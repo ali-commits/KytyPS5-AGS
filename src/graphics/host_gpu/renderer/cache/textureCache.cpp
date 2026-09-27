@@ -33,23 +33,26 @@ namespace {
 
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 
-[[nodiscard]] bool DecodeDccClear(const TextureCache::ImageDesc& desc, uint8_t code,
+[[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,
                                   vk::ClearColorValue& clear) {
+	const auto& metadata = desc.info.metadata;
+	const auto  format   = desc.view_info.format;
+	const bool  cmask    = metadata.kind == ImageMetadataKind::Cmask;
+	if (cmask ? code == 0 : code == 0x20) {
+		// Register clears belong to the color buffer; the texture pipe cannot decode them.
+		return desc.type == TextureCache::BindingType::RenderTarget &&
+		       metadata.clear_register_valid &&
+		       DecodePackedColorClear(format, metadata.clear_word, clear);
+	}
+	if (cmask) {
+		return false;
+	}
 	switch (code) {
 		case 0x00:
-		case 0x20:
 		case 0x40:
 		case 0x80:
 		case 0xc0: break;
 		default: return false;
-	}
-	const auto& metadata = desc.info.metadata;
-	const auto  format   = desc.view_info.format;
-	if (code == 0x20) {
-		// Clear-to-register is a color-buffer operation; the texture pipe cannot decode it.
-		return desc.type == TextureCache::BindingType::RenderTarget &&
-		       metadata.dcc_clear_register_valid &&
-		       DecodePackedColorClear(format, metadata.dcc_clear_word, clear);
 	}
 	clear = {};
 	if (code == 0x00) {
@@ -1125,9 +1128,10 @@ void TextureCache::InitializeImage(ImageId id) {
 	}
 }
 
-void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
+void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
                                        uint32_t metadata_base_layer) {
-	if (desc.info.metadata.kind != ImageMetadataKind::Dcc) {
+	if (desc.info.metadata.kind != ImageMetadataKind::Dcc &&
+	    desc.info.metadata.kind != ImageMetadataKind::Cmask) {
 		return;
 	}
 	const auto range = desc.info.metadata.range;
@@ -1135,18 +1139,18 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		std::scoped_lock lock {m_lock};
 		auto& image         = m_slot_images[id];
 		image.info.metadata = desc.info.metadata;
-		// A native DCC allocation must not retain a reused HTile/CMask/FMask interpretation.
+		// Native color metadata must not retain a reused HTile/CMask/FMask clear flag.
 		m_surface_metas.erase(range.address);
 		if (range.size == 0 || desc.info.resources.levels != 1 || image.info.resources.levels != 1) {
 			return;
 		}
 	}
 	const auto layers = desc.info.TransferLayers();
-	// These one-mip surfaces use complete 4 KiB DCC metadata blocks.
+	// These one-mip surfaces use complete 4 KiB color metadata blocks.
 	constexpr uint64_t MetadataBlockSize = 0x1000;
 	if (!range.Valid() || range.address % MetadataBlockSize != 0 || layers == 0 ||
 	    range.size % layers != 0 || (range.size / layers) % MetadataBlockSize != 0) {
-		EXIT("TextureCache: DCC slices must contain aligned 4 KiB blocks\n");
+		EXIT("TextureCache: color metadata slices must contain aligned 4 KiB blocks\n");
 	}
 	const auto& view           = desc.view_info;
 	const bool  volume_texture = desc.info.IsVolume() && view.type == vk::ImageViewType::e3D;
@@ -1154,7 +1158,7 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 	const auto  image_first    = volume_texture ? 0u : view.base_layer;
 	const auto  count          = volume_texture ? desc.info.extent.depth : view.layer_count;
 	if (first >= layers || count > layers - first) {
-		EXIT("TextureCache: DCC view exceeds its native metadata slices\n");
+		EXIT("TextureCache: color view exceeds its native metadata slices\n");
 	}
 	// Finish native metadata writes before reading backing bytes. This can submit the scheduler,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
@@ -1166,15 +1170,15 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 		const auto address = range.address + slice_size * (first + slice);
 		uint8_t code = 0;
 		if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
-			EXIT("TextureCache: failed to read DCC metadata backing\n");
+			EXIT("TextureCache: failed to read color metadata backing\n");
 		}
 		vk::ClearValue clear {};
-		if (!DecodeDccClear(desc, code, clear.color)) {
+		if (!DecodeColorClear(desc, code, clear.color)) {
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
 		if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
-			EXIT("TextureCache: failed to read DCC metadata slice\n");
+			EXIT("TextureCache: failed to read color metadata slice\n");
 		}
 		if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
 			continue;
@@ -1319,7 +1323,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
 	}
-	MaterializeDccClear(result, desc, metadata_base_layer);
+	MaterializeColorClear(result, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
 	    desc.info.metadata.compression != VideoOutCompression::Uncompressed) {
 		std::scoped_lock lock {m_lock};
