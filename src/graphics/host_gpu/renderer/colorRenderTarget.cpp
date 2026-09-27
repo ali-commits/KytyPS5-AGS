@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 
 namespace Libs::Graphics {
 
@@ -200,8 +201,7 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		     " layer=%u/%u\n",
 		     rt.attrib3.dimension, rt.attrib3.depth, view.base_layer, view.image_layers);
 	}
-	// PPSA28068: the linear EULA target and its sampled view must share the padded pitch.
-	if (!tile || volume || texture_tile) {
+	if (samples == 1) {
 		pitch = TileGetTexturePitch(transfer_format, width, rt.attrib3.tile_mode);
 	} else {
 		pitch = TileGetRenderTargetPitch(width, bytes_per_element, rt.attrib.num_fragments);
@@ -232,28 +232,23 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	} else {
 		TileSizeAlign layout {};
 		bool          valid_layout = false;
-		if (!tile || texture_tile) {
+		if (samples == 1) {
 			TileGetTextureSize(transfer_format, width, height, levels, rt.attrib3.tile_mode,
 			                   &layout, mip_sizes, mip_padded);
-			const auto alignment = tile ? texture_tile_layout.block.block_size : 256u;
-			valid_layout = layout.size != 0 && layout.align == alignment;
+			valid_layout = layout.size != 0 && layout.align != 0 &&
+			               (rt.attrib3.tile_mode != Prospero::TileMode::kRenderTarget ||
+			                levels <= std::bit_width(std::max(width, height)));
 		} else {
-			valid_layout =
-			    levels == 1 ? TileGetRenderTargetSize(width, height, pitch, bytes_per_element,
-			                                          layout, rt.attrib.num_fragments)
-			                : TileGetRenderTargetMipLayout(width, height, pitch, bytes_per_element,
-			                                               levels, layout, mip_sizes, mip_padded);
+			valid_layout = TileGetRenderTargetSize(width, height, pitch, bytes_per_element,
+			                                       layout, rt.attrib.num_fragments);
+			mip_sizes[0]  = {layout.size, 0, 0, 0, 0, 0};
+			mip_padded[0] = {pitch, height};
 		}
 		if (!valid_layout) {
 			EXIT("unsupported render-target layout: %ux%u pitch=%u bytes=%u levels=%u\n", width,
 			     height, pitch, bytes_per_element, levels);
 		}
 		size = layout.size;
-		EXIT_IF(size > UINT32_MAX);
-		if (levels == 1) {
-			mip_sizes[0]  = {static_cast<uint32_t>(size), 0, 0, 0, 0, 0};
-			mip_padded[0] = {pitch, height};
-		}
 	}
 	if (size == 0 || (!volume && size > UINT64_MAX / view.image_layers)) {
 		EXIT("render-target memory footprint is invalid\n");

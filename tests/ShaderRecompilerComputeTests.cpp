@@ -8328,6 +8328,8 @@ public:
         TargetCase{1440, 720, 1, 1472, 0x40b000, Prospero::TileMode::kLinear},
         // PPSA01416: linear RGBA16F chains place the smallest mip first.
         TargetCase{128, 128, 1, 128, 0x2be00, Prospero::TileMode::kLinear, 7, true},
+        // PPSA03541: the single texel still occupies a padded 128x64 block.
+        TargetCase{1, 1, 1, 128, 0x10000, Prospero::TileMode::kRenderTarget, 1, true},
     };
     constexpr uint64_t allocation_size = 0x410000;
 
@@ -8409,6 +8411,12 @@ public:
                   rendering.num_color_attachments == 1,
               "color attachment lost its dimensions or padded guest layout");
 
+      if (width == 1 && height == 1) {
+        Require(name, "single-texel tiled layout",
+                color.desc.info.mip_layout[0] == ImageMipInfo{0, 0x10000, 128, 64},
+                "the render target lost the SDK's padded block height");
+      }
+
       if (target.levels == 7) {
         constexpr std::array offsets{0xbe00u, 0x3e00u, 0x1e00u, 0xe00u,
                                      0x600u, 0x200u, 0u};
@@ -8422,7 +8430,7 @@ public:
         }
       }
 
-      if (target.tile == Prospero::TileMode::kLinear) {
+      {
         vk::ClearValue clear{};
         clear.color.float32 = std::array{1.0f, 0.0f, 1.0f, 1.0f};
         TextureCacheTestAccess::ClearImage(
@@ -8437,7 +8445,9 @@ public:
                 (((width - 1u) & 3u) << 30u),
             ((width - 1u) >> 2u) | ((height - 1u) << 14u),
             DstSel(4, 5, 6, 7) | ((target.levels - 1) << 16u) |
-                (static_cast<uint32_t>(Prospero::ImageType::kColor2D) << 28u),
+                (static_cast<uint32_t>(target.tile) << 20u) |
+                (static_cast<uint32_t>(is_1d ? Prospero::ImageType::kColor1D
+                                             : Prospero::ImageType::kColor2D) << 28u),
             0, 0x00700000u | ((target.levels - 1) << 4u), 0, 0}};
         ShaderRecompiler::IR::DescriptorValue value{};
         value.dword_count = 8;
@@ -8445,27 +8455,28 @@ public:
         ShaderRecompiler::IR::ImageResource resource{};
         resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Sampled;
         resource.numeric_class = Prospero::TextureNumericClass::Float;
-        resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+        resource.dimension = is_1d ? ShaderRecompiler::Decoder::ImageDimension::Dim1D
+                                   : ShaderRecompiler::Decoder::ImageDimension::Dim2D;
         resource.read = true;
         const auto sampled =
             RenderExecutorTestAccess::ResolveTexture(executor, resource, value);
-        Require(name, "linear target sampled alias",
+        Require(name, "target sampled alias",
                 sampled.image_id == color.image_id &&
                     sampled.desc.info.pitch == target.pitch &&
                     sampled.desc.info.data.size == target.size &&
                     sampled.desc.info.mip_layout == color.desc.info.mip_layout &&
                     texture_cache.FindTexture(sampled.image_id, sampled.desc) != nullptr,
-                "sampling the linear target created a second image");
+                "sampling the target changed its padded layout or created a second image");
         const auto expected = target.float16
                                   ? std::vector<u32>{0x00003c00u, 0x3c003c00u}
                                   : std::vector<u32>{0xffff00ffu};
         for (uint32_t mip = 0; mip < target.levels; ++mip) {
-          Require(name, "linear target sampled contents",
+          Require(name, "target sampled contents",
                   ReadCachedTexel(name, context, sampled.image_id,
                                   {static_cast<int32_t>((width >> mip) - 1),
                                    static_cast<int32_t>((height >> mip) - 1), 0},
                                   {1, 1, 1}, 0, mip) == expected,
-                  "the sampled linear target lost its GPU-written final texel");
+                  "the sampled target lost its GPU-written final texel");
         }
       }
 

@@ -1238,38 +1238,6 @@ bool TileGetDccSize(uint32_t width, uint32_t height, uint32_t slices,
 	return true;
 }
 
-bool TileGetRenderTargetMipLayout(uint32_t width, uint32_t height, uint32_t pitch,
-                                  uint32_t bytes_per_element, uint32_t levels,
-                                  TileSizeAlign& total_size, TileSizeOffset* level_sizes,
-                                  TilePaddedSize* padded_size) {
-	total_size = {};
-	if (width == 0 || height == 0 || levels == 0 || levels > 16 ||
-	    pitch != TileGetRenderTargetPitch(width, bytes_per_element)) {
-		return false;
-	}
-	uint32_t max_levels    = 1;
-	uint32_t max_dimension = std::max(width, height);
-	while (max_dimension > 1) {
-		max_dimension >>= 1u;
-		max_levels++;
-	}
-	if (levels > max_levels) {
-		return false;
-	}
-	auto format = Prospero::BufferFormat::kInvalid;
-	switch (bytes_per_element) {
-		case 1: format = Prospero::BufferFormat::k8UNorm; break;
-		case 2: format = Prospero::BufferFormat::k16UNorm; break;
-		case 4: format = Prospero::BufferFormat::k32Float; break;
-		case 8: format = Prospero::BufferFormat::k16_16_16_16Float; break;
-		case 16: format = Prospero::BufferFormat::k32_32_32_32Float; break;
-		default: return false;
-	}
-	TileGetTextureSize(format, width, height, levels, Prospero::TileMode::kRenderTarget,
-	                   &total_size, level_sizes, padded_size);
-	return total_size.size != 0 && total_size.align == 65536;
-}
-
 void TileGetTextureSize(Prospero::BufferFormat format, uint32_t width, uint32_t height,
                         uint32_t levels, Prospero::TileMode tile, TileSizeAlign* total_size,
                         TileSizeOffset* level_sizes, TilePaddedSize* padded_size) {
