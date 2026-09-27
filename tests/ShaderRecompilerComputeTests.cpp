@@ -11930,6 +11930,36 @@ public:
                 "attachment usage leaked into the next draw");
       }
 
+      // PPSA03541 reuses a tile24 depth allocation through a tile27 RGB10A2 T#.
+      auto pooled_resource = sampled_depth_resource;
+      pooled_resource.numeric_class = Prospero::TextureNumericClass::Float;
+      ImageId pooled_color_id{};
+      for (const bool color : {false, true, false, true}) {
+        auto value = shared_depth_value;
+        value.dwords[1] = static_cast<uint32_t>(phased_depth_address >> 40u) |
+            (static_cast<uint32_t>(color ? Prospero::BufferFormat::k10_10_10_2UNorm
+                                        : Prospero::BufferFormat::k32Float) << 20u);
+        value.dwords[3] = color ? 0x91b00facu : 0x91800204u;
+        const auto binding = RenderExecutorTestAccess::ResolveTexture(
+            executor, pooled_resource, value);
+        const auto view = texture_cache.FindTexture(binding.image_id, binding.desc);
+        if (color && !pooled_color_id) {
+          pooled_color_id = binding.image_id;
+        }
+        Require(name, "pooled depth/color tile identity",
+                view != nullptr &&
+                    binding.image_id == (color ? pooled_color_id : phased_depth.image_id) &&
+                    (!color || binding.image_id != phased_depth.image_id) &&
+                    texture_cache.GetImage(binding.image_id).backing.format ==
+                        (color ? vk::Format::eA2B10G10R10UnormPack32
+                               : vk::Format::eD32SfloatS8Uint) &&
+                    binding.desc.info.tile_mode ==
+                        (color ? Prospero::TileMode::kRenderTarget
+                               : Prospero::TileMode::kDepth),
+                "a changed tile family reused depth or repeated sampling lost its backing");
+        RenderExecutorTestAccess::ResetBindings(executor);
+      }
+
       auto video_subresource =
           make_target_desc(base + 0x20000, target_mip_size, {1, 1, 1});
       video_subresource.type = BindingType::VideoOut;
