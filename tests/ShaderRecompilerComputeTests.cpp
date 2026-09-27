@@ -10127,18 +10127,20 @@ public:
             program.shader_info_complete = true;
             ShaderRecompiler::IR::AllocateBindings(program);
           };
+      const auto make_buffer_program =
+          [](ShaderType stage, ShaderRecompiler::IR::BufferResource resource) {
+            ShaderRecompiler::IR::CompiledShaderInfo program{};
+            program.stage = stage;
+            program.info.buffers.push_back(resource);
+            program.bindings.descriptors.push_back(
+                {ShaderRecompiler::IR::DescriptorBindingKind::Buffers, {0}});
+            program.bindings.memory_offset_count = 1;
+            program.bindings.push_data_start_dword = 0;
+            return program;
+          };
 
       {
-        ShaderRecompiler::IR::Program buffer_ir{};
-        buffer_ir.stage = ShaderType::Compute;
-        buffer_ir.resource_tracking_complete = true;
-        buffer_ir.info.buffers.resize(1);
-        buffer_ir.info.buffers[0].read = true;
-        allocate_bindings(buffer_ir);
-        ShaderRecompiler::IR::CompiledShaderInfo buffer_program{};
-        buffer_program.stage = buffer_ir.stage;
-        buffer_program.info = std::move(buffer_ir.info);
-        buffer_program.bindings = std::move(buffer_ir.bindings);
+        const auto buffer_program = make_buffer_program(ShaderType::Compute, {.read = true});
 
         constexpr uint64_t buffer_address = base + allocation_size - 0x5000;
         ShaderBufferResource buffer_descriptor{};
@@ -10380,6 +10382,60 @@ public:
           Prospero::TextureNumericClass::Uint;
       sampled_overwide_resource.read = true;
       sampled_overwide_resource.written = false;
+      {
+        // MLB The Show 21 compresses a standalone final block through mip 9.
+        constexpr uint64_t address = base + 0x180000;
+        ShaderRecompiler::IR::DescriptorValue descriptor{};
+        descriptor.dwords = {static_cast<uint32_t>(address >> 8u),
+                             0x03e00000u, 0, 0x9019902cu, 0, 0x00700000u, 0, 0};
+        descriptor.dword_count = 8;
+        TestCase test;
+        test.name = "RebasedLastMipQueryStore";
+        test.has_user_data = true;
+        std::copy_n(descriptor.dwords.begin(), 8, test.user_data.begin());
+        test.opcodes = {ShaderOpcode::V_MOV_B32, ShaderOpcode::IMAGE_GET_RESINFO,
+                        ShaderOpcode::IMAGE_STORE, ShaderOpcode::S_ENDPGM};
+        AppendVMovU32(&test.code, 24, 0);
+        AppendVMovU32(&test.code, 25, 0);
+        test.code.push_back(EncodeMimg0(0x0e, 0x3));
+        test.code.push_back(EncodeMimg1(0, 24));
+        test.code.push_back(EncodeMimg0(0x08, 0x3));
+        test.code.push_back(EncodeMimg1(0, 24));
+        AppendEnd(&test.code);
+        const auto compiled = CompileCase(test, SubgroupSize());
+        auto sampled_descriptor = descriptor;
+        sampled_descriptor.dwords[1] |= 9u << 16u;
+        const auto query = RenderExecutorTestAccess::ResolveTexture(
+            executor, compiled.program.info.images.at(0), sampled_descriptor);
+        const auto store = RenderExecutorTestAccess::ResolveTexture(
+            executor, compiled.program.info.images.at(1), descriptor);
+        Require(name, "rebased last mip",
+                query.image_id == store.image_id &&
+                    query.desc.info.data.size == 256 &&
+                    query.desc.info.resources.levels == 1 &&
+                    query.desc.view_info.base_level == 0 &&
+                    query.desc.view_info.level_count == 1 &&
+                    query.desc.view_info.min_lod == 0 &&
+                    store.desc.view_info.base_level == 0,
+                "equivalent selected mip changed backing or relative LOD");
+        Image sampled;
+        sampled.view = texture_cache.FindTexture(query.image_id, query.desc);
+        sampled.layout = vk::ImageLayout::eGeneral;
+        Image storage_view;
+        storage_view.view = texture_cache.FindTexture(store.image_id, store.desc);
+        storage_view.layout = vk::ImageLayout::eGeneral;
+        texture_cache.GetImage(store.image_id).Transit(
+            vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+            {}, scheduler.Current().Handle());
+        scheduler.Finish();
+        Dispatch(test, compiled, {}, nullptr, &sampled, nullptr, &storage_view);
+        texture_cache.MarkGpuWritten(store.image_id);
+        Require(name, "rebased mip query and store",
+                ReadCachedTexel(name, context, store.image_id) ==
+                    std::vector<uint32_t>{1, 1},
+                "query/store did not access the standalone 1x1 mip");
+      }
       auto plain_mipped_storage_binding =
           RenderExecutorTestAccess::ResolveTexture(executor, storage_resource,
                                                    mipped_storage_descriptor);
@@ -11937,17 +11993,8 @@ public:
             texture_cache, scheduler.Current(), expanded_array_id,
             {vk::ImageAspectFlagBits::eColor, 0, 1, 1, 1}, clear);
 
-        ShaderRecompiler::IR::Program buffer_ir{};
-        buffer_ir.stage = ShaderType::Vertex;
-        buffer_ir.resource_tracking_complete = true;
-        buffer_ir.info.buffers.resize(1);
-        buffer_ir.info.buffers[0].read = true;
-        buffer_ir.info.buffers[0].formatted = true;
-        allocate_bindings(buffer_ir);
-        ShaderRecompiler::IR::CompiledShaderInfo buffer_program{};
-        buffer_program.stage = buffer_ir.stage;
-        buffer_program.info = std::move(buffer_ir.info);
-        buffer_program.bindings = std::move(buffer_ir.bindings);
+        const auto buffer_program = make_buffer_program(
+            ShaderType::Vertex, {.read = true, .formatted = true});
 
         constexpr uint64_t buffer_size = 2 * target_mip_size;
         static_assert(buffer_size > BufferCache::CACHING_PAGESIZE);
@@ -12613,17 +12660,8 @@ public:
         }
         auto plane_upload = CreateHostBuffer(name, plane_size,
             vk::BufferUsageFlagBits::eTransferSrc, plane_words);
-        ShaderRecompiler::IR::Program plane_ir{};
-        plane_ir.stage = ShaderType::Compute;
-        plane_ir.resource_tracking_complete = true;
-        auto &plane_resource = plane_ir.info.buffers.emplace_back();
-        plane_resource.written = true;
-        plane_resource.formatted = true;
-        allocate_bindings(plane_ir);
-        ShaderRecompiler::IR::CompiledShaderInfo plane_program{};
-        plane_program.stage = plane_ir.stage;
-        plane_program.info = std::move(plane_ir.info);
-        plane_program.bindings = std::move(plane_ir.bindings);
+        const auto plane_program = make_buffer_program(
+            ShaderType::Compute, {.written = true, .formatted = true});
         ShaderBufferResource plane_descriptor{};
         plane_descriptor.UpdateAddress48(plane_address);
         plane_descriptor.fields[1] |= 4u << 16u;
