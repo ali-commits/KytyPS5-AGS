@@ -2565,13 +2565,20 @@ public:
                     release_label <= Sync::ReadReferenceClock(),
                 "clock write with writeback and interrupt lost its data");
 
-        auto immediate = make_release_mem(1, 0, &release_label, 0x11223344u);
-        Pm4Execution immediate_execution;
-        const auto immediate_tick = gpu_scheduler.CurrentTick();
-        const auto immediate_result =
-            processor->Process(immediate_execution, immediate);
-        const bool immediate_split_once =
-            gpu_scheduler.CurrentTick() == immediate_tick + 1;
+        for (const auto interrupt : {0u, 3u, 1u, 2u}) {
+          release_label = 0;
+          auto immediate = make_release_mem(1, interrupt, &release_label, 0x11223344u);
+          Pm4Execution immediate_execution;
+          const auto immediate_tick = gpu_scheduler.CurrentTick();
+          const auto immediate_result =
+              processor->Process(immediate_execution, immediate);
+          Require("GpuCommandLane", "32-bit release boundary",
+                  immediate_result == Pm4ProcessResult::Complete &&
+                      gpu_scheduler.CurrentTick() ==
+                          immediate_tick + (interrupt == 1 || interrupt == 2) &&
+                      release_label == (interrupt == 1 ? 0 : 0x11223344u),
+                  "label-only release submitted work or interrupt release lost its boundary");
+        }
 
         auto gds = make_release_mem(5, 0, &gds_label, 1ull << 16u);
         Pm4Execution gds_execution;
@@ -2597,8 +2604,7 @@ public:
             gpu_scheduler.CurrentTick() == gds_interrupt_tick + 1;
 
         release_mem_submission_counts =
-            immediate_result == Pm4ProcessResult::Complete &&
-            immediate_split_once && gds_result == Pm4ProcessResult::Complete &&
+            gds_result == Pm4ProcessResult::Complete &&
             gds_waited_once && interrupt_result == Pm4ProcessResult::Complete &&
             interrupt_split_once &&
             gds_interrupt_result == Pm4ProcessResult::Complete &&
