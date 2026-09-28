@@ -78,8 +78,7 @@ static Graphics::RenderContext& GetGpuResources() {
 }
 
 static bool IsGpuAddressRange(uint64_t vaddr, uint64_t size) {
-	constexpr uint64_t GPU_ADDRESS_LIMIT = 1ull << 40u;
-	return vaddr != 0 && size != 0 && vaddr < GPU_ADDRESS_LIMIT && size < GPU_ADDRESS_LIMIT - vaddr;
+	return Graphics::GuestRange {vaddr, size}.Valid();
 }
 
 static void MapGpuRange(uint64_t vaddr, uint64_t size) {

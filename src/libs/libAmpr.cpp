@@ -685,8 +685,6 @@ constexpr int      PROT_AMPR_READ                = 0x40;
 constexpr int      PROT_AMPR_WRITE               = 0x80;
 constexpr int      PROT_ACP_READ                 = 0x100;
 constexpr int      PROT_ACP_WRITE                = 0x200;
-constexpr uint64_t AMM_VA_START                  = 0x0000001000000000ull;
-constexpr uint64_t AMM_VA_SIZE                   = 0x0000001000000000ull;
 constexpr uint64_t APR_MAX_READ_LENGTH           = 0x0000000100000000ull;
 constexpr uint64_t APR_MAX_FILE_OFFSET           = 0x0000010000000000ull;
 constexpr uint64_t APR_MAX_APP_ADDRESS           = 0x0000f00000000000ull;
@@ -748,13 +746,6 @@ struct AmmAutoPoolRange {
 	uint64_t start = 0;
 	uint64_t size  = 0;
 	uint64_t used  = 0;
-};
-
-struct AmmVirtualAddressRanges {
-	uint64_t va_start          = 0;
-	uint64_t va_end            = 0;
-	uint64_t multimap_va_start = 0;
-	uint64_t multimap_va_end   = 0;
 };
 
 struct AmmUsageStatsData {
@@ -2386,19 +2377,18 @@ static void KYTY_SYSV_ABI AmmGetVirtualAddressRanges(uint64_t* va_start, uint64_
                                                      uint64_t* multimap_va_end) {
 	PRINT_NAME();
 
+	constexpr auto end = LibKernel::Memory::kExtendedMemoryBase + LibKernel::Memory::kExtendedMemorySize;
 	if (va_start != nullptr) {
-		AprShared::WriteGuest(reinterpret_cast<uint64_t>(va_start), AMM_VA_START);
+		AprShared::WriteGuest(reinterpret_cast<uint64_t>(va_start), LibKernel::Memory::kExtendedMemoryBase);
 	}
 	if (va_end != nullptr) {
-		AprShared::WriteGuest(reinterpret_cast<uint64_t>(va_end), AMM_VA_START + AMM_VA_SIZE);
+		AprShared::WriteGuest(reinterpret_cast<uint64_t>(va_end), end);
 	}
 	if (multimap_va_start != nullptr) {
-		AprShared::WriteGuest(reinterpret_cast<uint64_t>(multimap_va_start),
-		                      AMM_VA_START + AMM_VA_SIZE / 2u);
+		AprShared::WriteGuest(reinterpret_cast<uint64_t>(multimap_va_start), end);
 	}
 	if (multimap_va_end != nullptr) {
-		AprShared::WriteGuest(reinterpret_cast<uint64_t>(multimap_va_end),
-		                      AMM_VA_START + AMM_VA_SIZE);
+		AprShared::WriteGuest(reinterpret_cast<uint64_t>(multimap_va_end), end);
 	}
 }
 

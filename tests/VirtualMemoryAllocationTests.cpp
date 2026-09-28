@@ -2163,6 +2163,50 @@ void TestFixedReserveRangeAddRollbackKeepsPlaceholder() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestExtendedAndUserMappingsDoNotAlias() {
+	const char* test = "ExtendedAndUserMappingsDoNotAlias";
+	constexpr uint64_t user_address = 0x1000000000ull;
+	const uint64_t addresses[] {
+	    user_address,
+	    Libs::LibKernel::Memory::kExtendedMemoryBase + user_address,
+	    Libs::LibKernel::Memory::kExtendedMemoryBase + Libs::LibKernel::Memory::kExtendedMemorySize -
+	        SceKernelPageSize,
+	};
+	int64_t physical = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+	            SceKernelPageSize * std::size(addresses), SceKernelPageSize, SceKernelMtypeC,
+	            &physical),
+	        "KernelAllocateDirectMemory");
+	for (size_t i = 0; i < std::size(addresses); ++i) {
+		void* mapped = reinterpret_cast<void*>(addresses[i]);
+		CheckOk(test,
+		        Libs::LibKernel::Memory::KernelMapDirectMemory(
+		            &mapped, SceKernelPageSize, SceKernelProtCpuRw,
+		            SceKernelMapFixed | SceKernelMapNoOverwrite,
+		            physical + i * SceKernelPageSize, SceKernelPageSize),
+		        "KernelMapDirectMemory");
+		Check(test, mapped == reinterpret_cast<void*>(addresses[i]), "fixed mapping moved");
+		*static_cast<uint64_t*>(mapped) = 0x0123456700000000ull + i;
+	}
+	for (size_t i = 0; i < std::size(addresses); ++i) {
+		uint64_t value = 0;
+		Check(test,
+		      Libs::LibKernel::Memory::TryReadBacking(addresses[i], &value, sizeof(value)) &&
+		          value == 0x0123456700000000ull + i &&
+		          *reinterpret_cast<uint64_t*>(addresses[i]) == value,
+		      "Extended and user mappings overlap or lost their backing");
+		CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(addresses[i], SceKernelPageSize),
+		        "KernelMunmap");
+	}
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+	            physical, SceKernelPageSize * std::size(addresses)),
+	        "KernelReleaseDirectMemory");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestLargeHintedReserveHostsSmallDirectMap() {
 	const char* test = "LargeHintedReserveHostsSmallDirectMap";
 
@@ -3155,6 +3199,7 @@ int main(int argc, char** argv) {
 	RunTest(TestFixedReserveRollbackSkipsUntouchedChunks);
 	RunTest(TestFixedReserveRangeAddRollbackKeepsPlaceholder);
 	RunTest(TestLargeHintedReserveHostsSmallDirectMap);
+	RunTest(TestExtendedAndUserMappingsDoNotAlias);
 	RunTest(TestMemoryPoolAlignmentContracts);
 	RunTest(TestProsperoSampleMemoryPoolExpandCommit);
 	RunTest(TestFragmentedMemoryPoolBacking);
