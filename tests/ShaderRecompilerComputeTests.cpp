@@ -3679,6 +3679,35 @@ public:
         return value;
       };
 
+      constexpr uint64_t stream_pages = base + 0x18000;
+      constexpr uint64_t stream_address = stream_pages + 0x4000 - sizeof(uint32_t);
+      const std::array<uint32_t, 2> stream_values{0x13579bdfu, 0x2468ace0u};
+      std::memcpy(reinterpret_cast<void *>(stream_address), stream_values.data(),
+                  sizeof(stream_values));
+      Require(name, "GPU-readable stream source",
+              Libs::LibKernel::Memory::KernelMprotect(
+                  reinterpret_cast<void *>(stream_pages), 0x8000, 0x10) == 0 &&
+                  cache.IsRegionCpuModified(stream_address, sizeof(stream_values)) &&
+                  !cache.IsRegionGpuModified(stream_address, sizeof(stream_values)),
+              "cross-page stream source is not CPU-dirty and GPU-clean");
+      const auto stream_tick = scheduler.CurrentTick();
+      const auto [streamed, streamed_offset] =
+          cache.ObtainBuffer(stream_address, sizeof(stream_values), false);
+      Require(name, "cross-page read-only stream upload",
+              streamed == &cache.GetUtilityBuffer(MemoryUsage::Stream) &&
+                  scheduler.CurrentTick() == stream_tick &&
+                  std::memcmp(streamed->Mapped().data() + streamed_offset,
+                              stream_values.data(), sizeof(stream_values)) == 0,
+              "GPU-readable guest bytes were not streamed without submission");
+      Require(name, "stream source protection restore",
+              Libs::LibKernel::Memory::KernelMprotect(
+                  reinterpret_cast<void *>(stream_pages), 0x8000, 0x3) == 0,
+              "stream source protection was not restored");
+      Require(name, "streamed GPU bytes",
+              ReadNativeValue(*streamed, streamed_offset) == stream_values[0] &&
+                  ReadNativeValue(*streamed, streamed_offset + sizeof(uint32_t)) == stream_values[1],
+              "stream commit did not publish both cross-page words to the GPU");
+
       constexpr uint64_t large_copy_source_offset = 0x40000;
       constexpr uint64_t large_copy_destination_offset = 0x80000;
       constexpr uint64_t large_copy_size = 96 * 1024;
