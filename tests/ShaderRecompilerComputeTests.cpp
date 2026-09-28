@@ -208,8 +208,8 @@ struct TextureCacheTestAccess {
   static_assert(std::same_as<decltype(TextureCache::m_slot_images),
                              Common::SlotVector<Image>>);
   static_assert(TextureCache::ImagePageTable::kPageBits == 20);
-  static_assert(TextureCache::ImagePageTable::kAddressSpaceBits == 40);
-  static_assert(TextureCache::ImagePageTable::kFirstLevelBits == 10);
+  static_assert(TextureCache::ImagePageTable::kAddressSpaceBits == 44);
+  static_assert(TextureCache::ImagePageTable::kFirstLevelBits == 14);
 
   static std::unique_lock<TrackingSpinLock> Lock(TextureCache &cache) {
     return std::unique_lock(cache.m_lock);
@@ -13694,7 +13694,7 @@ public:
             (bytes + BufferCache::CACHING_PAGESIZE - 1) /
             BufferCache::CACHING_PAGESIZE;
         auto address = buffer.device_address + backing - page_offset;
-        auto page = guest_base >> BufferCache::CACHING_PAGEBITS;
+        auto page = BufferCache::PageIndex(guest_base);
         for (uint64_t mapped = 0; mapped < pages; mapped++) {
           cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
                            (page + mapped) * sizeof(vk::DeviceAddress),
@@ -25957,6 +25957,11 @@ TestCase FlatVirtualAddressRebasesGuestAllocation() {
   using O = ShaderOpcode;
 
   constexpr uint64_t GuestBase = 0x0000000110000000ull;
+  constexpr uint64_t ExtendedBase = Libs::LibKernel::Memory::kExtendedMemoryBase + GuestBase;
+  static_assert(BufferCache::PageIndex(ExtendedBase) ==
+                ((Libs::Graphics::LOWER_ADDRESS_SIZE + GuestBase) >> BufferCache::CACHING_PAGEBITS));
+  static_assert(BufferCache::GuestAddress(BufferCache::PageIndex(ExtendedBase) <<
+                                        BufferCache::CACHING_PAGEBITS) == ExtendedBase);
   std::vector<u32> code;
   AppendVMovLiteral(&code, 20, static_cast<u32>(GuestBase + 4u));
   AppendVMovLiteral(&code, 21, static_cast<u32>(GuestBase >> 32u));
@@ -25967,17 +25972,22 @@ TestCase FlatVirtualAddressRebasesGuestAllocation() {
   AppendVMovLiteral(&code, 21, static_cast<u32>((GuestBase >> 32u) + 1u));
   code.push_back(EncodeFlat0(0x0c, 0, 0));
   code.push_back(EncodeFlat1(2, 0x7d, 0, 20));
+  AppendVMovLiteral(&code, 20, static_cast<u32>(ExtendedBase + 4u));
+  AppendVMovLiteral(&code, 21, static_cast<u32>(ExtendedBase >> 32u));
+  code.push_back(EncodeFlat0(0x0c, 0, 0));
+  code.push_back(EncodeFlat1(3, 0x7d, 0, 20));
   AppendStoreVgpr(&code, 0, 0);
   AppendStoreVgpr(&code, 1, 1);
   AppendStoreVgpr(&code, 2, 2);
+  AppendStoreVgpr(&code, 3, 3);
   AppendEnd(&code);
 
   TestCase test;
   test.name = "FlatVirtualAddressRebasesGuestAllocation";
   test.code = std::move(code);
   test.initial = {0xfeedfaceu, 0xcafebabeu, 0, 0x12345678u};
-  test.expected = {0x12345678u, 0x12345678u, 0};
-  test.bda_mappings = {{GuestBase, 8}};
+  test.expected = {0x12345678u, 0x12345678u, 0, 0xcafebabeu};
+  test.bda_mappings = {{GuestBase, 8}, {ExtendedBase, 0}};
   test.opcodes = {O::V_MOV_B32, O::FLAT_LOAD_DWORD, O::BUFFER_STORE_DWORD,
                   O::S_ENDPGM};
   return test;

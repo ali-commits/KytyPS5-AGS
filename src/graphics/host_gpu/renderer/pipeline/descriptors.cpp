@@ -196,8 +196,8 @@ bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bo
 	constexpr uint32_t htile_control = 0x00280000u;
 	const uint32_t expected_control  = htile_control | (descriptor.MsaaDepth() ? (1u << 10u) : 0u);
 	const auto     metadata_addr     = descriptor.MetaAddr() << 8u;
-	return metadata_control == expected_control && metadata_addr != 0 &&
-	       metadata_addr < TRACKER_ADDRESS_SIZE && (metadata_addr & 0x7fffu) == 0 &&
+	return metadata_control == expected_control && GuestRange {metadata_addr, 1}.Valid() &&
+	       (metadata_addr & 0x7fffu) == 0 &&
 	       descriptor.TileMode() == Prospero::TileMode::kDepth;
 }
 
