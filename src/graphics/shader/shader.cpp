@@ -668,15 +668,8 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		key.push_back(destination.registers_num);
 		key.push_back(destination.fetch_index);
 		key.push_back(static_cast<uint32_t>(destination.attr_id));
-		key.push_back(resource.Stride());
-		key.push_back(static_cast<uint32_t>(resource.SwizzleEnabled()));
-		key.push_back(resource.DstSelX());
-		key.push_back(resource.DstSelY());
-		key.push_back(resource.DstSelZ());
-		key.push_back(resource.DstSelW());
-		key.push_back(resource.RawFormat());
-		key.push_back(resource.OutOfBounds());
-		key.push_back(static_cast<uint32_t>(resource.AddTid()));
+		key.push_back(resource.fields[1] & 0xbfff0000u); // Stride and swizzle enable.
+		key.push_back(resource.fields[3] & 0x3087ffffu); // Channels, format, OOB, and add TID.
 	}
 }
 

@@ -165,6 +165,32 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 
 } // namespace
 
+std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPipelineKey& key) const {
+	std::size_t hash = 0;
+	PipelineKeyHash::Mix(hash, key.rendering.color_count);
+	for (uint32_t i = 0; i < key.rendering.color_count; i++) {
+		PipelineKeyHash::Mix(hash, static_cast<uint32_t>(key.rendering.color_formats[i]));
+	}
+	PipelineKeyHash::Mix(hash, static_cast<uint32_t>(key.rendering.depth_format));
+	PipelineKeyHash::Mix(hash, static_cast<uint32_t>(key.rendering.stencil_format));
+	for (const auto id: key.vertex_shader_ids) {
+		PipelineKeyHash::Mix(hash, id);
+	}
+	PipelineKeyHash::Mix(hash, key.ps_shader_id);
+	PipelineKeyHash::Mix(hash, key.vertex_input.binding_count);
+	for (uint32_t i = 0; i < key.vertex_input.binding_count; i++) {
+		PipelineKeyHash::Mix(hash, key.vertex_input.bindings[i].stride);
+		PipelineKeyHash::Mix(hash, key.vertex_input.bindings[i].instance);
+	}
+	PipelineKeyHash::Mix(hash, key.vertex_input.attribute_count);
+	for (uint32_t i = 0; i < key.vertex_input.attribute_count; i++) {
+		PipelineKeyHash::Mix(hash, key.vertex_input.attributes[i].offset);
+		PipelineKeyHash::Mix(hash, key.vertex_input.attributes[i].binding);
+	}
+	PipelineKeyHash::Mix(hash, XXH3_64bits(&key.static_params, sizeof(key.static_params)));
+	return hash;
+}
+
 struct PipelineCache::ProgramCache {
 	struct ProgramKey {
 		ShaderType            stage           = ShaderType::Unknown;
@@ -206,12 +232,12 @@ struct PipelineCache::ProgramCache {
 			PipelineKeyHash::Mix(hash, key.code_size);
 			PipelineKeyHash::Mix(hash, key.static_state.size());
 			// Bucket same-shape static variants by source. ProgramKey equality performs the one
-			// exact state comparison needed on a stable hit without hashing up to 429 words first.
+			// exact state comparison needed on a stable hit without hashing the full state first.
 			return hash;
 		}
 	};
 
-	static constexpr std::size_t MaxStaticKeyWords = 13 + ShaderVertexInputInfo::RES_MAX * 13;
+	static constexpr std::size_t MaxStaticKeyWords = 32 + ShaderVertexInputInfo::RES_MAX * 6;
 
 	Permutation CompilePermutation(const char*                                  stage_name,
 	                               const ShaderRecompiler::CompileOptions&      options,

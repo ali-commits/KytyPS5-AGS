@@ -10633,6 +10633,24 @@ void TestNewShaderRecompilerClipDisabledPosition() {
   layout_b.resources[0].UpdateAddress48(4);
   Check(MakeStageStaticKey(layout_a) == MakeStageStaticKey(layout_b),
         "pipeline-only vertex layout fragmented the shader module cache key");
+
+  const auto descriptor_state = [](const ShaderBufferResource &resource) {
+    return std::array<uint32_t, 9>{
+        resource.Stride(), resource.SwizzleEnabled(), resource.DstSelX(),
+        resource.DstSelY(), resource.DstSelZ(), resource.DstSelW(),
+        resource.RawFormat(), resource.OutOfBounds(), resource.AddTid()};
+  };
+  const auto key = MakeStageStaticKey(layout_a);
+  const auto state = descriptor_state(layout_a.resources[0]);
+  for (uint32_t word = 0; word < 4; word++) {
+    for (uint32_t bit = 0; bit < 32; bit++) {
+      auto changed = layout_a;
+      changed.resources[0].fields[word] ^= 1u << bit;
+      Check((MakeStageStaticKey(changed) == key) ==
+                (descriptor_state(changed.resources[0]) == state),
+            "vertex key lost a descriptor field or included runtime-only bits");
+    }
+  }
 }
 
 void TestNewShaderRecompilerAuxPositionExports() {
