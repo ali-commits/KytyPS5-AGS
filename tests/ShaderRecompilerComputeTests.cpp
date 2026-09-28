@@ -7288,12 +7288,16 @@ public:
               "failed to create the overlapping dirty Buffer owner");
       exact_buffer.first->Fill(exact_buffer.second, sizeof(uint32_t),
                                dirty_sibling_value);
+      texture_cache.InvalidateMemoryFromGPU(base + exact_image_offset,
+                                            sizeof(uint32_t));
       Libs::Graphics::Buffer exact_download(
           m_runtime_context, scheduler, MemoryUsage::DeviceLocal,
           base + exact_image_offset, AllFlags, sizeof(uint32_t));
       Require(name, "overlapping buffer ownership rejection",
               !texture_cache.FindImageFromRange(base + exact_image_offset,
                                                 sizeof(uint32_t)) &&
+                  !TextureCacheTestAccess::TryDownload(texture_cache,
+                                                       exact_image) &&
                   !BufferCacheTestAccess::SynchronizeBufferFromImage(
                       resources.GetBufferCache(), exact_download,
                       base + exact_image_offset, sizeof(uint32_t)),
@@ -7350,8 +7354,9 @@ public:
       Require(
           name, "CPU-dirty image range validity",
           !texture_cache.FindImageFromRange(gc_image_desc_a.info.data.address,
-                                            gc_image_desc_a.info.data.size),
-          "FindImageFromRange accepted CPU-dirty native contents");
+                                            gc_image_desc_a.info.data.size) &&
+              !TextureCacheTestAccess::TryDownload(texture_cache, gc_images[0]),
+          "CPU-dirty native contents remained eligible for image readback");
       texture_cache.MarkGpuWritten(gc_images[0]);
       for (size_t index = 0; index < gc_image_offsets.size(); index++) {
         Libs::LibKernel::Memory::WriteBacking(base + gc_image_offsets[index],
@@ -7440,11 +7445,33 @@ public:
       TextureCacheTestAccess::SetLinearReadback(texture_cache, true);
       const auto submit_readback_image =
           texture_cache.FindImage(submit_readback_desc);
+      auto submit_buffer = resources.GetBufferCache().ObtainBuffer(
+          submit_readback_desc.info.data.address,
+          submit_readback_desc.info.data.size, true);
+      Require(name, "linear submit dirty buffer allocation",
+              submit_buffer.first != nullptr,
+              "failed to create the older GPU Buffer contents");
+      submit_buffer.first->Fill(submit_buffer.second, sizeof(uint32_t),
+                                submit_readback_stale);
+      texture_cache.InvalidateMemoryFromGPU(
+          submit_readback_desc.info.data.address,
+          submit_readback_desc.info.data.size);
+      (void)texture_cache.FindTexture(submit_readback_image,
+                                      submit_readback_desc);
       Require(name, "linear submit image clear",
               texture_cache.ClearImageFromBuffer(
                   command, submit_readback_desc.info.data.address,
                   submit_readback_desc.info.data.size, submit_readback_value),
               "failed to create GPU-current linear storage contents");
+      Require(name, "older buffer permits current image readback",
+              resources.GetBufferCache().HasGpuDirtyBytes(
+                  submit_readback_desc.info.data.address,
+                  submit_readback_desc.info.data.size) &&
+                  texture_cache.FindImageFromRange(
+                      submit_readback_desc.info.data.address,
+                      submit_readback_desc.info.data.size) ==
+                      submit_readback_image,
+              "historical GPU Buffer dirtiness rejected newer image contents");
       TextureCacheTestAccess::TrackDownload(texture_cache,
                                             submit_readback_image);
       Libs::LibKernel::Memory::WriteBacking(
@@ -35485,7 +35512,9 @@ int main(int argc, char **argv) {
   vulkan.CheckRenderExecutorColorStandardTileDiscovery();
   vulkan.CheckRenderExecutorColorDepthTileDiscovery();
   vulkan.CheckRenderExecutorStencilBindingDiscovery();
+#endif
   vulkan.CheckUnifiedTextureCacheFlow();
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
   vulkan.CheckBgra16Readback();
   vulkan.CheckRasterization(false);
   vulkan.CheckRasterization(false, true);
