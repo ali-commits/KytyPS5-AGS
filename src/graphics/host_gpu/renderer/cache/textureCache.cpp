@@ -1867,7 +1867,10 @@ bool TextureCache::IsRegionGpuModified(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
 	for (const auto id: FindImagesInRegion(address, size, false)) {
 		const auto& image = m_slot_images[id];
-		if (!image.depth_id && image.IsGpuModified()) {
+		// PPSA17168: S_LOAD_DWORD reads shader data at an address overlapping an old
+		// render target whose memory the CPU has reused. The cached image still retains
+		// its earlier GPU-modified flag.
+		if (!image.depth_id && image.IsGpuModified() && !image.IsDefinitelyCpuDirty()) {
 			return true;
 		}
 	}

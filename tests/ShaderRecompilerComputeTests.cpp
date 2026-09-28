@@ -6169,7 +6169,11 @@ public:
                   !texture_cache.GetImage(fault_a_image).IsTracked() &&
                   !texture_cache.GetImage(fault_b_image).IsTracked() &&
                   texture_cache.GetImage(fault_a_image).IsMaybeCpuDirty() &&
-                  texture_cache.GetImage(fault_b_image).IsMaybeCpuDirty(),
+                  texture_cache.GetImage(fault_b_image).IsMaybeCpuDirty() &&
+                  texture_cache.IsRegionGpuModified(base + 0x8000,
+                                                    sizeof(fault_a)) &&
+                  texture_cache.IsRegionGpuModified(base + 0x8010,
+                                                    sizeof(fault_b)),
               "a byte-disjoint CPU write discarded authoritative images");
       const auto retracked_a = texture_cache.FindImage(fault_a_desc);
       const auto retracked_b = texture_cache.FindImage(fault_b_desc);
@@ -7346,18 +7350,31 @@ public:
       Require(name, "GPU image range validity",
               texture_cache.FindImageFromRange(
                   gc_image_desc_a.info.data.address,
-                  gc_image_desc_a.info.data.size) == gc_images[0],
+                  gc_image_desc_a.info.data.size) == gc_images[0] &&
+                  texture_cache.IsRegionGpuModified(
+                      gc_image_desc_a.info.data.address,
+                      gc_image_desc_a.info.data.size),
               "FindImageFromRange rejected a clean GPU-current image");
-      texture_cache.GetImage(gc_images[0])
-          .InvalidateCpuWrite(gc_image_desc_a.info.data.address,
-                              gc_image_desc_a.info.data.size);
+      auto &gc_native = texture_cache.GetImage(gc_images[0]);
+      texture_cache.InvalidateMemory(gc_image_desc_a.info.data.address,
+                                     gc_image_desc_a.info.data.size);
       Require(
           name, "CPU-dirty image range validity",
           !texture_cache.FindImageFromRange(gc_image_desc_a.info.data.address,
                                             gc_image_desc_a.info.data.size) &&
-              !TextureCacheTestAccess::TryDownload(texture_cache, gc_images[0]),
-          "CPU-dirty native contents remained eligible for image readback");
+              !TextureCacheTestAccess::TryDownload(texture_cache, gc_images[0]) &&
+              !texture_cache.IsRegionGpuModified(
+                  gc_image_desc_a.info.data.address,
+                  gc_image_desc_a.info.data.size) &&
+              gc_native.IsDefinitelyCpuDirty() && gc_native.IsGpuModified() &&
+              !gc_native.IsTracked(),
+          "CPU writes did not supersede native contents while retaining GPU history");
       texture_cache.MarkGpuWritten(gc_images[0]);
+      Require(name, "GPU image reacquisition",
+              texture_cache.IsRegionGpuModified(
+                  gc_image_desc_a.info.data.address,
+                  gc_image_desc_a.info.data.size),
+              "a new GPU write did not reclaim image authority");
       for (size_t index = 0; index < gc_image_offsets.size(); index++) {
         Libs::LibKernel::Memory::WriteBacking(base + gc_image_offsets[index],
                                               &gc_stale_values[index],
