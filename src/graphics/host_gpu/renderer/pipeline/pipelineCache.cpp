@@ -761,24 +761,20 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		        vs_input_info.resources_num > ShaderVertexInputInfo::RES_MAX);
 		key.vertex_input.binding_count   = static_cast<uint8_t>(vs_input_info.buffers_num);
 		key.vertex_input.attribute_count = static_cast<uint8_t>(vs_input_info.resources_num);
-		uint32_t attributes_num          = 0;
 		for (int binding = 0; binding < vs_input_info.buffers_num; binding++) {
 			const auto& buffer = vs_input_info.buffers[binding];
-			EXIT_IF(buffer.attr_num < 0 || buffer.attr_num > ShaderVertexInputBuffer::ATTR_MAX);
-			attributes_num += static_cast<uint32_t>(buffer.attr_num);
-			EXIT_IF(attributes_num > static_cast<uint32_t>(vs_input_info.resources_num));
 			key.vertex_input.bindings[binding] = {.stride   = buffer.stride,
 			                                      .instance = buffer.fetch_index != 0};
-			for (int attribute = 0; attribute < buffer.attr_num; attribute++) {
-				const auto index = buffer.attr_indices[attribute];
-				EXIT_IF(index < 0 || index >= vs_input_info.resources_num);
-				key.vertex_input.attributes[index] = {
-				    .offset  = buffer.attr_offsets[attribute],
-				    .binding = static_cast<uint8_t>(binding),
-				};
-			}
 		}
-		EXIT_IF(attributes_num != static_cast<uint32_t>(vs_input_info.resources_num));
+		for (int attribute = 0; attribute < vs_input_info.resources_num; attribute++) {
+			const auto binding = vs_input_info.resources_dst[attribute].buffer_index;
+			EXIT_IF(binding < 0 || binding >= vs_input_info.buffers_num);
+			key.vertex_input.attributes[attribute] = {
+			    .offset = static_cast<uint32_t>(vs_input_info.resources[attribute].Base48() -
+			                                    vs_input_info.buffers[binding].addr),
+			    .binding = static_cast<uint8_t>(binding),
+			};
+		}
 	}
 
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
