@@ -371,16 +371,15 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 }
 
 static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
-                                       const ShaderSemantic*  input_semantics,
-                                       uint32_t num_input_semantics, const uint32_t* attrib,
-                                       const uint32_t* buffer) {
+                                       std::span<const ShaderSemantic> input_semantics,
+                                       const uint32_t* attrib, const uint32_t* buffer) {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(attrib == nullptr || buffer == nullptr);
 
 	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
 
-	for (uint32_t i = 0; i < num_input_semantics; i++) {
+	for (uint32_t i = 0; i < input_semantics.size(); i++) {
 		const auto& in = input_semantics[i];
 
 		EXIT_NOT_IMPLEMENTED(in.static_vb_index == 1 || in.static_attribute == 1);
@@ -534,8 +533,7 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			     shader_addr);
 			return false;
 		}
-		ShaderApplyAttribSemantics(info, metadata.input_semantics.data(),
-		                           metadata.input_semantics_count, attrib, buffer);
+		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info);
 	}
 	return true;
