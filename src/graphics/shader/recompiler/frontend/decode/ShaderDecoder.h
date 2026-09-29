@@ -528,6 +528,7 @@ enum class Opcode {
 	DS_AND_B32,
 	DS_AND_RTN_B32,
 	DS_OR_B32,
+	DS_OR_B64,
 	DS_OR_RTN_B32,
 	DS_XOR_B32,
 	DS_XOR_RTN_B32,
