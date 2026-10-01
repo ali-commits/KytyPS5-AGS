@@ -1497,6 +1497,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
       .shader_base = reinterpret_cast<uint64_t>(test.code.data()),
       .read_memory = ReadTestMemory,
       .userdata = const_cast<std::vector<u32> *>(&test.initial),
+      .read_specialization_memory = ReadTestMemory,
   };
   Require(test.name, "resource materialization",
           ShaderRecompiler::IR::MaterializeResources(
@@ -33928,7 +33929,8 @@ void CheckResourcePlanHandoff() {
     ResourceSpecialization specialization;
     const SrtRuntime runtime{.user_data = user_data,
                              .read_memory = ReadTestMemory,
-                             .userdata = &memory};
+                             .userdata = &memory,
+                             .read_specialization_memory = ReadTestMemory};
     Require(name, "initial descriptors",
             MaterializeResources(plan, runtime, snapshot, specialization) &&
                 snapshot.buffers.size() == 1 && snapshot.buffers[0].dwords[0] == 0x1000u,
