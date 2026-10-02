@@ -88,8 +88,7 @@ public:
 	template <DirtySource source>
 	[[nodiscard]] bool IsModified(uint64_t offset, uint64_t size) const {
 		const auto [start, end] = GetPageRange(m_cpu_addr + offset, size);
-		const auto& bits        = GetBits<source>();
-		return RegionBits(bits, start, end).Any();
+		return GetBits<source>().FirstRangeFrom(start).first < end;
 	}
 
 	template <DirtySource source, bool enable>
