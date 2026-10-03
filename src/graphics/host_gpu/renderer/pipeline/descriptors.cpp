@@ -312,13 +312,14 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                              resource.written && !resource.read && !resource.atomic;
 	const auto numeric_class = Prospero::SampledTextureNumericClass(format);
 	const bool raw_float_atomic = format == Prospero::BufferFormat::k32Float && uint_resource &&
-	                              resource.atomic;
+	                              resource.atomic && !resource.atomic64;
 	const bool format_ok =
 	    raw_sint_storage || raw_float_atomic ||
 	    (numeric_class != Prospero::TextureNumericClass::Unsupported &&
 	     numeric_class != Prospero::TextureNumericClass::Sint &&
 	     uint_resource == (numeric_class == Prospero::TextureNumericClass::Uint) &&
-	     (!resource.atomic || format == Prospero::BufferFormat::k32UInt));
+	     (!resource.atomic || format == (resource.atomic64 ? Prospero::BufferFormat::k32_32UInt
+	                                                       : Prospero::BufferFormat::k32UInt)));
 	if (resource_ok && descriptor_ok && encoding_ok && format_ok && size != 0) {
 		return;
 	}
@@ -354,7 +355,8 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 			desc.info.guest_format = Prospero::BufferFormat::k32Float;
 			break;
 		case Prospero::TextureNumericClass::Uint:
-			desc.info.guest_format = Prospero::BufferFormat::k32UInt;
+			desc.info.guest_format = resource.atomic64 ? Prospero::BufferFormat::k32_32UInt
+			                                         : Prospero::BufferFormat::k32UInt;
 			break;
 		case Prospero::TextureNumericClass::Sint:
 			desc.info.guest_format = Prospero::BufferFormat::k32SInt;
@@ -365,10 +367,10 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
-	desc.info.bytes_per_block = 4;
+	desc.info.bytes_per_block = Prospero::NumBytesPerElement(desc.info.guest_format);
 	desc.info.samples         = 1;
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
-	desc.view_info.format     = desc.info.pixel_format;
+	desc.view_info.format     = resource.atomic64 ? vk::Format::eR64Uint : desc.info.pixel_format;
 	desc.view_info.type       = vk::ImageViewType::e2D;
 	desc.view_info.aspect     = vk::ImageAspectFlagBits::eColor;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
@@ -538,6 +540,9 @@ static bool ResolveTextureMipView(const TileSurfaceDescription& description, boo
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
+	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
+		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
+	}
 	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
 	const bool storage = resource.written;
 	if (storage) {
@@ -650,8 +655,9 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			pixel_format = depth_format->depth_attachment_format;
 		}
 	}
-	const auto storage_view_format = storage && (resource.atomic ||
-	                                            format == Prospero::BufferFormat::k32SInt)
+	const auto storage_view_format = resource.atomic64 ? vk::Format::eR64Uint
+	                                 : storage && (resource.atomic ||
+	                                               format == Prospero::BufferFormat::k32SInt)
 	                                     ? vk::Format::eR32Uint
 	                                     : SrgbStorageViewFormat(pixel_format);
 	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined
