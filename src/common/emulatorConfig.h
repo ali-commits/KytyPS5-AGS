@@ -53,6 +53,7 @@ struct ConfigOptions {
 	PresentMode            present_mode                = PresentMode::Mailbox;
 	int32_t                gpu_index                   = -1;
 	bool                   fullscreen_enabled          = false;
+	bool                   hide_cursor_enabled         = false;
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
 	uint32_t               vblank_frequency            = 60;
@@ -93,6 +94,7 @@ uint32_t GetControllerVibrationIntensity();
 PresentMode GetPresentMode();
 int32_t GetGpuIndex();
 bool     FullscreenEnabled();
+bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
 uint32_t GetVblankFrequency();
