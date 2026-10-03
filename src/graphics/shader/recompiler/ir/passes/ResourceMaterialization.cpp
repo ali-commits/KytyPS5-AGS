@@ -975,12 +975,14 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		}
 	}
 	plan.capture_specialization_reads = capture_indirect_reads || !plan.control_flow.empty();
-	// Writable descriptor addresses must come from clean backing for the alias proof.
-	for (const auto& buffer: plan.info.buffers) {
-		if (buffer.written) MarkCleanFlatSlots(plan, Source(plan, buffer.source), plan.clean_flat_slots);
-	}
-	for (const auto& image: plan.info.images) {
-		if (image.written) MarkCleanFlatSlots(plan, Source(plan, image.source), plan.clean_flat_slots);
+	if (plan.capture_specialization_reads) {
+		// Clean writable addresses prove that shader writes cannot overlap captured reads.
+		for (const auto& buffer: plan.info.buffers) {
+			if (buffer.written) MarkCleanFlatSlots(plan, Source(plan, buffer.source), plan.clean_flat_slots);
+		}
+		for (const auto& image: plan.info.images) {
+			if (image.written) MarkCleanFlatSlots(plan, Source(plan, image.source), plan.clean_flat_slots);
+		}
 	}
 	if (capture_indirect_reads) plan.resource_tracking_complete &= !program.has_address_writes;
 	return plan;
@@ -1004,7 +1006,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		observed.read_memory = CaptureOrdinaryRead;
 	}
 	SrtWalker clean(program, CleanRuntime(observed));
-	SrtWalker walker(program, observed, program.clean_flat_slots, &clean);
+	SrtWalker walker(program, observed, program.clean_flat_slots,
+	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
 		return false;
 	}
@@ -1026,7 +1029,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			return false;
 		}
 		if (active.empty() || active[source]) {
-			return (written ? clean : walker).EvaluateDescriptor(source, value);
+			return (capture_reads && written ? clean : walker).EvaluateDescriptor(source, value);
 		}
 		value = {};
 		value.dword_count = program.descriptor_sources[source].dword_count;
