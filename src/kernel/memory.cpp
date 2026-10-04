@@ -881,10 +881,9 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
-bool TryReadGpuBacking(uint64_t vaddr, void* data, uint64_t size) {
+bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
-		if (!Graphics::GuestGpu::IsGpuThread() ||
-		    GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size)) {
+		if (!Graphics::GuestGpu::IsGpuThread()) {
 			return false;
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
