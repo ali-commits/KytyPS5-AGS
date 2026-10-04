@@ -299,11 +299,14 @@ struct PipelineCache::ProgramCache {
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		auto                                         entry = programs.find(lookup_key);
-		const ShaderRecompiler::IR::SrtRuntime       runtime {
+		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			runtime.workgroup_counts = input_info.workgroup_counts;
+		}
 		if (entry != programs.end()) {
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, entry->second.resources,
