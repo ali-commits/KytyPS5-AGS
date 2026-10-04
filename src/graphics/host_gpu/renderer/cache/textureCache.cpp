@@ -195,6 +195,9 @@ bool TextureCache::SameBacking(const ImageInfo& cached, const ImageInfo& request
 	if (cached.tile_mode != requested.tile_mode) {
 		return false;
 	}
+	if (cached.GetColorTransform() != requested.GetColorTransform()) {
+		return false;
+	}
 	if (!ImageViewOps::FormatsCompatible(cached.pixel_format, requested.pixel_format) ||
 	    cached.type != requested.type) {
 		return false;
@@ -634,6 +637,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 	const bool source_depth = source.info.IsDepth();
 	const bool dest_depth   = destination.info.IsDepth();
 	const bool direct_copy =
+	    source.info.GetColorTransform() == destination.info.GetColorTransform() &&
 	    (source.backing.image_type == destination.backing.image_type ||
 	     (source.backing.image_type != vk::ImageType::e1D &&
 	      destination.backing.image_type != vk::ImageType::e1D)) &&
@@ -647,7 +651,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 			EXIT("TextureCache: cross-format multisample image copy is unsupported\n");
 		}
 		auto& copy_buffer = m_buffer_cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
-		destination.CopyImageWithBuffer(source, copy_buffer);
+		destination.CopyImageWithBuffer(source, copy_buffer, m_tiler);
 	}
 	if (source.IsGpuModified()) {
 		destination.MarkGpuModified();
@@ -801,6 +805,9 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 			}
 			return {merged_id};
 		}
+		if (requested.GetColorTransform() != cached.info.GetColorTransform()) {
+			return {ExpandImage(requested, cached_id)};
+		}
 		if (requested.IsBlock() && !cached.info.IsBlock()) {
 			return {ExpandImage(requested, cached_id)};
 		}
@@ -905,8 +912,8 @@ struct TextureCache::TextureTransfer {
 	TextureUploadLayout              layout;
 	std::vector<vk::BufferImageCopy> regions;
 	std::vector<GpuTileInfo>         tiles;
-	bool                             swap_bgra16 = false;
-	bool                             valid       = false;
+	ColorTransform                   color_transform = ColorTransform::None;
+	bool                             valid           = false;
 
 	[[nodiscard]] uint64_t LinearSize() const {
 		uint64_t size = 0;
@@ -935,7 +942,7 @@ TextureCache::BuildTextureTransfer(const Image& image, BindingType binding,
 	const char* owner            = "TextureCache readback";
 
 	TextureTransfer transfer;
-	transfer.swap_bgra16 = info.bgra16;
+	transfer.color_transform = info.GetColorTransform();
 	if (upload) {
 		if ((render_target || video_out) &&
 		    (info.resources.layers == 0 || info.data.size % info.resources.layers != 0 ||
@@ -1023,10 +1030,9 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 		TileManager::Result linear {source.Handle(), source_offset, info.data.size};
 		if (!transfer.tiles.empty()) {
 			linear = m_tiler.Detile(source.Handle(), source_offset, info.data.size,
-			                        transfer.LinearSize(), transfer.tiles);
-		}
-		if (transfer.swap_bgra16) {
-			linear = m_tiler.SwapBgra16(linear);
+			                        transfer.LinearSize(), transfer.tiles, transfer.color_transform);
+		} else if (transfer.color_transform != ColorTransform::None) {
+			linear = m_tiler.TransformColor(linear, transfer.color_transform, true);
 		}
 		upload(transfer.regions, linear);
 		return;
@@ -1741,14 +1747,14 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 	}
 
 	auto&      texture   = transfer.texture;
-	const auto transform = texture.swap_bgra16 ? TileManager::ColorTransform::SwapBgra16
-	                                           : TileManager::ColorTransform::None;
+	const auto transform = texture.color_transform;
 	if (texture.tiles.empty()) {
-		if (transform == TileManager::ColorTransform::SwapBgra16) {
+		if (transform != ColorTransform::None) {
 			auto linear = m_tiler.GetScratchBuffer(destination_size);
 			image.Download(texture.regions, linear.buffer, 0, linear.size);
-			m_tiler.SwapBgra16(linear,
-			                   {destination.Handle(), destination_offset, destination_size});
+			m_tiler.TransformColor(linear,
+			                       {destination.Handle(), destination_offset, destination_size},
+			                       transform, false);
 			return;
 		}
 		for (auto& copy: texture.regions) {
