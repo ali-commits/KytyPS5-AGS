@@ -640,6 +640,9 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 				case BlendMappingSupport::SourceAlphaOne:
 					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaOne;
 					break;
+				case BlendMappingSupport::SourceAlphaZero:
+					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaZero;
+					break;
 				default: break;
 			}
 			if (pixel_info.alpha_blend_source != ShaderAlphaBlendSource::None) {
@@ -764,6 +767,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 					blend.separate_alpha_blend = false;
 					break;
 				case ShaderAlphaBlendSource::SourceAlphaOne:
+				case ShaderAlphaBlendSource::SourceAlphaZero:
 					// The second source carries the mapped source factor; its alpha stays logical Sa.
 					blend.color_srcblend = static_cast<uint8_t>(Prospero::BlendFactor::kSrc1Color);
 					blend.color_destblend =
