@@ -43,10 +43,6 @@ struct ResourceSpecialization {
 // its values and is independent of the translated shader CFG.
 ResourcePlan ExtractResourcePlan(const Program& program);
 
-// Nonnegative constant/local/workgroup coefficients under the instruction's active guard.
-std::optional<std::array<uint64_t, 3>> AffineIndex(Value value, uint32_t axis, Value guard,
-                                                 uint32_t depth = 0);
-
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);

@@ -762,23 +762,11 @@ static bool IsFullDispatchPredicate(Value value, uint32_t depth = 0) {
 	return axis.IsImmediate() && axis.U32() < 3 && extent->Arg(0).Resolve() == axis;
 }
 
-static Value FillValue(Value value, Value guard) {
-	for (uint32_t depth = 0; depth <= 32; ++depth) {
-		value = value.Resolve();
-		const auto* inst = value.TryInstruction();
-		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::SelectU32 ||
-		    inst->Arg(0).Resolve() != guard)
-			return value;
-		value = inst->Arg(1);
-	}
-	return {};
-}
-
 // Nonnegative affine coefficients for constant, local and workgroup coordinates. Reject modular
 // arithmetic that could wrap; runtime coverage also bounds the largest invocation index.
-std::optional<std::array<uint64_t, 3>> AffineIndex(Value value, uint32_t axis, Value guard,
-                                                 uint32_t depth) {
-	value = FillValue(value, guard);
+static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t axis, Value guard,
+                                                      uint32_t depth = 0) {
+	value = ResolveActiveU32(value, guard);
 	if (depth > 32 || value.GetType() != Type::U32) {
 		return {};
 	}
@@ -802,8 +790,8 @@ std::optional<std::array<uint64_t, 3>> AffineIndex(Value value, uint32_t axis, V
 	    op != ValueOpcode::ShiftLeftLogical32) {
 		return {};
 	}
-	auto left  = AffineIndex(inst->Arg(0), axis, guard, depth + 1);
-	auto right = AffineIndex(inst->Arg(1), axis, guard, depth + 1);
+	auto left  = FillIndex(inst->Arg(0), axis, guard, depth + 1);
+	auto right = FillIndex(inst->Arg(1), axis, guard, depth + 1);
 	if (!left || !right) {
 		return {};
 	}
@@ -870,7 +858,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		const auto* address = store->Arg(1).ResolveInstruction();
 		if (address == nullptr || address->GetOpcode() != ValueOpcode::MakeImageAddress) return {};
 		for (uint32_t axis = 0; axis < 3; ++axis) {
-			const auto index = AffineIndex(address->Arg(axis), axis, guard);
+			const auto index = FillIndex(address->Arg(axis), axis, guard);
 			if (!index || (*index)[0] != 0) return {};
 			if (axis < 2) {
 				if ((*index)[1] != 1 || (*index)[2] == 0) return {};
@@ -900,14 +888,14 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		    memory.data_bits != 32 ||
 		    memory.data_dwords != static_cast<uint32_t>(store_op - stores.begin() + 1))
 			return {};
-		const auto address = AffineIndex(store->Arg(1), 0, guard);
+		const auto address = FillIndex(store->Arg(1), 0, guard);
 		if (!address || (*address)[0] != 0 || (*address)[1] != 1 || (*address)[2] == 0) return {};
 		result.fill.kind = UniformFillKind::Buffer;
 		result.fill.group_stride[0] = static_cast<uint32_t>((*address)[2]);
 		result.fill.words = memory.data_dwords;
 		data = store->Arg(4);
 	}
-	data = FillValue(data, guard);
+	data = ResolveActiveU32(data, guard);
 	const auto*          vector = data.TryInstruction();
 	constexpr std::array composites {ValueOpcode::CompositeConstructU32x2,
 	                                 ValueOpcode::CompositeConstructU32x3,
@@ -916,7 +904,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 	    (vector == nullptr || vector->GetOpcode() != composites[result.fill.words - 2]))
 		return {};
 	for (uint32_t i = 0; i < result.fill.words; ++i) {
-		const auto word = FillValue(result.fill.words == 1 ? data : vector->Arg(i), guard);
+		const auto word = ResolveActiveU32(result.fill.words == 1 ? data : vector->Arg(i), guard);
 		if (word.GetType() != Type::U32 ||
 		    !ValidateRuntimeValue(program, word, RuntimeValueType::Integer))
 			return {};
@@ -943,6 +931,11 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		if (source == nullptr) {
 			return value;
 		}
+		if (source->GetOpcode() == ValueOpcode::ReadFirstLane &&
+		    ValidateRuntimeValue(program, source->Arg(0))) {
+			// Uniform values need no new EXEC context; preserve their shared evaluation memo.
+			return Clone(source->Arg(0));
+		}
 		if (source->GetOpcode() == ValueOpcode::Phi) {
 			const auto invariant = ResolveInvariantPhi(program, value);
 			if (!invariant.IsEmpty() && invariant != value) {
@@ -951,6 +944,10 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		}
 		if (const auto found = cloned.find(source); found != cloned.end()) {
 			return Value(found->second);
+		}
+		if (source->GetOpcode() == ValueOpcode::LoadBufferU32) {
+			plan.requires_specialization_memory = true;
+			plan.capture_specialization_reads   = true;
 		}
 		auto& target =
 		    plan.value_storage.emplace_back(source->GetOpcode(), source->Flags<uint64_t>());
@@ -1042,7 +1039,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 			}
 		}
 	}
-	plan.capture_specialization_reads = capture_indirect_reads || !plan.control_flow.empty();
+	plan.capture_specialization_reads |= capture_indirect_reads || !plan.control_flow.empty();
 	if (plan.capture_specialization_reads) {
 		// Clean writable addresses prove that shader writes cannot overlap captured reads.
 		for (const auto& buffer: plan.info.buffers) {
@@ -1138,12 +1135,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		auto       packed_stride = descriptor.PackedStride();
 		const auto stride        = packed_stride & 0x3fffu;
 		const bool swizzle       = stride != 0u && ((packed_stride >> 14u) & 1u) != 0u;
-		if (base.dispatch_stride != 0u && descriptor.Base48() != 0u &&
-		    (descriptor.OutOfBounds() != 0u || stride == 0u || swizzle ||
-		     (packed_stride & (1u << 20u)) != 0u || base.max_byte_extent > stride)) {
-			return SpecializationFail(fmt::format(
-			    "dispatch-sized buffer {} requires an unswizzled structured DWORD layout", i));
-		}
 		if (stride == 0u) {
 			packed_stride &= ~((1u << 14u) | (3u << 16u));
 		} else if (!swizzle) {
