@@ -1344,6 +1344,7 @@ struct GraphicsCase {
   bool pixel_position_w = false;
   float vertex_clip_w = 1.0f;
   bool pixel_depth_export = false;
+  u32 pixel_perspective_sample_vgpr = UINT32_MAX;
   u32 pixel_perspective_centroid_vgpr = UINT32_MAX;
   u32 pixel_custom_interpolation_mask = 0;
 };
@@ -1761,6 +1762,7 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
   pixel_info.ps_pos_w = test.pixel_position_w;
   pixel_info.ps_depth_export_enable = test.pixel_depth_export;
   pixel_info.ps_system_input_base = 2;
+  pixel_info.ps_perspective_sample_vgpr = test.pixel_perspective_sample_vgpr;
   pixel_info.ps_perspective_centroid_vgpr = test.pixel_perspective_centroid_vgpr;
   pixel_info.custom_interpolation_mask = test.pixel_custom_interpolation_mask;
   for (u32 i = 0; i < std::size(pixel_info.interpolator_settings); i++) {
@@ -35107,6 +35109,26 @@ GraphicsCase GraphicsPackedHalfCentroid() {
   return test;
 }
 
+GraphicsCase GraphicsPerspectiveSample(bool multisample) {
+  GraphicsCase test;
+  test.name = multisample ? "GraphicsPerspectiveSample4x"
+                         : "GraphicsPerspectiveSample1x";
+  test.pixel_perspective_sample_vgpr = 0;
+  test.samples = multisample ? vk::SampleCountFlagBits::e4
+                            : vk::SampleCountFlagBits::e1;
+  test.fragment_code = {
+      EncodeVop2(0x08, 2, Vgpr(0), 0), // I squared
+      EncodeVop2(0x08, 3, Vgpr(1), 1), // J squared
+      EncodeExp0(0x00, 0xf), EncodeExp1(2, 3, 0, 1)};
+  AppendEnd(&test.fragment_code);
+  // The triangle gives I=x/2, J=y/2. Squaring before the 4x resolve
+  // distinguishes sample interpolation (21/256) from pixel-center (1/16).
+  const auto square = std::bit_cast<u32>(multisample ? 21.0f / 256.0f : 1.0f / 16.0f);
+  test.expected_pixel = {square, square, 0x3e800000u, 0x3e800000u};
+  test.opcodes = {ShaderOpcode::V_MUL_F32, ShaderOpcode::EXP, ShaderOpcode::S_ENDPGM};
+  return test;
+}
+
 GraphicsCase GraphicsPackedHalfInputAlias(bool second_weights) {
   auto test = GraphicsPackedHalfCentroid();
   test.name = second_weights ? "GraphicsPackedHalfAliasSecondWeights"
@@ -35982,6 +36004,8 @@ std::vector<GraphicsCase> MakeGraphicsCases() {
       GraphicsInterpolationExport(),
       GraphicsPositionWExport(),
       GraphicsPackedHalfCentroid(),
+      GraphicsPerspectiveSample(false),
+      GraphicsPerspectiveSample(true),
       GraphicsPackedHalfInputAlias(false),
       GraphicsPackedHalfInputAlias(true),
       GraphicsSmoothRawInputAlias(),
@@ -41299,6 +41323,8 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--centroid-only") == 0) {
     VulkanHarness vulkan;
     RunGraphicsCase(&vulkan, GraphicsPackedHalfCentroid());
+    RunGraphicsCase(&vulkan, GraphicsPerspectiveSample(false));
+    RunGraphicsCase(&vulkan, GraphicsPerspectiveSample(true));
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--pixel-alias-only") == 0) {
