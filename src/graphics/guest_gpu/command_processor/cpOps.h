@@ -232,6 +232,7 @@ struct DrawIndirectOp {
 
 // Dispatch op flags.
 inline constexpr uint32_t DispatchFlagSnapshot = 1u << 0u; // thread mode: `snapshot` is bound
+inline constexpr uint32_t DispatchFlagPrepared = 1u << 1u; // KYTY_DRAW_PREP_DISPATCH: `window`
 
 struct DispatchDirectOp {
 	uint32_t x        = 0;
@@ -240,6 +241,7 @@ struct DispatchDirectOp {
 	uint32_t mode     = 0;
 	uint32_t flags    = 0;
 	uint32_t snapshot = 0;
+	uint64_t window   = 0; // DispatchFlagPrepared: the draw-prep window position of its slot
 };
 
 // DISPATCH_INDIRECT: the resolver reads thread-dimension arguments itself.

@@ -1247,6 +1247,9 @@ private:
 	// Draw-prep (drawPrep.h): the preparation of the draw the engine is committing, taken by
 	// RefreshShaders in place of GetGraphicsPrograms when its certificate holds. Null otherwise.
 	DrawPrep::PreparedDraw* m_prepared_draw = nullptr;
+	// KYTY_DRAW_PREP_DISPATCH: the preparation of the dispatch the engine is executing, taken by
+	// DispatchDirect in place of GetComputeProgram when its certificate holds. Null otherwise.
+	DrawPrep::PreparedDraw* m_prepared_dispatch = nullptr;
 	// KYTY_DRAW_PREP_BINDINGS: the binding plan of the draw the engine is committing (null: none),
 	// and whether it applies: set by RefreshShaders once DrawPrep::Validate accepted the same
 	// slot's preparation (the plan was derived from it), cleared by the engine after the draw.

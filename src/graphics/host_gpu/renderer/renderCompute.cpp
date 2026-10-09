@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+#include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -348,23 +349,30 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	ShaderComputeInputInfo input_info {};
 	const bool use_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-	input_info.dispatch_thread_dimensions = use_thread_dimensions;
-	input_info.workgroup_counts[0] = thread_group_x;
-	input_info.workgroup_counts[1] = thread_group_y;
-	input_info.workgroup_counts[2] = thread_group_z;
-	if (use_thread_dimensions) {
-		const uint32_t group_sizes[] = {cs_regs.cs_regs.num_thread_x, cs_regs.cs_regs.num_thread_y,
-		                                cs_regs.cs_regs.num_thread_z};
-		for (uint32_t axis = 0; axis < 3u; ++axis) {
-			const auto size = std::max(group_sizes[axis], 1u);
-			const auto threads = input_info.workgroup_counts[axis];
-			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
-		}
-	}
+	DrawPrep::MakeComputeInputInfo(cs_regs, {thread_group_x, thread_group_y, thread_group_z, mode},
+	                               input_info);
 	CpGaps::Phase(CpGaps::Cat::DispatchProgram);
-	const auto compute_program =
-	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info,
-	                                                   m_compute_prep);
+	ShaderProgram compute_program;
+	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): the program a worker prepared from this dispatch's
+	// register snapshot, when its certificate holds; otherwise the serial lookup.
+	auto* const prepared = std::exchange(m_prepared_dispatch, nullptr);
+	if (prepared != nullptr && DrawPrep::ValidateDispatch(*prepared, input_info)) {
+		if (DrawPrep::VerifyMode() != 0) {
+			// The serial lookup on copies; it only reads memory the certificate proved clean.
+			auto serial_prep = std::make_unique<PipelineCache::StagePrep>();
+			auto serial_info = input_info;
+			const auto serial_program = m_context.GetPipelineCache().GetComputeProgram(
+			    cs_regs, sh_regs, serial_info, *serial_prep);
+			(void)DrawPrep::VerifyDispatch(*prepared, serial_program, serial_info, *serial_prep);
+		}
+		std::swap(m_compute_prep, prepared->compute_prep);
+		input_info                 = prepared->compute_info;
+		input_info.stage.resources = &m_compute_prep.resources;
+		compute_program            = prepared->compute_program;
+	} else {
+		compute_program = m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info,
+		                                                                 m_compute_prep);
+	}
 	CpGaps::Phase(CpGaps::Cat::DispatchOp);
 	if (!compute_program) {
 		// Temporary until RT is implemented.

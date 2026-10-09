@@ -2677,6 +2677,14 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
                                       uint32_t thread_group_z, uint32_t mode) {
 	// The wave size is register state: the front sets it, the op's execution reads it.
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): the dispatch's program is prepared in a window slot.
+	auto*      engine  = m_draw_prep.get();
+	const bool prepare = m_front_mode == FrontMode::Thread && engine != nullptr &&
+	                     engine->Parallel() && DrawPrep::DispatchPrepEnabled();
+	if (prepare && engine->SpeculativeSlots() != 0) {
+		// The slot must follow the real parse's (a SkipSlots op retires the speculative ones).
+		DropSpeculativeSlots();
+	}
 	CpSeq::DispatchDirectOp op;
 	op.x    = thread_group_x;
 	op.y    = thread_group_y;
@@ -2686,10 +2694,30 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		op.flags |= CpSeq::DispatchFlagSnapshot;
 		op.snapshot = TakeSnapshot();
 	}
+	if (prepare) {
+		const auto position = engine->PublishDispatch(
+		    {thread_group_x, thread_group_y, thread_group_z, mode}, m_ctx, m_ucfg, m_sh_ctx,
+		    [this] { return WaitForWindowSpace(); });
+		if (position != UINT64_MAX) {
+			op.flags |= CpSeq::DispatchFlagPrepared;
+			op.window = position;
+			m_published_ops.push_back(m_ops->Emitted());
+			if (m_published_ops.size() > 256u) {
+				(void)OldestPendingOp(m_published_ops);
+			}
+		}
+	}
 	(void)Submit(op);
 }
 
 void CommandProcessor::ExecDispatchDirect(const CpSeq::DispatchDirectOp& op) {
+	if ((op.flags & CpSeq::DispatchFlagPrepared) != 0) {
+		// KYTY_DRAW_PREP_DISPATCH: the same execution, with the slot's preparation offered.
+		auto plain = op;
+		plain.flags &= ~CpSeq::DispatchFlagPrepared;
+		m_draw_prep->ExecuteDispatch(op.window, [this, &plain] { ExecDispatchDirect(plain); });
+		return;
+	}
 	const auto thread_group_x = op.x;
 	const auto thread_group_y = op.y;
 	const auto thread_group_z = op.z;

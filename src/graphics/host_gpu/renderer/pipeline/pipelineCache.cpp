@@ -3577,6 +3577,46 @@ struct PipelineCache::ProgramCache {
 		return Result::Ok;
 	}
 
+	// KYTY_DRAW_PREP_DISPATCH: GetComputeProgram's lookup as TryPrepareSpeculative does it for a
+	// draw: the stage materialized on the calling thread with probe-only reads (the workgroup counts
+	// of the dispatch, as Get passes them), then the permutation looked up and bound.
+	PipelineCache::SpeculativeResult TryPrepareSpeculativeCompute(const ShaderParams&      params,
+	                                                              ShaderComputeInputInfo& info,
+	                                                              StagePrep&               prep,
+	                                                              ShaderProgram&           program,
+	                                                              uint64_t* compile_ns = nullptr) {
+		using Result     = PipelineCache::SpeculativeResult;
+		auto& scratch    = ThreadScratch();
+		auto& evaluation = ShaderRecompiler::IR::ThreadEvaluationScratch();
+		const auto compile_missing = [&]() -> Result {
+			if (compile_ns == nullptr) return Result::NotPublished;
+			ShaderReadAttempt attempt;
+			uint32_t          cursor = 0;
+			program = Get(params, info, prep, cursor, attempt, scratch, evaluation, true, compile_ns);
+			return program ? Result::Ok : Result::NotPublished;
+		};
+		auto& key = scratch.key;
+		BuildKey(params, info, key);
+		const auto* source = FindSourceMemo(key, scratch);
+		if (source == nullptr || source->skip_dispatch.load(std::memory_order_relaxed)) {
+			// A skipped source makes the serial lookup return no program: it decides.
+			return source == nullptr ? compile_missing() : Result::NotPublished;
+		}
+		auto runtime             = MakeSpeculativeRuntime(params);
+		runtime.workgroup_counts = info.workgroup_counts;
+		if (!MaterializeStage(*source, runtime, evaluation, prep)) {
+			return Result::ReadFailed;
+		}
+		uint32_t cursor = 0;
+		const auto* permutation =
+		    FindPermutationMemo(*source, key.stage, prep.specialization, cursor, scratch);
+		if (permutation == nullptr) {
+			return compile_missing();
+		}
+		program = Bind(*permutation, info, prep, cursor);
+		return Result::Ok;
+	}
+
 	explicit ProgramCache(vk::Device device): device(device) {
 		if (Config::ShaderValidationEnabled() && SpirvValidator::AsyncEnabled()) {
 			validator = std::make_unique<SpirvValidator>();
@@ -6529,6 +6569,33 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 		EXIT_IF(!read_attempt.Synchronize());
 	}
 	EXIT("compute resource readiness did not converge after 64 attempts\n");
+}
+
+PipelineCache::SpeculativeResult PipelineCache::PrepareComputeProgramSpeculative(
+    const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+    ShaderComputeInputInfo& input_info, StagePrep& stage_prep, ShaderProgram& program,
+    uint64_t* compile_ns) {
+	KYTY_PROFILER_DETAIL_FUNCTION();
+	EXIT_IF(!DrawPrep::Speculative());
+	if (ResourceReuseEnabled()) {
+		return SpeculativeResult::Ineligible;
+	}
+	const auto read_failed = [] { return DrawPrep::ActiveRecorder()->reads->Failed(); };
+	// The same static preparation as GetComputeProgram.
+	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	const auto params             = PrepareProgram(regs, sh, input_info);
+	if (read_failed()) {
+		return SpeculativeResult::ReadFailed;
+	}
+	input_info.lds_storage = input_info.lds_size_dwords * 4u >
+	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	const bool compile_ahead = g_program_prefetch.On();
+	const auto result        = m_program_cache->TryPrepareSpeculativeCompute(
+        params, input_info, stage_prep, program, compile_ahead ? compile_ns : nullptr);
+	if (result == SpeculativeResult::Ok && read_failed()) {
+		return SpeculativeResult::ReadFailed;
+	}
+	return result;
 }
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {

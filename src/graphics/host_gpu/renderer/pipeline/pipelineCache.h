@@ -196,6 +196,15 @@ public:
 	ShaderProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo& input_info, StagePrep& stage_prep);
+	// Draw-prep (KYTY_DRAW_PREP_DISPATCH): GetComputeProgram as a speculative preparation, as
+	// PrepareGraphicsProgramsSpeculative for a draw (every read through the active recorder,
+	// nothing synchronized; published programs only, or clean compiles with
+	// KYTY_PIPELINE_PREFETCH_PROGRAMS). input_info holds the dispatch's workgroup counts and
+	// thread-dimension mode on entry (DrawPrep::MakeComputeInputInfo).
+	[[nodiscard]] SpeculativeResult PrepareComputeProgramSpeculative(
+	    const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+	    ShaderComputeInputInfo& input_info, StagePrep& stage_prep, ShaderProgram& program,
+	    uint64_t* compile_ns = nullptr);
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,

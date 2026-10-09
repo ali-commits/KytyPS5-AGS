@@ -18678,6 +18678,171 @@ public:
                 static_cast<unsigned long long>(DrawRun::GetTotals().verify_checks.load()));
   }
 
+  // KYTY_DRAW_PREP_DISPATCH (drawPrep.h): direct dispatches of a compute shader that stores its
+  // user SGPR s4 through the V# s[0:3], each into its own dword, as a command stream: serially
+  // (the processor's direct front), then through a sequencer thread, where parallel draw prep
+  // with the switch publishes every dispatch and the resolver takes its preparation. Both
+  // phases must store the same values; with the switch every dispatch after the first (whose
+  // program the serial phase published) is committed from its slot, and verify mode compares
+  // each with the serial lookup.
+  void CheckDrawPrepDispatch() {
+    constexpr const char *name = "DrawPrepDispatch";
+    constexpr uintptr_t base = 0x0000000206c00000ull;
+    constexpr uint64_t allocation_size = 0x40000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t code_offset = 0x1000;
+    constexpr std::array<uint64_t, 2> output_offsets{0x20000, 0x30000};
+    constexpr uint32_t dispatches = 6;
+
+    std::vector<u32> code;
+    code.push_back(EncodeVop1(0x01u, 1, 4u));               // v_mov_b32 v1, s4
+    code.push_back(EncodeMubuf0(0x1cu, 0, false, false));  // buffer_store_dword v1, s[0:3]
+    code.push_back(EncodeMubuf1(1, 0, 0));
+    code.push_back(EncodeSopp(0x0c, 0));                   // s_waitcnt
+    AppendEnd(&code);
+
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), allocation_size,
+                allocation_alignment, 0, &direct_offset) == 0,
+            "dispatch allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(&mapped, allocation_size, 0x3, 0x10,
+                                                           direct_offset,
+                                                           allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "dispatch mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memset(memory, 0, allocation_size);
+    const auto code_address = base + code_offset;
+    std::memcpy(memory + code_offset, code.data(), code.size() * sizeof(u32));
+    ShaderMapUserData(code_address,
+                      {.type = Prospero::ShaderBinaryType::kCs,
+                       .code_size_bytes = static_cast<uint32_t>(code.size() * sizeof(u32))});
+    const auto value = [](size_t phase, u32 k) { return 0x1000u * static_cast<u32>(phase + 1u) + k; };
+    // Phase p's stream: for each dispatch k the V# of its own output dword and its value, then
+    // DISPATCH_DIRECT 1x1x1.
+    const auto stream_for = [&](size_t phase) {
+      std::vector<u32> words;
+      for (u32 k = 0; k < dispatches; k++) {
+        ShaderBufferResource descriptor{};
+        descriptor.UpdateAddress48(base + output_offsets[phase] + k * 4u);
+        descriptor.fields[2] = 4;
+        descriptor.fields[3] = DstSel(4, 5, 6, 7) |
+                               (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+        words.push_back(KYTY_PM4(7, Pm4::IT_SET_SH_REG, Pm4::R_ZERO));
+        words.push_back(Pm4::COMPUTE_USER_DATA_0);
+        words.insert(words.end(), std::begin(descriptor.fields), std::end(descriptor.fields));
+        words.push_back(value(phase, k));
+        words.insert(words.end(), {KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, Pm4::R_ZERO), 1u, 1u, 1u, 0x41u});
+      }
+      return words;
+    };
+
+    const auto context_owner = MakeRenderContext();
+    auto &context = *context_owner;
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
+    uint64_t committed = 0;
+    uint64_t verified = 0;
+    context.GetGpu().SendCommandSync([&] {
+      GraphicsInitJmpTables();
+      CommandProcessor processor(context, 0);
+      processor.Reset();
+      processor.BufferInit();
+      context.MapMemory(base, allocation_size);
+      auto &shaders = processor.GetShCtx();
+      shaders.SetCsShader({.data_addr = code_address, .num_thread_x = 1, .num_thread_y = 1,
+                           .num_thread_z = 1, .wave_size = 64, .user_sgpr = 5});
+      const auto stored = [&](size_t phase) {
+        std::vector<u32> values;
+        for (u32 k = 0; k < dispatches; k++) {
+          const auto address = base + output_offsets[phase] + k * 4u;
+          context.GetBufferCache().ReadMemory(address, 4);
+          u32 word = 0;
+          Libs::LibKernel::Memory::TryReadBacking(address, &word, sizeof(word));
+          values.push_back(word);
+        }
+        return values;
+      };
+      const auto expect = [&](size_t phase, const char *stage) {
+        const auto values = stored(phase);
+        for (u32 k = 0; k < dispatches; k++) {
+          Require(name, stage, values[k] == value(phase, k),
+                  "dispatch " + std::to_string(k) + " stored " + Hex(values[k]) + ", expected " +
+                      Hex(value(phase, k)));
+        }
+      };
+      // Serial reference (also publishes the program).
+      {
+        const auto stream = stream_for(0);
+        Pm4Execution execution;
+        Require(name, "serial stream",
+                processor.Process(execution, stream) == Pm4ProcessResult::Complete,
+                "the dispatch stream did not complete");
+        expect(0, "serial dispatches");
+      }
+      if (CpSeq::ConfiguredMode() == CpSeq::Mode::Thread) {
+        auto &totals = DrawPrep::GetTotals();
+        const auto committed_before = totals.dispatch_committed.load();
+        const auto checks_before = totals.dispatch_verify_checks.load();
+        const auto mismatches_before = totals.dispatch_verify_mismatches.load();
+        const auto stream = stream_for(1);
+        {
+          CpSeq::Sequencer sequencer(processor);
+          processor.AttachSequencer(&sequencer);
+          sequencer.Start();
+          processor.BufferInit();
+          CpSeq::Intake intake;
+          intake.sequence = 1;
+          intake.commands = stream;
+          sequencer.Admit(intake);
+          Pm4Execution execution;
+          bool handoff = false;
+          bool complete = false;
+          for (uint32_t slice = 0; slice < 100000 && !complete && !handoff; slice++) {
+            complete = processor.ResolveSubmission(execution, 1, stream, handoff) ==
+                       Pm4ProcessResult::Complete;
+          }
+          Require(name, "sequenced stream", complete && !handoff,
+                  "the sequencer's ops did not complete the stream");
+          sequencer.Stop();
+          processor.DetachSequencer();
+        }
+        processor.BufferInit();
+        expect(1, "sequenced dispatches");
+        committed = totals.dispatch_committed.load() - committed_before;
+        verified = totals.dispatch_verify_checks.load() - checks_before;
+        Require(name, "verify", totals.dispatch_verify_mismatches.load() == mismatches_before,
+                "a prepared dispatch differed from the serial lookup");
+        const bool prepared = DrawPrep::DispatchPrepEnabled() &&
+                              DrawPrep::GetMode() == DrawPrep::Mode::Parallel;
+        Require(name, "prepared dispatches",
+                prepared ? committed == dispatches &&
+                               (DrawPrep::VerifyMode() == 0 || verified == dispatches)
+                         : committed == 0,
+                "committed " + std::to_string(committed) + ", verified " +
+                    std::to_string(verified) + " of " + std::to_string(dispatches) +
+                    " dispatches");
+      }
+      context.UnmapMemory(base, allocation_size);
+      context.GetCommandScheduler().Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "dispatch mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "dispatch allocation release failed");
+    std::printf("[gpu]     %-32s ok (prepared %llu, verified %llu)\n", name,
+                static_cast<unsigned long long>(committed), static_cast<unsigned long long>(verified));
+  }
+
   // KYTY_DRAW_RUN_WRITES: CheckDrawRun's draws with a pixel shader that also stores its constant
   // through a per-draw V# (s[16:19]), each draw into its own dword of an output region. With the
   // switch on they form runs like the non-writing draws (continued 2 x draws - 1, one late
@@ -56569,6 +56734,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckDrawPrepEngineDraw();
     vulkan.CheckDrawPrepEngineTextures();
+    vulkan.CheckDrawPrepDispatch();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-run-only") == 0) {
@@ -56968,6 +57134,7 @@ int main(int argc, char **argv) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
   vulkan.CheckDrawPrepEngineDraw();
   vulkan.CheckDrawPrepEngineTextures();
+  vulkan.CheckDrawPrepDispatch();
   vulkan.CheckDrawRun();
   vulkan.CheckDrawRun(true);
   vulkan.CheckTextureMemoRevalidation();

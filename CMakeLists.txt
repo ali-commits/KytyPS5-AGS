@@ -2008,6 +2008,16 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_cp_seq_thread_verify PROPERTIES
 		ENVIRONMENT "KYTY_CP_SEQ=1;KYTY_CP_SEQ_VERIFY=exit;KYTY_DRAW_PREP_VERIFY=exit")
+	# KYTY_DRAW_PREP_DISPATCH: direct dispatches prepared in window slots by the draw-prep workers,
+	# every accepted preparation compared with the serial lookup.
+	add_test(NAME draw_prep_engine_parallel_cp_seq_thread_dispatch_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(draw_prep_engine_parallel_cp_seq_thread_dispatch_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_DISPATCH=1;KYTY_CP_SEQ=1;KYTY_CP_SEQ_VERIFY=exit")
+	add_test(NAME draw_prep_engine_parallel_cp_seq_thread_dispatch_park
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(draw_prep_engine_parallel_cp_seq_thread_dispatch_park PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_WINDOW=2;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_DISPATCH=1;KYTY_CP_SEQ=1;KYTY_CP_SEQ_VERIFY=exit;KYTY_CP_SEQ_SPIN_US=0;KYTY_CP_SEQ_RESOLVER_SPIN_US=0;KYTY_CP_SEQ_SNAPSHOTS=4")
 	add_test(NAME shader_recompiler_compute_cp_seq_thread_recorder
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_cp_seq_thread_recorder PROPERTIES
