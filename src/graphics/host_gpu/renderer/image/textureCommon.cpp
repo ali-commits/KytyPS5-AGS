@@ -176,6 +176,11 @@ SurfaceFormatInfo TextureGetSurfaceFormatInfo(Prospero::BufferFormat format) {
 	EXIT("unknown format: fmt = %u\n", static_cast<uint32_t>(format));
 }
 
+bool TextureSurfaceFormatKnown(Prospero::BufferFormat format) {
+	return ResolveHostFormat(Prospero::RemapTextureFormat(format), Prospero::ChannelOrder::kStandard)
+	           .format != vk::Format::eUndefined;
+}
+
 // Mirrors the unsupported-layout exits of TextureCalcUploadLayout without exiting, so paths that
 // have an exact fallback (e.g. downloads before a GPU write) can decline instead of stopping.
 bool TextureUploadLayoutSupported(Prospero::BufferFormat format, uint32_t width, uint32_t height,
