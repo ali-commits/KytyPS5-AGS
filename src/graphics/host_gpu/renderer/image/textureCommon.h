@@ -42,6 +42,8 @@ struct TextureUploadLayout {
 vk::ComponentMapping   TextureGetComponentMapping(uint32_t                        swizzle,
                                                   Prospero::ColorComponentMapping host_to_storage);
 SurfaceFormatInfo      TextureGetSurfaceFormatInfo(Prospero::BufferFormat format);
+// Whether TextureGetSurfaceFormatInfo has a host format for `format` (it exits otherwise).
+[[nodiscard]] bool     TextureSurfaceFormatKnown(Prospero::BufferFormat format);
 RenderTargetFormatInfo TextureGetRenderTargetFormat(Prospero::ChannelLayout layout,
                                                     Prospero::ChannelType   type,
                                                     Prospero::ChannelOrder  order);

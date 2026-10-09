@@ -23,6 +23,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
@@ -320,6 +321,18 @@ private:
 		uint64_t dirty_bytes = 0; // dirty chunk bytes that caused the refresh
 	};
 	[[nodiscard]] PartialUploadResult TryPartialUpload(Image& image);
+	// KYTY_IMAGE_GPU_KEEP (default on; =0 the whole-image path): a CPU write to, or a partial unmap
+	// of, a GPU-written image replaces only those guest bytes; the image keeps the GPU's other
+	// bytes and refreshes only the subresources over the replaced ones (Image::NoteKeptCpuWrite).
+	// KeepEligible: the state the partial refresh needs. KeepGpuBytes marks [address, address +
+	// size) (CPU write: widened to KeptWriteGranule, those pages released; unmap: exact, pages kept
+	// watched) and returns false where the caller must take the whole-image path.
+	[[nodiscard]] bool        KeepEligible(const Image& image) const;
+	[[nodiscard]] bool        KeepGpuBytes(Image& image, uint64_t address, uint64_t size, bool unmap);
+	// Uploads the subresources over image.kept_dirty from guest memory; false: nothing recorded,
+	// the caller uploads the whole image.
+	[[nodiscard]] PartialUploadResult UploadKeptRanges(Image& image);
+	[[nodiscard]] bool        UploadKeptDepthLayers(Image& image, PartialUploadResult& result);
 	// Whole-image refresh of a tiled sampled texture whose guest bytes are copied to staging
 	// by m_staging_copier. False when the ordinary refresh path must be used.
 	[[nodiscard]] bool        TryAsyncFullUpload(Image& image);
@@ -461,6 +474,20 @@ private:
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+	// KYTY_IMAGE_WRITEBACK_GUARD: a recorded image download not yet written into guest memory. It
+	// watches the pages it has not given up (`watched`); a CPU write to them before the write-back
+	// releases them and marks them CPU-written, and the write-back leaves those to the CPU.
+	struct PendingWriteback {
+		KeptRanges::List watched;
+		KeptRanges::List cpu_written;
+	};
+	// GPU thread, m_lock held.
+	[[nodiscard]] std::shared_ptr<PendingWriteback> BeginPendingWriteback(GuestRange range);
+	// CPU write faults (InvalidateMemory), m_lock held.
+	void NotePendingWritebackCpuWrite(uint64_t address, uint64_t size);
+	// Priority worker: the download into guest memory (every byte when `pending` is null).
+	void WriteBackImageBytes(GuestRange range, const uint8_t* data,
+	                         const std::shared_ptr<PendingWriteback>& pending);
 	void RunPressureGarbageCollector(uint64_t tick);
 	// KYTY_VRAM_IDLE_FRAMES=N (default 0: off): once every 32 frames, registered images unused for
 	// more than N presented frames that the submission-age collector frees without a download (not
@@ -553,6 +580,8 @@ private:
 	uint64_t         m_gc_tick                = 0;
 	ImageCacheGcPolicy m_pressure_gc_policy;
 	bool             m_pressure_gc_enabled   = false;
+	// KYTY_IMAGE_GC_FILTER (RunGarbageCollector's submission-age walk).
+	bool             m_gc_filter_candidates  = true;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t>::Cursor m_pressure_gc_cursor;
 	uint64_t m_pressure_retirement_bytes = 0;
 	mutable uint32_t m_image_query_epoch      = 0;
@@ -577,6 +606,14 @@ private:
 	bool             m_partial_bands       = true;
 	bool             m_partial_verify      = false;
 	uint32_t         m_chunk_shift         = 16;
+	// KYTY_IMAGE_GPU_KEEP (see KeepEligible).
+	bool             m_gpu_keep            = true;
+	// KYTY_IMAGE_WRITEBACK_GUARD (see WriteBackImageBytes). Lock order: m_lock, then
+	// m_writeback_mutex; the priority worker takes only the latter.
+	bool             m_writeback_guard     = true;
+	std::mutex       m_writeback_mutex;
+	std::vector<std::shared_ptr<PendingWriteback>> m_pending_writebacks;
+	std::atomic<size_t> m_pending_writeback_count {0};
 	uint64_t         m_overlap_keep_frames = 0;
 	// Set by FindImage for the ResolveOverlap calls of one lookup: many live overlapping
 	// images already share the requested range, so overlapped images are not kept.

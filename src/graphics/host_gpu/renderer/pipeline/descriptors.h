@@ -133,8 +133,11 @@ template <typename T>
 [[nodiscard]] uint64_t SampledDepthBindingSignature(const ShaderRecompiler::IR::ImageResource& resource,
                                                     const ShaderTextureResource& descriptor,
                                                     vk::Format image_format, vk::Format view_format);
-void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
-                            const ShaderTextureResource& descriptor, uint64_t size);
+// Exits on an unsupported storage view unless `fatal` is false: then it prints the report (once)
+// and returns false.
+bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
+                            const ShaderTextureResource& descriptor, uint64_t size,
+                            bool fatal = true);
 
 } // namespace Libs::Graphics
 

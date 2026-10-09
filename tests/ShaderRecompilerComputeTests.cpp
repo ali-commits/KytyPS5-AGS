@@ -362,6 +362,12 @@ struct TextureCacheTestAccess {
   static void SetExactRangeMode(TextureCache &cache, int mode) {
     cache.m_exact_range_mode = mode;
   }
+  // KYTY_IMAGE_GPU_KEEP.
+  static void SetGpuKeep(TextureCache &cache, bool keep) { cache.m_gpu_keep = keep; }
+  // KYTY_IMAGE_GC_FILTER.
+  static void SetGcFilter(TextureCache &cache, bool filter) {
+    cache.m_gc_filter_candidates = filter;
+  }
 
   static void ClearImage(TextureCache &cache, CommandBuffer &command, ImageId id,
                          const vk::ImageSubresourceRange &range,
@@ -380,6 +386,8 @@ struct TextureCacheTestAccess {
     // This fixture asserts the legacy submission-age thresholds and exact
     // ten-entry traversal budget, independently of the launch environment.
     cache.m_pressure_gc_enabled = false;
+    // KYTY_IMAGE_GC_FILTER off: every walked entry counts (SetGcFilter turns it on).
+    cache.m_gc_filter_candidates = false;
     cache.m_trigger_gc_memory = 0;
     cache.m_pressure_gc_memory = pressure;
     cache.m_critical_gc_memory = UINT64_MAX;
@@ -15316,6 +15324,46 @@ public:
       Require(name, "depth/stencil GC traversal budget", gc_depth_budget,
               "recursive association deletion stopped LRU traversal or "
               "exceeded the ten-entry deletion budget");
+      // KYTY_IMAGE_GC_FILTER: stencil associations (freed with their depth image) do not count
+      // against the ten-entry budget, so six pairs are all collected in one pass.
+      constexpr uint64_t gc_filter_pair_offset = 0x360000;
+      std::array<ImageId, gc_depth_pair_count> gc_filter_depth{};
+      std::array<ImageId, gc_depth_pair_count> gc_filter_stencil{};
+      std::array<ImageId, gc_depth_pair_count * 2> gc_filter_lru{};
+      for (size_t index = 0; index < gc_depth_pair_count; index++) {
+        auto depth = MakeLinearDesc(
+            base + gc_filter_pair_offset + index * gc_depth_pair_stride,
+            sizeof(float), vk::Format::eD32SfloatS8Uint,
+            Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+            {1, 1, 1}, 1, 4, 1);
+        depth.type = BindingType::DepthTarget;
+        depth.info.stencil = {depth.info.data.address + gc_depth_pair_stride / 2,
+                              sizeof(uint32_t)};
+        depth.view_info.format = vk::Format::eD32SfloatS8Uint;
+        depth.view_info.aspect =
+            vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+        depth.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        gc_filter_depth[index] = texture_cache.FindImage(depth);
+        TextureCacheTestAccess::AssociateStencil(texture_cache, gc_filter_depth[index],
+                                                 depth.info.stencil);
+        gc_filter_stencil[index] = texture_cache.FindImageFromRange(
+            depth.info.stencil.address, depth.info.stencil.size, false);
+        // Association first: the old walk spent half its budget on them.
+        gc_filter_lru[index * 2] = gc_filter_stencil[index];
+        gc_filter_lru[index * 2 + 1] = gc_filter_depth[index];
+      }
+      TextureCacheTestAccess::ConfigureGarbageCollection(texture_cache, gc_filter_lru, 81,
+                                                         UINT64_MAX);
+      TextureCacheTestAccess::SetGcFilter(texture_cache, true);
+      OnGpuThread(context, [&] { texture_cache.RunGarbageCollector(); });
+      bool gc_filter_all = true;
+      for (size_t index = 0; index < gc_depth_pair_count; index++) {
+        gc_filter_all &= !TextureCacheTestAccess::Contains(texture_cache, gc_filter_depth[index]) &&
+                         !TextureCacheTestAccess::Contains(texture_cache, gc_filter_stencil[index]);
+      }
+      Require(name, "GC candidate filter", gc_filter_all,
+              "stencil associations counted against the deletion budget");
+
 
       constexpr uint64_t large_offset = 0x400000;
       constexpr uint32_t large_width = 4096;
@@ -15374,6 +15422,45 @@ public:
               large_download == reused_large_download,
               "successive near-capacity image transfers replaced the shared "
               "download buffer");
+      {
+        // KYTY_IMAGE_WRITEBACK_GUARD: a CPU write after the collector recorded the download
+        // (the image is gone, its pages unwatched) keeps its page; the other pages get the image.
+        constexpr uint32_t gpu_value = 0x3c3c3c3cu;
+        constexpr uint32_t newer = 0x12345678u;
+        // (KYTY_IMAGE_WRITEBACK_GUARD=0: the write-back overwrites it, as before.)
+        const char *guard_env = std::getenv("KYTY_IMAGE_WRITEBACK_GUARD");
+        const bool guard_enabled = guard_env == nullptr || std::strcmp(guard_env, "0") != 0;
+        const auto image = texture_cache.FindImage(large_desc);
+        Require(name, "write-back guard clear",
+                texture_cache.ClearImageFromBuffer(command, large_desc.info.data.address,
+                                                   large_desc.info.data.size, gpu_value),
+                "failed to write the write-back guard image");
+        TextureCacheTestAccess::ConfigureGarbageCollection(texture_cache, std::array{image}, 81,
+                                                           0);
+        OnGpuThread(context, [&] { texture_cache.RunGarbageCollector(); });
+        const auto middle = base + large_offset + large_size / 2;
+        // A guest write: it faults on the pages the pending write-back still watches.
+        Require(name, "write-back guard write", resources.InvalidateMemory(middle, sizeof(newer)),
+                "the CPU write is outside the mapped allocation");
+        Libs::LibKernel::Memory::WriteBacking(middle, &newer, sizeof(newer));
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+        const auto read = [](uint64_t address) {
+          uint32_t value = 0;
+          Libs::LibKernel::Memory::TryReadBacking(address, &value, sizeof(value));
+          return value;
+        };
+        Require(name, "write-back guard",
+                !TextureCacheTestAccess::Contains(texture_cache, image) &&
+                    read(base + large_offset) == gpu_value &&
+                    (read(middle) == newer || !guard_enabled) &&
+                    read(base + large_offset + large_size - sizeof(uint32_t)) == gpu_value,
+                fmt::format("image write-back over a newer CPU write: first={:#x} middle={:#x} "
+                            "last={:#x}",
+                            read(base + large_offset), read(middle),
+                            read(base + large_offset + large_size - sizeof(uint32_t)))
+                    .c_str());
+      }
 
       constexpr uint64_t tile_alias_offset = 0x2000000;
       constexpr uint64_t tile_alias_size = 0x400000;
@@ -16398,6 +16485,142 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "color-volume direct-memory allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  // KYTY_IMAGE_GPU_KEEP: a CPU write to one layer of a GPU-written depth array, and a partial
+  // unmap of another, refresh only those layers; the other layers keep what the GPU wrote. With the
+  // switch off the whole array is refreshed from guest memory (the previous behaviour).
+  void CheckGpuKeptImageBytes() {
+    constexpr const char *name = "GpuKeptImageBytes";
+    constexpr uintptr_t base = 0x000000020c000000ull;
+    constexpr uint32_t width = 128;
+    constexpr uint32_t layers = 4;
+    constexpr uint64_t slice = uint64_t{width} * width * sizeof(float);
+    constexpr uint64_t allocation_size = slice * layers;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    static_assert(slice == 0x10000);
+    EnsureRuntimeContext();
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "kept-image direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "kept-image fixed mapping failed");
+    const auto bits = [](float value) {
+      uint32_t word = 0;
+      std::memcpy(&word, &value, sizeof(word));
+      return word;
+    };
+    constexpr float guest_depth = 0.125f;
+    constexpr float gpu_depth = 0.75f;
+    constexpr float cpu_depth = 0.25f;
+
+    for (const bool keep : {true, false}) {
+      {
+        const std::vector<float> guest(allocation_size / sizeof(float), guest_depth);
+        std::memcpy(mapped, guest.data(), allocation_size);
+      }
+      const auto context_owner = MakeRenderContext();
+      auto &context = *context_owner;
+      context.InitializeGpu(nullptr);
+      LibKernel::Memory::InstallGpuResources(&context);
+      auto &scheduler = context.GetCommandScheduler();
+      HW::Context registers{};
+      HW::UserConfig user_config{};
+      HW::Shader shaders{};
+      scheduler.Begin(registers, user_config, shaders);
+      auto &resources = context;
+      auto &texture_cache = resources.GetTextureCache();
+      TextureCacheTestAccess::SetGpuKeep(texture_cache, keep);
+      resources.MapMemory(base, allocation_size);
+
+      auto desc = MakeLinearDesc(base, allocation_size, vk::Format::eD32Sfloat,
+                                 Prospero::BufferFormat::k32Float,
+                                 Prospero::ImageType::kColor2D, {width, width, 1},
+                                 layers, sizeof(float), 1);
+      desc.type = TextureCache::BindingType::DepthTarget;
+      desc.view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+      desc.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+      const auto id = texture_cache.FindImage(desc);
+      (void)texture_cache.FindDepthTarget(id, desc);
+      vk::ClearValue clear{};
+      clear.depthStencil = vk::ClearDepthStencilValue{gpu_depth, 0};
+      TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), id,
+                                         {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, layers},
+                                         clear);
+      Require(name, "GPU-written array",
+              id && texture_cache.GetImage(id).IsGpuModified() &&
+                  ReadCachedTexel(name, context, id, {5, 5, 0}, {1, 1, 1}, 1) ==
+                      std::vector<u32>{bits(gpu_depth)},
+              "the depth clear did not reach the array");
+
+      // The CPU writes one texel of layer 1 (fault first, as a guest write does).
+      const auto cpu_address = base + slice * 1 + 0x100;
+      const auto cpu_word = bits(cpu_depth);
+      Require(name, "guest write", context.InvalidateMemory(cpu_address, sizeof(cpu_word)),
+              "the CPU write is outside the mapped allocation");
+      LibKernel::Memory::WriteBacking(cpu_address, &cpu_word, sizeof(cpu_word));
+      // The game unmaps layer 3 (its memory is refilled from the CPU later).
+      resources.UnmapMemory(base + slice * 3, slice);
+      Require(name, "partial unmap keeps the image",
+              TextureCacheTestAccess::Contains(texture_cache, id) == keep,
+              keep ? "a partial unmap freed a GPU-written image"
+                   : "the switch off kept a partly unmapped image");
+      if (keep) {
+        (void)texture_cache.FindDepthTarget(id, desc);
+        const auto texel = [&](uint32_t layer, int32_t x) {
+          return ReadCachedTexel(name, context, id, {x, 0, 0}, {1, 1, 1}, layer);
+        };
+        Require(name, "kept layers", texel(0, 7) == std::vector<u32>{bits(gpu_depth)} &&
+                                         texel(2, 7) == std::vector<u32>{bits(gpu_depth)},
+                "a CPU write or partial unmap replaced the GPU's other layers");
+        Require(name, "written layer",
+                texel(1, 0x100 / 4) == std::vector<u32>{cpu_word} &&
+                    texel(1, 7) == std::vector<u32>{bits(guest_depth)},
+                "the written layer did not take the guest bytes");
+        Require(name, "unmapped layer", texel(3, 7) == std::vector<u32>{bits(guest_depth)},
+                "the unmapped layer was not refreshed");
+        // A second write to the same layer faults again once the refresh watched it again.
+        const auto second = bits(0.5f);
+        Require(name, "second guest write",
+                context.InvalidateMemory(cpu_address + 4, sizeof(second)),
+                "the second CPU write is outside the mapped allocation");
+        LibKernel::Memory::WriteBacking(cpu_address + 4, &second, sizeof(second));
+        (void)texture_cache.FindDepthTarget(id, desc);
+        Require(name, "rewritten layer",
+                ReadCachedTexel(name, context, id, {0x104 / 4, 0, 0}, {1, 1, 1}, 1) ==
+                        std::vector<u32>{second} &&
+                    texel(0, 7) == std::vector<u32>{bits(gpu_depth)},
+                "a write after the refresh was not observed");
+      } else {
+        const auto again = texture_cache.FindImage(desc);
+        (void)texture_cache.FindDepthTarget(again, desc);
+        Require(name, "switch off refreshes whole",
+                ReadCachedTexel(name, context, again, {7, 0, 0}, {1, 1, 1}, 0) ==
+                    std::vector<u32>{bits(guest_depth)},
+                "with KYTY_IMAGE_GPU_KEEP=0 the array kept GPU layers");
+      }
+      resources.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+      context.ShutdownGpu();
+      LibKernel::Memory::InstallGpuResources(nullptr);
+    }
+
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "kept-image direct mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "kept-image direct-memory allocation release failed");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -56844,6 +57067,11 @@ int main(int argc, char **argv) {
     vulkan.CheckRenderExecutorCmaskFastClear();
     vulkan.CheckSampledDccClear();
     vulkan.CheckRenderExecutorStencilBindingDiscovery();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--gpu-keep-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckGpuKeptImageBytes();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--native-indirect-only") == 0) {

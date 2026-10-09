@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/platform/uffdWriteWatch.h"
 #include "common/profiler.h"
+#include "common/skipInvalid.h"
 #include "common/ramStats.h"
 #include "common/rendererBatch.h"
 #include "common/stringUtils.h"
@@ -1510,10 +1511,36 @@ uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 }
 
 void WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept {
-	if (!TryWriteBacking(vaddr, data, size)) {
+	if (TryWriteBacking(vaddr, data, size)) {
+		return;
+	}
+	if (!Common::SkipInvalidEnabled()) {
 		EXIT("Memory: required direct-backing write failed, addr=0x%016" PRIx64
 		     " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
+	}
+	// KYTY_SKIP_INVALID (chenxiao07/KytyPS5 c680f0545): GPU results (readbacks, downloads) for guest
+	// memory unmapped meanwhile have nowhere to go. The pages still backed are written, the rest
+	// (unmapped, or private memory without a backing view) is dropped.
+	constexpr uint64_t GuestPage = 0x4000;
+	const auto*        source    = static_cast<const uint8_t*>(data);
+	uint64_t           written   = 0;
+	uint64_t           first_dropped = UINT64_MAX;
+	for (uint64_t at = vaddr, end = vaddr + size; at < end;) {
+		const auto next = std::min((at & ~(GuestPage - 1)) + GuestPage, end);
+		if (TryWriteBacking(at, source + (at - vaddr), next - at)) {
+			written += next - at;
+		} else if (first_dropped == UINT64_MAX) {
+			first_dropped = at;
+		}
+		at = next;
+	}
+	static std::atomic_bool logged {false};
+	if (Common::LogOnce(logged)) {
+		LOGF("Memory: GPU data for guest memory without backing dropped, addr=0x%016" PRIx64
+		     " size=0x%" PRIx64 " (0x%" PRIx64 " bytes written, first dropped page 0x%016" PRIx64
+		     "; logged once)\n",
+		     vaddr, size, written, first_dropped);
 	}
 }
 

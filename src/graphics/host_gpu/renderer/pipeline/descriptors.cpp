@@ -11,6 +11,7 @@
 #include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
+#include "common/skipInvalid.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -465,8 +466,8 @@ static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageR
 	       (descriptor.fields[5] & ~field5_max_mip_mask) == field5_expected;
 }
 
-void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
-                            const ShaderTextureResource& descriptor, uint64_t size) {
+bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
+                            const ShaderTextureResource& descriptor, uint64_t size, bool fatal) {
 	const auto format        = descriptor.Format();
 	const bool resource_ok   = IsSupportedStorageImageResource(resource);
 	const bool descriptor_ok = IsSupportedStorageTextureDescriptor(resource, descriptor);
@@ -485,9 +486,15 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	     (!resource.atomic || format == (resource.atomic64 ? Prospero::BufferFormat::k32_32UInt
 	                                                       : Prospero::BufferFormat::k32UInt)));
 	if (resource_ok && descriptor_ok && encoding_ok && format_ok && size != 0) {
-		return;
+		return true;
 	}
-	EXIT("unsupported storage texture: resource=%d descriptor=%d encoding=%d format=%d "
+	static std::atomic_bool logged {false};
+	if (!fatal && !Common::LogOnce(logged)) {
+		return false;
+	}
+	char report[1024] {};
+	std::snprintf(report, sizeof(report),
+	    "unsupported storage texture: resource=%d descriptor=%d encoding=%d format=%d "
 	     "class=%u numeric=%u dimension=%u mip_mode=%u atomic=%d compare=%d "
 	     "base_level=%u last_level=%u max_mip=%u min_lod=%u base_array=%u bc=%u msaa=%d "
 	     "depth_tile_bpe=%u swizzle_ok=%d "
@@ -509,6 +516,11 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	     descriptor.DstSelXYZW(), resource.read, resource.written, descriptor.fields[0],
 	     descriptor.fields[1], descriptor.fields[2], descriptor.fields[3], descriptor.fields[4],
 	     descriptor.fields[5], descriptor.fields[6], descriptor.fields[7]);
+	if (fatal) {
+		EXIT("%s", report);
+	}
+	std::printf("Warning: %s(bound as null storage; KYTY_SKIP_INVALID, logged once)\n", report);
+	return false;
 }
 
 static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
@@ -727,9 +739,18 @@ static bool ResolveTextureMipView(const TileSurfaceDescription& description, boo
 	return false;
 }
 
+// KYTY_SKIP_INVALID (chenxiao07/KytyPS5 b310b97c9, 5cb588f96, 4a4faf72a, 0a1f06d92): a descriptor the
+// emulator cannot represent (a stale table slot while a level loads, which the draw usually never
+// reads) is bound as a null image instead of ending the session; a storage view of it loses its
+// writes for that draw. Each reason is logged once (`logged` is the caller's flag).
+static TextureCache::ImageDesc SkipTextureDescriptor(const ShaderRecompiler::IR::ImageResource& resource,
+                                                     const ShaderTextureResource& descriptor,
+                                                     const char* why, std::atomic_bool& logged);
+
 static TextureCache::ImageDesc BuildTextureDescription(
     const ShaderRecompiler::IR::ImageResource& resource, const ShaderTextureResource& descriptor) {
 	const bool storage = resource.written;
+	const bool skip    = Common::SkipInvalidEnabled();
 	const auto address         = descriptor.Base40();
 	const auto width           = static_cast<uint32_t>(descriptor.Width5()) + 1u;
 	const auto height          = static_cast<uint32_t>(descriptor.Height5()) + 1u;
@@ -756,6 +777,10 @@ static TextureCache::ImageDesc BuildTextureDescription(
 	     (base_level != 0 || last_level == 0 || last_level > 3 || max_mip != last_level ||
 	      !msaa_tile || (descriptor.MsaaDepth() && !depth_tile) ||
 	      (!msaa_array && (descriptor.Depth() != 0 || descriptor.BaseArray5() != 0))))) {
+		if (skip) {
+			static std::atomic_bool logged {false};
+			return SkipTextureDescriptor(resource, descriptor, "unsupported texture mip view", logged);
+		}
 		EXIT("unsupported texture mip view: base=%u last=%u levels=%u max=%u type=%u tile=%u "
 		     "class=%u numeric=%u dimension=%u mip_mode=%u read=%d written=%d "
 		     "dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
@@ -771,6 +796,15 @@ static TextureCache::ImageDesc BuildTextureDescription(
 	const auto samples = multisampled ? 1u << last_level : 1u;
 	const auto depth          = static_cast<uint32_t>(descriptor.Depth()) + 1u;
 	const auto format         = descriptor.Format();
+	if (skip) {
+		// (TextureGetSurfaceFormatInfo exits over it; a format without a texel layout leaves
+		// TileGetTextureSize's size 0, the invalid-footprint path below.)
+		if (!TextureSurfaceFormatKnown(format)) {
+			static std::atomic_bool logged {false};
+			return SkipTextureDescriptor(resource, descriptor, "texture format without a host format",
+			                             logged);
+		}
+	}
 	const auto surface_format = TextureGetSurfaceFormatInfo(format);
 	const bool sampled_numeric_class =
 	    storage || resource.numeric_class == Prospero::SampledTextureNumericClass(format);
@@ -792,6 +826,12 @@ static TextureCache::ImageDesc BuildTextureDescription(
 		    width, height, volume ? depth : 1u, physical_levels, image_layers};
 		if (!ResolveTextureMipView(physical, !resource.r128 && descriptor.MetaCompress(),
 		                           view_levels, levels, view_base)) {
+			if (skip) {
+				static std::atomic_bool logged {false};
+				return SkipTextureDescriptor(resource, descriptor,
+				                             "unsupported texture mip view changes the physical layout",
+				                             logged);
+			}
 			EXIT("unsupported texture mip view changes physical layout: base=%u last=%u max=%u "
 			     "extent=%ux%ux%u tile=%u\n",
 			     base_level, last_level, max_mip, width, height, depth,
@@ -806,6 +846,11 @@ static TextureCache::ImageDesc BuildTextureDescription(
 		                              : TileGetRenderTargetPitch(width, bytes, last_level);
 		if (pitch == 0 || !TileGetRenderTargetSize(width, height, pitch, bytes, size, last_level) ||
 		    size.size > UINT32_MAX / image_layers) {
+			if (skip) {
+				static std::atomic_bool logged {false};
+				return SkipTextureDescriptor(resource, descriptor, "unsupported multisample texture layout",
+				                             logged);
+			}
 			EXIT("unsupported multisample texture layout\n");
 		}
 		size.size *= image_layers;
@@ -816,6 +861,11 @@ static TextureCache::ImageDesc BuildTextureDescription(
 	}
 	if (size.size == 0 || size.align == 0 ||
 	    (address & (static_cast<uint64_t>(size.align) - 1u)) != 0) {
+		if (storage && skip) {
+			static std::atomic_bool logged {false};
+			return SkipTextureDescriptor(resource, descriptor,
+			                             "storage texture with an invalid footprint (size or alignment)", logged);
+		}
 		if (storage) {
 			EXIT("Not implemented (storage texture with size=0x%x align=0x%x addr=0x%016" PRIx64
 			     ")\n",
@@ -836,8 +886,13 @@ static TextureCache::ImageDesc BuildTextureDescription(
 		}
 		return NullTextureDesc(resource, TextureCache::BindingType::Texture);
 	}
-	if (storage) {
-		ValidateStorageTexture(resource, descriptor, size.size);
+	if (storage && !ValidateStorageTexture(resource, descriptor, size.size, !skip)) {
+		return NullTextureDesc(resource, TextureCache::BindingType::Storage);
+	}
+	// A T# of no guest memory (the texture cache's registration would exit over it).
+	if (skip && (address >= TRACKER_ADDRESS_SIZE || size.size > TRACKER_ADDRESS_SIZE - address)) {
+		static std::atomic_bool logged {false};
+		return SkipTextureDescriptor(resource, descriptor, "texture data outside guest memory", logged);
 	}
 
 	auto pixel_format = surface_format.vk_format;
@@ -876,6 +931,13 @@ static TextureCache::ImageDesc BuildTextureDescription(
 		desc.info.metadata.kind          = ImageMetadataKind::Dcc;
 		desc.info.metadata.range         = {descriptor.MetaAddr() << 8u, metadata_size.size};
 		desc.info.metadata.dcc_alpha_msb = descriptor.DccAlphaPos();
+		const auto& meta = desc.info.metadata.range;
+		// (ImageOps::Validate exits over "invalid DCC metadata".)
+		if (skip && (meta.address == 0 || meta.address >= TRACKER_ADDRESS_SIZE ||
+		             (meta.size != 0 && meta.size > TRACKER_ADDRESS_SIZE - meta.address))) {
+			static std::atomic_bool logged {false};
+			return SkipTextureDescriptor(resource, descriptor, "invalid DCC metadata", logged);
+		}
 	}
 	if (samples > 1) {
 		desc.info.mip_layout[0] = {0, size.size, pitch, height};
@@ -888,6 +950,23 @@ static TextureCache::ImageDesc BuildTextureDescription(
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
 	return desc;
+}
+
+static TextureCache::ImageDesc SkipTextureDescriptor(const ShaderRecompiler::IR::ImageResource& resource,
+                                                     const ShaderTextureResource& descriptor,
+                                                     const char* why, std::atomic_bool& logged) {
+	if (Common::LogOnce(logged)) {
+		std::printf("Warning: %s: %s view bound as null (KYTY_SKIP_INVALID; logged once): "
+		            "addr=0x%016" PRIx64 " format=%u type=%u tile=%u "
+		            "dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+		            why, resource.written ? "storage" : "sampled", descriptor.Base40(),
+		            static_cast<uint32_t>(descriptor.Format()), static_cast<uint32_t>(descriptor.Type()),
+		            static_cast<uint32_t>(descriptor.TileMode()), descriptor.fields[0], descriptor.fields[1],
+		            descriptor.fields[2], descriptor.fields[3], descriptor.fields[4], descriptor.fields[5],
+		            descriptor.fields[6], descriptor.fields[7]);
+	}
+	return NullTextureDesc(resource, resource.written ? TextureCache::BindingType::Storage
+	                                                  : TextureCache::BindingType::Texture);
 }
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
@@ -1025,6 +1104,15 @@ void RenderExecutor::ResolveTextureFull(const ShaderRecompiler::IR::ImageResourc
 		}
 	} else {
 		desc = BuildTextureDescription(resource, descriptor);
+	}
+	if (desc.info.data.Empty()) {
+		// Bound as null (an invalid footprint; KYTY_SKIP_INVALID): as a null descriptor above.
+		binding.image_id = texture_cache.FindImage(desc);
+		if (memo) {
+			m_texture_memo.Record(texture_cache, memo_key, hash, binding, binding.image_id, false,
+			                      false);
+		}
+		return;
 	}
 	// Only descriptor-derived geometry is retained. FindImage may alter the local
 	// description and must still resolve ownership, aliases, uploads and metadata.

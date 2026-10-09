@@ -12,6 +12,7 @@
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "common/sehGuard.h"
+#include "common/skipInvalid.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -6396,6 +6397,23 @@ void ApplyClipSpace(const GraphicContext& graphics, const HW::Context& context,
 
 } // namespace
 
+// KYTY_SKIP_INVALID (chenxiao07/KytyPS5 b310b97c9, b200a57b9): resource tables that never become
+// readable (pointers into memory the guest has not mapped while an area loads) skip the draw or
+// dispatch instead of ending the session, as an unmaterializable stage already does. Logged once
+// per reason.
+static PipelineCache::GraphicsPrograms SkipUnmaterializable(const char* why) {
+	static std::mutex                      mutex;
+	static std::unordered_set<std::string> logged;
+	{
+		std::scoped_lock lock(mutex);
+		if (!logged.insert(why).second) {
+			return {};
+		}
+	}
+	std::printf("Warning: %s; it is skipped (KYTY_SKIP_INVALID, logged once)\n", why);
+	return {};
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
@@ -6454,9 +6472,17 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			if (!read_attempt.materialization_failed) return result;
 			// No pipeline or texture-cache lock is held while the scheduler publishes bytes.
 			// Restart all stages before final bindings/uploads, including their SRT refresh.
-			EXIT_IF(!read_attempt.Synchronize());
+			if (!read_attempt.Synchronize()) {
+				if (!Common::SkipInvalidEnabled()) {
+					EXIT("graphics resource readiness: a missing range cannot be synchronized\n");
+				}
+				return SkipUnmaterializable("a draw's resource tables read memory that cannot be synchronized");
+			}
 		}
-		EXIT("graphics resource readiness did not converge after 64 attempts\n");
+		if (!Common::SkipInvalidEnabled()) {
+			EXIT("graphics resource readiness did not converge after 64 attempts\n");
+		}
+		return SkipUnmaterializable("a draw's resource readiness did not converge after 64 attempts");
 	};
 	// Draw-prep S3: PS and VS materialized concurrently. The O15 reuse mode keeps shared
 	// per-entry state and tessellation has three vertex stages; both stay serial.
@@ -6566,9 +6592,19 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 		const auto result = m_program_cache->Get(params, input_info, stage_prep, push_data_cursor,
 		                                         read_attempt, scratch, evaluation);
 		if (!read_attempt.materialization_failed) return result;
-		EXIT_IF(!read_attempt.Synchronize());
+		if (!read_attempt.Synchronize()) {
+			if (!Common::SkipInvalidEnabled()) {
+				EXIT("compute resource readiness: a missing range cannot be synchronized\n");
+			}
+			(void)SkipUnmaterializable("a dispatch's resource tables read memory that cannot be synchronized");
+			return {};
+		}
 	}
-	EXIT("compute resource readiness did not converge after 64 attempts\n");
+	if (!Common::SkipInvalidEnabled()) {
+		EXIT("compute resource readiness did not converge after 64 attempts\n");
+	}
+	(void)SkipUnmaterializable("a dispatch's resource readiness did not converge after 64 attempts");
+	return {};
 }
 
 PipelineCache::SpeculativeResult PipelineCache::PrepareComputeProgramSpeculative(
