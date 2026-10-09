@@ -2008,6 +2008,16 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_cp_seq_thread_verify PROPERTIES
 		ENVIRONMENT "KYTY_CP_SEQ=1;KYTY_CP_SEQ_VERIFY=exit;KYTY_DRAW_PREP_VERIFY=exit")
+	# KYTY_DRAW_PREP_CLEAN_SINCE: log-mode certificates take page verdicts found since the
+	# preparation began; verified (exit on a read it would call clean that is not) and on.
+	add_test(NAME draw_prep_engine_parallel_clean_since_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(draw_prep_engine_parallel_clean_since_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_CLEAN_SINCE=exit;KYTY_CP_SEQ=1;KYTY_CP_SEQ_VERIFY=exit")
+	add_test(NAME draw_run_parallel_clean_since
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_parallel_clean_since PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=1;KYTY_DRAW_PREP_CLEAN_SINCE=exit")
 	# KYTY_DRAW_PREP_DISPATCH: direct dispatches prepared in window slots by the draw-prep workers,
 	# every accepted preparation compared with the serial lookup.
 	add_test(NAME draw_prep_engine_parallel_cp_seq_thread_dispatch_verify

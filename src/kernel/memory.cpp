@@ -1425,6 +1425,50 @@ bool IsGpuMapped(uint64_t vaddr, uint64_t size) {
 	return g_gpu_resources != nullptr && g_gpu_resources->IsMapped(vaddr, size);
 }
 
+// DrawPrep::Validate's clean check after a clean coherence-log check over [since, now]
+// (KYTY_DRAW_PREP_CLEAN_SINCE). GPU thread only. The verdict of a whole 4 KiB page that was found
+// clean when the coherence generation was g (loaded before the exact predicates ran) still holds
+// now if g >= since: every transition that can make the page's bytes unclean logs the range it
+// affects before the change is observable, and those transitions run on this thread (GPU-dirty
+// marks, pending publications, GPU-modified images), so one that touched the requested range after
+// g lies in [since, now] and failed the caller's log check. The table keeps verdicts across commits
+// (the per-generation verdict cache drops them at every transition anywhere). Any other page is
+// checked exactly, as IsGpuCleanForRead does.
+bool IsGpuCleanForReadSince(uint64_t vaddr, uint64_t size, uint64_t since) {
+	namespace CleanVerdict = Graphics::CleanVerdict;
+	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return true;
+	}
+	if (!Graphics::GuestGpu::IsGpuThread() || size == 0) {
+		return IsGpuCleanForRead(vaddr, size);
+	}
+	const auto first = vaddr >> CleanVerdict::PAGE_BITS;
+	const auto last  = (vaddr + size - 1) >> CleanVerdict::PAGE_BITS;
+	if (first == 0 || last - first >= CleanVerdict::MAX_CACHED_PAGES) {
+		return QueryGpuCleanVerdict(vaddr, size);
+	}
+	struct Entry {
+		uint64_t page       = 0;
+		uint64_t generation = 0;
+	};
+	constexpr size_t                         Entries = 4096;
+	static thread_local std::array<Entry, Entries> verdicts {};
+	for (auto page = first; page <= last; page++) {
+		auto& entry = verdicts[static_cast<size_t>((page ^ (page >> 12u)) % Entries)];
+		if (entry.page == page && entry.generation >= since && entry.generation != 0) {
+			continue;
+		}
+		const auto generation = CleanVerdict::Generation();
+		if (IsGpuRangeCleanForBackingRead(page << CleanVerdict::PAGE_BITS, CleanVerdict::PAGE_SIZE)) {
+			entry = {page, generation};
+			continue;
+		}
+		// Not the whole page: the requested bytes decide, exactly.
+		return QueryGpuCleanVerdict(vaddr, size);
+	}
+	return true;
+}
+
 bool IsGpuCleanForRead(uint64_t vaddr, uint64_t size) {
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return true;

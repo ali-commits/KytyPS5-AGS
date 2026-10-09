@@ -144,6 +144,9 @@ bool HashGpuCleanBacking(uint64_t vaddr, uint64_t size, uint64_t& digest,
 // The clean verdict of TryReadGpuCleanBacking without reading bytes (GPU thread; true for
 // ranges outside GPU memory).
 [[nodiscard]] bool     IsGpuCleanForRead(uint64_t vaddr, uint64_t size);
+// After a clean coherence-log check of the range over [since, now] (DrawPrep::Validate,
+// KYTY_DRAW_PREP_CLEAN_SINCE): IsGpuCleanForRead with page verdicts kept since `since`.
+[[nodiscard]] bool     IsGpuCleanForReadSince(uint64_t vaddr, uint64_t size, uint64_t since);
 // Whether [vaddr, vaddr + size) lies in guest memory mapped for the GPU (the renderer's mapped
 // ranges, the same ones its fault handler resolves). False before InstallGpuResources.
 [[nodiscard]] bool     IsGpuMapped(uint64_t vaddr, uint64_t size);

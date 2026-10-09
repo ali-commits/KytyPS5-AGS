@@ -531,6 +531,61 @@ static ValidateResult ValidateValues(const ReadSet& reads) {
 // Per-reason fallback counts for the periodic console line (PrintDrawPrepSummary).
 std::array<std::atomic<uint64_t>, static_cast<size_t>(Failure::Mismatch) + 1u> g_fallback_reasons;
 
+// KYTY_DRAW_PREP_CLEAN_SINCE (live, default 0): the "every range clean now" part of a log-mode
+// certificate whose log check found no transition touching the ranges since the preparation
+// began (coherence_generation) takes page verdicts found since then
+// (LibKernel::Memory::IsGpuCleanForReadSince) instead of the exact predicates for every page. The
+// per-generation verdict cache that IsGpuCleanForRead uses drops every verdict at any transition
+// anywhere, which happens between almost all commits, so at the Sky Garden the exact checks were
+// about 4.7% of the command processor's time. 1 on; verify runs both, uses the exact result and
+// counts the reads the shortcut would have called clean that are not; exit stops at the first.
+static int64_t ParseCleanSince(const char* value) {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+}
+static Live::Switch g_clean_since("KYTY_DRAW_PREP_CLEAN_SINCE", ParseCleanSince);
+static std::atomic<uint64_t> g_clean_since_checks {0};
+static std::atomic<uint64_t> g_clean_since_mismatches {0};
+
+static bool AllCleanAfterLog(const PreparedDraw& prepared) {
+	const auto mode = g_clean_since.Get();
+	if (mode == 0) {
+		return prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
+	}
+	const auto since = prepared.coherence_generation;
+	const auto shortcut = [since](uint64_t address, uint64_t size) {
+		return LibKernel::Memory::IsGpuCleanForReadSince(address, size, since);
+	};
+	if (mode == 1) {
+		return prepared.reads.AllClean(shortcut);
+	}
+	const bool fast  = prepared.reads.AllClean(shortcut);
+	const bool exact = prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
+	g_clean_since_checks.fetch_add(1, std::memory_order_relaxed);
+	if (fast && !exact) {
+		const auto count = g_clean_since_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 16) {
+			LOGF("DrawPrepCleanSince: a read the page verdicts called clean is not (%zu ranges, since "
+			     "generation %" PRIu64 ")\n",
+			     prepared.reads.Ranges().size(), since);
+		}
+		if (mode == 3) {
+			EXIT("DrawPrepCleanSince: a read the page verdicts called clean is not\n");
+		}
+	}
+	if ((g_clean_since_checks.load(std::memory_order_relaxed) & 0xfffffu) == 0) {
+		std::printf("DrawPrepCleanSince verify: %" PRIu64 " checks, %" PRIu64 " mismatches\n",
+		            g_clean_since_checks.load(std::memory_order_relaxed),
+		            g_clean_since_mismatches.load(std::memory_order_relaxed));
+	}
+	return exact;
+}
+
 // The certificate part of Validate (draws) and ValidateDispatch: the shader map, then the log or
 // value check of every read. False with `failure` set when it does not hold.
 static bool CertificateHolds(PreparedDraw& prepared, Failure& failure) {
@@ -551,7 +606,7 @@ static bool CertificateHolds(PreparedDraw& prepared, Failure& failure) {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepLogChecks);
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepLogEntries, outcome.entries);
 		if (outcome.result == Coherence::CheckResult::Clean) {
-			if (!prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead)) {
+			if (!AllCleanAfterLog(prepared)) {
 				return fail(Failure::CertUnclean);
 			}
 		} else {
@@ -1553,6 +1608,13 @@ void PrintDrawPrepSummary() {
 		             std::to_string(values[3] - last_dispatch[3]) + " checks, " +
 		             std::to_string(values[4] - last_dispatch[4]) + " mismatches";
 		std::copy(std::begin(values), std::end(values), std::begin(last_dispatch));
+	}
+	if (g_clean_since.Get() >= 2) {
+		dispatches += " | clean-since verify: " +
+		              std::to_string(g_clean_since_checks.load(std::memory_order_relaxed)) +
+		              " checks, " +
+		              std::to_string(g_clean_since_mismatches.load(std::memory_order_relaxed)) +
+		              " mismatches (total)";
 	}
 	std::printf("DrawPrep %.0fs: %" PRIu64 " committed from a prepared slot, %" PRIu64
 	            " fell back to the serial path;%s%s\n",
