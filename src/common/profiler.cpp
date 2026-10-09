@@ -217,6 +217,7 @@ constexpr std::array<const char*, kFrameEventCount> kFrameEventNames {
     "FrameEvent.TextureKeptWrites.Cumulative",
     "FrameEvent.TextureKeptUnmaps.Cumulative",
     "FrameEvent.TextureKeptFallbacks.Cumulative",
+    "FrameEvent.ImageWritebackSkippedBytes.Cumulative",
     "FrameEvent.TextureOverlapKeeps.Cumulative",
     "FrameEvent.TilerScratchPoolHits.Cumulative",
     "FrameEvent.TilerScratchPoolMisses.Cumulative",

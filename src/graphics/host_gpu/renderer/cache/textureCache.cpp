@@ -514,6 +514,8 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	m_gpu_keep = EnvNotZero("KYTY_IMAGE_GPU_KEEP");
 	// KYTY_IMAGE_GC_FILTER (default on; =0 off): see RunGarbageCollector.
 	m_gc_filter_candidates = EnvNotZero("KYTY_IMAGE_GC_FILTER");
+	// KYTY_IMAGE_WRITEBACK_GUARD (default on; =0 off): see WriteBackImageBytes.
+	m_writeback_guard = EnvNotZero("KYTY_IMAGE_WRITEBACK_GUARD");
 	LOGF("Image GPU keep (KYTY_IMAGE_GPU_KEEP): %s\n",
 	     m_gpu_keep ? "CPU writes and partial unmaps replace only their bytes of GPU-written images"
 	                : "off (whole-image refresh)");
@@ -5076,6 +5078,8 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 		for (auto page = pages.first; !covered && page < pages.last_exclusive; ++page) {
 			covered = m_image_page_counts[page].load() != 0;
 		}
+		// KYTY_IMAGE_WRITEBACK_GUARD: a pending image write-back watches pages of its own.
+		covered = covered || m_pending_writeback_count.load(std::memory_order_acquire) != 0;
 		if (!covered) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::TextureInvalidateSkips);
 			return;
@@ -5086,6 +5090,7 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	const PageManager::DeferUnprotectScope defer_unprotect;
 	std::scoped_lock                       lock {m_lock};
 	InvalidateCpuAliases(address, size);
+	NotePendingWritebackCpuWrite(address, size);
 }
 
 void TextureCache::DownloadDepth(Image& image, vk::Buffer destination, uint64_t destination_offset,
@@ -5774,22 +5779,114 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	                                               1, &barrier, 0, nullptr);
 	const auto publication = m_buffer_cache.BeginBackingPublication(
 	    std::span<const GuestRange>(&range, 1), m_scheduler.CurrentTick());
+	// KYTY_IMAGE_WRITEBACK_GUARD: the range's pages stay watched until the write-back (see
+	// PendingWriteback).
+	const auto pending = m_writeback_guard ? BeginPendingWriteback(range) : nullptr;
 	if (oversized != nullptr) {
 		m_scheduler.DeferPriorityOperation(
-		    [this, owner = std::move(oversized), range, mapped, publication]() mutable {
+		    [this, owner = std::move(oversized), range, mapped, publication, pending]() mutable {
 			    owner->Invalidate(0, range.size);
-			    LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
+			    WriteBackImageBytes(range, mapped, pending);
 			    m_buffer_cache.EndBackingPublication(publication);
 			    owner.reset();
 		    });
 		return true;
 	}
-	m_scheduler.DeferPriorityOperation([this, &download, range, mapped, offset, publication] {
+	m_scheduler.DeferPriorityOperation([this, &download, range, mapped, offset, publication, pending] {
 		download.Invalidate(offset, range.size);
-		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
+		WriteBackImageBytes(range, mapped, pending);
 		m_buffer_cache.EndBackingPublication(publication);
 	});
 	return true;
+}
+
+// KYTY_IMAGE_WRITEBACK_GUARD (default on; =0 writes every byte as before; chenxiao07/KytyPS5
+// 79d57528c). An image download is recorded, and its bytes reach guest memory only when the GPU
+// has finished, on the priority worker. Nothing held the CPU off the range meanwhile: a garbage
+// collection frees the image (its pages are no longer watched) right after recording, and a CPU
+// write to a readback image that stays registered only makes the image CPU-dirty. Writing the
+// recorded bytes then put stale GPU data over what the CPU wrote since. Now the pending write-back
+// watches the range's pages itself until it has written them: a CPU write meanwhile faults, the
+// fault (InvalidateCpuAliases) releases the written pages and marks them CPU-written, and the
+// write-back leaves those pages to the CPU (logged). A write that faults while the write-back runs
+// waits for it (m_writeback_mutex) and lands after it.
+std::shared_ptr<TextureCache::PendingWriteback> TextureCache::BeginPendingWriteback(GuestRange range) {
+	auto       pending = std::make_shared<PendingWriteback>();
+	const auto begin   = Common::AlignDown(range.address, TRACKER_PAGE_SIZE);
+	const auto end     = Common::AlignUp(range.End(), TRACKER_PAGE_SIZE);
+	m_page_manager.UpdatePageWatchers<true>(begin, end - begin);
+	pending->watched.emplace_back(begin, end);
+	std::scoped_lock lock {m_writeback_mutex};
+	m_pending_writebacks.push_back(pending);
+	m_pending_writeback_count.store(m_pending_writebacks.size(), std::memory_order_release);
+	return pending;
+}
+
+void TextureCache::NotePendingWritebackCpuWrite(uint64_t address, uint64_t size) {
+	if (m_pending_writeback_count.load(std::memory_order_acquire) == 0) {
+		return;
+	}
+	const auto begin = Common::AlignDown(address, TRACKER_PAGE_SIZE);
+	const auto end   = Common::AlignUp(address + size, TRACKER_PAGE_SIZE);
+	std::scoped_lock lock {m_writeback_mutex};
+	for (const auto& pending: m_pending_writebacks) {
+		KeptRanges::List released;
+		for (const auto& [watched_begin, watched_end]: pending->watched) {
+			const auto from = std::max(begin, watched_begin);
+			const auto to   = std::min(end, watched_end);
+			if (from < to) {
+				released.emplace_back(from, to);
+			}
+		}
+		for (const auto& [from, to]: released) {
+			m_page_manager.UpdatePageWatchers<false>(from, to - from);
+			KeptRanges::Subtract(pending->watched, from, to);
+			(void)KeptRanges::Add(pending->cpu_written, from, to);
+		}
+	}
+}
+
+void TextureCache::WriteBackImageBytes(GuestRange range, const uint8_t* data,
+                                       const std::shared_ptr<PendingWriteback>& pending) {
+	if (pending == nullptr) {
+		LibKernel::Memory::WriteBacking(range.address, data, range.size);
+		return;
+	}
+	std::scoped_lock lock {m_writeback_mutex};
+	uint64_t at      = range.address;
+	uint64_t skipped = 0;
+	for (const auto& [written_begin, written_end]: pending->cpu_written) {
+		const auto from = std::max(written_begin, range.address);
+		const auto to   = std::min(written_end, range.End());
+		if (from >= to) {
+			continue;
+		}
+		if (at < from) {
+			LibKernel::Memory::WriteBacking(at, data + (at - range.address), from - at);
+		}
+		skipped += to - from;
+		at = std::max(at, to);
+	}
+	if (at < range.End()) {
+		LibKernel::Memory::WriteBacking(at, data + (at - range.address), range.End() - at);
+	}
+	// Written: the pages the CPU did not take may be released now.
+	for (const auto& [begin, end]: pending->watched) {
+		m_page_manager.UpdatePageWatchers<false>(begin, end - begin);
+	}
+	pending->watched.clear();
+	std::erase(m_pending_writebacks, pending);
+	m_pending_writeback_count.store(m_pending_writebacks.size(), std::memory_order_release);
+	if (skipped == 0) {
+		return;
+	}
+	Profiler::CountFrameEvent(Profiler::FrameEvent::ImageWritebackSkippedBytes, skipped);
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+		LOGF("TextureCache: image write-back at 0x%016" PRIx64 " size=0x%" PRIx64
+		     " left 0x%" PRIx64 " bytes to CPU writes made after the download was recorded\n",
+		     range.address, range.size, skipped);
+	}
 }
 
 bool TextureCache::NoImagesOnPages(uint64_t address, uint64_t size) const noexcept {

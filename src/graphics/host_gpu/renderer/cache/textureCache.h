@@ -23,6 +23,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
@@ -473,6 +474,20 @@ private:
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+	// KYTY_IMAGE_WRITEBACK_GUARD: a recorded image download not yet written into guest memory. It
+	// watches the pages it has not given up (`watched`); a CPU write to them before the write-back
+	// releases them and marks them CPU-written, and the write-back leaves those to the CPU.
+	struct PendingWriteback {
+		KeptRanges::List watched;
+		KeptRanges::List cpu_written;
+	};
+	// GPU thread, m_lock held.
+	[[nodiscard]] std::shared_ptr<PendingWriteback> BeginPendingWriteback(GuestRange range);
+	// CPU write faults (InvalidateMemory), m_lock held.
+	void NotePendingWritebackCpuWrite(uint64_t address, uint64_t size);
+	// Priority worker: the download into guest memory (every byte when `pending` is null).
+	void WriteBackImageBytes(GuestRange range, const uint8_t* data,
+	                         const std::shared_ptr<PendingWriteback>& pending);
 	void RunPressureGarbageCollector(uint64_t tick);
 	// KYTY_VRAM_IDLE_FRAMES=N (default 0: off): once every 32 frames, registered images unused for
 	// more than N presented frames that the submission-age collector frees without a download (not
@@ -593,6 +608,12 @@ private:
 	uint32_t         m_chunk_shift         = 16;
 	// KYTY_IMAGE_GPU_KEEP (see KeepEligible).
 	bool             m_gpu_keep            = true;
+	// KYTY_IMAGE_WRITEBACK_GUARD (see WriteBackImageBytes). Lock order: m_lock, then
+	// m_writeback_mutex; the priority worker takes only the latter.
+	bool             m_writeback_guard     = true;
+	std::mutex       m_writeback_mutex;
+	std::vector<std::shared_ptr<PendingWriteback>> m_pending_writebacks;
+	std::atomic<size_t> m_pending_writeback_count {0};
 	uint64_t         m_overlap_keep_frames = 0;
 	// Set by FindImage for the ResolveOverlap calls of one lookup: many live overlapping
 	// images already share the requested range, so overlapped images are not kept.

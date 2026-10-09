@@ -44,6 +44,28 @@ inline uint64_t Add(List& ranges, uint64_t begin, uint64_t end) {
 	return (end - begin) - covered;
 }
 
+// Removes [begin, end).
+inline void Subtract(List& ranges, uint64_t begin, uint64_t end) {
+	if (begin >= end) {
+		return;
+	}
+	List kept;
+	kept.reserve(ranges.size() + 1);
+	for (const auto& range: ranges) {
+		if (range.second <= begin || range.first >= end) {
+			kept.push_back(range);
+			continue;
+		}
+		if (range.first < begin) {
+			kept.emplace_back(range.first, begin);
+		}
+		if (end < range.second) {
+			kept.emplace_back(end, range.second);
+		}
+	}
+	ranges = std::move(kept);
+}
+
 [[nodiscard]] inline bool Intersects(const List& ranges, uint64_t begin, uint64_t end) {
 	if (begin >= end) {
 		return false;

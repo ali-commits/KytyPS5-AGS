@@ -353,6 +353,8 @@ enum class FrameEvent : uint32_t {
 	TextureKeptWrites,
 	TextureKeptUnmaps,
 	TextureKeptFallbacks,
+	// KYTY_IMAGE_WRITEBACK_GUARD: image download bytes not written back over newer CPU bytes.
+	ImageWritebackSkippedBytes,
 	// Overlapped texture images kept alive instead of freed (KYTY_TEXTURE_OVERLAP_KEEP_FRAMES).
 	TextureOverlapKeeps,
 	// TileManager scratch buffers reused from its pool or newly allocated (KYTY_TILER_SCRATCH_POOL).

@@ -41,6 +41,21 @@ void TestAdd() {
 	      "one range spanning several merges them all");
 }
 
+void TestSubtract() {
+	KeptRanges::List ranges;
+	(void)KeptRanges::Add(ranges, 0x0, 0x10000);
+	KeptRanges::Subtract(ranges, 0x4000, 0x8000);
+	Check(ranges.size() == 2 && ranges[0] == KeptRanges::Range(0x0, 0x4000) &&
+	          ranges[1] == KeptRanges::Range(0x8000, 0x10000),
+	      "a hole splits a range");
+	KeptRanges::Subtract(ranges, 0x0, 0x4000);
+	Check(ranges.size() == 1 && ranges[0].first == 0x8000, "a whole range goes");
+	KeptRanges::Subtract(ranges, 0xc000, 0x20000);
+	Check(ranges.size() == 1 && ranges[0] == KeptRanges::Range(0x8000, 0xc000), "a tail goes");
+	KeptRanges::Subtract(ranges, 0x0, 0x1000);
+	Check(ranges.size() == 1 && KeptRanges::Bytes(ranges) == 0x4000, "a miss changes nothing");
+}
+
 void TestIntersects() {
 	KeptRanges::List ranges;
 	(void)KeptRanges::Add(ranges, 0x1000, 0x2000);
@@ -100,6 +115,7 @@ void TestDirtyLayers() {
 
 int main() {
 	TestAdd();
+	TestSubtract();
 	TestIntersects();
 	TestWriteSpan();
 	TestDirtyLayers();

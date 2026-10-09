@@ -15422,6 +15422,45 @@ public:
               large_download == reused_large_download,
               "successive near-capacity image transfers replaced the shared "
               "download buffer");
+      {
+        // KYTY_IMAGE_WRITEBACK_GUARD: a CPU write after the collector recorded the download
+        // (the image is gone, its pages unwatched) keeps its page; the other pages get the image.
+        constexpr uint32_t gpu_value = 0x3c3c3c3cu;
+        constexpr uint32_t newer = 0x12345678u;
+        // (KYTY_IMAGE_WRITEBACK_GUARD=0: the write-back overwrites it, as before.)
+        const char *guard_env = std::getenv("KYTY_IMAGE_WRITEBACK_GUARD");
+        const bool guard_enabled = guard_env == nullptr || std::strcmp(guard_env, "0") != 0;
+        const auto image = texture_cache.FindImage(large_desc);
+        Require(name, "write-back guard clear",
+                texture_cache.ClearImageFromBuffer(command, large_desc.info.data.address,
+                                                   large_desc.info.data.size, gpu_value),
+                "failed to write the write-back guard image");
+        TextureCacheTestAccess::ConfigureGarbageCollection(texture_cache, std::array{image}, 81,
+                                                           0);
+        OnGpuThread(context, [&] { texture_cache.RunGarbageCollector(); });
+        const auto middle = base + large_offset + large_size / 2;
+        // A guest write: it faults on the pages the pending write-back still watches.
+        Require(name, "write-back guard write", resources.InvalidateMemory(middle, sizeof(newer)),
+                "the CPU write is outside the mapped allocation");
+        Libs::LibKernel::Memory::WriteBacking(middle, &newer, sizeof(newer));
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+        const auto read = [](uint64_t address) {
+          uint32_t value = 0;
+          Libs::LibKernel::Memory::TryReadBacking(address, &value, sizeof(value));
+          return value;
+        };
+        Require(name, "write-back guard",
+                !TextureCacheTestAccess::Contains(texture_cache, image) &&
+                    read(base + large_offset) == gpu_value &&
+                    (read(middle) == newer || !guard_enabled) &&
+                    read(base + large_offset + large_size - sizeof(uint32_t)) == gpu_value,
+                fmt::format("image write-back over a newer CPU write: first={:#x} middle={:#x} "
+                            "last={:#x}",
+                            read(base + large_offset), read(middle),
+                            read(base + large_offset + large_size - sizeof(uint32_t)))
+                    .c_str());
+      }
 
       constexpr uint64_t tile_alias_offset = 0x2000000;
       constexpr uint64_t tile_alias_size = 0x400000;
