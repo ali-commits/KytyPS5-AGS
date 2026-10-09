@@ -979,6 +979,10 @@ target_include_directories(image_cache_gc_policy_tests PRIVATE "${KYTY_SOURCE_DI
 add_executable(image_clear_range_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImageClearRangeTests.cpp")
 target_include_directories(image_clear_range_tests PRIVATE "${KYTY_SOURCE_DIR}")
 
+# KYTY_IMAGE_GPU_KEEP range arithmetic (image/keptRanges.h); no Vulkan device.
+add_executable(image_gpu_keep_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImageGpuKeepTests.cpp")
+target_include_directories(image_gpu_keep_tests PRIVATE "${KYTY_SOURCE_DIR}")
+
 # Register clear decoding (imageInfo.h, KYTY_CLEAR_REGISTER_WIDE); no Vulkan device.
 add_executable(clear_register_decode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ClearRegisterDecodeTests.cpp")
 target_link_libraries(clear_register_decode_tests common fmt::fmt Vulkan::Headers)
@@ -1130,6 +1134,7 @@ if(BUILD_TESTING)
 	add_test(NAME texture_set_cache COMMAND $<TARGET_FILE:texture_set_cache_tests>)
 	add_test(NAME image_cache_gc_policy COMMAND $<TARGET_FILE:image_cache_gc_policy_tests>)
 	add_test(NAME image_clear_range COMMAND $<TARGET_FILE:image_clear_range_tests>)
+	add_test(NAME image_gpu_keep COMMAND $<TARGET_FILE:image_gpu_keep_tests>)
 	add_test(NAME clear_register_decode COMMAND $<TARGET_FILE:clear_register_decode_tests>)
 	add_test(NAME ampr_counter_bank COMMAND $<TARGET_FILE:ampr_counter_bank_tests>)
 	add_test(NAME draw_prep COMMAND $<TARGET_FILE:draw_prep_tests>)
@@ -1145,6 +1150,8 @@ if(BUILD_TESTING)
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --image-pressure-retirement-only)
 	add_test(NAME present_box_downscale
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --present-box-downscale-only)
+	add_test(NAME image_gpu_keep_device
+	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-keep-only)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -2231,6 +2238,7 @@ if(BUILD_TESTING)
 		scalar_provenance_tests
 		image_page_table_tests
 		image_clear_range_tests
+		image_gpu_keep_tests
 		clear_register_decode_tests
 		memory_tracker_tests
 		page_manager_tests

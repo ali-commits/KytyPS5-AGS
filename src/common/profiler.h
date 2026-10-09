@@ -348,6 +348,11 @@ enum class FrameEvent : uint32_t {
 	TexturePartialFallbacks,
 	TextureChunkInvalidations,
 	TexturePartialVerifyMismatches,
+	// KYTY_IMAGE_GPU_KEEP (TextureCache::KeepGpuBytes): CPU writes and partial unmaps that replaced
+	// only their bytes of a GPU-written image, and kept refreshes that still uploaded it whole.
+	TextureKeptWrites,
+	TextureKeptUnmaps,
+	TextureKeptFallbacks,
 	// Overlapped texture images kept alive instead of freed (KYTY_TEXTURE_OVERLAP_KEEP_FRAMES).
 	TextureOverlapKeeps,
 	// TileManager scratch buffers reused from its pool or newly allocated (KYTY_TILER_SCRATCH_POOL).

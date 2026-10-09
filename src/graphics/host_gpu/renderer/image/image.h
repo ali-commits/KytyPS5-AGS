@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/host_gpu/renderer/image/keptRanges.h"
 
 #include <algorithm>
 #include <compare>
@@ -130,6 +131,7 @@ public:
 			m_maybe_hash_valid = false;
 			// Whole-image invalidation carries no chunk information.
 			m_partial_valid = false;
+			kept_dirty.clear();
 			NoteDirtySpan(vaddr, size);
 		} else if (ImagePageRangesOverlap(live.address, live.size, vaddr, size)) {
 			m_maybe_cpu_dirty = true;
@@ -150,7 +152,27 @@ public:
 		m_maybe_cpu_dirty  = false;
 		m_maybe_hash_valid = false;
 		m_partial_valid    = false;
+		kept_dirty.clear();
 	}
+
+	// KYTY_IMAGE_GPU_KEEP (TextureCache::KeepGpuBytes): a CPU write or a partial unmap replaced the
+	// guest bytes of [begin, end) of this GPU-written image; its other bytes stay the GPU's. The image
+	// is CPU-dirty in kept_dirty only: the next refresh uploads the subresources over those ranges
+	// (TextureCache::UploadKeptRanges). Any whole-image invalidation clears kept_dirty again.
+	// Refused (false) while the whole image is CPU-dirty: that refresh uploads everything anyway.
+	bool NoteKeptCpuWrite(uint64_t begin, uint64_t end) {
+		if (m_maybe_cpu_dirty || (m_cpu_dirty && kept_dirty.empty())) {
+			return false;
+		}
+		m_cpu_dirty        = true;
+		m_maybe_cpu_dirty  = false;
+		m_maybe_hash_valid = false;
+		m_partial_valid    = false;
+		(void)KeptRanges::Add(kept_dirty, std::max(begin, live.address), std::min(end, live.End()));
+		NoteDirtySpan(begin, end - begin);
+		return true;
+	}
+	[[nodiscard]] bool HasKeptDirty() const noexcept { return m_cpu_dirty && !kept_dirty.empty(); }
 
 	// Chunk-granular CPU write tracking (TextureCache, KYTY_TEXTURE_PARTIAL_UPLOAD). Only for
 	// page-aligned images, so every write to one of their pages overlaps their bytes. While
@@ -313,6 +335,7 @@ public:
 		// Also reached without an upload (the image is being overwritten on the GPU); a
 		// guest-sourced refresh sets partial validity again afterwards.
 		m_partial_valid = false;
+		kept_dirty.clear();
 		ClearChunkDirty();
 		ClearDirtySpan();
 	}
@@ -478,6 +501,11 @@ public:
 	vk::Rect2D       claimed_rect {};
 	bool             claimed_rect_valid  = false;
 	ChunkState       chunks;
+	// KYTY_IMAGE_GPU_KEEP: see NoteKeptCpuWrite. kept_holes are the page-aligned ranges inside
+	// [track_addr, track_addr_end) whose watch a kept CPU write released (the faulting pages); the
+	// next TrackImage watches them again, UntrackImage leaves them out.
+	KeptRanges::List kept_dirty;
+	KeptRanges::List kept_holes;
 	// Last download into a cache buffer for texel-buffer reads (SynchronizeBufferFromImage):
 	// the buffer revision it produced and this image's content serial at the time.
 	struct TexelSyncMark {

@@ -320,6 +320,18 @@ private:
 		uint64_t dirty_bytes = 0; // dirty chunk bytes that caused the refresh
 	};
 	[[nodiscard]] PartialUploadResult TryPartialUpload(Image& image);
+	// KYTY_IMAGE_GPU_KEEP (default on; =0 the whole-image path): a CPU write to, or a partial unmap
+	// of, a GPU-written image replaces only those guest bytes; the image keeps the GPU's other
+	// bytes and refreshes only the subresources over the replaced ones (Image::NoteKeptCpuWrite).
+	// KeepEligible: the state the partial refresh needs. KeepGpuBytes marks [address, address +
+	// size) (CPU write: widened to KeptWriteGranule, those pages released; unmap: exact, pages kept
+	// watched) and returns false where the caller must take the whole-image path.
+	[[nodiscard]] bool        KeepEligible(const Image& image) const;
+	[[nodiscard]] bool        KeepGpuBytes(Image& image, uint64_t address, uint64_t size, bool unmap);
+	// Uploads the subresources over image.kept_dirty from guest memory; false: nothing recorded,
+	// the caller uploads the whole image.
+	[[nodiscard]] PartialUploadResult UploadKeptRanges(Image& image);
+	[[nodiscard]] bool        UploadKeptDepthLayers(Image& image, PartialUploadResult& result);
 	// Whole-image refresh of a tiled sampled texture whose guest bytes are copied to staging
 	// by m_staging_copier. False when the ordinary refresh path must be used.
 	[[nodiscard]] bool        TryAsyncFullUpload(Image& image);
@@ -577,6 +589,8 @@ private:
 	bool             m_partial_bands       = true;
 	bool             m_partial_verify      = false;
 	uint32_t         m_chunk_shift         = 16;
+	// KYTY_IMAGE_GPU_KEEP (see KeepEligible).
+	bool             m_gpu_keep            = true;
 	uint64_t         m_overlap_keep_frames = 0;
 	// Set by FindImage for the ResolveOverlap calls of one lookup: many live overlapping
 	// images already share the requested range, so overlapped images are not kept.

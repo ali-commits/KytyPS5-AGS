@@ -509,6 +509,12 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		m_partial_upload = false;
 	}
 	m_partial_bands  = EnvNotZero("KYTY_TEXTURE_PARTIAL_BANDS");
+	// KYTY_IMAGE_GPU_KEEP (default on; =0 off): see KeepEligible (idea from chenxiao07/KytyPS5
+	// e7bf421a1 / 21cfed4aa / 8fe29414f).
+	m_gpu_keep = EnvNotZero("KYTY_IMAGE_GPU_KEEP");
+	LOGF("Image GPU keep (KYTY_IMAGE_GPU_KEEP): %s\n",
+	     m_gpu_keep ? "CPU writes and partial unmaps replace only their bytes of GPU-written images"
+	                : "off (whole-image refresh)");
 	if (const auto* verify = std::getenv("KYTY_TEXTURE_PARTIAL_VERIFY");
 	    verify != nullptr && std::strcmp(verify, "1") == 0) {
 		m_partial_verify = true;
@@ -1238,6 +1244,14 @@ void TextureCache::TrackImage(ImageId id) {
 		TrackChunkImage(image);
 		return;
 	}
+	if (!image.kept_holes.empty()) {
+		// KYTY_IMAGE_GPU_KEEP: watch the pages kept CPU writes released again. Their bytes stay
+		// dirty until the refresh; a write from here on faults and is recorded before it lands.
+		for (const auto& [begin, end]: image.kept_holes) {
+			m_page_manager.UpdatePageWatchers<true>(begin, end - begin);
+		}
+		image.kept_holes.clear();
+	}
 	const auto image_begin = image.live.address;
 	const auto image_end   = image.live.End();
 	if (image_begin == image.track_addr && image_end == image.track_addr_end) {
@@ -1386,6 +1400,265 @@ void TextureCache::InvalidateChunks(Image& image, uint64_t address, uint64_t siz
 	image.NoteChunkWrite(address, size);
 }
 
+// KYTY_IMAGE_GPU_KEEP. On the console a CPU write or a remap replaces only those bytes of an image the
+// GPU rendered; the whole-image path made it CPU-dirty everywhere (a partial unmap freed it), and its
+// next use uploaded every byte from guest memory, which does not hold what the GPU rendered. A game
+// that streams through a pool it also renders into (Demon's Souls: an 80-layer shadow-map array whose
+// free layers its texture streamer remaps and fills from the CPU, chenxiao07/KytyPS5 e7bf421a1)
+// lost the rendered layers and uploaded the whole array again. Kept images refresh only the
+// subresources over the replaced bytes (UploadKeptRanges).
+namespace {
+// A kept CPU write releases this much around the fault: a streamed layer faults a few times,
+// not once per page.
+constexpr uint64_t KeptWriteGranule = uint64_t {64} << 10;
+} // namespace
+
+bool TextureCache::KeepEligible(const Image& image) const {
+	const auto& info = image.info;
+	if (!m_gpu_keep || !image.registered || image.depth_id || image.ChunkTracked() ||
+	    !image.IsGpuModified() || !image.OwnsAllBytes() || image.IsBufferModified() ||
+	    image.IsMaybeCpuDirty() || (image.IsDefinitelyCpuDirty() && image.kept_dirty.empty()) ||
+	    !image.FullyResident() || image.backing.image == nullptr || info.samples != 1 ||
+	    image.backing.samples != 1 || info.IsVolume() ||
+	    info.metadata.compression != VideoOutCompression::Uncompressed || !image.IsTracked() ||
+	    image.track_addr != image.live.address || image.track_addr_end != image.live.End()) {
+		return false;
+	}
+	if (UploadBinding(image) == BindingType::DepthTarget) {
+		// Whole layers of one level, without a D16 promotion (UploadKeptDepthLayers).
+		const auto layers = info.resources.layers;
+		return layers >= 2 && info.resources.levels == 1 && info.data.size % layers == 0 &&
+		       DepthAspectTransferBytes(info.pixel_format) == info.bytes_per_block;
+	}
+	return info.IsTiled() && info.GetColorTransform() == ColorTransform::None;
+}
+
+bool TextureCache::KeepGpuBytes(Image& image, uint64_t address, uint64_t size, bool unmap) {
+	if (!KeepEligible(image)) {
+		return false;
+	}
+	const auto live  = image.live;
+	auto       begin = std::max(address, live.address);
+	auto       end   = std::min(address + size, live.End());
+	if (!unmap) {
+		const auto span = KeptRanges::WriteSpan(address, size, live.address, live.End(),
+		                                        KeptWriteGranule, TRACKER_PAGE_SIZE);
+		begin = span.first;
+		end   = span.second;
+		const auto& info = image.info;
+		if (UploadBinding(image) == BindingType::DepthTarget && begin < end) {
+			// Depth arrays refresh whole layers: the granule stops at the written layers (thin
+			// layers are not refreshed for a neighbour's write), or at the written pages where a
+			// layer is not page-sized.
+			const auto slice = info.data.size / info.resources.layers;
+			const auto base  = info.data.address;
+			if (slice % TRACKER_PAGE_SIZE == 0 && address < info.data.End() && address + size > base) {
+				const auto first = (std::max(address, base) - base) / slice;
+				const auto last  = (std::min(address + size, info.data.End()) - 1 - base) / slice;
+				begin = std::max(begin, base + first * slice);
+				end   = std::min(end, base + (last + 1) * slice);
+			} else {
+				begin = std::max(begin, Common::AlignDown(address, TRACKER_PAGE_SIZE));
+				end   = std::min(end, Common::AlignUp(address + size, TRACKER_PAGE_SIZE));
+			}
+		}
+	}
+	if (begin >= end) {
+		return false;
+	}
+	// Bytes the image keeps once this span is replaced. (A CPU rewriting nearly all of a render
+	// target reuses its memory: one whole refresh instead of a fault per granule.)
+	auto       covered = image.kept_dirty;
+	(void)KeptRanges::Add(covered, std::max(begin, live.address), std::min(end, live.End()));
+	if (KeptRanges::Bytes(covered) >= live.size - live.size / 4) {
+		return false;
+	}
+	if (!image.NoteKeptCpuWrite(begin, end)) {
+		return false;
+	}
+	if (!unmap) {
+		// Stop watching the written pages (the faulting write must be able to complete); every
+		// other page stays watched, so later writes elsewhere are recorded too.
+		auto released = image.kept_holes;
+		(void)KeptRanges::Add(released, begin, end);
+		auto at = begin;
+		for (const auto& [hole_begin, hole_end]: image.kept_holes) {
+			if (hole_end <= begin || hole_begin >= end) {
+				continue;
+			}
+			if (at < hole_begin) {
+				m_page_manager.UpdatePageWatchers<false>(at, hole_begin - at);
+			}
+			at = std::max(at, hole_end);
+		}
+		if (at < end) {
+			m_page_manager.UpdatePageWatchers<false>(at, end - at);
+		}
+		image.kept_holes = std::move(released);
+	}
+	// An unmap keeps the pages watched: a remap gives the watched pages their protection back
+	// (memory.cpp ResyncGpuRangeProtection), so the new contents' CPU writes fault as before.
+	Profiler::CountFrameEvent(unmap ? Profiler::FrameEvent::TextureKeptUnmaps
+	                                : Profiler::FrameEvent::TextureKeptWrites);
+	return true;
+}
+
+TextureCache::PartialUploadResult TextureCache::UploadKeptRanges(Image& image) {
+	PartialUploadResult result;
+	const auto          base = image.live.address;
+	if (!image.HasKeptDirty() || !image.IsGpuModified() || !image.OwnsAllBytes() ||
+	    image.IsBufferModified() || image.depth_id || !image.FullyResident()) {
+		return result;
+	}
+	if (UploadBinding(image) == BindingType::DepthTarget) {
+		(void)UploadKeptDepthLayers(image, result);
+		return result;
+	}
+	const auto binding  = UploadBinding(image);
+	const auto transfer = BuildTextureTransfer(image, binding, TransferDirection::Upload);
+	if (!transfer.valid || transfer.color_transform != ColorTransform::None || transfer.tiles.empty() ||
+	    transfer.tiles.size() != transfer.regions.size()) {
+		return result;
+	}
+	// Whole subresources (tiles) over a replaced byte; their other bytes come from guest memory
+	// too, every other subresource keeps the GPU's contents.
+	std::vector<GpuTileInfo>         tiles;
+	std::vector<vk::BufferImageCopy> regions;
+	uint64_t                         linear_total = 0;
+	for (size_t index = 0; index < transfer.tiles.size(); index++) {
+		auto tile   = transfer.tiles[index];
+		auto region = transfer.regions[index];
+		if (tile.tiled_size == 0 ||
+		    !KeptRanges::Intersects(image.kept_dirty, base + tile.tiled_offset,
+		                            base + tile.tiled_offset + tile.tiled_size)) {
+			continue;
+		}
+		linear_total        = Common::AlignUp(linear_total, 256);
+		tile.linear_offset  = linear_total;
+		region.bufferOffset = linear_total;
+		linear_total += tile.linear_size;
+		tiles.push_back(tile);
+		regions.push_back(region);
+	}
+	result.dirty_bytes = KeptRanges::Bytes(image.kept_dirty);
+	if (tiles.empty()) {
+		// Only bytes no texel is decoded from (gaps between levels) were replaced.
+		result.done = true;
+		return result;
+	}
+	// The selected tiled ranges, packed, from guest memory (an unmapped part reads as zeros, as the
+	// console's fresh mapping would hold whatever the CPU writes later). Synchronous: this path is
+	// rare and must not depend on the staging copier's mapping checks.
+	struct SourceRange {
+		uint64_t offset;
+		uint64_t size;
+		uint64_t packed;
+	};
+	std::vector<SourceRange> ranges;
+	uint64_t                 packed_total = 0;
+	uint64_t                 tiled_bytes  = 0;
+	for (auto& tile: tiles) {
+		const auto found = std::find_if(ranges.begin(), ranges.end(), [&](const SourceRange& r) {
+			return r.offset == tile.tiled_offset && r.size == tile.tiled_size;
+		});
+		if (found != ranges.end()) {
+			tile.tiled_offset = found->packed;
+			continue;
+		}
+		packed_total = Common::AlignUp(packed_total, 256);
+		ranges.push_back({tile.tiled_offset, tile.tiled_size, packed_total});
+		tile.tiled_offset = packed_total;
+		packed_total += tile.tiled_size;
+		tiled_bytes += tile.tiled_size;
+	}
+	auto& staging         = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Upload);
+	auto [mapped, offset] = staging.Map(packed_total, 256);
+	if (mapped == nullptr) {
+		return result;
+	}
+	for (const auto& range: ranges) {
+		if (!LibKernel::Memory::TryReadBacking(base + range.offset, mapped + range.packed, range.size) &&
+		    !LibKernel::Memory::TryReadSparseBacking(base + range.offset, mapped + range.packed,
+		                                             range.size)) {
+			std::memset(mapped + range.packed, 0, range.size);
+		}
+	}
+	staging.Commit();
+	Profiler::CountFrameEvent(Profiler::FrameEvent::TextureUploadBytesStaging, packed_total);
+	if (!m_tiler.DetileToImage(image, staging.Handle(), offset, packed_total, linear_total, tiles,
+	                           regions)) {
+		const auto linear = m_tiler.Detile(staging.Handle(), offset, packed_total, linear_total, tiles);
+		for (auto& region: regions) {
+			region.bufferOffset += linear.offset;
+		}
+		image.Upload(regions, linear.buffer, linear.offset, linear.size);
+	}
+	result.done  = true;
+	result.bytes = tiled_bytes;
+	return result;
+}
+
+bool TextureCache::UploadKeptDepthLayers(Image& image, PartialUploadResult& result) {
+	const auto& info   = image.info;
+	const auto  layers = info.resources.layers;
+	if (info.samples != 1 || image.backing.samples != 1 || layers < 2 || info.resources.levels != 1 ||
+	    info.data.size % layers != 0 || DepthAspectTransferBytes(info.pixel_format) != info.bytes_per_block) {
+		return false;
+	}
+	const uint64_t slice  = info.data.size / layers;
+	const uint64_t base   = info.data.address;
+	const auto     picked = KeptRanges::DirtyLayers(image.kept_dirty, base, slice, layers);
+	result.dirty_bytes    = KeptRanges::Bytes(image.kept_dirty);
+	if (picked.empty()) {
+		result.done = true;
+		return true;
+	}
+	const uint64_t total  = slice * picked.size();
+	auto&          staging = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Upload);
+	auto [mapped, offset]  = staging.Map(total, 256);
+	if (mapped == nullptr) {
+		return false;
+	}
+	for (size_t index = 0; index < picked.size(); index++) {
+		const auto source = base + slice * picked[index];
+		auto*      target = mapped + slice * index;
+		if (!LibKernel::Memory::TryReadBacking(source, target, slice) &&
+		    !LibKernel::Memory::TryReadSparseBacking(source, target, slice)) {
+			std::memset(target, 0, slice);
+		}
+	}
+	staging.Commit();
+	Profiler::CountFrameEvent(Profiler::FrameEvent::TextureUploadBytesStaging, total);
+	const auto                       all_copies = BuildDepthCopies(info, slice, vk::ImageAspectFlagBits::eDepth);
+	std::vector<vk::BufferImageCopy> copies;
+	copies.reserve(picked.size());
+	for (size_t index = 0; index < picked.size(); index++) {
+		auto copy         = all_copies[picked[index]];
+		copy.bufferOffset = slice * index;
+		copies.push_back(copy);
+	}
+	TileManager::Result linear {staging.Handle(), offset, total};
+	if (info.IsTiled()) {
+		const auto       all_tiles = BuildDepthTiles(info);
+		std::vector<GpuTileInfo> tiles;
+		tiles.reserve(picked.size());
+		for (size_t index = 0; index < picked.size(); index++) {
+			auto tile          = all_tiles[picked[index]];
+			tile.tiled_offset  = slice * index;
+			tile.linear_offset = slice * index;
+			tiles.push_back(tile);
+		}
+		linear = m_tiler.Detile(staging.Handle(), offset, total, total, tiles);
+	}
+	for (auto& copy: copies) {
+		copy.bufferOffset += linear.offset;
+	}
+	image.Upload(copies, linear.buffer, linear.offset, linear.size);
+	result.done  = true;
+	result.bytes = total;
+	return true;
+}
+
 void TextureCache::UntrackImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (!image.IsTracked()) {
@@ -1405,6 +1678,23 @@ void TextureCache::UntrackImage(ImageId id) {
 	const auto size      = image.track_addr_end - image.track_addr;
 	image.track_addr     = 0;
 	image.track_addr_end = 0;
+	if (!image.kept_holes.empty() || !image.kept_dirty.empty()) {
+		// KYTY_IMAGE_GPU_KEEP: the released pages are not watched any more. Writes from now on are
+		// not observed, so only a whole refresh is exact again.
+		auto at = address;
+		for (const auto& [begin, end]: image.kept_holes) {
+			if (at < begin) {
+				m_page_manager.UpdatePageWatchers<false>(at, begin - at);
+			}
+			at = std::max(at, end);
+		}
+		if (at < address + size) {
+			m_page_manager.UpdatePageWatchers<false>(at, address + size - at);
+		}
+		image.kept_holes.clear();
+		image.kept_dirty.clear();
+		return;
+	}
 	if (size != 0) {
 		m_page_manager.UpdatePageWatchers<false>(address, size);
 	}
@@ -2355,7 +2645,19 @@ void TextureCache::InitializeImage(ImageId id, RefreshIntent intent) {
 		guest_refresh = image.ChunkTracked() && !image.IsBufferModified() &&
 		                !image.IsGpuModified() && !image.depth_id && binding == BindingType::Texture;
 		PartialUploadResult partial {};
-		if (image.ChunkTracked() && image.chunks.dirty_count != 0 && !first) {
+		if (image.HasKeptDirty()) {
+			// KYTY_IMAGE_GPU_KEEP: only the subresources over the replaced bytes.
+			partial = UploadKeptRanges(image);
+			if (!partial.done) {
+				Profiler::CountFrameEvent(Profiler::FrameEvent::TextureKeptFallbacks);
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+					LOGF("TextureCache: kept GPU image 0x%016" PRIx64 " size=0x%" PRIx64
+					     " refreshes whole (no partial upload for it)\n",
+					     image.info.data.address, image.info.data.size);
+				}
+			}
+		} else if (image.ChunkTracked() && image.chunks.dirty_count != 0 && !first) {
 			partial = TryPartialUpload(image);
 			if (!partial.done) {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::TexturePartialFallbacks);
@@ -5837,6 +6139,21 @@ void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 			InvalidateChunks(*owner, address, size);
 			continue;
 		}
+		if (!owner->kept_holes.empty() || owner->HasKeptDirty() ||
+		    (owner->Overlaps(address, size) && owner->IsGpuModified())) {
+			// KYTY_IMAGE_GPU_KEEP: the written pages only (also a neighbour's write on a shared
+			// page: its bytes of the image are refreshed, the page is released). The head/tail
+			// untracking below does not know released pages: a kept image that cannot keep the
+			// write takes the whole-image path.
+			if (KeepGpuBytes(*owner, address, size, false)) {
+				continue;
+			}
+			if (!owner->kept_holes.empty() || owner->HasKeptDirty()) {
+				owner->InvalidateCpuWrite(owner->live.address, owner->live.size);
+				UntrackImage(id);
+				continue;
+			}
+		}
 		if (owner->Overlaps(address, size)) {
 			owner->InvalidateCpuWrite(address, size);
 			UntrackImage(id);
@@ -5962,6 +6279,13 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	for (const auto id: images) {
 		auto owner = m_slot_images.try_get(id);
 		if (owner == nullptr) {
+			continue;
+		}
+		// KYTY_IMAGE_GPU_KEEP: an image the GPU wrote keeps its other bytes when only part of it is
+		// unmapped (a pool the game remaps one layer at a time); the unmapped bytes are refreshed
+		// from guest memory at its next use.
+		if ((address > owner->live.address || address + size < owner->live.End()) &&
+		    KeepGpuBytes(*owner, address, size, true)) {
 			continue;
 		}
 		FreeImage(id, HangTrace::ImageFreeReason::Unmap);
