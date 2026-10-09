@@ -142,6 +142,10 @@ struct ShaderVertexInputInfo {
 	uint32_t                wave_size           = 64;
 	uint32_t                scratch_size_dwords = 0;
 	uint32_t                pa_cl_vs_out_cntl    = 0;
+	// PS flat/smooth groups may relocate a shared parameter to a spare location.
+	// Only mask-selected source entries are meaningful (including in cache keys).
+	uint32_t                param_alias_mask = 0;
+	std::array<uint32_t, 32> param_alias_source {};
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
@@ -240,6 +244,11 @@ bool     ShaderCbShaderMaskExports();
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
                                       std::span<const uint32_t> active_inputs, uint32_t input);
+void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
+                                     const ShaderPixelInputInfo& pixel);
+void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
+                                     const ShaderPixelInputInfo& pixel,
+                                     std::span<const uint32_t> active_inputs);
 bool     ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info, uint32_t input);
 bool     ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info, uint32_t input);
 
