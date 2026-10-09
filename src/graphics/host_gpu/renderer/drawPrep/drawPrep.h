@@ -183,6 +183,9 @@ struct DispatchArgs {
 	uint32_t y    = 0;
 	uint32_t z    = 0;
 	uint32_t mode = 0; // DISPATCH_INITIATOR
+	// DISPATCH_INDIRECT (without thread dimensions): the counts are GPU data; the lookup starts
+	// from no workgroup counts, as RenderExecutor::DispatchIndirect's does.
+	bool indirect = false;
 };
 
 // The dispatch inputs GetComputeProgram starts from (RenderExecutor::DispatchDirect): the thread

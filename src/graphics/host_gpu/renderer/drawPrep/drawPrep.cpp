@@ -377,6 +377,9 @@ void MakeComputeInputInfo(const HW::ComputeShaderInfo& cs, const DispatchArgs& a
                           ShaderComputeInputInfo& info) {
 	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
 	info                                  = {};
+	if (args.indirect) {
+		return; // RenderExecutor::DispatchIndirect's lookup: no counts, no thread dimensions
+	}
 	const bool use_thread_dimensions      = (args.mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
 	info.dispatch_thread_dimensions       = use_thread_dimensions;
 	info.workgroup_counts[0]              = args.x;
@@ -1406,8 +1409,8 @@ uint64_t Engine::PublishDispatch(const DispatchArgs& args, const HW::Context& co
 	slot.registers.user_config = user_config;
 	slot.registers.shaders     = shaders;
 	// RenderExecutor::DispatchDirect returns before its program lookup for the others.
-	slot.eligible        = shaders.GetCs().cs_regs.data_addr != 0 && args.x != 0 && args.y != 0 &&
-	                       args.z != 0;
+	slot.eligible        = shaders.GetCs().cs_regs.data_addr != 0 &&
+	                (args.indirect || (args.x != 0 && args.y != 0 && args.z != 0));
 	slot.worker_prepared = false;
 	slot.after_stop      = m_stop_pending;
 	slot.speculative     = false;

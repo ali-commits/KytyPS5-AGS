@@ -251,6 +251,7 @@ struct DispatchIndirectOp {
 	uint32_t flags     = 0;
 	uint32_t snapshot  = 0;
 	uint32_t reserved  = 0;
+	uint64_t window    = 0; // DispatchFlagPrepared: the draw-prep window position of its slot
 };
 
 // EVENT_WRITE_EOP / EVENT_WRITE_EOS: the WriteAtEndOfPipe arguments.

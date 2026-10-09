@@ -18692,6 +18692,8 @@ public:
     constexpr uint64_t allocation_alignment = 0x10000;
     constexpr uint64_t code_offset = 0x1000;
     constexpr std::array<uint64_t, 2> output_offsets{0x20000, 0x30000};
+    // DISPATCH_INDIRECT arguments (1x1x1), written by the CPU.
+    constexpr uint64_t args_offset = 0x3f000;
     constexpr uint32_t dispatches = 6;
 
     std::vector<u32> code;
@@ -18722,9 +18724,13 @@ public:
     ShaderMapUserData(code_address,
                       {.type = Prospero::ShaderBinaryType::kCs,
                        .code_size_bytes = static_cast<uint32_t>(code.size() * sizeof(u32))});
+    const std::array<u32, 3> indirect_args{1u, 1u, 1u};
+    std::memcpy(memory + args_offset, indirect_args.data(), sizeof(indirect_args));
+    const auto args_address = base + args_offset;
+    // Dispatch k (of 2 x dispatches: direct, then indirect) of phase p stores this value.
     const auto value = [](size_t phase, u32 k) { return 0x1000u * static_cast<u32>(phase + 1u) + k; };
     // Phase p's stream: for each dispatch k the V# of its own output dword and its value, then
-    // DISPATCH_DIRECT 1x1x1.
+    // DISPATCH_DIRECT 1x1x1; then as many DISPATCH_INDIRECTs (arguments 1x1x1).
     const auto stream_for = [&](size_t phase) {
       std::vector<u32> words;
       for (u32 k = 0; k < dispatches; k++) {
@@ -18738,6 +18744,19 @@ public:
         words.insert(words.end(), std::begin(descriptor.fields), std::end(descriptor.fields));
         words.push_back(value(phase, k));
         words.insert(words.end(), {KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, Pm4::R_ZERO), 1u, 1u, 1u, 0x41u});
+      }
+      for (u32 k = dispatches; k < 2 * dispatches; k++) {
+        ShaderBufferResource descriptor{};
+        descriptor.UpdateAddress48(base + output_offsets[phase] + k * 4u);
+        descriptor.fields[2] = 4;
+        descriptor.fields[3] = DstSel(4, 5, 6, 7) |
+                               (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+        words.push_back(KYTY_PM4(7, Pm4::IT_SET_SH_REG, Pm4::R_ZERO));
+        words.push_back(Pm4::COMPUTE_USER_DATA_0);
+        words.insert(words.end(), std::begin(descriptor.fields), std::end(descriptor.fields));
+        words.push_back(value(phase, k));
+        words.insert(words.end(), {0xc0021600u, static_cast<u32>(args_address),
+                                   static_cast<u32>(args_address >> 32u), 0x41u});
       }
       return words;
     };
@@ -18759,7 +18778,7 @@ public:
                            .num_thread_z = 1, .wave_size = 64, .user_sgpr = 5});
       const auto stored = [&](size_t phase) {
         std::vector<u32> values;
-        for (u32 k = 0; k < dispatches; k++) {
+        for (u32 k = 0; k < 2 * dispatches; k++) {
           const auto address = base + output_offsets[phase] + k * 4u;
           context.GetBufferCache().ReadMemory(address, 4);
           u32 word = 0;
@@ -18770,7 +18789,7 @@ public:
       };
       const auto expect = [&](size_t phase, const char *stage) {
         const auto values = stored(phase);
-        for (u32 k = 0; k < dispatches; k++) {
+        for (u32 k = 0; k < 2 * dispatches; k++) {
           Require(name, stage, values[k] == value(phase, k),
                   "dispatch " + std::to_string(k) + " stored " + Hex(values[k]) + ", expected " +
                       Hex(value(phase, k)));
@@ -18821,11 +18840,11 @@ public:
         const bool prepared = DrawPrep::DispatchPrepEnabled() &&
                               DrawPrep::GetMode() == DrawPrep::Mode::Parallel;
         Require(name, "prepared dispatches",
-                prepared ? committed == dispatches &&
-                               (DrawPrep::VerifyMode() == 0 || verified == dispatches)
+                prepared ? committed == 2 * dispatches &&
+                               (DrawPrep::VerifyMode() == 0 || verified == 2 * dispatches)
                          : committed == 0,
                 "committed " + std::to_string(committed) + ", verified " +
-                    std::to_string(verified) + " of " + std::to_string(dispatches) +
+                    std::to_string(verified) + " of " + std::to_string(2 * dispatches) +
                     " dispatches");
       }
       context.UnmapMemory(base, allocation_size);

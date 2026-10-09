@@ -624,8 +624,25 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	ShaderComputeInputInfo input_info {};
 	CpGaps::Phase(CpGaps::Cat::DispatchProgram);
-	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
-	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info, m_compute_prep);
+	ShaderProgram compute_program;
+	// KYTY_DRAW_PREP_DISPATCH (drawPrep.h): as in DispatchDirect, from no workgroup counts.
+	auto* const prepared = std::exchange(m_prepared_dispatch, nullptr);
+	if (prepared != nullptr && DrawPrep::ValidateDispatch(*prepared, input_info)) {
+		if (DrawPrep::VerifyMode() != 0) {
+			auto serial_prep = std::make_unique<PipelineCache::StagePrep>();
+			auto serial_info = input_info;
+			const auto serial_program = m_context.GetPipelineCache().GetComputeProgram(
+			    cs_regs, buffer.GetRegisters().GetShaderRegisters(), serial_info, *serial_prep);
+			(void)DrawPrep::VerifyDispatch(*prepared, serial_program, serial_info, *serial_prep);
+		}
+		std::swap(m_compute_prep, prepared->compute_prep);
+		input_info                 = prepared->compute_info;
+		input_info.stage.resources = &m_compute_prep.resources;
+		compute_program            = prepared->compute_program;
+	} else {
+		compute_program = m_context.GetPipelineCache().GetComputeProgram(
+		    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info, m_compute_prep);
+	}
 	CpGaps::Phase(CpGaps::Cat::DispatchPipeline);
 	if (!compute_program) {
 		// Temporary until RT is implemented.

@@ -2763,6 +2763,16 @@ void CommandProcessor::ExecDispatchDirect(const CpSeq::DispatchDirectOp& op) {
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	// KYTY_DRAW_PREP_DISPATCH: the program of a native indirect dispatch does not depend on its
+	// (GPU-written) arguments. One with thread dimensions reads them on the CPU and runs as a direct
+	// dispatch, unprepared.
+	auto*      engine  = m_draw_prep.get();
+	const bool prepare = m_front_mode == FrontMode::Thread && engine != nullptr &&
+	                     engine->Parallel() && DrawPrep::DispatchPrepEnabled() &&
+	                     (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0;
+	if (prepare && engine->SpeculativeSlots() != 0) {
+		DropSpeculativeSlots();
+	}
 	CpSeq::DispatchIndirectOp op;
 	op.args_addr = args_addr;
 	op.mode      = mode;
@@ -2770,10 +2780,29 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		op.flags |= CpSeq::DispatchFlagSnapshot;
 		op.snapshot = TakeSnapshot();
 	}
+	if (prepare) {
+		const auto position = engine->PublishDispatch({0, 0, 0, mode, true}, m_ctx, m_ucfg, m_sh_ctx,
+		                                              [this] { return WaitForWindowSpace(); });
+		if (position != UINT64_MAX) {
+			op.flags |= CpSeq::DispatchFlagPrepared;
+			op.window = position;
+			m_published_ops.push_back(m_ops->Emitted());
+			if (m_published_ops.size() > 256u) {
+				(void)OldestPendingOp(m_published_ops);
+			}
+		}
+	}
 	(void)Submit(op);
 }
 
 void CommandProcessor::ExecDispatchIndirect(const CpSeq::DispatchIndirectOp& op) {
+	if ((op.flags & CpSeq::DispatchFlagPrepared) != 0) {
+		// KYTY_DRAW_PREP_DISPATCH: the same execution, with the slot's preparation offered.
+		auto plain = op;
+		plain.flags &= ~CpSeq::DispatchFlagPrepared;
+		m_draw_prep->ExecuteDispatch(op.window, [this, &plain] { ExecDispatchIndirect(plain); });
+		return;
+	}
 	if ((op.mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		const auto args = ReadGuestForCp<vk::DispatchIndirectCommand>(op.args_addr);
 		CpSeq::DispatchDirectOp direct;

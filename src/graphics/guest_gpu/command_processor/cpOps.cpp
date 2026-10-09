@@ -180,8 +180,9 @@ void NormalizeForCompare(OpKind kind, void* payload) noexcept {
 		}
 		case OpKind::DispatchIndirect: {
 			auto* op = static_cast<DispatchIndirectOp*>(payload);
-			op->flags &= ~DispatchFlagSnapshot;
+			op->flags &= ~(DispatchFlagSnapshot | DispatchFlagPrepared);
 			op->snapshot = 0;
+			op->window   = 0;
 			break;
 		}
 		default: break;
