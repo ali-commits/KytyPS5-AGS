@@ -6,6 +6,7 @@
 #include "common/file.h"
 #include "common/hangTrace.h"
 #include "common/logging/log.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "common/stringUtils.h"
@@ -64,10 +65,11 @@
 namespace Libs::Graphics {
 
 static bool MeshRestartEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_MESH_RESTART");
 		return value != nullptr && std::strcmp(value, "1") == 0;
-	}();
+	}));
 	return enabled;
 }
 
@@ -395,10 +397,11 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 }
 
 static bool DynamicStateShadowEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_DYNAMIC_STATE_SHADOW");
 		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 

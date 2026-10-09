@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_CACHE_BUFFERLOOKUPSTATS_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_CACHE_BUFFERLOOKUPSTATS_H_
 
+#include "common/onceValue.h"
 #include <cstdint>
 
 // KYTY_BUFFER_LOOKUP_STATS=1 (diagnostic, default off): where the command processor's V# binding
@@ -59,7 +60,10 @@ namespace Detail {
 } // namespace Detail
 
 [[nodiscard]] inline bool Enabled() {
-	static const bool enabled = Detail::ReadEnabled();
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return Detail::ReadEnabled();
+	}));
 	return enabled;
 }
 // KYTY_BUFFER_LOOKUP_STATS=keys: also the distinct read-binding keys per frame (NoteKey; a hash-set

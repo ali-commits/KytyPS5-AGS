@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "common/hangTrace.h"
 #include "common/liveSwitch.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "common/stringUtils.h"
@@ -149,29 +150,32 @@ static bool IsMultisampledTexture(Prospero::ImageType type) {
 // KYTY_PRECISE_WRITE_RANGES=0 treats every writable storage binding as written in full (the
 // behaviour before write-range proofs).
 static bool PreciseWriteRangesEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_PRECISE_WRITE_RANGES");
 		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 
 // KYTY_WRITE_RANGE_LOG=N logs the first N writable storage bindings: shader, guest range, the
 // proven written spans (or why the binding stays whole) and the evaluated address intervals.
 static uint32_t WriteRangeLogLimit() {
-	static const uint32_t limit = [] {
+	static std::atomic<int64_t> limit_once {Common::OnceUnset};
+	const auto limit = static_cast<uint32_t>(Common::Once(limit_once, [] {
 		const auto* value = std::getenv("KYTY_WRITE_RANGE_LOG");
 		return value == nullptr ? 0u : static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
-	}();
+	}));
 	return limit;
 }
 
 // KYTY_WRITE_RANGE_STATS=0 skips the image lookup behind FrameEvent.WriteRangeImagesSpared.
 static bool WriteRangeImageStatsEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_WRITE_RANGE_STATS");
 		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 
@@ -1175,10 +1179,11 @@ static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
 // KYTY_UPLOAD_DEDUP=0 restores the previous per-draw upload memo (64 hashed slots, only with
 // KYTY_RENDERER_BATCH=1).
 static bool UploadDedupEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_UPLOAD_DEDUP");
 		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 
@@ -1187,10 +1192,11 @@ static bool UploadDedupEnabled() {
 // checked: in the U54 captures the table matched about 14 of 9,200 lookups per flip at the Sky
 // Garden start and 0.6 of 900 in the desert, so hashing every upload cost more than it saved.
 static bool UploadDedupTableEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_UPLOAD_DEDUP_TABLE");
 		return value != nullptr && std::strcmp(value, "1") == 0;
-	}();
+	}));
 	return enabled;
 }
 
@@ -2297,10 +2303,11 @@ static void CountDescriptorPushMiss(int32_t result, std::span<const vk::WriteDes
 // are the potential of splitting them (a pushed set and a dynamic one). Counted as
 // DescriptorOffsetAudit* frame events (with a connected profiler).
 static bool DescriptorOffsetAuditEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_DESCRIPTOR_OFFSET_AUDIT");
 		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 

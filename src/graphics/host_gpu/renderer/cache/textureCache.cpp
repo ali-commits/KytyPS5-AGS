@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -596,7 +597,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 }
 
 bool TextureCache::AliasBytesEnabled() {
-	static const bool enabled = AliasAgeByFrames() && EnvNotZero("KYTY_ALIAS_BYTES");
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return AliasAgeByFrames() && EnvNotZero("KYTY_ALIAS_BYTES");
+	}));
 	return enabled;
 }
 

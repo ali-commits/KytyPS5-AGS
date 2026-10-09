@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
@@ -45,7 +46,8 @@ bool CmaskFastClearEnabled() {
 }
 
 bool DrawSequenceEnabled(DrawSequencePart part) {
-	static const uint32_t parts = [] {
+	static std::atomic<int64_t> parts_once {Common::OnceUnset};
+	const auto parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
 		constexpr uint32_t all = static_cast<uint32_t>(DrawSequencePart::Targets) |
 		                         static_cast<uint32_t>(DrawSequencePart::Textures);
 		const auto* value = std::getenv("KYTY_DRAW_SEQUENCE_FAST");
@@ -63,18 +65,19 @@ bool DrawSequenceEnabled(DrawSequencePart part) {
 			selected |= static_cast<uint32_t>(DrawSequencePart::Textures);
 		}
 		return selected;
-	}();
+	}));
 	return (parts & static_cast<uint32_t>(part)) != 0;
 }
 
 int DrawSequenceVerifyMode() {
-	static const int mode = [] {
+	static std::atomic<int64_t> mode_once {Common::OnceUnset};
+	const auto mode = static_cast<int>(Common::Once(mode_once, [] {
 		const auto* value = std::getenv("KYTY_DRAW_SEQUENCE_VERIFY");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "0") == 0) {
 			return 0;
 		}
 		return std::strcmp(value, "exit") == 0 ? 2 : 1;
-	}();
+	}));
 	return mode;
 }
 
@@ -90,7 +93,8 @@ void ReportDrawSequenceMismatch(const char* what) {
 }
 
 bool RenderStateFastEnabled(RenderStatePart part) {
-	static const uint32_t parts = [] {
+	static std::atomic<int64_t> parts_once {Common::OnceUnset};
+	const auto parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
 		constexpr uint32_t all = static_cast<uint32_t>(RenderStatePart::VertexCopy) |
 		                         static_cast<uint32_t>(RenderStatePart::PrepSwap) |
 		                         static_cast<uint32_t>(RenderStatePart::Reset);
@@ -112,18 +116,19 @@ bool RenderStateFastEnabled(RenderStatePart part) {
 			selected |= static_cast<uint32_t>(RenderStatePart::Reset);
 		}
 		return selected;
-	}();
+	}));
 	return (parts & static_cast<uint32_t>(part)) != 0;
 }
 
 int RenderStateVerifyMode() {
-	static const int mode = [] {
+	static std::atomic<int64_t> mode_once {Common::OnceUnset};
+	const auto mode = static_cast<int>(Common::Once(mode_once, [] {
 		const auto* value = std::getenv("KYTY_RENDER_STATE_VERIFY");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "0") == 0) {
 			return 0;
 		}
 		return std::strcmp(value, "exit") == 0 ? 2 : 1;
-	}();
+	}));
 	return mode;
 }
 

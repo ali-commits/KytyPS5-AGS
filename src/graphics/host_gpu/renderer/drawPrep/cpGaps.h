@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DRAWPREP_CPGAPS_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DRAWPREP_CPGAPS_H_
 
+#include "common/onceValue.h"
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -243,10 +244,11 @@ private:
 };
 
 [[nodiscard]] inline bool Enabled() noexcept {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_CP_GAP_STATS");
 		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 

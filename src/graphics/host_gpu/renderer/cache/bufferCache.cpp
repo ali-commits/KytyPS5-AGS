@@ -6,6 +6,7 @@
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -1053,10 +1054,11 @@ void BufferCache::ChangeRegister(BufferId id) {
 // the item's tick), so a touch in a tick the item already holds, which LeastRecentlyUsedCache::Touch
 // would return from at once, skips reading the scattered item. The LRU order is unchanged.
 static bool BufferLruSkipEnabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_BUFFER_LRU_SKIP");
 		return value != nullptr && std::strcmp(value, "1") == 0;
-	}();
+	}));
 	return enabled;
 }
 
@@ -3200,10 +3202,11 @@ struct BindingMemoStats {
 	std::chrono::steady_clock::time_point last {};
 };
 bool BindingMemoStatsEnabled() {
-	static const bool on = [] {
+	static std::atomic<int64_t> on_once {Common::OnceUnset};
+	const auto on = static_cast<bool>(Common::Once(on_once, [] {
 		const char* value = std::getenv("KYTY_BINDING_MEMO_STATS");
 		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return on;
 }
 BindingMemoStats& GetBindingMemoStats() {

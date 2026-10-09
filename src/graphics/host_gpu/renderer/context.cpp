@@ -1,6 +1,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/hangTrace.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "common/threads.h"
@@ -45,12 +46,18 @@ static bool EnvSwitch(const char* name, bool default_value) {
 }
 
 bool BarrierBatchEnabled() {
-	static const bool enabled = EnvSwitch("KYTY_BARRIER_BATCH", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return EnvSwitch("KYTY_BARRIER_BATCH", true);
+	}));
 	return enabled;
 }
 
 bool BarrierSinkEnabled() {
-	static const bool enabled = BarrierBatchEnabled() && EnvSwitch("KYTY_BARRIER_SINK", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return BarrierBatchEnabled() && EnvSwitch("KYTY_BARRIER_SINK", true);
+	}));
 	return enabled;
 }
 
@@ -60,19 +67,26 @@ bool UploadBatchEnabled() {
 }
 
 bool DrawWriteSinkEnabled() {
-	static const bool enabled = BarrierBatchEnabled() && EnvSwitch("KYTY_DRAW_WRITE_SINK", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return BarrierBatchEnabled() && EnvSwitch("KYTY_DRAW_WRITE_SINK", true);
+	}));
 	return enabled;
 }
 
 bool DepthFeedbackKeepEnabled() {
-	static const bool enabled =
-	    BarrierBatchEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_KEEP", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return BarrierBatchEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_KEEP", true);
+	}));
 	return enabled;
 }
 
 bool DepthFeedbackLazyEnabled() {
-	static const bool enabled =
-	    DepthFeedbackKeepEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_LAZY", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return DepthFeedbackKeepEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_LAZY", true);
+	}));
 	return enabled;
 }
 
@@ -82,7 +96,10 @@ bool DepthLayoutStableEnabled() {
 }
 
 bool PushConstantShadowEnabled() {
-	static const bool enabled = EnvSwitch("KYTY_PUSH_CONSTANT_SHADOW", true);
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return EnvSwitch("KYTY_PUSH_CONSTANT_SHADOW", true);
+	}));
 	return enabled;
 }
 

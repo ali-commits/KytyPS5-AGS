@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DRAWPREP_COMMITSTATS_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DRAWPREP_COMMITSTATS_H_
 
+#include "common/onceValue.h"
 #include <cstdint>
 
 // KYTY_CP_COMMIT_STATS=1 (diagnostic, default off): where the command processor's time goes when it
@@ -79,14 +80,20 @@ namespace Detail {
 } // namespace Detail
 
 [[nodiscard]] inline bool Enabled() {
-	static const bool enabled = Detail::ReadEnabled();
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+		return Detail::ReadEnabled();
+	}));
 	return enabled;
 }
 
 // KYTY_CP_COMMIT_STATS=indirect: only native indirect draws committed from a prepared slot
 // (DrawPrep::Engine::ExecuteIndirect) are measured.
 [[nodiscard]] inline bool IndirectOnly() {
-	static const bool indirect = Detail::ReadIndirectOnly();
+	static std::atomic<int64_t> indirect_once {Common::OnceUnset};
+	const auto indirect = static_cast<bool>(Common::Once(indirect_once, [&] {
+		return Detail::ReadIndirectOnly();
+	}));
 	return indirect;
 }
 

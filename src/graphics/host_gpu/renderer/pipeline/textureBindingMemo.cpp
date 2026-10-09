@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/textureBindingMemo.h"
 
 #include "common/assert.h"
+#include "common/onceValue.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
@@ -124,10 +125,11 @@ TextureBindingMemo::TextureBindingMemo() = default;
 TextureBindingMemo::~TextureBindingMemo() = default;
 
 bool TextureBindingMemo::Enabled() {
-	static const bool enabled = [] {
+	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
+	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const auto* value = std::getenv("KYTY_TEXTURE_BINDING_MEMO");
 		return value == nullptr || std::strcmp(value, "0") != 0;
-	}();
+	}));
 	return enabled;
 }
 
