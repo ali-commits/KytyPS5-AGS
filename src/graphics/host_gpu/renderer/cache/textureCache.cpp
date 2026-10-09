@@ -512,6 +512,8 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	// KYTY_IMAGE_GPU_KEEP (default on; =0 off): see KeepEligible (idea from chenxiao07/KytyPS5
 	// e7bf421a1 / 21cfed4aa / 8fe29414f).
 	m_gpu_keep = EnvNotZero("KYTY_IMAGE_GPU_KEEP");
+	// KYTY_IMAGE_GC_FILTER (default on; =0 off): see RunGarbageCollector.
+	m_gc_filter_candidates = EnvNotZero("KYTY_IMAGE_GC_FILTER");
 	LOGF("Image GPU keep (KYTY_IMAGE_GPU_KEEP): %s\n",
 	     m_gpu_keep ? "CPU writes and partial unmaps replace only their bytes of GPU-written images"
 	                : "off (whole-image refresh)");
@@ -6310,6 +6312,12 @@ bool TextureCache::IdleRetirable(const Image& image, uint64_t frame, uint64_t mi
 	// What the submission-age collector frees without a download: clean of GPU writes (the guest
 	// bytes or the buffer cache hold the contents, a later use recreates and refreshes it), and
 	// not a stencil association, a bound resource, a render target or a presentation surface.
+	// GPU-written images stay however long they go unused (chenxiao07/KytyPS5 45beec32a frees them
+	// after 600 flips): their native contents are the only copy of what the GPU rendered (guest
+	// memory holds older bytes; a tiled image has no download path, and KYTY_ALIAS_BYTES would only
+	// move the bytes into a cache buffer of the same size). An age says nothing about a later read:
+	// a probe or impostor rendered once and sampled minutes later would come back as stale guest
+	// bytes. Freeing them needs a download into guest memory first, not an age.
 	return image.registered && !image.depth_id && !image.IsGpuModified() &&
 	       !image.binding.is_bound && !image.binding.is_target && !image.usage.video_out &&
 	       frame - std::min(frame, image.frame_accessed_last) > min_age;
@@ -6443,9 +6451,28 @@ void TextureCache::RunGarbageCollector() {
 		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
 		std::vector<ImageId> candidates;
 		candidates.reserve(deletions);
+		// KYTY_IMAGE_GC_FILTER (default on; =0 counts every entry; chenxiao07/KytyPS5 45beec32a):
+		// the walk passes over the images the loop below keeps, without counting them against the
+		// budget. Those are never used again either, so they stay at the front of the LRU list:
+		// counted, every pass examined the same kept images and deleted nothing behind them.
+		const auto kept = [&](ImageId id) {
+			const auto* owner = m_slot_images.try_get(id);
+			if (owner == nullptr || !owner->registered || owner->depth_id) {
+				return true; // a stencil association goes with its depth image
+			}
+			if (!owner->IsGpuModified()) {
+				return false;
+			}
+			const bool safe = SafeToDownload(*owner);
+			return safe && (owner->info.IsTiled() || !pressured);
+		};
+		size_t passed = 0;
 		// Deleting depth recursively deletes its stencil association, so finish LRU traversal
 		// first.
 		m_lru_cache.ForEachItemBelow(tick - age, [&](ImageId id) {
+			if (m_gc_filter_candidates && kept(id)) {
+				return ++passed >= 4096; // bounded per pass
+			}
 			candidates.push_back(id);
 			return candidates.size() == deletions;
 		});

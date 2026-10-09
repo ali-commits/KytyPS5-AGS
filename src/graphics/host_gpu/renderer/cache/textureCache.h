@@ -565,6 +565,8 @@ private:
 	uint64_t         m_gc_tick                = 0;
 	ImageCacheGcPolicy m_pressure_gc_policy;
 	bool             m_pressure_gc_enabled   = false;
+	// KYTY_IMAGE_GC_FILTER (RunGarbageCollector's submission-age walk).
+	bool             m_gc_filter_candidates  = true;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t>::Cursor m_pressure_gc_cursor;
 	uint64_t m_pressure_retirement_bytes = 0;
 	mutable uint32_t m_image_query_epoch      = 0;

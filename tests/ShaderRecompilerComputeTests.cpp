@@ -364,6 +364,10 @@ struct TextureCacheTestAccess {
   }
   // KYTY_IMAGE_GPU_KEEP.
   static void SetGpuKeep(TextureCache &cache, bool keep) { cache.m_gpu_keep = keep; }
+  // KYTY_IMAGE_GC_FILTER.
+  static void SetGcFilter(TextureCache &cache, bool filter) {
+    cache.m_gc_filter_candidates = filter;
+  }
 
   static void ClearImage(TextureCache &cache, CommandBuffer &command, ImageId id,
                          const vk::ImageSubresourceRange &range,
@@ -382,6 +386,8 @@ struct TextureCacheTestAccess {
     // This fixture asserts the legacy submission-age thresholds and exact
     // ten-entry traversal budget, independently of the launch environment.
     cache.m_pressure_gc_enabled = false;
+    // KYTY_IMAGE_GC_FILTER off: every walked entry counts (SetGcFilter turns it on).
+    cache.m_gc_filter_candidates = false;
     cache.m_trigger_gc_memory = 0;
     cache.m_pressure_gc_memory = pressure;
     cache.m_critical_gc_memory = UINT64_MAX;
@@ -15318,6 +15324,45 @@ public:
       Require(name, "depth/stencil GC traversal budget", gc_depth_budget,
               "recursive association deletion stopped LRU traversal or "
               "exceeded the ten-entry deletion budget");
+      // KYTY_IMAGE_GC_FILTER: stencil associations (freed with their depth image) do not count
+      // against the ten-entry budget, so six pairs are all collected in one pass.
+      constexpr uint64_t gc_filter_pair_offset = 0x360000;
+      std::array<ImageId, gc_depth_pair_count> gc_filter_depth{};
+      std::array<ImageId, gc_depth_pair_count> gc_filter_stencil{};
+      std::array<ImageId, gc_depth_pair_count * 2> gc_filter_lru{};
+      for (size_t index = 0; index < gc_depth_pair_count; index++) {
+        auto depth = MakeLinearDesc(
+            base + gc_filter_pair_offset + index * gc_depth_pair_stride,
+            sizeof(float), vk::Format::eD32SfloatS8Uint,
+            Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+            {1, 1, 1}, 1, 4, 1);
+        depth.type = BindingType::DepthTarget;
+        depth.info.stencil = {depth.info.data.address + gc_depth_pair_stride / 2,
+                              sizeof(uint32_t)};
+        depth.view_info.format = vk::Format::eD32SfloatS8Uint;
+        depth.view_info.aspect =
+            vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+        depth.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        gc_filter_depth[index] = texture_cache.FindImage(depth);
+        TextureCacheTestAccess::AssociateStencil(texture_cache, gc_filter_depth[index],
+                                                 depth.info.stencil);
+        gc_filter_stencil[index] = texture_cache.FindImageFromRange(
+            depth.info.stencil.address, depth.info.stencil.size, false);
+        // Association first: the old walk spent half its budget on them.
+        gc_filter_lru[index * 2] = gc_filter_stencil[index];
+        gc_filter_lru[index * 2 + 1] = gc_filter_depth[index];
+      }
+      TextureCacheTestAccess::ConfigureGarbageCollection(texture_cache, gc_filter_lru, 81,
+                                                         UINT64_MAX);
+      TextureCacheTestAccess::SetGcFilter(texture_cache, true);
+      OnGpuThread(context, [&] { texture_cache.RunGarbageCollector(); });
+      bool gc_filter_all = true;
+      for (size_t index = 0; index < gc_depth_pair_count; index++) {
+        gc_filter_all &= !TextureCacheTestAccess::Contains(texture_cache, gc_filter_depth[index]) &&
+                         !TextureCacheTestAccess::Contains(texture_cache, gc_filter_stencil[index]);
+      }
+      Require(name, "GC candidate filter", gc_filter_all,
+              "stencil associations counted against the deletion budget");
 
 
       constexpr uint64_t large_offset = 0x400000;
