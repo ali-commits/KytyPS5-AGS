@@ -19181,6 +19181,256 @@ public:
                 static_cast<unsigned long long>(DrawRun::GetTotals().verify_checks.load()));
   }
 
+  // KYTY_DRAW_RUN_RECALL: draws of one rendering instance alternating between two textures (two
+  // structure keys), so none continues the draw before it. With the switch on, a draw continues the
+  // earlier record of its texture (a recall) when that record is of the same rendering instance;
+  // after a texture rewrite between the two streams the first draw of that texture falls back late. Every image must equal the
+  // serial draws' (additive blending: a recall with the other texture's bindings changes the sum).
+  void CheckDrawRunRecall() {
+    const char *name = "DrawRunRecall";
+    constexpr uintptr_t base = 0x000000020b000000ull;
+    constexpr uint64_t allocation_size = 0x400000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t vertex_offset = 0x1000;
+    constexpr uint64_t pixel_offset = 0x2000;
+    constexpr uint64_t user_data_offset = 0x4000;
+    constexpr uint64_t target_offset = 0x20000;
+    // Serial phase: textures 0 and 1; command-processor phase: textures 2 and 3.
+    constexpr std::array<uint64_t, 4> texture_offsets{0x100000, 0x140000, 0x200000, 0x240000};
+    constexpr uint64_t texture_bytes = 0x10000;
+    constexpr uint32_t extent = 32;
+    constexpr uint32_t texture_extent = 8;
+    constexpr uint32_t draws_per_stream = 6;
+    constexpr std::array<u32, 2> texels{0x10u | (0x20u << 8u) | (0x30u << 16u) | (0x40u << 24u),
+                                        0x40u | (0x08u << 8u) | (0x04u << 16u) | (0x20u << 24u)};
+    constexpr u32 rewritten_texel = 0x02u | (0x04u << 8u) | (0x60u << 16u) | (0x10u << 24u);
+
+    std::vector<u32> vertex_code;
+    AppendVMovLiteral(&vertex_code, 1, 0xbf800000u);
+    AppendVMovLiteral(&vertex_code, 2, 0x40400000u);
+    vertex_code.push_back(EncodeVopc(0xc2, InlineU32(1), 5));
+    vertex_code.push_back(EncodeVop2(0x01, 3, Vgpr(1), 2));
+    vertex_code.push_back(EncodeVopc(0xc2, InlineU32(2), 5));
+    vertex_code.push_back(EncodeVop2(0x01, 4, Vgpr(1), 2));
+    AppendVMovU32(&vertex_code, 0, 0);
+    AppendVMovLiteral(&vertex_code, 6, 0x3f800000u);
+    vertex_code.push_back(EncodeExp0(0x0c, 0xf));
+    vertex_code.push_back(EncodeExp1(3, 4, 0, 6));
+    for (u32 parameter = 0; parameter < 8; parameter++) {
+      vertex_code.push_back(EncodeExp0(0x20 + parameter, 0xf));
+      vertex_code.push_back(EncodeExp1(0, 0, 0, 0));
+    }
+    AppendEnd(&vertex_code);
+    std::vector<u32> pixel_code;
+    AppendVMovLiteral(&pixel_code, 20, 0x3f000000u);
+    AppendVMovLiteral(&pixel_code, 21, 0x3f000000u);
+    pixel_code.push_back(EncodeMimg0(0x27, 0xf)); // IMAGE_SAMPLE_LZ
+    pixel_code.push_back(EncodeMimg1(0, 20, 0, 2));
+    pixel_code.push_back(EncodeSopp(0x0c, 0));     // s_waitcnt
+    pixel_code.push_back(EncodeExp0(0x00, 0xf));
+    pixel_code.push_back(EncodeExp1(0, 1, 2, 3));
+    AppendEnd(&pixel_code);
+
+    EnsureRuntimeContext();
+    const PushDescriptorsScope push_descriptors(m_runtime_context, MaxPushDescriptors());
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), allocation_size,
+                allocation_alignment, 0, &direct_offset) == 0,
+            "draw-run allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(&mapped, allocation_size, 0x3, 0x10,
+                                                           direct_offset,
+                                                           allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "draw-run mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memset(memory, 0, allocation_size);
+    const auto vertex_address = base + vertex_offset;
+    const auto pixel_address = base + pixel_offset;
+    auto *user_data = reinterpret_cast<ShaderUserData *>(memory + user_data_offset);
+    std::memcpy(memory + vertex_offset, vertex_code.data(), vertex_code.size() * sizeof(u32));
+    std::memcpy(memory + pixel_offset, pixel_code.data(), pixel_code.size() * sizeof(u32));
+    ShaderMapUserData(vertex_address,
+                      {.type = Prospero::ShaderBinaryType::kGs,
+                       .user_data = user_data,
+                       .code_size_bytes = static_cast<uint32_t>(vertex_code.size() * sizeof(u32))});
+    ShaderMapUserData(pixel_address,
+                      {.type = Prospero::ShaderBinaryType::kPs,
+                       .user_data = user_data,
+                       .code_size_bytes = static_cast<uint32_t>(pixel_code.size() * sizeof(u32))});
+    std::array<ShaderTextureResource, 4> t_sharps{};
+    for (size_t t = 0; t < t_sharps.size(); t++) {
+      const auto address = base + texture_offsets[t];
+      std::fill_n(reinterpret_cast<u32 *>(memory + texture_offsets[t]), texture_bytes / sizeof(u32),
+                  texels[t % 2]);
+      t_sharps[t] = ShaderTextureResource{{
+          static_cast<uint32_t>(address >> 8u),
+          (static_cast<uint32_t>(Prospero::BufferFormat::k8_8_8_8UNorm) << 20u) |
+              (((texture_extent - 1u) & 3u) << 30u),
+          ((texture_extent - 1u) >> 2u) | ((texture_extent - 1u) << 14u),
+          DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(Prospero::ImageType::kColor2D) << 28u),
+          0, 0x00700000u, 0, 0}};
+    }
+    const ShaderSamplerResource s_sharp{
+        {2u | (2u << 3u) | (2u << 6u), 0, (1u << 20u) | (1u << 22u), 0}};
+    const std::array<u32, 3> draw{0xc0012d00u, 3u, 0x2u};
+
+    const auto context_owner = MakeRenderContext();
+    auto &context = *context_owner;
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
+    uint64_t recalled = 0;
+    uint64_t continued = 0;
+    uint64_t late = 0;
+    uint64_t mismatches = 0;
+    context.GetGpu().SendCommandSync([&] {
+      GraphicsInitJmpTables();
+      CommandProcessor processor(context, 0);
+      processor.Reset();
+      processor.BufferInit();
+      context.MapMemory(base, allocation_size);
+      auto &scheduler = context.GetCommandScheduler();
+      auto &executor = context.GetRenderExecutor();
+      auto &texture_cache = context.GetTextureCache();
+      auto &registers = processor.GetCtx();
+      auto &shaders = processor.GetShCtx();
+      registers.SetViewportTransformControl(0x300);
+      registers.SetViewportScaleOffset(0, extent / 2, extent / 2, extent / 2, extent / 2, 1, 0);
+      registers.SetViewportZMax(0, 1);
+      registers.SetScreenScissor(0, 0, extent, extent);
+      registers.SetWindowScissor(0, 0, extent, extent, false);
+      registers.SetGenericScissor(0, 0, extent, extent, false);
+      registers.SetViewportScissor(0, 0, 0, extent, extent, false);
+      registers.SetRenderTargetMask(0xf);
+      registers.SetShaderMask(0xf);
+      registers.SetPsInControl(0x8000);
+      registers.SetColorBase(0, {.addr = base + target_offset});
+      registers.SetColorInfo(0, {.format = Prospero::ChannelLayout::k32_32_32_32,
+                                 .channel_type = Prospero::ChannelType::kFloat,
+                                 .channel_order = Prospero::ChannelOrder::kStandard});
+      registers.SetColorAttrib2(0, {.height = extent - 1, .width = extent - 1});
+      registers.SetColorAttrib3(0, {.tile_mode = Prospero::TileMode::kLinear, .dimension = 1});
+      registers.SetTargetOutputMode(0, 4);
+      auto blend = registers.GetBlendControl(0);
+      blend.enable = true;
+      blend.color_srcblend = blend.color_destblend = blend.alpha_srcblend =
+          blend.alpha_destblend = static_cast<uint8_t>(Prospero::BlendFactor::kOne);
+      registers.SetBlendControl(0, blend);
+      auto target_info = registers.GetRenderTarget(0).info;
+      target_info.blend_bypass = false;
+      registers.SetColorInfo(0, target_info);
+      processor.GetUcfg().SetPrimitiveType(Prospero::PrimitiveType::kTriList);
+      shaders.SetEsShaderBase(vertex_address);
+      shaders.SetPsShaderBase(pixel_address);
+      shaders.SetPsShaderResource2({.user_sgpr = 12});
+
+      RenderColorInfo color{};
+      RenderExecutorTestAccess::ResolveRenderColorTarget(executor, scheduler.Current(), color, 0);
+      Require(name, "color target", static_cast<bool>(color.image_id),
+              "the 32x32 RGBA32F target was not created");
+      const auto clear = [&] {
+        TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), color.image_id,
+                                           {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
+      };
+      const auto read = [&] {
+        return ReadCachedTexel(name, context, color.image_id, {}, {extent, extent, 1});
+      };
+      const auto rewrite = [&](size_t t) {
+        std::vector<u32> data(texture_bytes / sizeof(u32), rewritten_texel);
+        Require(name, "texture rewrite",
+                Libs::LibKernel::Memory::TryWriteBacking(base + texture_offsets[t], data.data(),
+                                                         texture_bytes),
+                "the texture backing could not be written");
+        texture_cache.InvalidateMemory(base + texture_offsets[t], texture_bytes);
+      };
+
+      // Serial reference with textures 0 and 1 (draw k samples texture k % 2).
+      clear();
+      for (u32 k = 0; k < 2 * draws_per_stream; k++) {
+        if (k == draws_per_stream) {
+          rewrite(0);
+        }
+        for (u32 i = 0; i < 8; i++) {
+          shaders.SetPsUserSgpr(i, t_sharps[k % 2].fields[i], HW::UserSgprType::Unknown);
+        }
+        for (u32 i = 0; i < 4; i++) {
+          shaders.SetPsUserSgpr(8 + i, s_sharp.fields[i], HW::UserSgprType::Unknown);
+        }
+        RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+                                           {.vertex_count = 3, .instance_count = 1});
+      }
+      const auto serial = read();
+
+      // The same draws with textures 2 and 3 through the command processor, in two streams.
+      const auto stream = [&](u32 first) {
+        std::vector<u32> words;
+        for (u32 k = first; k < first + draws_per_stream; k++) {
+          words.push_back(KYTY_PM4(14, Pm4::IT_SET_SH_REG, Pm4::R_ZERO));
+          words.push_back(Pm4::SPI_SHADER_USER_DATA_PS_0);
+          words.insert(words.end(), std::begin(t_sharps[2 + k % 2].fields),
+                       std::end(t_sharps[2 + k % 2].fields));
+          words.insert(words.end(), std::begin(s_sharp.fields), std::end(s_sharp.fields));
+          words.insert(words.end(), draw.begin(), draw.end());
+        }
+        Pm4Execution execution;
+        Require(name, "run stream", processor.Process(execution, words) == Pm4ProcessResult::Complete,
+                "the draw stream did not complete");
+      };
+      auto &totals = DrawRun::GetTotals();
+      const auto recalled_before = totals.recalled.load();
+      const auto continued_before = totals.continued.load();
+      const auto late_before = totals.late_fallbacks.load();
+      const auto mismatches_before = totals.verify_mismatches.load();
+      clear();
+      stream(0);
+      rewrite(2);
+      stream(draws_per_stream);
+      recalled = totals.recalled.load() - recalled_before;
+      continued = totals.continued.load() - continued_before;
+      late = totals.late_fallbacks.load() - late_before;
+      mismatches = totals.verify_mismatches.load() - mismatches_before;
+      Require(name, "serial and command-processor draws", read() == serial,
+              "the command processor's draws differ from the serial draws (recalled " +
+                  std::to_string(recalled) + ", late fallbacks " + std::to_string(late) + ")");
+      Require(name, "verify", mismatches == 0,
+              std::to_string(mismatches) + " recall(s) would have reused a different value");
+      Require(name, "no plain continuation", continued == 0,
+              "alternating textures continued " + std::to_string(continued) + " draw(s)");
+      const auto *code_cert = std::getenv("KYTY_DRAW_PREP_CODE_CERT");
+      const bool certified = code_cert == nullptr || std::strcmp(code_cert, "0") != 0;
+      const bool acquire = DrawRun::AcquireReuseEnabled() || DrawRun::GetMode() == DrawRun::Mode::Verify;
+      if (DrawRun::Enabled() && DrawRun::RecallEnabled() && acquire &&
+          DrawPrep::GetMode() != DrawPrep::Mode::Off && certified) {
+        // The first use of each texture transitions it, which begins a new rendering instance:
+        // draw 1's, so draw 2 cannot recall draw 0. Draws 3..5 recall. After the rewrite draw 6
+        // recalls, falls back late and refreshes texture 2 (another new instance), so draw 7 cannot
+        // recall draw 5; draws 8..11 recall: 8 recalls, 1 late fallback.
+        Require(name, "recalls", recalled == 2 * draws_per_stream - 4 && late == 1,
+                "recalled " + std::to_string(recalled) + ", late fallbacks " + std::to_string(late));
+      } else {
+        Require(name, "no recall without the switch", recalled == 0 && late == 0,
+                "recalled " + std::to_string(recalled) + " without KYTY_DRAW_RUN_RECALL");
+      }
+      RenderExecutorTestAccess::ResetBindings(executor);
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "draw-run mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "draw-run allocation release failed");
+    std::printf("[gpu]     %-32s ok (recalled %llu, late fallbacks %llu, verify checks %llu)\n", name,
+                static_cast<unsigned long long>(recalled), static_cast<unsigned long long>(late),
+                static_cast<unsigned long long>(DrawRun::GetTotals().verify_checks.load()));
+  }
+
   // KYTY_EOP_TIMESTAMPS: end-of-pipe clock writes (RELEASE_MEM, data select 3).
   // - record: the slots keep their record-time values.
   // - gpu: the record-time values are written at once. Once the tick has completed, the next clock
@@ -56763,6 +57013,11 @@ int main(int argc, char **argv) {
     vulkan.CheckDrawRun(false, true);
     vulkan.CheckDrawRun(true, true);
     vulkan.CheckDepthFeedbackKeep();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--draw-run-recall-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDrawRunRecall();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-run-writes-only") == 0) {

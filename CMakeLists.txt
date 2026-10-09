@@ -1710,6 +1710,27 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-writes-only)
 	set_tests_properties(draw_run_writes_parallel_verify PROPERTIES
 		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=exit;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1")
+	# KYTY_DRAW_RUN_RECALL: draws alternating between two textures recall the earlier record.
+	add_test(NAME draw_run_recall_off
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_recall_off PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1")
+	add_test(NAME draw_run_recall_inline
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_recall_inline PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_RECALL=1")
+	add_test(NAME draw_run_recall_inline_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_recall_inline_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=inline;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_RUN=exit;KYTY_DRAW_RUN_RECALL=1")
+	add_test(NAME draw_run_recall_parallel_all
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_recall_parallel_all PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1")
+	add_test(NAME draw_run_recall_parallel_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_recall_parallel_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=exit;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1")
 	# The KYTY_DRAW_RUN* flags switched live (common/liveSwitch.h): on, then off again.
 	add_test(NAME draw_run_live
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-live)

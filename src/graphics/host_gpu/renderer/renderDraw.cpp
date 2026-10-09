@@ -61,6 +61,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include <xxhash.h>
 
 namespace Libs::Graphics {
 
@@ -2057,7 +2058,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// KYTY_DRAW_RUN (drawPrep/drawRun.h): a continuation keeps the previous draw's targets (the
 	// entries are still in `state`: the fast reset leaves them, DrawRunCandidate requires it).
 	m_run_slice_offset = render_target_slice_offset;
-	if (DrawRun::Enabled() && DrawRunCandidate(buffer, state, render_target_slice_offset)) {
+	if (DrawRun::Enabled() &&
+	    (DrawRunCandidate(buffer, state, render_target_slice_offset) ||
+	     (DrawRun::RecallEnabled() &&
+	      DrawRunRecallCandidate(buffer, state, render_target_slice_offset)))) {
 		if (DrawRun::GetMode() == DrawRun::Mode::On) {
 			state.color_count         = m_run.color_count;
 			state.color_slots_written = m_run.color_slots;
@@ -2178,8 +2182,10 @@ static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInf
 
 void RenderExecutor::BeginDrawRun() {
 	m_run_prev_valid     = m_run.valid;
+	m_run_keepable       = m_run.valid;
 	m_run.valid          = false;
 	m_run_active         = false;
+	m_run_recall         = false;
 	m_run_verify         = false;
 	m_prepared_validated = false;
 	if (!m_in_engine_commit && DrawRun::Enabled()) {
@@ -2255,7 +2261,7 @@ static bool DrawRunTextureReady(const Image& image) {
 // 3 registration, 4 rebind request, 5 residency, 6 layout, 7 access, 8 stage, 9 per-subresource
 // states, 10 content serial, 11 unregistered, 12 CPU-dirty, 13 buffer-modified, 14 texture refresh).
 uint32_t RenderExecutor::DrawRunImagesChange(bool compare_serials, bool attachments_only,
-                                           bool log_change) const {
+                                           bool log_change, bool attachment_serials) const {
 	auto&            cache = m_context.GetTextureCache();
 	std::scoped_lock lock {cache.m_lock};
 	const auto&      images = cache.m_slot_images;
@@ -2284,7 +2290,8 @@ uint32_t RenderExecutor::DrawRunImagesChange(bool compare_serials, bool attachme
 			field = 8;
 		} else if (image->backing.subresource_states.empty() != mark.single_state) {
 			field = 9;
-		} else if (compare_serials && image->ContentSerial() != mark.serial) {
+		} else if (compare_serials && (mark.texture || attachment_serials) &&
+		           image->ContentSerial() != mark.serial) {
 			field = 10;
 		} else if (!image->info.data.Empty() && !image->registered) {
 			field = 11;
@@ -2401,7 +2408,7 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 			if (runtime == nullptr) {
 				continue;
 			}
-			switch (DrawRunWritesOverRun(*runtime)) {
+			switch (DrawRunWritesOverRun(*runtime, m_run.images)) {
 				case 0: break;
 				case 1: writes = true; break;
 				default: DrawRun::CountMiss(Miss::Writes); return false;
@@ -2415,10 +2422,180 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 	return true;
 }
 
+// KYTY_DRAW_RUN_RECALL: a hash of a binding's mip views (RecallTexture::mips).
+static uint64_t DrawRunMipViewsHash(const std::vector<vk::ImageView>& views) {
+	return views.empty() ? 0 : XXH3_64bits(views.data(), views.size() * sizeof(vk::ImageView));
+}
+
+// KYTY_DRAW_RUN_RECALL: the stage's texture set of these words (-1: the current one, 0..2 its
+// history; -2: none) when it holds exactly the bindings the record committed.
+template <typename RecallTextures>
+static int DrawRunRecallSet(const PreparedBindings& prepared, const ShaderStageRuntime& runtime,
+                            const RecallTextures& textures) {
+	const auto& program = *runtime.program;
+	const auto& words   = runtime.resources->images;
+	if (program.info.images.size() != textures.size()) {
+		return -2;
+	}
+	const auto same = [&](const std::vector<TextureBinding>& images) {
+		if (images.size() != textures.size()) {
+			return false;
+		}
+		for (size_t i = 0; i < images.size(); i++) {
+			const auto& binding = images[i];
+			const auto& kept    = textures[i];
+			if (binding.image_id != kept.id || binding.image_view != kept.view ||
+			    binding.layout != kept.layout || DrawRunMipViewsHash(binding.mip_views) != kept.mips) {
+				return false;
+			}
+		}
+		return true;
+	};
+	if (textures.empty()) {
+		return -1; // nothing to take back: the stage's images are cleared
+	}
+	if (prepared.texture_program == &program && std::ranges::equal(prepared.texture_words, words)) {
+		return same(prepared.images) ? -1 : -2;
+	}
+	for (size_t i = 0; i < prepared.texture_history.size(); i++) {
+		const auto& set = prepared.texture_history[i];
+		if (set.program == &program && std::ranges::equal(set.words, words)) {
+			return same(set.images) ? static_cast<int>(i) : -2;
+		}
+	}
+	return -2;
+}
+
+// KYTY_DRAW_RUN_RECALL (drawPrep/drawRun.h): whether the committed draw continues a kept record of
+// its rendering instance (PrepareDrawRenderState, after DrawRunCandidate declined a plain
+// continuation). On success the record is m_run (the previous one kept in its place) and, unless in
+// verify mode, the stages hold the record's texture sets and samplers and `state` its targets.
+bool RenderExecutor::DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRenderState& state,
+                                            uint32_t render_target_slice_offset) {
+	if (m_run_key == 0 || (m_run_prev_valid && m_run_key == m_run.key)) {
+		return false;
+	}
+	DrawRunRecord* kept = nullptr;
+	for (auto& record: m_run_kept) {
+		if (record.valid && record.key == m_run_key) {
+			kept = &record;
+			break;
+		}
+	}
+	if (kept == nullptr) {
+		return false;
+	}
+	auto& totals = DrawRun::GetTotals();
+	totals.recall_matches.fetch_add(1, std::memory_order_relaxed);
+	auto& record = *kept;
+	if (DrawRun::ActivityEpoch() != record.activity || buffer.Identity() != record.command ||
+	    m_context.GetCommandScheduler().CurrentTick() != record.tick ||
+	    buffer.ActiveRenderingSerial() == 0 ||
+	    buffer.ActiveRenderingSerial() != record.rendering_serial) {
+		record.valid = false; // it can never be recalled again
+		return false;
+	}
+	const void* pixel = state.ps_active ? state.ps_input_info.stage.program : nullptr;
+	if (!record.recall_valid || !record.acquire_valid || record.depth.size() != 1 ||
+	    record.colors.size() != record.color_count || !m_prepared_validated ||
+	    state.ps_active != record.ps_active || render_target_slice_offset != record.slice_offset ||
+	    state.vertex_stages_written != 1 ||
+	    state.vertex_info[0].stage.program != record.vertex_program || pixel != record.pixel_program ||
+	    (state.ps_active && !m_graphics_bindings.pixel.has_value())) {
+		return false;
+	}
+	const auto vertex_textures = std::span(record.recall_textures).first(record.recall_vertex_textures);
+	const auto pixel_textures  = std::span(record.recall_textures).subspan(record.recall_vertex_textures);
+	auto&      vertex          = m_graphics_bindings.vertex[0];
+	const auto vertex_set      = DrawRunRecallSet(vertex, state.vertex_info[0].stage, vertex_textures);
+	const auto pixel_set       = state.ps_active ? DrawRunRecallSet(*m_graphics_bindings.pixel,
+	                                                                state.ps_input_info.stage, pixel_textures)
+	                                             : (pixel_textures.empty() ? -1 : -2);
+	const auto pixel_samplers  = record.recall_samplers.size() - record.recall_vertex_samplers;
+	if (vertex_set == -2 || pixel_set == -2 ||
+	    state.vertex_info[0].stage.program->info.samplers.size() != record.recall_vertex_samplers ||
+	    (state.ps_active ? state.ps_input_info.stage.program->info.samplers.size() : 0) !=
+	        pixel_samplers) {
+		totals.recall_sets_missed.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	// KYTY_DRAW_RUN_WRITES: the candidate's own writes must not lie over an image of the record.
+	if (record.writes) {
+		const ShaderStageRuntime* runtimes[] = {&state.vertex_info[0].stage,
+		                                        state.ps_active ? &state.ps_input_info.stage : nullptr};
+		for (const auto* runtime: runtimes) {
+			if (runtime != nullptr && DrawRunWritesOverRun(*runtime, record.images) > 1) {
+				DrawRun::CountMiss(DrawRun::Miss::Writes);
+				return false;
+			}
+		}
+	}
+	// The record becomes the run; the previous one (complete or not) takes its place.
+	std::swap(m_run, record);
+	record.valid     = m_run_keepable && record.key != m_run.key;
+	m_run.valid      = false; // the draw's own record (DrawRunRecordDraw) validates it again
+	m_run_prev_valid = true;
+	m_run_keepable   = true;
+	m_run_recall     = true;
+	totals.recalled.fetch_add(1, std::memory_order_relaxed);
+	if (DrawRun::GetMode() != DrawRun::Mode::On) {
+		return true; // verify: the normal path runs and is compared with the record
+	}
+	// The record's bindings: each stage's texture set back from its history, its samplers, and the
+	// record's targets.
+	const auto restore = [](PreparedBindings& prepared, const ShaderStageRuntime& runtime, int set,
+	                        std::span<const vk::Sampler> samplers) {
+		if (runtime.program->info.images.empty()) {
+			prepared.images.clear();
+			prepared.texture_program = nullptr;
+		} else if (set >= 0) {
+			auto& found = prepared.texture_history[static_cast<size_t>(set)];
+			std::swap(found.program, prepared.texture_program);
+			std::swap(found.words, prepared.texture_words);
+			std::swap(found.images, prepared.images);
+		}
+		prepared.samplers.assign(samplers.begin(), samplers.end());
+	};
+	const auto samplers = std::span<const vk::Sampler>(m_run.recall_samplers);
+	restore(vertex, state.vertex_info[0].stage, vertex_set,
+	        samplers.first(m_run.recall_vertex_samplers));
+	if (state.ps_active) {
+		restore(*m_graphics_bindings.pixel, state.ps_input_info.stage, pixel_set,
+		        samplers.subspan(m_run.recall_vertex_samplers));
+	}
+	for (uint32_t i = 0; i < m_run.color_count; i++) {
+		state.color_info[i] = m_run.colors[i];
+	}
+	state.depth_info = m_run.depth[0];
+	return true;
+}
+
+// KYTY_DRAW_RUN_RECALL: before a draw records a new run, the record it replaces is kept (in the
+// entry of the same key, else the next one in turn).
+void RenderExecutor::DrawRunKeep() {
+	if (!m_run_keepable || !m_run.recall_valid || m_run.key == m_run_key || !DrawRun::RecallEnabled()) {
+		return;
+	}
+	m_run_keepable = false;
+	auto slot      = m_run_kept_next;
+	for (uint32_t i = 0; i < m_run_kept.size(); i++) {
+		if (m_run_kept[i].key == m_run.key) {
+			slot = i;
+			break;
+		}
+	}
+	if (slot == m_run_kept_next) {
+		m_run_kept_next = (m_run_kept_next + 1) % static_cast<uint32_t>(m_run_kept.size());
+	}
+	std::swap(m_run, m_run_kept[slot]);
+	m_run_kept[slot].valid = true;
+}
+
 // KYTY_DRAW_RUN_WRITES: 0 when the stage writes no buffer, 1 when it writes only outside the run's
 // images, 2 when a written V# range (as the descriptor states it, before any clamp) lies over an
 // image of the run (a texture or an attachment) or the run has no image marks to compare.
-uint32_t RenderExecutor::DrawRunWritesOverRun(const ShaderStageRuntime& runtime) const {
+uint32_t RenderExecutor::DrawRunWritesOverRun(const ShaderStageRuntime&     runtime,
+                                              std::span<const DrawRunImage> images) {
 	const auto& program  = *runtime.program;
 	const auto& snapshot = *runtime.resources;
 	uint32_t    result   = 0;
@@ -2438,7 +2615,7 @@ uint32_t RenderExecutor::DrawRunWritesOverRun(const ShaderStageRuntime& runtime)
 		}
 		result = 1;
 		const auto end = address + size < address ? UINT64_MAX : address + size;
-		for (const auto& mark: m_run.images) {
+		for (const auto& mark: images) {
 			if (mark.size != 0 && address < mark.address + mark.size && mark.address < end) {
 				return 2;
 			}
@@ -2500,7 +2677,8 @@ bool RenderExecutor::DrawRunAcquireCandidate(const CommandBuffer&               
 
 bool RenderExecutor::DrawRunPartialPush(const CommandBuffer&           buffer,
                                         const PipelineCache::Pipeline& pipeline) const {
-	return DrawRun::PushPartialEnabled() && pipeline.uses_push_descriptors && m_run.push_valid &&
+	return DrawRun::PushPartialEnabled() && !m_run_recall && pipeline.uses_push_descriptors &&
+	       m_run.push_valid &&
 	       m_run.push_layout == pipeline.pipeline_layout &&
 	       buffer.DescriptorEpoch(vk::PipelineBindPoint::eGraphics) == m_run.push_epoch;
 }
@@ -2512,6 +2690,9 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
                                        std::span<PreparedBindings* const> stages,
                                        const vk::Rect2D*                  written,
                                        const PipelineCache::Pipeline&     pipeline) {
+	if (!m_run_active) {
+		DrawRunKeep();
+	}
 	auto& run            = m_run;
 	run.key              = m_run_key;
 	run.activity         = DrawRun::ActivityEpoch();
@@ -2586,6 +2767,23 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 		run.depth.assign(1, state.depth_info);
 		run.bounded = written != nullptr;
 		run.written = written != nullptr ? *written : vk::Rect2D {};
+	}
+	run.recall_valid = DrawRun::RecallEnabled();
+	if (run.recall_valid) {
+		run.recall_textures.clear();
+		run.recall_samplers.clear();
+		for (const auto* stage: stages) {
+			for (const auto& binding: stage->images) {
+				run.recall_textures.push_back({binding.image_id, binding.image_view, binding.layout,
+				                               DrawRunMipViewsHash(binding.mip_views)});
+			}
+			run.recall_samplers.insert(run.recall_samplers.end(), stage->samplers.begin(),
+			                           stage->samplers.end());
+			if (stage == stages.front()) {
+				run.recall_vertex_textures = static_cast<uint32_t>(run.recall_textures.size());
+				run.recall_vertex_samplers = static_cast<uint32_t>(run.recall_samplers.size());
+			}
+		}
 	}
 	if (verify) {
 		run.pushed_images.assign(m_descriptor_images.begin(), m_descriptor_images.end());
@@ -3296,6 +3494,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		DrawRun::GetTotals().late_fallbacks.fetch_add(1, std::memory_order_relaxed);
 		DrawRun::CountMiss(DrawRun::Miss::Images);
 		m_run_active = false;
+		DrawRunRecallFallback();
 		DrawRunTargets(buffer, draw, m_run_slice_offset, state);
 		// No plan: its shader data was taken by the first preparation above.
 		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
@@ -3329,6 +3528,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		DrawRun::GetTotals().late_fallbacks.fetch_add(1, std::memory_order_relaxed);
 		DrawRun::CountMiss(DrawRun::Miss::Images);
 		m_run_verify = false;
+		DrawRunRecallFallback();
 	}
 
 	// KYTY_LOD_STATS_PLAIN_VARIANT: without a mip-statistics counter on any image the pixel
@@ -3533,7 +3733,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// KYTY_DRAW_RUN continuation: the dynamic state is a function of the same registers, targets and
 	// vertex program as the previous draw's, which recorded it into this command buffer; the
 	// shadow shows nothing replaced it since (another pipeline bind or command buffer).
-	const bool run_dynamic = (m_run_active || m_run_verify) && DynamicStateShadowEnabled() &&
+	// A recall records it again: the draws in between left their own.
+	const bool run_dynamic = (m_run_active || m_run_verify) && !m_run_recall &&
+	                         DynamicStateShadowEnabled() &&
 	                         m_dynamic_state.valid && m_dynamic_state.command == vk_buffer.Identity() &&
 	                         m_dynamic_state.pipeline != nullptr &&
 	                         buffer.BoundPipeline(vk::PipelineBindPoint::eGraphics) ==

@@ -75,6 +75,7 @@ extern Live::Switch g_mode;
 extern Live::Switch g_acquire; // KYTY_DRAW_RUN_ACQUIRE
 extern Live::Switch g_push;    // KYTY_DRAW_RUN_PUSH
 extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
+extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -132,6 +133,29 @@ extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 // form runs. A switch change ends the current run.
 [[nodiscard]] inline bool WritesEnabled() {
 	return Detail::g_writes.On();
+}
+
+// KYTY_DRAW_RUN_RECALL=1 (live, default 0; with KYTY_DRAW_RUN=1 or verify; needs
+// KYTY_DRAW_RUN_ACQUIRE or verify mode, whose records keep their targets): a draw whose structure
+// key differs from the previous draw's may continue an EARLIER record of the same rendering
+// instance. A record is kept (RenderExecutor::m_run_kept, 32 entries) when the next draw starts
+// a new one. At the Sky Garden about half of the draws that start a run repeat the structure of an
+// earlier run of their instance (stages alternating between a few materials).
+// Recalling record R is a continuation of R, with these differences:
+//  - the certificate is R's: the same activity epoch (so only engine-committed draws ran since R),
+//    command buffer, tick and rendering instance, programs, slice offset and structure key;
+//  - each stage's texture set is taken back from the stage's texture history (the sets
+//    RepeatStageTextures keeps); its image ids, views, layouts and mip views must be exactly the
+//    ones R recorded, and the samplers are R's, so the bindings are R's;
+//  - the targets are R's recorded targets; the image check after the buffer work compares the
+//    attachments without their content serials (the draws in between drew into them, which is what
+//    a continuation of them would also skip), the textures with them;
+//  - the descriptors are pushed whole, the dynamic state is recorded again and the pipeline is
+//    bound as for any draw (the draws in between changed all three).
+// Verify mode: a would-be recall takes the normal path, which is compared with R as for any
+// continuation (targets, textures and views, samplers, rendering state, no transition).
+[[nodiscard]] inline bool RecallEnabled() {
+	return Detail::g_recall.On();
 }
 
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
@@ -196,6 +220,9 @@ struct Totals {
 	std::atomic<uint64_t> partial_pushes {0};  // KYTY_DRAW_RUN_PUSH (verify: would have)
 	std::atomic<uint64_t> write_records {0};   // KYTY_DRAW_RUN_WRITES: eligible draws with buffer writes
 	std::atomic<uint64_t> write_continued {0}; // continuations (verify: would-be) whose programs write
+	std::atomic<uint64_t> recall_matches {0};  // KYTY_DRAW_RUN_RECALL: a kept record had the key
+	std::atomic<uint64_t> recalled {0};        // recalled (verify: would have)
+	std::atomic<uint64_t> recall_sets_missed {0}; // a stage's texture set was not R's any more
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};

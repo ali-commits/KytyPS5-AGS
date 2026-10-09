@@ -1310,6 +1310,20 @@ private:
 		bool               push_valid  = false; // pushed (not a descriptor set)
 		// KYTY_DRAW_RUN_WRITES: the recorded programs write buffers (recorded with the switch on).
 		bool writes = false;
+		// KYTY_DRAW_RUN_RECALL: the texture bindings each stage committed (the vertex stage's first)
+		// and its samplers: a recall takes each stage's set back from its texture history only when it
+		// still holds exactly these.
+		struct RecallTexture {
+			ImageId         id {};
+			vk::ImageView   view   = nullptr;
+			vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+			uint64_t        mips   = 0; // hash of the mip views
+		};
+		std::vector<RecallTexture> recall_textures;
+		std::vector<vk::Sampler>   recall_samplers;
+		uint32_t                   recall_vertex_textures = 0;
+		uint32_t                   recall_vertex_samplers = 0;
+		bool                       recall_valid           = false;
 		// Verify mode: what the normal path must reproduce for a continuation.
 		std::vector<TextureBinding>          textures;
 		std::vector<vk::Sampler>             samplers;
@@ -1322,11 +1336,13 @@ private:
 	[[nodiscard]] DrawRunImage MakeDrawRunImage(ImageId id, bool texture) const;
 	// attachments_only: the textures of the record are not checked (KYTY_DRAW_RUN_ACQUIRE).
 	// DrawRunImagesChange: 0 when unchanged, else the first difference (verify-mode detail).
+	// attachment_serials: false compares the content serials of the textures only (a recall).
 	[[nodiscard]] uint32_t DrawRunImagesChange(bool compare_serials,
-	                                           bool attachments_only = false, bool log_change = false) const;
+	                                           bool attachments_only = false, bool log_change = false,
+	                                           bool attachment_serials = true) const;
 	[[nodiscard]] bool     DrawRunImagesUnchanged(bool compare_serials,
 	                                              bool attachments_only = false) const {
-		return DrawRunImagesChange(compare_serials, attachments_only) == 0;
+		return DrawRunImagesChange(compare_serials, attachments_only, false, !m_run_recall) == 0;
 	}
 	// Whether a guest range lies over one of the marked attachments.
 	[[nodiscard]] static bool DrawRunOverAttachment(std::span<const DrawRunImage> marks,
@@ -1347,7 +1363,8 @@ private:
 	                                    uint32_t render_target_slice_offset);
 	// KYTY_DRAW_RUN_WRITES: whether a stage of a candidate writes buffers (1) and whether a written
 	// range lies over an image of the run (2; 0: no writes).
-	[[nodiscard]] uint32_t DrawRunWritesOverRun(const ShaderStageRuntime& runtime) const;
+	[[nodiscard]] static uint32_t DrawRunWritesOverRun(const ShaderStageRuntime&     runtime,
+	                                                   std::span<const DrawRunImage> images);
 	void               DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                  uint32_t render_target_slice_offset, DrawRenderState& state);
 	// written: the scissor union the attachments were acquired for (null: unbounded claims).
@@ -1363,6 +1380,23 @@ private:
 	                   vk::ImageAspectFlags feedback_aspects,
 	                   std::span<PreparedBindings* const> stages);
 	DrawRunRecord m_run;
+	// KYTY_DRAW_RUN_RECALL: earlier records of the instance (DrawRunKeep), whether the committed draw
+	// recalls one, and whether m_run holds a complete record that is kept when it is replaced.
+	[[nodiscard]] bool DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRenderState& state,
+	                                          uint32_t render_target_slice_offset);
+	void               DrawRunKeep();
+	// A recall that falls back late: its record is not kept again, nor seeds an acquisition reuse.
+	void DrawRunRecallFallback() {
+		if (m_run_recall) {
+			m_run_recall     = false;
+			m_run_keepable   = false;
+			m_run_prev_valid = false;
+		}
+	}
+	std::array<DrawRunRecord, 32> m_run_kept;
+	uint32_t                     m_run_kept_next = 0;
+	bool                         m_run_recall    = false;
+	bool                         m_run_keepable  = false;
 	bool          m_run_prev_valid     = false; // m_run.valid when the committed draw began
 	bool          m_run_active         = false; // the draw takes the delta path
 	bool          m_run_verify         = false; // verify mode: the draw would have continued
