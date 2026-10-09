@@ -2333,6 +2333,44 @@ uint32_t RenderExecutor::DrawRunImagesChange(bool compare_serials, bool attachme
 	return 0;
 }
 
+// KYTY_DRAW_RUN_IMAGE_EPOCH (drawRun.h): DrawRunImagesChange is skipped while no image property it
+// reads changed since the record's marks were proven current.
+bool RenderExecutor::DrawRunImagesUnchanged(bool compare_serials, bool attachments_only) const {
+	const auto mode  = DrawRun::ImageEpochMode();
+	const auto epoch = ImageStateEpoch();
+	if (mode != 0 && m_run.image_epoch != 0 && epoch == m_run.image_epoch) {
+		auto& totals = DrawRun::GetTotals();
+		if (mode == 1) {
+			totals.epoch_skips.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+		totals.epoch_checks.fetch_add(1, std::memory_order_relaxed);
+		const auto change =
+		    DrawRunImagesChange(compare_serials, attachments_only, false, !m_run_recall);
+		if (change != 0) {
+			totals.epoch_mismatches.fetch_add(1, std::memory_order_relaxed);
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+				std::printf("DrawRunImageEpochVerify: an image changed without an epoch bump "
+				            "(change 0x%x)\n",
+				            change);
+				std::fflush(stdout);
+			}
+			if (mode == 3) {
+				EXIT("DrawRunImageEpochVerify: an image changed without an epoch bump\n");
+			}
+		}
+		return change == 0;
+	}
+	const bool unchanged =
+	    DrawRunImagesChange(compare_serials, attachments_only, false, !m_run_recall) == 0;
+	// A full check that passed proves the marks current as of `epoch` (read before it).
+	if (unchanged && compare_serials && !attachments_only && !m_run_recall) {
+		m_run.image_epoch = epoch;
+	}
+	return unchanged;
+}
+
 void RenderExecutor::DrawRunMarkBindings() {
 	auto& images = m_context.GetTextureCache().m_slot_images;
 	for (const auto& mark: m_run.images) {
@@ -2737,6 +2775,9 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 				return;
 			}
 		}
+		// KYTY_DRAW_RUN_IMAGE_EPOCH: the epoch before the marks, valid when every marked image also
+		// passes the check's flag tests now (what the marks do not record).
+		const auto epoch = ImageStateEpoch();
 		for (const auto* stage: stages) {
 			for (const auto& binding: stage->images) {
 				run.images.push_back(MakeDrawRunImage(binding.image_id, true));
@@ -2749,6 +2790,15 @@ void RenderExecutor::DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRe
 		if (state.depth_info.image_id) {
 			run.images.push_back(MakeDrawRunImage(state.depth_info.image_id, false));
 		}
+		bool clean = true;
+		for (const auto& mark: run.images) {
+			const auto* image = m_context.GetTextureCache().m_slot_images.try_get(mark.id);
+			clean = clean && image != nullptr && !image->binding.needs_rebind &&
+			        (image->info.data.Empty() ||
+			         (image->registered && !image->IsCpuDirty() && !image->IsBufferModified())) &&
+			        (!mark.texture || DrawRunTextureReady(*image));
+		}
+		run.image_epoch = clean ? epoch : 0;
 	}
 	// A texture over an attachment's memory (an alias of it) is synchronized from the attachment by
 	// each draw's texture resolution (SyncAliasFromOwner), which a continuation skips: no run.

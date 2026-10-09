@@ -1731,6 +1731,32 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
 	set_tests_properties(draw_run_recall_parallel_verify PROPERTIES
 		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN=exit;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1")
+	# KYTY_DRAW_RUN_IMAGE_EPOCH: continuations skip the image check while the image-state epoch holds
+	# (on), and the verify mode checks every skip (exit at a change without an epoch bump).
+	add_test(NAME draw_run_image_epoch_run_on
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_image_epoch_run_on PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=1")
+	add_test(NAME draw_run_image_epoch_run_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(draw_run_image_epoch_run_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=exit")
+	add_test(NAME draw_run_image_epoch_writes_on
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-writes-only)
+	set_tests_properties(draw_run_image_epoch_writes_on PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=1")
+	add_test(NAME draw_run_image_epoch_writes_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-writes-only)
+	set_tests_properties(draw_run_image_epoch_writes_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=exit")
+	add_test(NAME draw_run_image_epoch_recall_on
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_image_epoch_recall_on PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=1")
+	add_test(NAME draw_run_image_epoch_recall_verify
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-recall-only)
+	set_tests_properties(draw_run_image_epoch_recall_verify PROPERTIES
+		ENVIRONMENT "KYTY_DRAW_PREP=parallel;KYTY_DRAW_PREP_VERIFY=exit;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_RUN_ACQUIRE=1;KYTY_DRAW_RUN_PUSH=1;KYTY_DRAW_RUN_WRITES=1;KYTY_DRAW_RUN_RECALL=1;KYTY_DRAW_RUN=1;KYTY_DRAW_RUN_IMAGE_EPOCH=exit")
 	# The KYTY_DRAW_RUN* flags switched live (common/liveSwitch.h): on, then off again.
 	add_test(NAME draw_run_live
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-live)

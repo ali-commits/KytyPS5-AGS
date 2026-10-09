@@ -739,7 +739,9 @@ ImageId TextureCache::InsertImage(const ImageInfo& info, uint32_t resident_first
 		if (resident_prefix != 0) {
 			auto& image          = m_slot_images[id];
 			image.resident_first = resident_first;
+			NoteImageStateChange();
 			image.live           = {info.data.address, resident_prefix};
+			NoteImageStateChange();
 			if (m_resident_idle_frames != 0) {
 				m_partial_images.push_back(id);
 			}
@@ -829,7 +831,9 @@ void TextureCache::EnsureResidency(ImageId id, uint32_t first_level, bool sampli
 		UnregisterImage(id);
 	}
 	image.resident_first = new_first;
+	NoteImageStateChange();
 	image.live = new_first != 0 ? GuestRange {image.info.data.address, prefix} : image.info.data;
+	NoteImageStateChange();
 	if (image.backing.sparse) {
 		// KYTY_TEXTURE_SPARSE_RESIDENCY: memory behind the newly resident levels, bound (and waited
 		// for) before anything records a write of them; their refresh follows (MarkResidencyDirty).
@@ -1005,6 +1009,7 @@ void TextureCache::RegisterImage(ImageId id) {
 		m_image_page_table[page].push_back(id);
 	});
 	image.registered = true;
+	NoteImageStateChange();
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	image.lru_tick   = m_lru_cache.TickOf(image.lru_id);
 	m_total_used_memory += image.AccountedSize();
@@ -1064,6 +1069,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	}
 	m_registered_image_memory -= accounted;
 	image.registered = false;
+	NoteImageStateChange();
 }
 
 void TextureCache::DeleteImage(ImageId id) {
@@ -1116,11 +1122,13 @@ void TextureCache::DeleteImage(ImageId id) {
 		}
 		m_scheduler.DeferOperation([this, id, retiring_bytes] {
 			m_slot_images.erase(id);
+			NoteImageStateChange();
 			EXIT_IF(retiring_bytes > m_pressure_retirement_bytes);
 			m_pressure_retirement_bytes -= retiring_bytes;
 		});
 	} else {
 		m_slot_images.erase(id);
+		NoteImageStateChange();
 	}
 }
 
@@ -1249,7 +1257,9 @@ void TextureCache::TrackImage(ImageId id) {
 	}
 	if (!image.IsTracked()) {
 		image.track_addr     = image_begin;
+		NoteImageStateChange();
 		image.track_addr_end = image_end;
+		NoteImageStateChange();
 		m_page_manager.UpdatePageWatchers<true>(image_begin, image.live.size);
 		return;
 	}
@@ -1275,6 +1285,7 @@ void TextureCache::TrackImageHead(ImageId id) {
 	}
 	const auto size  = image.track_addr - image_begin;
 	image.track_addr = image_begin;
+	NoteImageStateChange();
 	m_page_manager.UpdatePageWatchers<true>(image_begin, size);
 }
 
@@ -1293,6 +1304,7 @@ void TextureCache::TrackImageTail(ImageId id) {
 	const auto address   = image.track_addr_end;
 	const auto size      = image_end - address;
 	image.track_addr_end = image_end;
+	NoteImageStateChange();
 	m_page_manager.UpdatePageWatchers<true>(address, size);
 }
 
@@ -1301,8 +1313,11 @@ void TextureCache::TrackChunkImage(Image& image) {
 		// Nothing is watched: the untracked marks describe holes of a previous tracked period.
 		std::fill(image.chunks.untracked.begin(), image.chunks.untracked.end(), 0);
 		image.chunks.untracked_count = 0;
+		NoteImageStateChange();
 		image.track_addr     = image.live.address;
+		NoteImageStateChange();
 		image.track_addr_end = image.live.End();
+		NoteImageStateChange();
 		m_page_manager.UpdatePageWatchers<true>(image.live.address, image.live.size);
 		return;
 	}
@@ -1355,8 +1370,10 @@ uint32_t TextureCache::UpdateChunkWatchers(Image& image, uint32_t first, uint32_
 	flush(last);
 	if constexpr (track) {
 		chunks.untracked_count -= changed;
+		NoteImageStateChange();
 	} else {
 		chunks.untracked_count += changed;
+		NoteImageStateChange();
 	}
 	return changed;
 }
@@ -1399,8 +1416,11 @@ void TextureCache::UntrackImage(ImageId id) {
 		(void)UpdateChunkWatchers<false>(image, 0, image.chunks.count);
 		std::fill(image.chunks.untracked.begin(), image.chunks.untracked.end(), 0);
 		image.chunks.untracked_count = 0;
+		NoteImageStateChange();
 		image.track_addr     = 0;
+		NoteImageStateChange();
 		image.track_addr_end = 0;
+		NoteImageStateChange();
 		// Writes are no longer observed: only a full refresh can restore partial validity.
 		image.SetPartialValid(false);
 		return;
@@ -1408,7 +1428,9 @@ void TextureCache::UntrackImage(ImageId id) {
 	const auto address   = image.track_addr;
 	const auto size      = image.track_addr_end - image.track_addr;
 	image.track_addr     = 0;
+	NoteImageStateChange();
 	image.track_addr_end = 0;
+	NoteImageStateChange();
 	if (size != 0) {
 		m_page_manager.UpdatePageWatchers<false>(address, size);
 	}
@@ -1423,6 +1445,7 @@ void TextureCache::UntrackImageHead(ImageId id) {
 	const auto address = Common::AlignDown(begin + TRACKER_PAGE_SIZE, TRACKER_PAGE_SIZE);
 	const auto size    = address - begin;
 	image.track_addr   = address;
+	NoteImageStateChange();
 	if (image.track_addr == image.track_addr_end) {
 		MarkAsMaybeDirty(id, image);
 	}
@@ -1440,6 +1463,7 @@ void TextureCache::UntrackImageTail(ImageId id) {
 	const auto address   = Common::AlignDown(end, TRACKER_PAGE_SIZE);
 	const auto size      = end - address;
 	image.track_addr_end = address;
+	NoteImageStateChange();
 	if (image.track_addr == image.track_addr_end) {
 		MarkAsMaybeDirty(id, image);
 	}
@@ -1870,6 +1894,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 			}
 			if (cached.binding.is_bound || cached.binding.is_target) {
 				cached.binding.needs_rebind = true;
+				NoteImageStateChange();
 			}
 			return other_id;
 		}
@@ -1881,6 +1906,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	replacement.usage         = cached.usage;
 	if (cached.binding.is_bound || cached.binding.is_target) {
 		cached.binding.needs_rebind = true;
+		NoteImageStateChange();
 	}
 	if (cached.backing.samples == replacement.backing.samples) {
 		const bool copy_supported =
@@ -2085,6 +2111,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 	}
 	if (source.binding.is_bound || source.binding.is_target) {
 		source.binding.needs_rebind = true;
+		NoteImageStateChange();
 	}
 	// The copy below supplies the source's bytes (and their ownership): the refresh must not move
 	// them into the buffer first.
@@ -3681,6 +3708,7 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	}
 	record.depth_id             = depth_id;
 	record.stencil_subresources = depth.stencil_subresources;
+	NoteImageStateChange();
 	return association;
 }
 

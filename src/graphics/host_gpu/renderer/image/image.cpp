@@ -228,6 +228,7 @@ uint64_t Image::RecordedTransitions() noexcept {
 
 void Image::NotePossibleWrite() noexcept {
 	m_content_serial = NextContentSerial();
+	NoteImageStateChange();
 	// Every native write (copy, clear, draw/dispatch binding, upload) ends the guarantee that
 	// clean chunks match guest memory; a guest-sourced upload sets it again afterwards.
 	m_partial_valid = false;
@@ -274,6 +275,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 
 	Barriers barriers;
 	if (partial || has_subresource_states) {
+		NoteImageStateChange();
 		if (!has_subresource_states) {
 			subresource_states.resize(info.resources.levels * info.resources.layers, state);
 		}
@@ -350,6 +352,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 	}
 
 	state = {destination_stage, destination_access, destination_layout, guest};
+	NoteImageStateChange();
 	return barriers;
 }
 
@@ -970,6 +973,7 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	ImageOps::Validate(info);
 	m_cpu_dirty =
 	    !info.data.Empty() && info.metadata.compression == VideoOutCompression::Uncompressed;
+	NoteImageStateChange();
 	if (info.pixel_format == vk::Format::eUndefined) {
 		return;
 	}

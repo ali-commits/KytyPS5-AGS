@@ -1324,6 +1324,9 @@ private:
 		uint32_t                   recall_vertex_textures = 0;
 		uint32_t                   recall_vertex_samplers = 0;
 		bool                       recall_valid           = false;
+		// KYTY_DRAW_RUN_IMAGE_EPOCH: the image-state epoch at which the marks were last proven
+		// current (0: never); refreshed by a check that passes.
+		mutable uint64_t image_epoch = 0;
 		// Verify mode: what the normal path must reproduce for a continuation.
 		std::vector<TextureBinding>          textures;
 		std::vector<vk::Sampler>             samplers;
@@ -1340,10 +1343,8 @@ private:
 	[[nodiscard]] uint32_t DrawRunImagesChange(bool compare_serials,
 	                                           bool attachments_only = false, bool log_change = false,
 	                                           bool attachment_serials = true) const;
-	[[nodiscard]] bool     DrawRunImagesUnchanged(bool compare_serials,
-	                                              bool attachments_only = false) const {
-		return DrawRunImagesChange(compare_serials, attachments_only, false, !m_run_recall) == 0;
-	}
+	[[nodiscard]] bool DrawRunImagesUnchanged(bool compare_serials,
+	                                          bool attachments_only = false) const;
 	// Whether a guest range lies over one of the marked attachments.
 	[[nodiscard]] static bool DrawRunOverAttachment(std::span<const DrawRunImage> marks,
 	                                                uint64_t address, uint64_t size);

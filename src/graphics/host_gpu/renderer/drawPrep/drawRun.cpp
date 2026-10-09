@@ -45,6 +45,17 @@ Live::Switch g_writes("KYTY_DRAW_RUN_WRITES", Live::ParseDefaultOff,
 Live::Switch g_recall("KYTY_DRAW_RUN_RECALL", Live::ParseDefaultOff,
                       [](int64_t, int64_t) { NoteForeignActivity("KYTY_DRAW_RUN_RECALL change"); });
 
+// KYTY_DRAW_RUN_IMAGE_EPOCH: unset, "0": 0; "verify": 2; "exit": 3; anything else: 1.
+Live::Switch g_image_epoch("KYTY_DRAW_RUN_IMAGE_EPOCH", [](const char* value) -> int64_t {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+});
+
 } // namespace Detail
 
 namespace {
@@ -209,7 +220,7 @@ void PrintSummary() {
 		return;
 	}
 	static uint64_t                                          last_ns = 0;
-	static std::array<uint64_t, 19>                          last {};
+	static std::array<uint64_t, 22>                          last {};
 	static std::array<uint64_t, static_cast<size_t>(Miss::Count)> last_misses {};
 	const auto                                               now = NowNs();
 	if (last_ns == 0) {
@@ -219,7 +230,7 @@ void PrintSummary() {
 	if (now - last_ns < 10'000'000'000ull) {
 		return;
 	}
-	const std::array<uint64_t, 19> values {
+	const std::array<uint64_t, 22> values {
 	    g_totals.draws.load(std::memory_order_relaxed),
 	    g_totals.eligible.load(std::memory_order_relaxed),
 	    g_totals.key_matches.load(std::memory_order_relaxed),
@@ -238,8 +249,11 @@ void PrintSummary() {
 	    g_totals.write_continued.load(std::memory_order_relaxed),
 	    g_totals.recall_matches.load(std::memory_order_relaxed),
 	    g_totals.recalled.load(std::memory_order_relaxed),
-	    g_totals.recall_sets_missed.load(std::memory_order_relaxed)};
-	std::array<uint64_t, 19> delta {};
+	    g_totals.recall_sets_missed.load(std::memory_order_relaxed),
+	    g_totals.epoch_skips.load(std::memory_order_relaxed),
+	    g_totals.epoch_checks.load(std::memory_order_relaxed),
+	    g_totals.epoch_mismatches.load(std::memory_order_relaxed)};
+	std::array<uint64_t, 22> delta {};
 	for (size_t i = 0; i < values.size(); i++) {
 		delta[i] = values[i] - last[i];
 	}
@@ -269,14 +283,15 @@ void PrintSummary() {
 	            " mismatches; %" PRIu64 " alias-excluded, %" PRIu64 " acquisitions reused, %" PRIu64
 	            " dynamic re-emitted, %" PRIu64 " partial pushes, %" PRIu64 " depth-promotions excluded, %" PRIu64
 	            " deferred; writes: %" PRIu64 " records, %" PRIu64 " continued; recall: %" PRIu64
-	            " matches, %" PRIu64 " recalled, %" PRIu64 " sets missed\n",
+	            " matches, %" PRIu64 " recalled, %" PRIu64 " sets missed; image epoch: %" PRIu64
+	            " skips, verify %" PRIu64 " checks, %" PRIu64 " mismatches\n",
 	            static_cast<double>(now - last_ns) * 1e-9,
 	            GetMode() == Mode::Verify ? "verify" : "on", delta[0], delta[1], delta[2], delta[3],
 	            delta[0] != 0 ? 100.0 * static_cast<double>(delta[3]) / static_cast<double>(delta[0])
 	                          : 0.0,
 	            delta[4], misses.empty() ? " none" : misses.c_str(), delta[6], delta[7], delta[8],
 	            delta[9], delta[10], delta[11], delta[12], delta[13], delta[14], delta[15], delta[16],
-	            delta[17], delta[18]);
+	            delta[17], delta[18], delta[19], delta[20], delta[21]);
 	std::fflush(stdout);
 	last    = values;
 	last_ns = now;

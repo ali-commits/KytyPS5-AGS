@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
 #include <algorithm>
+#include <atomic>
 #include <compare>
 #include <limits>
 #include <memory>
@@ -38,6 +39,19 @@ struct ImageUsage {
 	bool depth_target  = false;
 	bool video_out     = false;
 };
+
+// KYTY_DRAW_RUN_IMAGE_EPOCH (RenderExecutor::DrawRunImagesUnchanged): advanced after every change
+// of an image property a draw-run continuation's image check reads (DrawRunImagesChange): an image
+// created or deleted, its registration, rebind request, residency, layout/access/stage, per-
+// subresource states, content serial, CPU dirtiness, buffer modification and tracking range.
+// Changes made on other threads (CPU dirtiness) advance it after the change.
+inline std::atomic<uint64_t> g_image_state_epoch {1};
+inline void NoteImageStateChange() noexcept {
+	g_image_state_epoch.fetch_add(1, std::memory_order_release);
+}
+[[nodiscard]] inline uint64_t ImageStateEpoch() noexcept {
+	return g_image_state_epoch.load(std::memory_order_acquire);
+}
 
 struct ImageBinding {
 	vk::ImageLayout  attachment_layout = vk::ImageLayout::eUndefined;
@@ -118,7 +132,10 @@ public:
 	[[nodiscard]] uint64_t DefiniteWrites() const noexcept { return m_definite_writes; }
 	void                   NoteContentWrite() noexcept;
 	void                   NotePossibleWrite() noexcept;
-	void AdoptContentSerial(uint64_t serial) noexcept { m_content_serial = serial; }
+	void AdoptContentSerial(uint64_t serial) noexcept {
+		m_content_serial = serial;
+		NoteImageStateChange();
+	}
 	// A fresh serial from the same sequence, for ordering other writers against image writes
 	// (BufferCache::InvalidateContentRevisions stamps unbounded buffer writers with it).
 	[[nodiscard]] static uint64_t NextContentSerial() noexcept;
@@ -131,9 +148,11 @@ public:
 			// Whole-image invalidation carries no chunk information.
 			m_partial_valid = false;
 			NoteDirtySpan(vaddr, size);
+			NoteImageStateChange();
 		} else if (ImagePageRangesOverlap(live.address, live.size, vaddr, size)) {
 			m_maybe_cpu_dirty = true;
 			NoteDirtySpan(vaddr, size);
+			NoteImageStateChange();
 		}
 	}
 
@@ -150,6 +169,7 @@ public:
 		m_maybe_cpu_dirty  = false;
 		m_maybe_hash_valid = false;
 		m_partial_valid    = false;
+		NoteImageStateChange();
 	}
 
 	// Chunk-granular CPU write tracking (TextureCache, KYTY_TEXTURE_PARTIAL_UPLOAD). Only for
@@ -190,6 +210,7 @@ public:
 		chunks.whole_cycles    = 0;
 		chunks.whole_released  = false;
 		chunks.hashes.clear();
+		NoteImageStateChange();
 	}
 	[[nodiscard]] static bool ChunkBit(const std::vector<uint64_t>& bits, uint32_t index) noexcept {
 		return (bits[index >> 6] >> (index & 63u)) & 1u;
@@ -216,6 +237,7 @@ public:
 		m_maybe_cpu_dirty  = false;
 		m_maybe_hash_valid = false;
 		NoteDirtySpan(vaddr, size);
+		NoteImageStateChange();
 	}
 	void ClearChunkDirty() noexcept {
 		if (chunks.dirty_count != 0) {
@@ -276,6 +298,7 @@ public:
 		if (!m_cpu_dirty) {
 			m_maybe_cpu_dirty = true;
 		}
+		NoteImageStateChange();
 	}
 	[[nodiscard]] bool NeedsMaybeCpuHash() const {
 		return m_maybe_cpu_dirty && !m_maybe_hash_valid;
@@ -298,6 +321,7 @@ public:
 		if (!m_cpu_dirty) {
 			ClearDirtySpan();
 		}
+		NoteImageStateChange();
 		return m_cpu_dirty;
 	}
 
@@ -315,6 +339,7 @@ public:
 		m_partial_valid = false;
 		ClearChunkDirty();
 		ClearDirtySpan();
+		NoteImageStateChange();
 	}
 
 	[[nodiscard]] bool IsGpuModified() const noexcept { return m_gpu_modified; }
@@ -422,8 +447,12 @@ public:
 	void               MarkBufferModified() noexcept {
 		m_buffer_modified = true;
 		m_partial_valid   = false;
+		NoteImageStateChange();
 	}
-	void               ClearBufferModified() noexcept { m_buffer_modified = false; }
+	void ClearBufferModified() noexcept {
+		m_buffer_modified = false;
+		NoteImageStateChange();
+	}
 
 	// Against the registered (resident) guest range; see `live`.
 	[[nodiscard]] bool Overlaps(uint64_t address, uint64_t size,
@@ -500,6 +529,7 @@ public:
 	void AdoptState(vk::PipelineStageFlags2 stage, vk::AccessFlags2 access,
 	                vk::ImageLayout layout) noexcept {
 		backing.state = {stage, access, layout};
+		NoteImageStateChange();
 	}
 
 private:

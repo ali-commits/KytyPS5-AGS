@@ -76,6 +76,7 @@ extern Live::Switch g_acquire; // KYTY_DRAW_RUN_ACQUIRE
 extern Live::Switch g_push;    // KYTY_DRAW_RUN_PUSH
 extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
+extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -158,6 +159,18 @@ extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 	return Detail::g_recall.On();
 }
 
+// KYTY_DRAW_RUN_IMAGE_EPOCH (live, default 0; 1 on, verify, exit): a continuation's image check
+// (RenderExecutor::DrawRunImagesUnchanged) is skipped while the image-state epoch
+// (g_image_state_epoch, image.h) is the one read when the record's marks were taken and every
+// marked image then passed the check's flag tests (registered, no rebind request, not CPU-dirty or
+// buffer-modified, a texture's view ready): no image property the check reads changed since. A
+// check that passes refreshes the record's epoch. verify: the check runs anyway and a skip that
+// would have hidden a change is a mismatch (an epoch bump missing at some image mutation).
+// "exit" stops at the first.
+[[nodiscard]] inline int64_t ImageEpochMode() {
+	return Detail::g_image_epoch.Get();
+}
+
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
 // GPU thread; other threads only bump it.
 // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
@@ -223,6 +236,9 @@ struct Totals {
 	std::atomic<uint64_t> recall_matches {0};  // KYTY_DRAW_RUN_RECALL: a kept record had the key
 	std::atomic<uint64_t> recalled {0};        // recalled (verify: would have)
 	std::atomic<uint64_t> recall_sets_missed {0}; // a stage's texture set was not R's any more
+	std::atomic<uint64_t> epoch_skips {0};         // KYTY_DRAW_RUN_IMAGE_EPOCH: checks skipped
+	std::atomic<uint64_t> epoch_checks {0};        // verify: skips checked
+	std::atomic<uint64_t> epoch_mismatches {0};    // verify: a skip would have hidden a change
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};
