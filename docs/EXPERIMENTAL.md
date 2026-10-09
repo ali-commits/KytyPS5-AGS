@@ -251,6 +251,9 @@ From int5 (`u59-windows-20261003-int5`):
   - `KYTY_DRAW_PREP_CLEAN_SINCE` (on in the preset): a draw prepared ahead re-checks only the guest pages that changed
     since its preparation (+0.6%). `KYTY_DRAW_PREP_DISPATCH` (off) also prepares compute dispatches ahead; it measured
     no gain.
+  - `KYTY_DRAW_RUN_IMAGE_EPOCH` (on in the preset): a continuation skips its image check while no image property the
+    check reads has changed (+1.0%). `KYTY_DRAW_RUN_RECALL` (off) lets a draw continue an earlier run of the same
+    render pass; it measured 0-1%.
 - Possible fixes for device-lost (masterSemaphore) GPU hangs, the `VK_ERROR_DEVICE_LOST` crashes reported on RTX 40
   and 50 series cards, ported from Senaxx's fork. None of them is confirmed to fix those crashes.
   - `S_MEMREALTIME` reads the GPU clock (`VK_KHR_shader_clock`) instead of returning a fixed placeholder.
