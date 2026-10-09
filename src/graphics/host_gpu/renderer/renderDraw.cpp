@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/meshIndirect.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -2147,13 +2148,15 @@ void RenderExecutor::DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& d
 // writes and atomics, address writes, GDS, the fault buffer), so a draw of it changes nothing a
 // later draw's structure depends on and needs no barrier against the next one. Its mip-statistics
 // counters (an emulator buffer, unordered atomics) are allowed.
-static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInfo& program) {
+// buffer_writes (KYTY_DRAW_RUN_WRITES): V# buffer writes and atomics are allowed as well.
+static bool DrawRunProgramEligible(const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                                   bool buffer_writes = false) {
 	using Kind = ShaderRecompiler::IR::DescriptorBindingKind;
 	if (program.has_address_writes) {
 		return false;
 	}
 	for (const auto& resource: program.info.buffers) {
-		if (resource.written || resource.atomic) {
+		if (!buffer_writes && (resource.written || resource.atomic)) {
 			return false;
 		}
 	}
@@ -2385,8 +2388,60 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 		DrawRun::CountMiss(Miss::Programs);
 		return false;
 	}
+	// KYTY_DRAW_RUN_WRITES: a record of a writing program exists only while the switch is on (a
+	// change ends the run). The candidate's own writes must not lie over an image of the run.
+	bool writes = false;
+	if (m_run.writes) {
+		const ShaderStageRuntime* runtimes[] = {&state.vertex_info[0].stage,
+		                                        state.ps_active ? &state.ps_input_info.stage : nullptr};
+		for (const auto* runtime: runtimes) {
+			if (runtime == nullptr) {
+				continue;
+			}
+			switch (DrawRunWritesOverRun(*runtime)) {
+				case 0: break;
+				case 1: writes = true; break;
+				default: DrawRun::CountMiss(Miss::Writes); return false;
+			}
+		}
+	}
 	totals.continued.fetch_add(1, std::memory_order_relaxed);
+	if (writes) {
+		totals.write_continued.fetch_add(1, std::memory_order_relaxed);
+	}
 	return true;
+}
+
+// KYTY_DRAW_RUN_WRITES: 0 when the stage writes no buffer, 1 when it writes only outside the run's
+// images, 2 when a written V# range (as the descriptor states it, before any clamp) lies over an
+// image of the run (a texture or an attachment) or the run has no image marks to compare.
+uint32_t RenderExecutor::DrawRunWritesOverRun(const ShaderStageRuntime& runtime) const {
+	const auto& program  = *runtime.program;
+	const auto& snapshot = *runtime.resources;
+	uint32_t    result   = 0;
+	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+		const auto& resource = program.info.buffers[i];
+		if (!resource.written && !resource.atomic) {
+			continue;
+		}
+		if (i >= snapshot.buffers.size() || snapshot.buffers[i].dword_count < 4) {
+			return 2;
+		}
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]);
+		const auto address    = descriptor.Base48();
+		const auto size       = descriptor.GetSize();
+		if (address == 0 || size == 0) {
+			continue; // a null V#: nothing is written (HasShaderBufferWrites)
+		}
+		result = 1;
+		const auto end = address + size < address ? UINT64_MAX : address + size;
+		for (const auto& mark: m_run.images) {
+			if (mark.size != 0 && address < mark.address + mark.size && mark.address < end) {
+				return 2;
+			}
+		}
+	}
+	return result;
 }
 
 bool RenderExecutor::DrawRunAcquireCandidate(const CommandBuffer&               buffer,
@@ -3714,11 +3769,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			}
 			return static_cast<bool>(state.depth_info.image_id) && state.depth_info.image_id == id;
 		};
+		// KYTY_DRAW_RUN_WRITES: buffer writes (shader_write_stages only ever holds those) may seed a run.
+		const bool writes_ok = DrawRun::WritesEnabled();
 		bool eligible = m_in_engine_commit && m_prepared_validated && m_run_key != 0 &&
 		                !mesh_active &&
 		                (indirect == nullptr || DrawRun::IndirectRunsEnabled()) &&
 		                vertex_stages.size() == 1 &&
-		                !shader_write_stages && !feedback_aspects &&
+		                (!shader_write_stages || writes_ok) && !feedback_aspects &&
 		                buffer.ActiveRenderingSerial() != 0 &&
 		                RenderStateFastEnabled(RenderStatePart::Reset) &&
 		                !graphics_debug_dump_enabled() &&
@@ -3729,7 +3786,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		for (const auto* stage: stages) {
 			eligible = eligible && stage->gds.buffer == nullptr &&
-			           DrawRunProgramEligible(*stage->runtime->program);
+			           DrawRunProgramEligible(*stage->runtime->program, writes_ok);
 			for (const auto& binding: stage->images) {
 				// Storage bindings are transitioned with write access (a barrier every draw).
 				eligible = eligible && !is_attachment(binding.image_id) &&
@@ -3738,8 +3795,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		if (eligible) {
 			DrawRun::GetTotals().eligible.fetch_add(1, std::memory_order_relaxed);
+			const bool program_writes =
+			    writes_ok && std::any_of(stages.begin(), stages.end(), [](const auto* stage) {
+				    return !DrawRunProgramEligible(*stage->runtime->program);
+			    });
+			if (program_writes) {
+				DrawRun::GetTotals().write_records.fetch_add(1, std::memory_order_relaxed);
+			}
 			DrawRunRecordDraw(buffer, state, m_run_slice_offset, rendering, stages,
 			                  bounded ? &written : nullptr, pipeline);
+			// A continuation keeps its record's programs (DrawRunCandidate), so the flag holds.
+			m_run.writes = program_writes;
 		}
 	}
 	if (CommitStats::Enabled()) [[unlikely]] {

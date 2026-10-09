@@ -74,6 +74,7 @@ namespace Detail {
 extern Live::Switch g_mode;
 extern Live::Switch g_acquire; // KYTY_DRAW_RUN_ACQUIRE
 extern Live::Switch g_push;    // KYTY_DRAW_RUN_PUSH
+extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -110,6 +111,27 @@ extern Live::Switch g_push;    // KYTY_DRAW_RUN_PUSH
 // a would-be continuation are the previous draw's.
 [[nodiscard]] inline bool PushPartialEnabled() {
 	return Detail::g_push.On();
+}
+
+// KYTY_DRAW_RUN_WRITES=1 (live, default 0; with KYTY_DRAW_RUN=1 or verify): draws whose programs
+// write or atomically update V# buffers may form runs too. At the Sky Garden 27% of the draws that
+// start a run (about 550 a frame) only differ from a continuation in that the previous draw wrote a
+// buffer (same instance, pipeline, structure and dynamic state). A buffer write changes nothing a
+// continuation reuses unless it lies over one of the run's images:
+//  - each draw's buffers, including the written ones, are resolved, synchronized, invalidated in the
+//    texture cache (InvalidateMemoryFromGPU) and bound as on the normal path, in the same order;
+//  - the previous draw's post-draw shader-write barrier stays pending exactly as on the normal path
+//    (CommandBuffer::CanSinkDrawWrites: draws of one rendering instance pass it, as the hardware
+//    does not order buffer accesses between draws either; anything else records it first);
+//  - a write by the previous draw over an image of the run marks it buffer-modified or moves its
+//    content serial, which the check after the buffer work sees (the draw falls back);
+//  - a candidate whose own written V# ranges overlap one of the run's images (textures or
+//    attachments) is not continued at all (Miss::Writes), so its textures are never resolved after
+//    its own invalidation, which the normal path would not do.
+// Programs with address (BDA) writes, written or atomic images, GDS or the fault buffer still never
+// form runs. A switch change ends the current run.
+[[nodiscard]] inline bool WritesEnabled() {
+	return Detail::g_writes.On();
 }
 
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
@@ -155,6 +177,7 @@ enum class Miss : uint8_t {
 	Validation,
 	Images,
 	Pipeline,
+	Writes, // KYTY_DRAW_RUN_WRITES: the candidate's written ranges overlap an image of the run
 	Count
 };
 
@@ -171,6 +194,8 @@ struct Totals {
 	std::atomic<uint64_t> alias_excluded {0};  // eligible, but a texture lies over an attachment
 	std::atomic<uint64_t> acquire_reused {0};  // KYTY_DRAW_RUN_ACQUIRE (verify: would have)
 	std::atomic<uint64_t> partial_pushes {0};  // KYTY_DRAW_RUN_PUSH (verify: would have)
+	std::atomic<uint64_t> write_records {0};   // KYTY_DRAW_RUN_WRITES: eligible draws with buffer writes
+	std::atomic<uint64_t> write_continued {0}; // continuations (verify: would-be) whose programs write
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};

@@ -18678,6 +18678,325 @@ public:
                 static_cast<unsigned long long>(DrawRun::GetTotals().verify_checks.load()));
   }
 
+  // KYTY_DRAW_RUN_WRITES: CheckDrawRun's draws with a pixel shader that also stores its constant
+  // through a per-draw V# (s[16:19]), each draw into its own dword of an output region. With the
+  // switch on they form runs like the non-writing draws (continued 2 x draws - 1, one late
+  // fallback after the texture rewrite); without it no writing draw continues. `overlap`: one draw
+  // of each stream writes into the texture it samples instead (Miss::Writes: that draw is never
+  // continued). Every image and every written dword must equal the serial draws'.
+  void CheckDrawRunWrites(bool overlap) {
+    const char *name = overlap ? "DrawRunWritesOverlap" : "DrawRunWrites";
+    constexpr uintptr_t base = 0x000000020b000000ull;
+    constexpr uint64_t allocation_size = 0x400000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t vertex_offset = 0x1000;
+    constexpr uint64_t pixel_offset = 0x2000;
+    constexpr uint64_t user_data_offset = 0x4000;
+    constexpr uint64_t target_offset = 0x20000;
+    // Serial phase: texture A and output A; command-processor phase: texture B and output B.
+    constexpr std::array<uint64_t, 2> texture_offsets{0x100000, 0x200000};
+    constexpr std::array<uint64_t, 2> output_offsets{0x300000, 0x310000};
+    constexpr uint64_t texture_bytes = 0x10000;
+    constexpr uint32_t extent = 32;
+    constexpr uint32_t texture_extent = 8;
+    constexpr uint32_t draws_per_stream = 4;
+    // The draw (of each stream) whose store lands in its texture (`overlap`), at the texture's
+    // last dword (a corner texel the centre sample does not reach).
+    constexpr uint32_t overlap_draw = 2;
+    constexpr u32 old_texel = 0x40u | (0x80u << 8u) | (0xc0u << 16u) | (0xffu << 24u);
+    constexpr u32 new_texel = 0x10u | (0x20u << 8u) | (0x30u << 16u) | (0x40u << 24u);
+
+    std::vector<u32> vertex_code;
+    AppendVMovLiteral(&vertex_code, 1, 0xbf800000u);
+    AppendVMovLiteral(&vertex_code, 2, 0x40400000u);
+    vertex_code.push_back(EncodeVopc(0xc2, InlineU32(1), 5));
+    vertex_code.push_back(EncodeVop2(0x01, 3, Vgpr(1), 2));
+    vertex_code.push_back(EncodeVopc(0xc2, InlineU32(2), 5));
+    vertex_code.push_back(EncodeVop2(0x01, 4, Vgpr(1), 2));
+    AppendVMovU32(&vertex_code, 0, 0);
+    AppendVMovLiteral(&vertex_code, 6, 0x3f800000u);
+    vertex_code.push_back(EncodeExp0(0x0c, 0xf));
+    vertex_code.push_back(EncodeExp1(3, 4, 0, 6));
+    for (u32 parameter = 0; parameter < 8; parameter++) {
+      vertex_code.push_back(EncodeExp0(0x20 + parameter, 0xf));
+      vertex_code.push_back(EncodeExp1(0, 0, 0, 0));
+    }
+    AppendEnd(&vertex_code);
+    std::vector<u32> pixel_code;
+    AppendVMovLiteral(&pixel_code, 20, 0x3f000000u);
+    AppendVMovLiteral(&pixel_code, 21, 0x3f000000u);
+    pixel_code.push_back(EncodeMimg0(0x27, 0xf)); // IMAGE_SAMPLE_LZ
+    pixel_code.push_back(EncodeMimg1(0, 20, 0, 2));
+    pixel_code.push_back(EncodeVop1(0x01, 0, 12)); // V_MOV_B32 v0, s12
+    AppendVMovU32(&pixel_code, 22, 0);
+    pixel_code.push_back(EncodeMubuf0(0x1cu));     // BUFFER_STORE_DWORD v0, v22, s[16:19] offen
+    pixel_code.push_back(EncodeMubuf1(0, 4, 22));
+    pixel_code.push_back(EncodeSopp(0x0c, 0));     // s_waitcnt
+    pixel_code.push_back(EncodeExp0(0x00, 0xf));
+    pixel_code.push_back(EncodeExp1(0, 1, 2, 3));
+    AppendEnd(&pixel_code);
+
+    EnsureRuntimeContext();
+    const PushDescriptorsScope push_descriptors(m_runtime_context, MaxPushDescriptors());
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), allocation_size,
+                allocation_alignment, 0, &direct_offset) == 0,
+            "draw-run allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(&mapped, allocation_size, 0x3, 0x10,
+                                                           direct_offset,
+                                                           allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "draw-run mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memset(memory, 0, allocation_size);
+    const auto vertex_address = base + vertex_offset;
+    const auto pixel_address = base + pixel_offset;
+    auto *user_data = reinterpret_cast<ShaderUserData *>(memory + user_data_offset);
+    std::memcpy(memory + vertex_offset, vertex_code.data(), vertex_code.size() * sizeof(u32));
+    std::memcpy(memory + pixel_offset, pixel_code.data(), pixel_code.size() * sizeof(u32));
+    ShaderMapUserData(vertex_address,
+                      {.type = Prospero::ShaderBinaryType::kGs,
+                       .user_data = user_data,
+                       .code_size_bytes = static_cast<uint32_t>(vertex_code.size() * sizeof(u32))});
+    ShaderMapUserData(pixel_address,
+                      {.type = Prospero::ShaderBinaryType::kPs,
+                       .user_data = user_data,
+                       .code_size_bytes = static_cast<uint32_t>(pixel_code.size() * sizeof(u32))});
+    std::array<ShaderTextureResource, 2> t_sharps{};
+    for (size_t t = 0; t < t_sharps.size(); t++) {
+      const auto address = base + texture_offsets[t];
+      std::fill_n(reinterpret_cast<u32 *>(memory + texture_offsets[t]),
+                  texture_bytes / sizeof(u32), old_texel);
+      t_sharps[t] = ShaderTextureResource{{
+          static_cast<uint32_t>(address >> 8u),
+          (static_cast<uint32_t>(Prospero::BufferFormat::k8_8_8_8UNorm) << 20u) |
+              (((texture_extent - 1u) & 3u) << 30u),
+          ((texture_extent - 1u) >> 2u) | ((texture_extent - 1u) << 14u),
+          DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(Prospero::ImageType::kColor2D) << 28u),
+          0, 0x00700000u, 0, 0}};
+    }
+    const ShaderSamplerResource s_sharp{
+        {2u | (2u << 3u) | (2u << 6u), 0, (1u << 20u) | (1u << 22u), 0}};
+    const std::array<u32, 3> draw{0xc0012d00u, 3u, 0x2u};
+    const auto constant = [](u32 k) { return std::bit_cast<u32>(0.125f * static_cast<float>(k + 1u)); };
+    // Phase p's draw k stores into its own dword of output p, or (overlap) into texture p's last
+    // texel row: the 8x8 texture's last dword.
+    const auto store_address = [&](size_t phase, u32 k) -> uint64_t {
+      if (overlap && k % draws_per_stream == overlap_draw) {
+        return base + texture_offsets[phase] + texture_extent * texture_extent * 4u - 4u;
+      }
+      return base + output_offsets[phase] + k * 4u;
+    };
+    const auto v_sharp = [&](uint64_t address) {
+      ShaderBufferResource resource{};
+      resource.UpdateAddress48(address);
+      resource.fields[2] = 4;  // NUM_RECORDS bytes (no stride)
+      resource.fields[3] = DstSel(4, 5, 6, 7) |
+                           (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+      return resource;
+    };
+
+    const auto context_owner = MakeRenderContext();
+    auto &context = *context_owner;
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
+    uint64_t continued = 0;
+    uint64_t late = 0;
+    uint64_t mismatches = 0;
+    uint64_t write_continued = 0;
+    uint64_t write_misses = 0;
+    context.GetGpu().SendCommandSync([&] {
+      GraphicsInitJmpTables();
+      CommandProcessor processor(context, 0);
+      processor.Reset();
+      processor.BufferInit();
+      context.MapMemory(base, allocation_size);
+      auto &scheduler = context.GetCommandScheduler();
+      auto &executor = context.GetRenderExecutor();
+      auto &texture_cache = context.GetTextureCache();
+      auto &registers = processor.GetCtx();
+      auto &shaders = processor.GetShCtx();
+      registers.SetViewportTransformControl(0x300);
+      registers.SetViewportScaleOffset(0, extent / 2, extent / 2, extent / 2, extent / 2, 1, 0);
+      registers.SetViewportZMax(0, 1);
+      registers.SetScreenScissor(0, 0, extent, extent);
+      registers.SetWindowScissor(0, 0, extent, extent, false);
+      registers.SetGenericScissor(0, 0, extent, extent, false);
+      registers.SetViewportScissor(0, 0, 0, extent, extent, false);
+      registers.SetRenderTargetMask(0xf);
+      registers.SetShaderMask(0xf);
+      registers.SetPsInControl(0x8000);
+      registers.SetColorBase(0, {.addr = base + target_offset});
+      registers.SetColorInfo(0, {.format = Prospero::ChannelLayout::k32_32_32_32,
+                                 .channel_type = Prospero::ChannelType::kFloat,
+                                 .channel_order = Prospero::ChannelOrder::kStandard});
+      registers.SetColorAttrib2(0, {.height = extent - 1, .width = extent - 1});
+      registers.SetColorAttrib3(0, {.tile_mode = Prospero::TileMode::kLinear, .dimension = 1});
+      registers.SetTargetOutputMode(0, 4);
+      auto blend = registers.GetBlendControl(0);
+      blend.enable = true;
+      blend.color_srcblend = blend.color_destblend = blend.alpha_srcblend =
+          blend.alpha_destblend = static_cast<uint8_t>(Prospero::BlendFactor::kOne);
+      registers.SetBlendControl(0, blend);
+      auto target_info = registers.GetRenderTarget(0).info;
+      target_info.blend_bypass = false;
+      registers.SetColorInfo(0, target_info);
+      processor.GetUcfg().SetPrimitiveType(Prospero::PrimitiveType::kTriList);
+      shaders.SetEsShaderBase(vertex_address);
+      shaders.SetPsShaderBase(pixel_address);
+      shaders.SetPsShaderResource2({.user_sgpr = 20});
+
+      RenderColorInfo color{};
+      RenderExecutorTestAccess::ResolveRenderColorTarget(executor, scheduler.Current(), color, 0);
+      Require(name, "color target", static_cast<bool>(color.image_id),
+              "the 32x32 RGBA32F target was not created");
+      const auto clear = [&] {
+        TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), color.image_id,
+                                           {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
+      };
+      const auto read = [&] {
+        return ReadCachedTexel(name, context, color.image_id, {}, {extent, extent, 1});
+      };
+      const auto rewrite = [&](size_t t) {
+        std::vector<u32> texels(texture_bytes / sizeof(u32), new_texel);
+        Require(name, "texture rewrite",
+                Libs::LibKernel::Memory::TryWriteBacking(base + texture_offsets[t], texels.data(),
+                                                         texture_bytes),
+                "the texture backing could not be written");
+        texture_cache.InvalidateMemory(base + texture_offsets[t], texture_bytes);
+      };
+      // The dwords phase p stored (in draw order), read back from the GPU.
+      const auto stored = [&](size_t phase) {
+        std::vector<u32> values;
+        for (u32 k = 0; k < 2 * draws_per_stream; k++) {
+          const auto address = store_address(phase, k);
+          context.GetBufferCache().ReadMemory(address, 4);
+          u32 value = 0;
+          Libs::LibKernel::Memory::TryReadBacking(address, &value, sizeof(value));
+          values.push_back(value);
+        }
+        return values;
+      };
+
+      // Serial reference with texture A and output A.
+      clear();
+      for (u32 k = 0; k < 2 * draws_per_stream; k++) {
+        if (k == draws_per_stream) {
+          rewrite(0);
+        }
+        const auto v = v_sharp(store_address(0, k));
+        for (u32 i = 0; i < 8; i++) {
+          shaders.SetPsUserSgpr(i, t_sharps[0].fields[i], HW::UserSgprType::Unknown);
+        }
+        for (u32 i = 0; i < 4; i++) {
+          shaders.SetPsUserSgpr(8 + i, s_sharp.fields[i], HW::UserSgprType::Unknown);
+          shaders.SetPsUserSgpr(16 + i, v.fields[i], HW::UserSgprType::Unknown);
+        }
+        shaders.SetPsUserSgpr(12, constant(k), HW::UserSgprType::Unknown);
+        RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+                                           {.vertex_count = 3, .instance_count = 1});
+      }
+      const auto serial = read();
+      const auto serial_stored = stored(0);
+      for (u32 k = 0; k < 2 * draws_per_stream; k++) {
+        if (overlap && k % draws_per_stream == overlap_draw) {
+          continue; // both streams' overlapping draws store into the same texel
+        }
+        Require(name, "serial store", serial_stored[k] == constant(k),
+                "serial draw " + std::to_string(k) + " stored " + std::to_string(serial_stored[k]));
+      }
+
+      // The same draws with texture B and output B through the command processor, in two streams.
+      const auto stream = [&](u32 first) {
+        std::vector<u32> words;
+        for (u32 k = first; k < first + draws_per_stream; k++) {
+          const auto v = v_sharp(store_address(1, k));
+          words.push_back(KYTY_PM4(15, Pm4::IT_SET_SH_REG, Pm4::R_ZERO));
+          words.push_back(Pm4::SPI_SHADER_USER_DATA_PS_0);
+          words.insert(words.end(), std::begin(t_sharps[1].fields), std::end(t_sharps[1].fields));
+          words.insert(words.end(), std::begin(s_sharp.fields), std::end(s_sharp.fields));
+          words.push_back(constant(k));
+          words.push_back(KYTY_PM4(6, Pm4::IT_SET_SH_REG, Pm4::R_ZERO));
+          words.push_back(Pm4::SPI_SHADER_USER_DATA_PS_0 + 16u);
+          words.insert(words.end(), std::begin(v.fields), std::end(v.fields));
+          words.insert(words.end(), draw.begin(), draw.end());
+        }
+        Pm4Execution execution;
+        Require(name, "run stream", processor.Process(execution, words) == Pm4ProcessResult::Complete,
+                "the draw stream did not complete");
+      };
+      auto &totals = DrawRun::GetTotals();
+      const auto continued_before = totals.continued.load();
+      const auto late_before = totals.late_fallbacks.load();
+      const auto mismatches_before = totals.verify_mismatches.load();
+      const auto write_continued_before = totals.write_continued.load();
+      const auto write_misses_before =
+          totals.misses[static_cast<uint32_t>(DrawRun::Miss::Writes)].load();
+      clear();
+      stream(0);
+      rewrite(1);
+      stream(draws_per_stream);
+      continued = totals.continued.load() - continued_before;
+      late = totals.late_fallbacks.load() - late_before;
+      mismatches = totals.verify_mismatches.load() - mismatches_before;
+      write_continued = totals.write_continued.load() - write_continued_before;
+      write_misses =
+          totals.misses[static_cast<uint32_t>(DrawRun::Miss::Writes)].load() - write_misses_before;
+      Require(name, "serial and command-processor run draws", read() == serial,
+              "the command processor's draws differ from the serial draws (continued " +
+                  std::to_string(continued) + ", late fallbacks " + std::to_string(late) + ")");
+      Require(name, "serial and command-processor stores", stored(1) == serial_stored,
+              "the command processor's draws stored other values than the serial draws");
+      Require(name, "verify", mismatches == 0,
+              std::to_string(mismatches) + " continuation(s) would have reused a different value");
+      const auto *code_cert = std::getenv("KYTY_DRAW_PREP_CODE_CERT");
+      const bool certified = code_cert == nullptr || std::strcmp(code_cert, "0") != 0;
+      if (DrawRun::Enabled() && DrawRun::WritesEnabled() && DrawPrep::GetMode() != DrawPrep::Mode::Off &&
+          certified) {
+        if (overlap) {
+          // The storing-over-its-texture draw of each stream never continues; the draw after it
+          // finds that texture buffer-modified (late fallback) or continues once it was refreshed.
+          Require(name, "overlap", write_misses == 2 && continued > 0 && continued < 2 * draws_per_stream - 1,
+                  "write misses " + std::to_string(write_misses) + ", continued " +
+                      std::to_string(continued) + ", late fallbacks " + std::to_string(late));
+        } else {
+          Require(name, "continuations",
+                  continued == 2 * draws_per_stream - 1 && late == 1 && write_continued == continued &&
+                      write_misses == 0,
+                  "continued " + std::to_string(continued) + " (writing " +
+                      std::to_string(write_continued) + "), late fallbacks " + std::to_string(late) +
+                      ", write misses " + std::to_string(write_misses));
+        }
+      } else {
+        Require(name, "no writing run without the switch",
+                continued == 0 && late == 0 && write_continued == 0,
+                "a writing draw continued a run without KYTY_DRAW_RUN_WRITES (continued " +
+                    std::to_string(continued) + ")");
+      }
+      RenderExecutorTestAccess::ResetBindings(executor);
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "draw-run mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "draw-run allocation release failed");
+    std::printf("[gpu]     %-32s ok (continued %llu, writing %llu, late fallbacks %llu, write misses "
+                "%llu, verify checks %llu)\n",
+                name, static_cast<unsigned long long>(continued),
+                static_cast<unsigned long long>(write_continued), static_cast<unsigned long long>(late),
+                static_cast<unsigned long long>(write_misses),
+                static_cast<unsigned long long>(DrawRun::GetTotals().verify_checks.load()));
+  }
+
   // KYTY_EOP_TIMESTAMPS: end-of-pipe clock writes (RELEASE_MEM, data select 3).
   // - record: the slots keep their record-time values.
   // - gpu: the record-time values are written at once. Once the tick has completed, the next clock
@@ -56259,6 +56578,12 @@ int main(int argc, char **argv) {
     vulkan.CheckDrawRun(false, true);
     vulkan.CheckDrawRun(true, true);
     vulkan.CheckDepthFeedbackKeep();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--draw-run-writes-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDrawRunWrites(false);
+    vulkan.CheckDrawRunWrites(true);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-run-live") == 0) {

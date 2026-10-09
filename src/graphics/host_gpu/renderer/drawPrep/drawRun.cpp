@@ -37,6 +37,9 @@ Live::Switch g_mode("KYTY_DRAW_RUN", ParseMode,
                     [](int64_t, int64_t) { NoteForeignActivity(); });
 Live::Switch g_acquire("KYTY_DRAW_RUN_ACQUIRE", Live::ParseDefaultOff);
 Live::Switch g_push("KYTY_DRAW_RUN_PUSH", Live::ParseDefaultOff);
+// A record made under one value must not be continued under the other.
+Live::Switch g_writes("KYTY_DRAW_RUN_WRITES", Live::ParseDefaultOff,
+                      [](int64_t, int64_t) { NoteForeignActivity("KYTY_DRAW_RUN_WRITES change"); });
 
 } // namespace Detail
 
@@ -202,7 +205,7 @@ void PrintSummary() {
 		return;
 	}
 	static uint64_t                                          last_ns = 0;
-	static std::array<uint64_t, 14>                          last {};
+	static std::array<uint64_t, 16>                          last {};
 	static std::array<uint64_t, static_cast<size_t>(Miss::Count)> last_misses {};
 	const auto                                               now = NowNs();
 	if (last_ns == 0) {
@@ -212,7 +215,7 @@ void PrintSummary() {
 	if (now - last_ns < 10'000'000'000ull) {
 		return;
 	}
-	const std::array<uint64_t, 14> values {
+	const std::array<uint64_t, 16> values {
 	    g_totals.draws.load(std::memory_order_relaxed),
 	    g_totals.eligible.load(std::memory_order_relaxed),
 	    g_totals.key_matches.load(std::memory_order_relaxed),
@@ -226,13 +229,15 @@ void PrintSummary() {
 	    g_totals.dynamic_emitted.load(std::memory_order_relaxed),
 	    g_totals.partial_pushes.load(std::memory_order_relaxed),
 	    g_totals.depth_promotions_excluded.load(std::memory_order_relaxed),
-	    g_totals.depth_promotions_deferred.load(std::memory_order_relaxed)};
-	std::array<uint64_t, 14> delta {};
+	    g_totals.depth_promotions_deferred.load(std::memory_order_relaxed),
+	    g_totals.write_records.load(std::memory_order_relaxed),
+	    g_totals.write_continued.load(std::memory_order_relaxed)};
+	std::array<uint64_t, 16> delta {};
 	for (size_t i = 0; i < values.size(); i++) {
 		delta[i] = values[i] - last[i];
 	}
 	static const char* const miss_names[] = {"activity", "command",  "instance", "programs",
-	                                         "validation", "images", "pipeline"};
+	                                         "validation", "images", "pipeline", "writes"};
 	std::string misses;
 	for (size_t i = 0; i < last_misses.size(); i++) {
 		const auto value = g_totals.misses[i].load(std::memory_order_relaxed);
@@ -256,13 +261,13 @@ void PrintSummary() {
 	            " late fallbacks; misses:%s; verify %" PRIu64 " checks, %" PRIu64
 	            " mismatches; %" PRIu64 " alias-excluded, %" PRIu64 " acquisitions reused, %" PRIu64
 	            " dynamic re-emitted, %" PRIu64 " partial pushes, %" PRIu64 " depth-promotions excluded, %" PRIu64
-	            " deferred\n",
+	            " deferred; writes: %" PRIu64 " records, %" PRIu64 " continued\n",
 	            static_cast<double>(now - last_ns) * 1e-9,
 	            GetMode() == Mode::Verify ? "verify" : "on", delta[0], delta[1], delta[2], delta[3],
 	            delta[0] != 0 ? 100.0 * static_cast<double>(delta[3]) / static_cast<double>(delta[0])
 	                          : 0.0,
 	            delta[4], misses.empty() ? " none" : misses.c_str(), delta[6], delta[7], delta[8],
-	            delta[9], delta[10], delta[11], delta[12], delta[13]);
+	            delta[9], delta[10], delta[11], delta[12], delta[13], delta[14], delta[15]);
 	std::fflush(stdout);
 	last    = values;
 	last_ns = now;

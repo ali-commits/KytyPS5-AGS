@@ -1305,6 +1305,8 @@ private:
 		uint64_t           push_epoch  = 0;
 		vk::PipelineLayout push_layout = nullptr;
 		bool               push_valid  = false; // pushed (not a descriptor set)
+		// KYTY_DRAW_RUN_WRITES: the recorded programs write buffers (recorded with the switch on).
+		bool writes = false;
 		// Verify mode: what the normal path must reproduce for a continuation.
 		std::vector<TextureBinding>          textures;
 		std::vector<vk::Sampler>             samplers;
@@ -1340,6 +1342,9 @@ private:
 	// PrepareDrawRenderState after the program refresh.
 	[[nodiscard]] bool DrawRunCandidate(const CommandBuffer& buffer, const DrawRenderState& state,
 	                                    uint32_t render_target_slice_offset);
+	// KYTY_DRAW_RUN_WRITES: whether a stage of a candidate writes buffers (1) and whether a written
+	// range lies over an image of the run (2; 0: no writes).
+	[[nodiscard]] uint32_t DrawRunWritesOverRun(const ShaderStageRuntime& runtime) const;
 	void               DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                  uint32_t render_target_slice_offset, DrawRenderState& state);
 	// written: the scissor union the attachments were acquired for (null: unbounded claims).
