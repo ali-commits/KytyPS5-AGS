@@ -246,6 +246,11 @@ From int5 (`u59-windows-20261003-int5`):
 - Draw-run batching (`KYTY_DRAW_RUN`, `KYTY_DRAW_RUN_ACQUIRE` and `KYTY_DRAW_RUN_PUSH`, on in the preset): a draw that
   continues the previous draw's structure (targets, programs, textures, samplers) is committed as a delta
   (command-processor time -2.4%, frame rate +1.9% in a same-process A/B launch at the Astro Bot Sky Garden start view).
+  - `KYTY_DRAW_RUN_WRITES` (on in the preset): draws whose shaders write buffers continue a run too, unless a written
+    range overlaps an image the run uses (frame rate +3.5% at the Sky Garden start view, same-process A/B).
+  - `KYTY_DRAW_PREP_CLEAN_SINCE` (on in the preset): a draw prepared ahead re-checks only the guest pages that changed
+    since its preparation (+0.6%). `KYTY_DRAW_PREP_DISPATCH` (off) also prepares compute dispatches ahead; it measured
+    no gain.
 - Possible fixes for device-lost (masterSemaphore) GPU hangs, the `VK_ERROR_DEVICE_LOST` crashes reported on RTX 40
   and 50 series cards, ported from Senaxx's fork. None of them is confirmed to fix those crashes.
   - `S_MEMREALTIME` reads the GPU clock (`VK_KHR_shader_clock`) instead of returning a fixed placeholder.
