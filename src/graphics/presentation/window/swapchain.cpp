@@ -1212,7 +1212,7 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		default: break;
 	}
 	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
-	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+	RenderLockGuard   render_lock(m_impl->renderer.GetMutex());
 	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
@@ -1230,7 +1230,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
 	// Into the GPU thread's command buffer (its flip) under the renderer's lock; the present
 	// thread's blank frame (no producer) uses only the presenter's scheduler and frame.
-	std::optional<Common::LockGuard> render_lock;
+	std::optional<RenderLockGuard> render_lock;
 	if (producer != nullptr || !PresentUnlocked()) {
 		render_lock.emplace(m_impl->renderer.GetMutex());
 	}
@@ -1326,7 +1326,7 @@ void Presenter::Impl::Present() {
 			continue;
 		}
 		{
-			std::optional<Common::LockGuard> render_lock;
+			std::optional<RenderLockGuard> render_lock;
 			if (!PresentUnlocked()) {
 				render_lock.emplace(renderer.GetMutex());
 			}

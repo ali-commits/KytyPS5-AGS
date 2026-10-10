@@ -1276,6 +1276,8 @@ void GuestGpu::ThreadRun(void* data) {
 	StartThreadSampler("cp");
 	// KYTY_CP_COMMIT: parsed (and its process-wide switches set) before the first command.
 	(void)CpCommit::Parts();
+	// KYTY_RENDER_LOCK_ASYMMETRIC (RenderMutex): this thread is the renderer lock's owner.
+	gpu->m_renderer.GetMutex().BecomeOwner();
 
 	const bool wakeups       = CpWakeupsEnabled();
 	uint64_t   spin_deadline = 0; // 0: not spinning on blocked queues
@@ -1384,6 +1386,7 @@ void GuestGpu::ThreadRun(void* data) {
 			// Deferred label writes still queued on the completion runner write the backing
 			// directly once commands are refused; finish them while this GuestGpu exists.
 			gpu->m_renderer.GetCommandScheduler().DrainPriorityOperations();
+			gpu->m_renderer.GetMutex().ResignOwner();
 			g_gpu_state  = nullptr;
 			g_gpu_thread = false;
 			return;
@@ -2820,7 +2823,7 @@ void CommandProcessor::ExecDispatchIndirect(const CpSeq::DispatchIndirectOp& op)
 
 void CommandProcessor::ReportLodStats(uint64_t destination, uint32_t size, uint32_t control) {
 	(void)CurrentBuffer(); // the report is recorded at this command position
-	Common::LockGuard lock(m_renderer.GetMutex());
+	RenderLockGuard lock(m_renderer.GetMutex());
 	m_renderer.GetLodStats().Report(destination, size, control);
 }
 
@@ -3548,7 +3551,7 @@ void CommandProcessor::ExecEndOfPipe(const CpSeq::EndOfPipeOp& op) {
 void CommandProcessor::EmitGlobalBarrier() {
 	KYTY_GPU_OP_SITE("guest.global_barrier");
 	KYTY_PROFILER_DETAIL_FUNCTION();
-	Common::LockGuard lock(m_renderer.GetMutex());
+	RenderLockGuard lock(m_renderer.GetMutex());
 	// Keep renderer-lock contention in the parent zone's self time.
 	KYTY_PROFILER_DETAIL_BLOCK("CommandProcessor::RecordGlobalBarrier");
 
@@ -3652,7 +3655,7 @@ void CommandProcessor::ExecEventWrite(const CpSeq::EventWriteOp& op) {
 				bool sync = false;
 				bool kept = false;
 				{
-					Common::LockGuard lock(m_renderer.GetMutex());
+					RenderLockGuard lock(m_renderer.GetMutex());
 					auto&             counter = m_renderer.GetOcclusionCounter();
 					sync = counter.Dump(event_address);
 					kept = counter.LastDumpKeptInstance();

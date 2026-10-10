@@ -4103,7 +4103,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	// Self time here includes renderer-lock acquisition and setup outside the
 	// separately timed preparation/execution phases.
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::SetupAndExecution");
-	Common::LockGuard lock(m_context.GetMutex());
+	RenderLockGuard lock(m_context.GetMutex());
 	// KYTY_DRAW_RUN: only a draw that records through the eligible path seeds the next continuation.
 	BeginDrawRun();
 	if (args.index_count == 0 || args.instance_count == 0) {
@@ -4225,7 +4225,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                    args.first_instance);
 
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::SetupAndExecution");
-	Common::LockGuard lock(m_context.GetMutex());
+	RenderLockGuard lock(m_context.GetMutex());
 	// KYTY_DRAW_RUN: only a draw that records through the eligible path seeds the next continuation.
 	BeginDrawRun();
 	if (args.vertex_count == 0 || args.instance_count == 0) {
@@ -4430,7 +4430,7 @@ bool RenderExecutor::DrawIndirectNative(uint64_t submit_id, CommandBuffer& buffe
 	                    source.args_addr);
 
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::SetupAndExecution");
-	Common::LockGuard lock(m_context.GetMutex());
+	RenderLockGuard lock(m_context.GetMutex());
 	// KYTY_DRAW_RUN: an engine commit with KYTY_DRAW_RUN_INDIRECT and a prepared slot, otherwise
 	// other command-processor work for the run certificate.
 	BeginDrawRun();
