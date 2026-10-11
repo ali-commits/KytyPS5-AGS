@@ -4148,6 +4148,7 @@ uint64_t BufferCache::BeginBackingPublication(std::span<const GuestRange> ranges
 		CleanVerdict::Invalidate(range.address, range.size, Coherence::Source::PublicationBegin);
 	}
 	m_backing_publications.push_back({token, tick, {ranges.begin(), ranges.end()}});
+	RewritePublicationSnapshot();
 	m_backing_publication_count.store(m_backing_publications.size(), std::memory_order_release);
 	return token;
 }
@@ -4163,12 +4164,134 @@ void BufferCache::EndBackingPublication(uint64_t token) {
 		CleanVerdict::Invalidate(range.address, range.size, Coherence::Source::PublicationEnd);
 	}
 	m_backing_publications.erase(found);
+	RewritePublicationSnapshot();
 	// Publish completion only after the callback has written every registered backing range.
 	m_backing_publication_count.store(m_backing_publications.size(), std::memory_order_release);
 }
 
+// KYTY_PUBLICATION_SNAPSHOT (live, default 1): HasPendingBackingPublication reads the seqlock copy
+// of the pending ranges instead of scanning the list under m_backing_publication_mutex. Every
+// recorded read of the draw-prep workers asks it (the read gate's pending-publication hint), and so
+// do the command processor's clean predicates; with publications almost always pending, 6 workers
+// and the command processor serialized on the mutex (Sky Garden sampling: ~30% of the workers'
+// preparation time in the lock). The answer is the locked scan's at one instant inside the call,
+// as before. 0 off (the locked scan); verify: both, counts answers that differ twice in a row (a
+// registration or completion between two scans can make one pair differ legitimately); exit:
+// stops at the first such difference.
+static Live::Switch g_publication_snapshot("KYTY_PUBLICATION_SNAPSHOT", [](const char* value) -> int64_t {
+	if (value == nullptr || value[0] == '\0') {
+		return 1;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	if (std::strcmp(value, "exit") == 0) {
+		return 3;
+	}
+	return std::strcmp(value, "0") == 0 ? 0 : 1;
+});
+static std::atomic<uint64_t> g_publication_snapshot_checks {0};
+static std::atomic<uint64_t> g_publication_snapshot_mismatches {0};
+static std::atomic<uint64_t> g_publication_snapshot_locked {0}; // verify mode: scans that took the mutex
+
+void BufferCache::RewritePublicationSnapshot() {
+	uint64_t count = 0;
+	for (const auto& entry: m_backing_publications) {
+		count += entry.ranges.size();
+	}
+	// Seqlock writer (serialized by the mutex): odd while the copy changes.
+	const auto seq = m_publication_seq.load(std::memory_order_relaxed);
+	m_publication_seq.store(seq + 1, std::memory_order_relaxed);
+	std::atomic_thread_fence(std::memory_order_release);
+	if (count > PublicationSnapshotRanges) {
+		m_publication_snapshot_count.store(PublicationSnapshotOverflow, std::memory_order_relaxed);
+	} else {
+		uint32_t index = 0;
+		for (const auto& entry: m_backing_publications) {
+			for (const auto& range: entry.ranges) {
+				m_publication_begin[index].store(range.address, std::memory_order_relaxed);
+				m_publication_end[index].store(range.End(), std::memory_order_relaxed);
+				index++;
+			}
+		}
+		m_publication_snapshot_count.store(index, std::memory_order_relaxed);
+	}
+	m_publication_seq.store(seq + 2, std::memory_order_release);
+}
+
+// The seqlock read: false when the copy overflowed or kept changing (the caller scans locked).
+bool BufferCache::SnapshotPendingBackingPublication(uint64_t vaddr, uint64_t size,
+                                                    bool& answer) const {
+	const auto end = vaddr + size;
+	for (uint32_t attempt = 0; attempt < 64; attempt++) {
+		const auto seq = m_publication_seq.load(std::memory_order_acquire);
+		if ((seq & 1u) != 0) {
+			continue;
+		}
+		const auto count = m_publication_snapshot_count.load(std::memory_order_relaxed);
+		if (count == PublicationSnapshotOverflow) {
+			return false;
+		}
+		bool found = false;
+		for (uint32_t i = 0; i < count && !found; i++) {
+			found = m_publication_begin[i].load(std::memory_order_relaxed) < end &&
+			        vaddr < m_publication_end[i].load(std::memory_order_relaxed);
+		}
+		std::atomic_thread_fence(std::memory_order_acquire);
+		if (m_publication_seq.load(std::memory_order_relaxed) == seq) {
+			answer = found;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool BufferCache::HasPendingBackingPublication(uint64_t vaddr, uint64_t size) const {
-	return PendingBackingPublicationTick(vaddr, size).has_value();
+	const auto mode = g_publication_snapshot.Get();
+	if (mode == 0) {
+		return PendingBackingPublicationTick(vaddr, size).has_value();
+	}
+	const GuestRange query {vaddr, size};
+	EXIT_IF(!query.Valid());
+	if (m_backing_publication_count.load(std::memory_order_acquire) == 0) {
+		return false;
+	}
+	const auto locked = [&] { return PendingBackingPublicationTick(vaddr, size).has_value(); };
+	bool answer = false;
+	if (!SnapshotPendingBackingPublication(vaddr, size, answer)) {
+		answer = locked();
+		if (mode >= 2) {
+			g_publication_snapshot_locked.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	if (mode >= 2) [[unlikely]] {
+		const auto checks = g_publication_snapshot_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (answer != locked()) {
+			bool again = false;
+			if (!SnapshotPendingBackingPublication(vaddr, size, again)) {
+				again = locked();
+			}
+			if (again != locked()) {
+				const auto count =
+				    g_publication_snapshot_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (count <= 16) {
+					std::printf("PublicationSnapshot: snapshot and locked scan differ for [0x%" PRIx64
+					            ", +0x%" PRIx64 ")\n",
+					            vaddr, size);
+				}
+				if (mode == 3) {
+					EXIT("PublicationSnapshot: snapshot and locked scan differ\n");
+				}
+			}
+		}
+		if ((checks & 0xffffffu) == 0) {
+			std::printf("PublicationSnapshot verify: %" PRIu64 " checks, %" PRIu64
+			            " mismatches, %" PRIu64 " locked scans\n",
+			            checks, g_publication_snapshot_mismatches.load(std::memory_order_relaxed),
+			            g_publication_snapshot_locked.load(std::memory_order_relaxed));
+		}
+	}
+	return answer;
 }
 
 std::optional<uint64_t> BufferCache::PendingBackingPublicationTick(uint64_t vaddr,

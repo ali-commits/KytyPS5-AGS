@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/writeTickMap.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -652,6 +653,19 @@ private:
 	std::vector<BackingPublication> m_backing_publications;
 	std::atomic<size_t>              m_backing_publication_count {0};
 	uint64_t                        m_next_backing_publication_token = 0;
+	// KYTY_PUBLICATION_SNAPSHOT: a seqlock copy of every pending range, rewritten under the mutex
+	// at each registration and completion, so HasPendingBackingPublication readers (the draw-prep
+	// workers' read gate, the command processor's clean predicates) never take the mutex.
+	// m_publication_snapshot_count is PublicationSnapshotOverflow when the ranges do not fit.
+	static constexpr uint32_t PublicationSnapshotRanges   = 64;
+	static constexpr uint32_t PublicationSnapshotOverflow = UINT32_MAX;
+	void RewritePublicationSnapshot(); // requires m_backing_publication_mutex
+	[[nodiscard]] bool SnapshotPendingBackingPublication(uint64_t vaddr, uint64_t size,
+	                                                     bool& answer) const;
+	std::atomic<uint64_t>                                        m_publication_seq {0};
+	std::atomic<uint32_t>                                        m_publication_snapshot_count {0};
+	std::array<std::atomic<uint64_t>, PublicationSnapshotRanges> m_publication_begin {};
+	std::array<std::atomic<uint64_t>, PublicationSnapshotRanges> m_publication_end {};
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
