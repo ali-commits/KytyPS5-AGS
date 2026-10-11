@@ -2,6 +2,7 @@
 #include "common/ramStats.h"
 
 #include "common/assert.h"
+#include "common/prepPhases.h"
 #include "common/crashContext.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -3551,6 +3552,7 @@ struct PipelineCache::ProgramCache {
 	                      PipelineCache::GraphicsPrograms& programs, bool link_parameters,
 	                      uint64_t* compile_ns = nullptr) {
 		using Result  = PipelineCache::SpeculativeResult;
+		namespace Phases = Common::PrepPhases; // KYTY_DRAW_PREP_PHASES
 		auto& scratch = ThreadScratch();
 		auto& evaluation = ShaderRecompiler::IR::ThreadEvaluationScratch();
 		const auto initial_cursor = push_data_cursor;
@@ -3581,10 +3583,12 @@ struct PipelineCache::ProgramCache {
 			if (ps_source == nullptr || ps_source->skip_dispatch.load(std::memory_order_relaxed)) {
 				return compile_missing();
 			}
+			Phases::Mark(Phases::Phase::PsLookup);
 			if (!MaterializeStage(*ps_source, MakeSpeculativeRuntime(ps_params), evaluation,
 			                      ps_prep)) {
 				return Result::ReadFailed;
 			}
+			Phases::Mark(Phases::Phase::PsMaterialize);
 			const auto* permutation = FindPermutationMemo(*ps_source, ps_key.stage,
 			                                              ps_prep.specialization, push_data_cursor,
 			                                              scratch);
@@ -3592,6 +3596,7 @@ struct PipelineCache::ProgramCache {
 				return compile_missing();
 			}
 			programs.pixel = Bind(*permutation, ps_info, ps_prep, push_data_cursor);
+			Phases::Mark(Phases::Phase::PsBind);
 		}
 		LinkPixelParameters(link_parameters, vs_info, ps_info);
 		BuildKey(vs_params, vs_info, vs_key);
@@ -3599,9 +3604,11 @@ struct PipelineCache::ProgramCache {
 		if (vs_source == nullptr || vs_source->skip_dispatch.load(std::memory_order_relaxed)) {
 			return compile_missing();
 		}
+		Phases::Mark(Phases::Phase::VsLookup);
 		if (!MaterializeStage(*vs_source, MakeSpeculativeRuntime(vs_params), evaluation, vs_prep)) {
 			return Result::ReadFailed;
 		}
+		Phases::Mark(Phases::Phase::VsMaterialize);
 		const auto* permutation = FindPermutationMemo(*vs_source, vs_key.stage,
 		                                              vs_prep.specialization, push_data_cursor,
 		                                              scratch);
@@ -3609,6 +3616,7 @@ struct PipelineCache::ProgramCache {
 			return compile_missing();
 		}
 		programs.vertex[0] = Bind(*permutation, vs_info, vs_prep, push_data_cursor);
+		Phases::Mark(Phases::Phase::VsBind);
 		return Result::Ok;
 	}
 
@@ -6561,6 +6569,7 @@ PipelineCache::SpeculativeResult PipelineCache::PrepareGraphicsProgramsSpeculati
 	if (vertex_info.logical_stage == ShaderType::Mesh) {
 		FinishMeshStage(m_graphics, vertex_info);
 	}
+	Common::PrepPhases::Mark(Common::PrepPhases::Phase::VsProgram);
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
@@ -6570,6 +6579,7 @@ PipelineCache::SpeculativeResult PipelineCache::PrepareGraphicsProgramsSpeculati
 	if (read_failed()) {
 		return SpeculativeResult::ReadFailed;
 	}
+	Common::PrepPhases::Mark(Common::PrepPhases::Phase::PsProgram);
 	const uint32_t push_data_start = vertex_info.logical_stage == ShaderType::Mesh
 	                                     ? ShaderRecompiler::IR::PushData::MeshDrawDwords(
 	                                           vertex_info.mesh.split_groups != 0)

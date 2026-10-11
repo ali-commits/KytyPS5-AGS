@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "common/prepPhases.h"
 
 #include "common/assert.h"
 #include "common/liveSwitch.h"
@@ -1219,6 +1220,8 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	SrtWalker clean(program, scratch, CleanRuntime(observed));
 	SrtWalker walker(program, scratch, observed, program.clean_flat_slots, &clean);
 	std::span<const uint8_t> active;
+	namespace Phases = Common::PrepPhases; // KYTY_DRAW_PREP_PHASES sub-buckets
+	auto phase_start = Phases::SubStart();
 	{
 		KYTY_PROFILER_DETAIL_BLOCK("Resources::SRT refresh");
 		active = clean.FindActiveSources();
@@ -1249,6 +1252,8 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		value.dword_count = program.descriptor_sources[source].dword_count;
 		return true;
 	};
+	Phases::SubAdd(Phases::Sub::SrtRefresh, phase_start);
+	phase_start = Phases::SubStart();
 	{
 		KYTY_PROFILER_DETAIL_BLOCK("Resources::Buffers");
 		snapshot.buffers.resize(program.info.buffers.size());
@@ -1272,6 +1277,8 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 		}
 	}
+	Phases::SubAdd(Phases::Sub::Buffers, phase_start);
+	phase_start = Phases::SubStart();
 	{
 		KYTY_PROFILER_DETAIL_BLOCK("Resources::Images");
 		snapshot.images.resize(program.info.images.size());
@@ -1332,6 +1339,8 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 		}
 	}
+	Phases::SubAdd(Phases::Sub::Images, phase_start);
+	phase_start = Phases::SubStart();
 	{
 		KYTY_PROFILER_DETAIL_BLOCK("Resources::Specialization");
 		snapshot.samplers.resize(program.info.samplers.size());
@@ -1357,7 +1366,9 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		}
 		if (capture_reads && !WrittenBuffersDisjoint(program, snapshot, reads)) return false;
 		snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-		return BuildResourceSpecialization(program, snapshot, specialization, fuse_buffers);
+		const bool built = BuildResourceSpecialization(program, snapshot, specialization, fuse_buffers);
+		Phases::SubAdd(Phases::Sub::Samplers, phase_start);
+		return built;
 	}
 }
 

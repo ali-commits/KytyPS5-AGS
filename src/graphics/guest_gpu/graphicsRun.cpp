@@ -1,6 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 
 #include "common/assert.h"
+#include "common/prepPhases.h"
 #include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
@@ -1504,6 +1505,7 @@ bool GuestGpu::Process(Submission& submission) {
 	if (first_slice && submission.reset_processor && submission.type != SubmissionType::Compute) {
 		CommitStats::OnFrameBoundary();
 		CpGaps::NoteFrame();
+		Common::PrepPhases::NoteFrame();
 	}
 	if (first_slice && RepeatTrace::Enabled()) {
 		// KYTY_CP_REPEAT_TRACE: a guest frame starts with the processor reset after
@@ -1629,6 +1631,7 @@ bool GuestGpu::ProcessSequenced(Submission& submission) {
 		if (submission.reset_processor && submission.type != SubmissionType::Compute) {
 			CommitStats::OnFrameBoundary();
 			CpGaps::NoteFrame();
+			Common::PrepPhases::NoteFrame();
 		}
 	}
 	cp.BufferInit();

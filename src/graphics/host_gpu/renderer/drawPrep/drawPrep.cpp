@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
 
 #include "common/assert.h"
+#include "common/prepPhases.h"
 #include "common/cpuPlacement.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
@@ -331,6 +332,7 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 	}
 	prepared.pixel_active = HasActivePixelShader(registers);
 	TargetExportMapping(ctx, prepared.target_export_mapping);
+	Common::PrepPhases::Mark(Common::PrepPhases::Phase::Reset);
 
 	Recorder    recorder {&prepared.reads, exact};
 	RecordScope scope(recorder);
@@ -356,12 +358,14 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 		prepared.failure = FromReadFailure(prepared.reads.Failure());
 		return;
 	}
+	Common::PrepPhases::Mark(Common::PrepPhases::Phase::Finish);
 	if (CertRangesOnWorker() && CertificateRangesUsed()) {
 		// The read set is final: its certificate ranges are too. Validate on the command
 		// processor uses them instead of sorting and merging there (KYTY_DRAW_PREP_CERT_RANGES).
 		prepared.reads.BuildCertificate(prepared.certificate);
 		prepared.certificate_built = true;
 	}
+	Common::PrepPhases::Mark(Common::PrepPhases::Phase::Certificate);
 	prepared.ok = true;
 }
 
@@ -1028,11 +1032,17 @@ struct Engine::Workers {
 		if (t_worker_number != 0) {
 			busy.emplace(WorkerBusyWait(t_worker_number));
 		}
+		// KYTY_DRAW_PREP_PHASES (common/prepPhases.h): the split of this preparation.
+		namespace Phases = Common::PrepPhases;
+		Phases::Begin();
 		PrepareSlot(pipeline_cache, slot, false);
 		HashForRepeatTrace(slot);
+		Phases::Mark(Phases::Phase::RunKey);
 		PlanBindings(slot, plan_context);
+		Phases::Mark(Phases::Phase::Plan);
 		slot.worker_prepared = true;
 		window.Complete(seq);
+		Phases::End(Phases::Phase::Complete);
 	}
 
 	void Run(uint32_t index) {

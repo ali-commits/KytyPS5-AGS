@@ -1,4 +1,5 @@
 #include "kernel/memory.h"
+#include "common/prepPhases.h"
 
 #include "common/assert.h"
 #include "common/hangTrace.h"
@@ -1360,7 +1361,12 @@ static bool TryReadForDrawPrep(Graphics::DrawPrep::Recorder& recorder, uint64_t 
 
 bool TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (auto* recorder = Graphics::DrawPrep::ActiveRecorder(); recorder != nullptr) [[unlikely]] {
-		return TryReadForDrawPrep(*recorder, vaddr, data, size, KYTY_MEMORY_CALLER());
+		// KYTY_DRAW_PREP_PHASES: the recorded reads' share of the preparation.
+		const auto start = Common::PrepPhases::SubStart();
+		const bool ok    = TryReadForDrawPrep(*recorder, vaddr, data, size, KYTY_MEMORY_CALLER());
+		Common::PrepPhases::SubAdd(Common::PrepPhases::Sub::Reads, start);
+		Common::PrepPhases::NoteRead(size);
+		return ok;
 	}
 	return TryReadGpuCleanBackingExact(vaddr, data, size);
 }
