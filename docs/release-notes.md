@@ -44,6 +44,14 @@ bytes (the game's XML assert, crash in the loader thread) and a model file 768 b
 thread after skipping the first cutscene). The Windows build already finished such reads through a host buffer;
 the Linux build now does the same. Windows is unchanged apart from this note.
 
+## amd5c: lock-free publication check
+
+- **Less waiting between draw preparation and the command processor:** a lock shared by the draw-prep workers and the
+  command processor (the pending-publication check) is now read lock-free (`KYTY_PUBLICATION_SNAPSHOT=1`, the
+  default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
+- **Diagnostic:** `KYTY_DRAW_PREP_PHASES=1` prints the time a draw-prep slot spends in each phase of its preparation.
+  Off by default.
+
 ## How to test
 
 Copy your working folder, unzip this build over it and start the game as usual. Play the first levels for a while.
