@@ -137,6 +137,16 @@ bool MayRelocatePixelParameters(const ShaderPixelInputInfo& pixel) {
 	return false;
 }
 
+// Ordinary VS outputs follow the bound PS program's active inputs (PR #27); every other draw
+// clears the aliases, so a reused input info never carries those of an earlier draw.
+void LinkPixelParameters(bool link, ShaderVertexInputInfo& vertex, const ShaderPixelInputInfo& pixel) {
+	if (link) {
+		ShaderLinkVertexPixelParameters(vertex, pixel);
+	} else {
+		vertex.param_alias_mask = 0;
+	}
+}
+
 // Entries from older revisions accumulate in the driver cache; start over beyond this size.
 constexpr uint64_t MaxDriverCacheFileSize = 512ull * 1024 * 1024;
 
@@ -3474,8 +3484,11 @@ struct PipelineCache::ProgramCache {
 	                    ShaderRecompiler::IR::EvaluationScratch& evaluation,
 	                    ShaderProgram& ps_program, ShaderProgram& vs_program) {
 		KYTY_PROFILER_DETAIL_BLOCK("ProgramCache::GetParallel");
+		// The vertex stage is materialized before the pixel program is known, so a draw whose pixel
+		// inputs may be relocated takes the serial path; every other draw has no aliases.
 		if (vs_info.logical_stage == ShaderType::Vertex &&
 		    MayRelocatePixelParameters(ps_info)) return false;
+		vs_info.param_alias_mask = 0;
 		auto* worker = StagePrepWorker::Get();
 		if (worker == nullptr) return false;
 		auto& ps_key = scratch.key;
@@ -3532,10 +3545,9 @@ struct PipelineCache::ProgramCache {
 	                      ShaderPixelInputInfo& ps_info, StagePrep& ps_prep,
 	                      const ShaderParams& vs_params, ShaderVertexInputInfo& vs_info,
 	                      StagePrep& vs_prep, uint32_t push_data_cursor,
-	                      PipelineCache::GraphicsPrograms& programs, uint64_t* compile_ns = nullptr) {
+	                      PipelineCache::GraphicsPrograms& programs, bool link_parameters,
+	                      uint64_t* compile_ns = nullptr) {
 		using Result  = PipelineCache::SpeculativeResult;
-		if (pixel_active && vs_info.logical_stage == ShaderType::Vertex &&
-		    MayRelocatePixelParameters(ps_info)) return Result::Ineligible;
 		auto& scratch = ThreadScratch();
 		auto& evaluation = ShaderRecompiler::IR::ThreadEvaluationScratch();
 		const auto initial_cursor = push_data_cursor;
@@ -3550,6 +3562,7 @@ struct PipelineCache::ProgramCache {
 				    scratch, evaluation, true, compile_ns);
 				if (!programs.pixel) return Result::NotPublished;
 			}
+			LinkPixelParameters(link_parameters, vs_info, ps_info);
 			programs.vertex[0] = Get(vs_params, vs_info, vs_prep, cursor, attempt,
 				    scratch, evaluation, true, compile_ns);
 			return programs.vertex[0] ? Result::Ok : Result::NotPublished;
@@ -3557,26 +3570,18 @@ struct PipelineCache::ProgramCache {
 		auto& ps_key  = scratch.key;
 		auto& vs_key  = scratch.second_key;
 		const SourceEntry* ps_source = nullptr;
+		// The pixel stage is bound first: the vertex key carries the parameter aliases of the bound
+		// pixel program (LinkPixelParameters), as in the serial path.
 		if (pixel_active) {
 			BuildKey(ps_params, ps_info, ps_key);
 			ps_source = FindSourceMemo(ps_key, scratch);
 			if (ps_source == nullptr || ps_source->skip_dispatch.load(std::memory_order_relaxed)) {
 				return compile_missing();
 			}
-		}
-		BuildKey(vs_params, vs_info, vs_key);
-		const auto* vs_source = FindSourceMemo(vs_key, scratch);
-		if (vs_source == nullptr || vs_source->skip_dispatch.load(std::memory_order_relaxed)) {
-			return compile_missing();
-		}
-		if (pixel_active &&
-		    !MaterializeStage(*ps_source, MakeSpeculativeRuntime(ps_params), evaluation, ps_prep)) {
-			return Result::ReadFailed;
-		}
-		if (!MaterializeStage(*vs_source, MakeSpeculativeRuntime(vs_params), evaluation, vs_prep)) {
-			return Result::ReadFailed;
-		}
-		if (pixel_active) {
+			if (!MaterializeStage(*ps_source, MakeSpeculativeRuntime(ps_params), evaluation,
+			                      ps_prep)) {
+				return Result::ReadFailed;
+			}
 			const auto* permutation = FindPermutationMemo(*ps_source, ps_key.stage,
 			                                              ps_prep.specialization, push_data_cursor,
 			                                              scratch);
@@ -3584,6 +3589,15 @@ struct PipelineCache::ProgramCache {
 				return compile_missing();
 			}
 			programs.pixel = Bind(*permutation, ps_info, ps_prep, push_data_cursor);
+		}
+		LinkPixelParameters(link_parameters, vs_info, ps_info);
+		BuildKey(vs_params, vs_info, vs_key);
+		const auto* vs_source = FindSourceMemo(vs_key, scratch);
+		if (vs_source == nullptr || vs_source->skip_dispatch.load(std::memory_order_relaxed)) {
+			return compile_missing();
+		}
+		if (!MaterializeStage(*vs_source, MakeSpeculativeRuntime(vs_params), evaluation, vs_prep)) {
+			return Result::ReadFailed;
 		}
 		const auto* permutation = FindPermutationMemo(*vs_source, vs_key.stage,
 		                                              vs_prep.specialization, push_data_cursor,
@@ -6480,10 +6494,9 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 				                                   push_data_cursor, read_attempt, scratch,
 				                                   evaluation);
 			}
-			if (pixel_active && !tess_active && !mesh_active &&
-			    !Prospero::IsRectList(user_config.GetPrimType())) {
-				ShaderLinkVertexPixelParameters(vertex_inputs[0], pixel_input);
-			}
+			LinkPixelParameters(pixel_active && !tess_active && !mesh_active &&
+			                        !Prospero::IsRectList(user_config.GetPrimType()),
+			                    vertex_inputs[0], pixel_input);
 			for (uint32_t i = 0; i < (tess_active ? 3u : 1u) &&
 			                     !read_attempt.materialization_failed; ++i) {
 				result.vertex[i] =
@@ -6559,6 +6572,8 @@ PipelineCache::SpeculativeResult PipelineCache::PrepareGraphicsProgramsSpeculati
 	const auto result = m_program_cache->TryPrepareSpeculative(
 	    pixel_active, pixel_params, pixel_info, pixel_prep, vertex_params, vertex_info, vertex_prep,
 	    push_data_start, programs,
+	    pixel_active && vertex_info.logical_stage == ShaderType::Vertex &&
+	        !Prospero::IsRectList(user_config.GetPrimType()),
 	    compile_ahead ? compile_ns : nullptr);
 	if (result == SpeculativeResult::Ok && read_failed()) {
 		return SpeculativeResult::ReadFailed;
