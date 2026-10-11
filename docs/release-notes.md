@@ -1,3 +1,52 @@
+# KytyPS5 U59 int18.1 AMD test 5 — the AMD driver crash fixed at its source, and faster CPU side
+
+> **This is a test build, mainly for AMD Radeon owners whose game crashed (`amdvlk64.dll+0x22240fc`) or showed broken
+> graphics with int18.** NVIDIA users are welcome to try it too: Sky Garden runs about 12% faster than with int18. The
+> first launch rebuilds the shader and program caches once, so the first minutes can stutter.
+
+## AMD graphics cards
+
+Majed-allababedi found where the AMD driver crash comes from and sent three fixes (pull requests #25, #26 and #27).
+Thank you!
+
+- **Driver crash at `amdvlk64.dll+0x22240fc` (#25):** the crash was not in the game's shaders but in one of Kyty's
+  own texture-tiling compute shaders. AMD's compiler crashed on the way it picked per-size values. The shader now
+  picks them one by one; the result is the same bytes, the driver no longer crashes building it.
+- **Depth-compare sampling of a missing texture (#26):** when a shader samples a depth texture that is not there,
+  Kyty now binds a depth-format placeholder, as Vulkan requires. Before, it was a color placeholder, which AMD may
+  turn into garbage.
+- **Pixel-shader inputs (#27):** when a pixel shader reads a flat and a smooth value from the same vertex output,
+  Kyty moved one of them to a spare slot that the vertex shader never wrote. NVIDIA tends to read zero there, AMD
+  reads garbage (a likely cause of the pink and particle glitches). The vertex shader now writes that slot too, and
+  pixel-shader inputs that are never read are no longer requested.
+
+AMD test 4's workaround (building some pipelines without optimization) is not in this build: if #25 is the cause,
+it is no longer needed. If you still crash, please say so and send your `_kyty.txt`.
+
+## Everyone
+
+- **Faster command processing:** measured on an RTX 3090 (Ryzen 9 7950X3D), Sky Garden went from 32.8 fps with int18
+  to 35.1 with the draw-run changes below (+7%), and the sequencer prefetch adds another 5-8% (launches in A B B A
+  order: Sky Garden 34.9 -> 36.5 fps, pirate island 29.3 -> 31.6, clock tower 38.4 -> 40.9).
+  - `KYTY_CP_SEQ_PREFETCH=1` (new default): while the emulator waits for the GPU at a "wait for idle", it prepares
+    the draws that follow. `KYTY_CP_SEQ_PREFETCH=0` turns it off.
+  - Draw runs through draws that write buffers (`KYTY_DRAW_RUN_WRITES`), fewer repeated checks of images and pages
+    (`KYTY_DRAW_RUN_IMAGE_EPOCH`, `KYTY_DRAW_PREP_CLEAN_SINCE`), larger descriptor pools.
+- **Fixes from chenxiao07's fork:** an image write-back no longer overwrites bytes the CPU wrote since (`KYTY_IMAGE_WRITEBACK_GUARD`),
+  a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
+  of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
+
+## How to test
+
+Copy your working folder, unzip this build over it and start the game as usual. Play the first levels for a while.
+
+- **AMD:** does it still crash, and do the graphics look right (no pink areas, no colorful particles)? If anything
+  goes wrong, send `_kyty.txt` from the emulator folder and say which level.
+- **Astro's Playroom on AMD:** do the clouds still break into blocks?
+- **Everyone:** is it faster or slower than int18 for you?
+
+---
+
 # KytyPS5 U59 int18 — AMD fixes, upstream sync, rumble for other controllers
 
 > int18 is int17 plus the fixes from the three AMD test builds, a sync with upstream Kyty, and fixes for
