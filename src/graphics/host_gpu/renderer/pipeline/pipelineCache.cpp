@@ -126,15 +126,13 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 
 // Ordinary VS keys must be linked after the compiled PS interface is known.
 bool MayRelocatePixelParameters(const ShaderPixelInputInfo& pixel) {
+	uint32_t flat_locations   = 0;
+	uint32_t smooth_locations = 0;
 	for (uint32_t input = 0; input < pixel.input_num; ++input) {
-		for (uint32_t other = 0; other < input; ++other) {
-			if (ShaderPixelParameterMappedLocation(pixel, input) ==
-			        ShaderPixelParameterMappedLocation(pixel, other) &&
-			    ShaderPixelParameterIsFlat(pixel, input) !=
-			        ShaderPixelParameterIsFlat(pixel, other)) return true;
-		}
+		const auto bit = 1u << (ShaderPixelParameterMappedLocation(pixel, input) & 31u);
+		(ShaderPixelParameterIsFlat(pixel, input) ? flat_locations : smooth_locations) |= bit;
 	}
-	return false;
+	return (flat_locations & smooth_locations) != 0;
 }
 
 // Ordinary VS outputs follow the bound PS program's active inputs (PR #27); every other draw
@@ -3233,7 +3231,8 @@ struct PipelineCache::ProgramCache {
 			InputInfo copy = input_info;
 			copy.stage     = {};
 			source.input_info.assign(reinterpret_cast<const uint8_t*>(&copy),
-			                         reinterpret_cast<const uint8_t*>(&copy) + sizeof(copy));
+			                         reinterpret_cast<const uint8_t*>(&copy) +
+			                             ShaderStoredInputInfoSize<InputInfo>());
 		}
 		if (specialization_bytes.empty()) {
 			ShaderRecompiler::IR::EncodeSpecialization(specialization, specialization_bytes);
@@ -3247,9 +3246,13 @@ struct PipelineCache::ProgramCache {
 	                                      const ShaderJournal::Entry& entry,
 	                                      ShaderRecompiler::IR::ResourceSpecialization specialization) {
 		using Outcome = ShaderPrecompiler::Outcome;
-		if (source.input_info.size() != sizeof(InputInfo)) return Outcome::Skipped;
-		std::memcpy(static_cast<void*>(&input_info), source.input_info.data(), sizeof(InputInfo));
+		constexpr auto stored = ShaderStoredInputInfoSize<InputInfo>();
+		if (source.input_info.size() != stored) return Outcome::Skipped;
+		std::memcpy(static_cast<void*>(&input_info), source.input_info.data(), stored);
 		input_info.stage = {};
+		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			input_info.param_alias_mask = 0;
+		}
 		auto& scratch = ThreadScratch();
 		ProgramKey key;
 		BuildKey(params, input_info, key);
@@ -5315,14 +5318,16 @@ namespace {
 // source cannot be used on this device.
 bool NormalizeListSource(const GraphicContext& graphics, ShaderJournal::Source& source) {
 	const auto load = [&](auto& info) {
-		if (source.input_info.size() != sizeof(info)) return false;
-		std::memcpy(static_cast<void*>(&info), source.input_info.data(), sizeof(info));
+		constexpr auto stored = ShaderStoredInputInfoSize<std::remove_cvref_t<decltype(info)>>();
+		if (source.input_info.size() != stored) return false;
+		std::memcpy(static_cast<void*>(&info), source.input_info.data(), stored);
 		info.stage = {};
 		return true;
 	};
 	const auto store = [&](const auto& info) {
 		const auto* bytes = reinterpret_cast<const uint8_t*>(&info);
-		source.input_info.assign(bytes, bytes + sizeof(info));
+		source.input_info.assign(
+		    bytes, bytes + ShaderStoredInputInfoSize<std::remove_cvref_t<decltype(info)>>());
 		source.static_state.clear();
 		BuildStageStaticKey(info, source.static_state);
 	};
@@ -5423,8 +5428,9 @@ void PipelineCache::InitializePipelineList() {
 		if (!code_file.read(reinterpret_cast<char*>(image.data()), static_cast<std::streamsize>(image.size()))) image.clear();
 		return image;
 	};
-	const std::array<uint32_t, 3> sizes {sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo),
-	                                     sizeof(ShaderComputeInputInfo)};
+	const std::array<uint32_t, 3> sizes {ShaderStoredInputInfoSize<ShaderVertexInputInfo>(),
+	                                     ShaderStoredInputInfoSize<ShaderPixelInputInfo>(),
+	                                     ShaderStoredInputInfoSize<ShaderComputeInputInfo>()};
 	PipelineList::ResolveStats stats;
 	auto resolved = PipelineList::Resolve(file, sizes, read, read_image, stats);
 	if (stats.resolved * 2 < stats.shaders) {
@@ -6062,8 +6068,8 @@ void PipelineCache::InitializeShaderPrecompile() {
 		const auto& properties = m_graphics.GetPhysicalDeviceProperties();
 		const auto  identity   = fmt::format(
 	        "kyty shader journal; device {:08x}:{:08x}; input infos {} {} {}", properties.vendorID,
-	        properties.deviceID, sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo),
-	        sizeof(ShaderComputeInputInfo));
+	        properties.deviceID, ShaderStoredInputInfoSize<ShaderVertexInputInfo>(),
+	        ShaderStoredInputInfoSize<ShaderPixelInputInfo>(), ShaderStoredInputInfoSize<ShaderComputeInputInfo>());
 		ShaderJournal::Settings settings;
 		settings.path     = path;
 		settings.identity = std::vector<uint8_t>(identity.begin(), identity.end());

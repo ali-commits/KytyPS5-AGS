@@ -89,7 +89,18 @@ void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
 void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
                                      const ShaderPixelInputInfo& pixel,
                                      std::span<const uint32_t> active_inputs) {
+	// Runs for every draw. Without a location read both flat and smooth no input moves
+	// (ShaderPixelParameterLocation returns the mapped location of each), so no aliases.
+	uint32_t flat_locations   = 0;
+	uint32_t smooth_locations = 0;
+	for (const auto input: active_inputs) {
+		const auto bit = 1u << (ShaderPixelParameterMappedLocation(pixel, input) & 31u);
+		(ShaderPixelParameterIsFlat(pixel, input) ? flat_locations : smooth_locations) |= bit;
+	}
 	vertex.param_alias_mask = 0;
+	if ((flat_locations & smooth_locations) == 0) {
+		return;
+	}
 	vertex.param_alias_source.fill(0);
 	for (const auto input: active_inputs) {
 		const auto source = ShaderPixelParameterMappedLocation(pixel, input);

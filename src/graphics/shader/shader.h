@@ -8,9 +8,11 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <array>
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -142,10 +144,6 @@ struct ShaderVertexInputInfo {
 	uint32_t                wave_size           = 64;
 	uint32_t                scratch_size_dwords = 0;
 	uint32_t                pa_cl_vs_out_cntl    = 0;
-	// PS flat/smooth groups may relocate a shared parameter to a spare location.
-	// Only mask-selected source entries are meaningful (including in cache keys).
-	uint32_t                param_alias_mask = 0;
-	std::array<uint32_t, 32> param_alias_source {};
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
@@ -154,7 +152,24 @@ struct ShaderVertexInputInfo {
 	// The user SGPR (s8 + GS user data index) holding the draw's start instance, which an indirect draw
 	// has the CP write; -1: the user data value.
 	int32_t                 start_instance_sgpr = -1;
+	// PS flat/smooth groups may relocate a shared parameter to a spare location.
+	// Only mask-selected source entries are meaningful (including in cache keys).
+	// Last: journals and pipeline lists store the fields before them (ShaderStoredInputInfoSize).
+	uint32_t                param_alias_mask = 0;
+	std::array<uint32_t, 32> param_alias_source {};
 };
+
+// Bytes of an input info that shader journals and pipeline lists store. A vertex input info is
+// stored without its PS parameter aliases (they follow from the pixel program the draw binds), so
+// journals and lists keep the layout of builds before the aliases.
+template <typename InputInfo>
+constexpr size_t ShaderStoredInputInfoSize() {
+	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+		return offsetof(ShaderVertexInputInfo, param_alias_mask);
+	} else {
+		return sizeof(InputInfo);
+	}
+}
 
 struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 	uint8_t            float_mode                 = 0xc0;
