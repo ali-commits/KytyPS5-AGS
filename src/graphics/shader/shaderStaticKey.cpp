@@ -26,10 +26,16 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 	key.push_back(info.scratch_size_dwords);
 	key.push_back(info.pa_cl_vs_out_cntl);
 	key.push_back(static_cast<uint32_t>(info.start_instance_sgpr));
-	key.push_back(info.param_alias_mask);
-	for (uint32_t destination = 0; destination < 32u; ++destination) {
-		if ((info.param_alias_mask & (1u << destination)) != 0) {
-			key.push_back(info.param_alias_source[destination]);
+	// Relocated PS parameters (ShaderLinkVertexPixelParameters). Only keys with aliases get these
+	// words, so the keys of every other vertex shader (and the shipped pipeline lists) stay as before;
+	// the tag cannot be mistaken for the clip-space flag that follows otherwise.
+	if (info.param_alias_mask != 0) {
+		key.push_back(0x7A11A5u);
+		key.push_back(info.param_alias_mask);
+		for (uint32_t destination = 0; destination < 32u; ++destination) {
+			if ((info.param_alias_mask & (1u << destination)) != 0) {
+				key.push_back(info.param_alias_source[destination]);
+			}
 		}
 	}
 	key.push_back(static_cast<uint32_t>(info.clip_space.enabled));
