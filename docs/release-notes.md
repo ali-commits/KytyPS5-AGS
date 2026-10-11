@@ -36,6 +36,14 @@ it is no longer needed. If you still crash, please say so and send your `_kyty.t
   a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
   of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
 
+## amd5b: Linux file reads fixed
+
+On Linux, a file read into guest memory that the emulator had write-protected (GPU write tracking) stopped at
+the first protected page and reported the short count as success: a worldmap level file read 72,704 of 271,864
+bytes (the game's XML assert, crash in the loader thread) and a model file 768 bytes (crash in the model streamer
+thread after skipping the first cutscene). The Windows build already finished such reads through a host buffer;
+the Linux build now does the same. Windows is unchanged apart from this note.
+
 ## How to test
 
 Copy your working folder, unzip this build over it and start the game as usual. Play the first levels for a while.
