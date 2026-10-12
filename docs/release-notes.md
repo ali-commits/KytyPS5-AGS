@@ -17,6 +17,10 @@
 - **Two draw-path shortcuts:** Sky Garden command processing takes 0.6 ms less per frame (+2% fps). The statistics
   counters are now owned by the GPU thread (`KYTY_CP_OWNED_COUNTERS=1`), and a draw run's eligibility is carried
   across continuations (`KYTY_DRAW_RUN_CONT_ELIGIBLE=1`). Both are on by default; set either to 0 to turn it off.
+- **Batched page re-protection after read uploads:** the write protection of pages after a read upload is now applied
+  in a batch on the upload worker instead of one call each on the command-processor thread. Sky Garden command
+  processing takes 0.5 ms less per frame (+2% fps). `KYTY_DEFER_PROTECTS=0` turns it off. The idea comes from the
+  peepostare fork; this is a re-implementation, not their code.
 - **Less waiting between draw preparation and the command processor (publication snapshot):** a lock shared by the
   draw-prep workers and the command processor (the pending-publication check) is now read lock-free
   (`KYTY_PUBLICATION_SNAPSHOT=1`, the default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
@@ -104,6 +108,7 @@ Copy your working folder, unzip this build over it and start the game as usual. 
 - **Everyone:** is it faster or slower than int18 for you?
 - **Developers:** `KYTY_CP_COMMIT_STATS=1` now also prints a `StartPhases` line (draws split by start reason) and
   `KYTY_FAULT_MAP=1` splits write-fault handler time by cause; both are off by default.
+  `KYTY_DEFER_PROTECTS_STATS=1` prints the batched re-protection counters.
   `KYTY_CP_COMMIT_STATS=steps` prints a per-step split of every draw's commit and gap.
 
 ---
