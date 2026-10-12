@@ -34,6 +34,10 @@ uint32_t AudioOutOutputs(const OutputParam* params, uint32_t num, bool blocking 
 float    AudioOutObjectsGain();
 // False when 3D audio objects are switched off: object PCM is dropped, not mixed.
 bool     AudioOutObjectsEnabled();
+// KYTY_AUDIO_TRACE BUZZ detector: which AudioOut2 port types it watches, and how many identical
+// blocks make one second.
+bool     AudioOut2BuzzWatchesPortType(uint16_t port_type);
+uint32_t AudioOut2BuzzThresholdBlocks(uint32_t sampling_freq, uint32_t frames_per_block);
 
 } // namespace Libs::Audio::AudioInternal
 

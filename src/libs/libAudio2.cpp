@@ -37,6 +37,29 @@ constexpr int AUDIO_OUT_PORT_TYPE_AUX       = 127;
 
 } // namespace
 
+// Pure helpers for the BUZZ detector (declared in audio_internal.h so the tests can reach them).
+namespace AudioInternal {
+
+// Only ports that carry game audio to the main device are watched: pad speaker, aux and vibration
+// ports (haptic pulses, short tones) and the per-voice object ports (0x100) are skipped.
+bool AudioOut2BuzzWatchesPortType(uint16_t port_type) {
+	switch (port_type) {
+		case 3: // pad speaker
+		case 5: // aux
+		case 6: // vibration
+			return false;
+		default: return (port_type & 0xff00u) != 0x0100u;
+	}
+}
+
+// At least one second of identical blocks: 94 blocks at 48 kHz with 512-frame blocks.
+uint32_t AudioOut2BuzzThresholdBlocks(uint32_t sampling_freq, uint32_t frames_per_block) {
+	frames_per_block = std::max(frames_per_block, 1u);
+	return std::max<uint32_t>(1, static_cast<uint32_t>((static_cast<uint64_t>(sampling_freq) + frames_per_block - 1) / frames_per_block));
+}
+
+} // namespace AudioInternal
+
 namespace AudioOut2 {
 
 LIB_NAME("AudioOut2", "AudioOut");
@@ -198,7 +221,13 @@ struct AudioOut2BlockTrace {
 	uint32_t                      history_n     = 0;
 	uint32_t                      run           = 0; // Consecutive identical non-silent blocks.
 	uint32_t                      periodic_run  = 0; // Consecutive blocks equal to an older one.
-	bool                          buzz_reported = false;
+	bool                          buzz_active   = false; // An episode of >= 1 s of repeats is running.
+	bool                          buzz_ongoing_reported = false;
+	bool                          buzz_same     = false;
+	int                           buzz_period   = 0;
+	uint64_t                      buzz_hash     = 0;
+	const void*                   buzz_pointer  = nullptr;
+	uint32_t                      buzz_sets     = 0;
 	const void*                   last_pointer  = nullptr;
 	uint64_t                      start         = 0; // Start of the summary window.
 	// Since the last summary.
@@ -549,8 +578,9 @@ static const char* audioout2_port_kind(uint16_t port_type) {
 }
 
 // KYTY_AUDIO_TRACE: compares the PCM a plain port is about to play with its last blocks. BUZZ when
-// more than 8 consecutive non-silent blocks are identical (one block replayed: a 93.75 Hz tone) or
-// equal to one of the 2nd-8th previous blocks (a stuck double/triple buffer). Caller holds
+// at least one second of consecutive non-silent blocks are identical (one block replayed: a 93.75 Hz
+// tone) or equal to one of the 2nd-8th previous blocks (a stuck double/triple buffer). An episode is
+// reported once when it ends, or at the 10 s summary if it is still running. Caller holds
 // g_audioout2_port_mutex.
 static void audioout2_trace_block_locked(AudioOut2PortStateEntry* state) {
 	auto&      b   = state->block_trace;
@@ -585,25 +615,35 @@ static void audioout2_trace_block_locked(AudioOut2PortStateEntry* state) {
 	b.periodic_run = (same || period != 0) ? b.periodic_run + 1 : 0;
 	const uint32_t run = std::max(b.run, b.periodic_run);
 	b.longest_run      = std::max(b.longest_run, run);
-	if (run > 8 && !b.buzz_reported) {
-		b.buzz_reported = true;
-		b.buzz_events++;
-		Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s BUZZ: %u consecutive repeated non-silent blocks (%s, "
-		            "period %d block(s), %.2f Hz); guest PCM 0x%" PRIx64 ", format 0x%x %u ch %u Hz %u frames, "
+	const bool     watched   = AudioInternal::AudioOut2BuzzWatchesPortType(state->port_type);
+	const uint32_t threshold = AudioInternal::AudioOut2BuzzThresholdBlocks(state->sampling_freq, state->samples_num);
+	const double   block_s   = static_cast<double>(state->samples_num) / std::max(state->sampling_freq, 1u);
+	auto           describe  = [&](const char* what, uint32_t blocks) {
+        Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s BUZZ %s: %u consecutive repeated non-silent blocks, %.2f s "
+		            "(%s, period %d block(s), %.2f Hz); guest PCM 0x%" PRIx64 ", format 0x%x %u ch %u Hz %u frames, "
 		            "output handle %d; PCM sets since the previous push %u (0 = the guest did not set PCM, the "
 		            "last block is replayed); hash %016" PRIx64,
 		            static_cast<double>(now) / 1e6, static_cast<uint64_t>(state->handle),
-		            audioout2_port_kind(state->port_type), run, same ? "identical to the previous block" : "equal to an older block",
-		            same ? 1 : period, state->sampling_freq / static_cast<double>(state->samples_num * (same ? 1 : period)),
-		            reinterpret_cast<uint64_t>(state->pcm_pointer), state->data_format,
+		            audioout2_port_kind(state->port_type), what, blocks, blocks * block_s,
+		            b.buzz_same ? "identical to the previous block" : "equal to an older block",
+		            b.buzz_same ? 1 : b.buzz_period,
+		            state->sampling_freq / static_cast<double>(state->samples_num * (b.buzz_same ? 1 : std::max(b.buzz_period, 1))),
+		            reinterpret_cast<uint64_t>(b.buzz_pointer), state->data_format,
 		            audioout2_data_format_channels(state->data_format), state->sampling_freq, state->samples_num,
-		            state->audio_handle, state->pcm_sets_since_push, hash);
-	} else if (run == 0 && b.buzz_reported) {
-		b.buzz_reported = false;
-		Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s BUZZ END after %u repeated blocks (%.2f s)",
-		            static_cast<double>(now) / 1e6, static_cast<uint64_t>(state->handle),
-		            audioout2_port_kind(state->port_type), previous_run,
-		            previous_run * static_cast<double>(state->samples_num) / std::max(state->sampling_freq, 1u));
+		            state->audio_handle, b.buzz_sets, b.buzz_hash);
+	};
+	if (watched && run >= threshold && !b.buzz_active) {
+		b.buzz_active           = true;
+		b.buzz_ongoing_reported = false;
+		b.buzz_same             = same;
+		b.buzz_period           = same ? 1 : period;
+		b.buzz_hash             = hash;
+		b.buzz_pointer          = state->pcm_pointer;
+		b.buzz_sets             = state->pcm_sets_since_push;
+	} else if (b.buzz_active && run == 0) {
+		b.buzz_active = false;
+		b.buzz_events++;
+		describe("ended", previous_run);
 	}
 	for (int i = AudioOut2BlockTrace::HISTORY - 1; i > 0; i--) {
 		b.history[i] = b.history[i - 1];
@@ -612,6 +652,10 @@ static void audioout2_trace_block_locked(AudioOut2PortStateEntry* state) {
 	b.history_n++;
 	if (now - b.start < Diag::TRACE_INTERVAL_US) {
 		return;
+	}
+	if (b.buzz_active && !b.buzz_ongoing_reported) {
+		b.buzz_ongoing_reported = true;
+		describe("still running", run);
 	}
 	Diag::Trace("t=%.1f s AudioOut2 port %" PRIu64 " %s blocks: %u pushed, %u without a new PCM set, %u identical to "
 	            "the previous, %u equal to an older one, %u silent, longest repeat run %u, %u BUZZ, %u PCM pointer "

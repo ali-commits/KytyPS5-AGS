@@ -744,6 +744,48 @@ void TestRepeatedBlockTrace() {
 	AudioOut2::AudioOut2ContextDestroy(context);
 }
 
+// The BUZZ detector watches only ports that carry game audio to the main device, and needs a second
+// of identical blocks.
+void TestBuzzDetectorScope() {
+	namespace AI = Libs::Audio::AudioInternal;
+	for (const uint16_t type: {uint16_t {0}, uint16_t {1}, uint16_t {2}, uint16_t {4}}) {
+		Check(AI::AudioOut2BuzzWatchesPortType(type), "game audio port type is not watched");
+	}
+	for (const uint16_t type: {uint16_t {3}, uint16_t {5}, uint16_t {6}, uint16_t {0x100}, uint16_t {0x1ff}}) {
+		Check(!AI::AudioOut2BuzzWatchesPortType(type), "pad speaker, aux, vibration or object port is watched");
+	}
+	Check(AI::AudioOut2BuzzThresholdBlocks(48000, 512) == 94, "1 s threshold at 48 kHz is not 94 blocks");
+	Check(AI::AudioOut2BuzzThresholdBlocks(24000, 512) == 47, "1 s threshold at 24 kHz is not 47 blocks");
+	Check(AI::AudioOut2BuzzThresholdBlocks(48000, 256) == 188, "1 s threshold at 256 frames is not 188 blocks");
+	Check(AI::AudioOut2BuzzThresholdBlocks(48000, 0) >= 1, "zero frame block threshold is not clamped");
+}
+
+// A steady tone on a watched port for more than a second, a pad speaker port repeating the same
+// block, then a fresh block: only the output is checked here, the episode report is a trace line.
+void TestLongRepeatEpisode() {
+	const auto context = CreateContext(1);
+	auto       pad     = MakeParam(0x200);
+	pad.port_type      = 3;
+	const auto main_port = CreatePort(context, MakeParam(0x200));
+	const auto pad_port  = CreatePort(context, pad);
+	std::array<float, 512 * 2> pcm {};
+	pcm.fill(0.25f);
+	SetPcm(main_port, pcm.data());
+	SetPcm(pad_port, pcm.data());
+	for (int i = 0; i < 100; i++) {
+		const auto output = PushPcm(context, sizeof(pcm));
+		Check(!output.empty(), "repeated block was not played");
+	}
+	pcm.fill(0.5f);
+	SetPcm(main_port, pcm.data());
+	SetPcm(pad_port, pcm.data());
+	const auto output = PushPcm(context, sizeof(pcm));
+	Check(!output.empty(), "fresh block not played after a long repeat");
+	AudioOut2::AudioOut2PortDestroy(pad_port);
+	AudioOut2::AudioOut2PortDestroy(main_port);
+	AudioOut2::AudioOut2ContextDestroy(context);
+}
+
 } // namespace
 
 int main() {
@@ -755,6 +797,8 @@ int main() {
 	Check(AudioOut2::AudioOut2UserCreate(1000, &g_user_handle) == OK, "test user create failed");
 	TestObjectPortsBeyond256();
 	TestRepeatedBlockTrace();
+	TestBuzzDetectorScope();
+	TestLongRepeatEpisode();
 	TestUserSupportedAttributes();
 	TestSlotReuse();
 	TestFullTableRecovers();
