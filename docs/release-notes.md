@@ -1,10 +1,35 @@
-# KytyPS5 U59 int18.1 AMD test 5 — the AMD driver crash fixed at its source, and faster CPU side
+# KytyPS5 U59 int19
 
-> **This is a test build, mainly for AMD Radeon owners whose game crashed (`amdvlk64.dll+0x22240fc`) or showed broken
-> graphics with int18.** NVIDIA users are welcome to try it too: Sky Garden runs about 12% faster than with int18. The
-> first launch rebuilds the shader and program caches once, so the first minutes can stutter.
+> **int19 is mainly for AMD Radeon owners whose game crashed (`amdvlk64.dll+0x22240fc`) or showed broken
+> graphics with int18, and for anyone who heard a buzzing sound after some minutes.** NVIDIA users benefit too: Sky
+> Garden runs about 12% faster than with int18. The first launch rebuilds the shader and program caches once, so the
+> first minutes can stutter.
 
-## AMD graphics cards
+## Everyone
+
+- **Faster command processing:** measured on an RTX 3090 (Ryzen 9 7950X3D), Sky Garden went from 32.8 fps with int18
+  to 35.1 with the draw-run changes below (+7%), and the sequencer prefetch adds another 5-8% (launches in A B B A
+  order: Sky Garden 34.9 -> 36.5 fps, pirate island 29.3 -> 31.6, clock tower 38.4 -> 40.9).
+  - `KYTY_CP_SEQ_PREFETCH=1` (new default): while the emulator waits for the GPU at a "wait for idle", it prepares
+    the draws that follow. `KYTY_CP_SEQ_PREFETCH=0` turns it off.
+  - Draw runs through draws that write buffers (`KYTY_DRAW_RUN_WRITES`), fewer repeated checks of images and pages
+    (`KYTY_DRAW_RUN_IMAGE_EPOCH`, `KYTY_DRAW_PREP_CLEAN_SINCE`), larger descriptor pools.
+- **Less waiting between draw preparation and the command processor (publication snapshot):** a lock shared by the
+  draw-prep workers and the command processor (the pending-publication check) is now read lock-free
+  (`KYTY_PUBLICATION_SNAPSHOT=1`, the default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
+- **SRT trace replay:** the descriptor walks that refresh a draw's resources are recorded once per program and
+  replayed with guards (`KYTY_SRT_TRACE=1`, the default; `=0` turns it off, `=verify` checks every replay against
+  the full walk). Measured +5.4-5.9% fps in Sky Garden on top of the lock fix.
+- **Direct reads in draw preparation:** `KYTY_DRAW_PREP_DIRECT_READS=1` (default) lets the draw-prep worker read
+  guest pages directly into coalesced records instead of going through the slower path (worker side only).
+  `=0` restores the old reads.
+- **Diagnostic:** `KYTY_DRAW_PREP_PHASES=1` prints the time a draw-prep slot spends in each phase of its preparation.
+  Off by default.
+- **Fixes from chenxiao07's fork:** an image write-back no longer overwrites bytes the CPU wrote since (`KYTY_IMAGE_WRITEBACK_GUARD`),
+  a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
+  of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
+
+## AMD GPUs
 
 Majed-allababedi found where the AMD driver crash comes from and sent three fixes (pull requests #25, #26 and #27).
 Thank you!
@@ -19,29 +44,20 @@ Thank you!
   Kyty moved one of them to a spare slot that the vertex shader never wrote. NVIDIA tends to read zero there, AMD
   reads garbage (a likely cause of the pink and particle glitches). The vertex shader now writes that slot too, and
   pixel-shader inputs that are never read are no longer requested.
+- **Sequencer prefetch:** see `KYTY_CP_SEQ_PREFETCH` under Everyone.
 
 AMD test 4's workaround (building some pipelines without optimization) is not in this build: if #25 is the cause,
 it is no longer needed. If you still crash, please say so and send your `_kyty.txt`.
 
-## Everyone
+## Intel CPUs
 
-- **Intel CPUs: "Intel CPU compatibility" is now on automatically.** With it off, the audio engine thread could crash
+- **"Intel CPU compatibility" is now on automatically.** With it off, the audio engine thread could crash
   early (`Mutex.cpp:363 m_initialized`, or a crash in `memset`): the game's AMD-only `EXTRQ` instructions then went
   through a slow trap whose Windows exception frame can overwrite data the game keeps just below its stack pointer.
   The setting is now partly checked by default (automatic: on unless the CPU is an AMD); checked or unchecked forces
   it on or off (`--amd-cpu`, `--no-amd-cpu`, `KYTY_AMD_CPU=1|0|auto`). AMD CPUs are unchanged.
-- **Faster command processing:** measured on an RTX 3090 (Ryzen 9 7950X3D), Sky Garden went from 32.8 fps with int18
-  to 35.1 with the draw-run changes below (+7%), and the sequencer prefetch adds another 5-8% (launches in A B B A
-  order: Sky Garden 34.9 -> 36.5 fps, pirate island 29.3 -> 31.6, clock tower 38.4 -> 40.9).
-  - `KYTY_CP_SEQ_PREFETCH=1` (new default): while the emulator waits for the GPU at a "wait for idle", it prepares
-    the draws that follow. `KYTY_CP_SEQ_PREFETCH=0` turns it off.
-  - Draw runs through draws that write buffers (`KYTY_DRAW_RUN_WRITES`), fewer repeated checks of images and pages
-    (`KYTY_DRAW_RUN_IMAGE_EPOCH`, `KYTY_DRAW_PREP_CLEAN_SINCE`), larger descriptor pools.
-- **Fixes from chenxiao07's fork:** an image write-back no longer overwrites bytes the CPU wrote since (`KYTY_IMAGE_WRITEBACK_GUARD`),
-  a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
-  of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
 
-## amd5b: Linux file reads fixed
+## Linux
 
 On Linux, a file read into guest memory that the emulator had write-protected (GPU write tracking) stopped at
 the first protected page and reported the short count as success: a worldmap level file read 72,704 of 271,864
@@ -49,21 +65,7 @@ bytes (the game's XML assert, crash in the loader thread) and a model file 768 b
 thread after skipping the first cutscene). The Windows build already finished such reads through a host buffer;
 the Linux build now does the same. Windows is unchanged apart from this note.
 
-## amd5c: lock-free publication check
-
-- **Less waiting between draw preparation and the command processor:** a lock shared by the draw-prep workers and the
-  command processor (the pending-publication check) is now read lock-free (`KYTY_PUBLICATION_SNAPSHOT=1`, the
-  default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
-- **Diagnostic:** `KYTY_DRAW_PREP_PHASES=1` prints the time a draw-prep slot spends in each phase of its preparation.
-  Off by default.
-- **SRT trace replay:** the descriptor walks that refresh a draw's resources are recorded once per program and
-  replayed with guards (`KYTY_SRT_TRACE=1`, the default; `=0` turns it off, `=verify` checks every replay against
-  the full walk). Measured +5.4-5.9% fps in Sky Garden on top of the lock fix.
-- **Direct reads in draw preparation:** `KYTY_DRAW_PREP_DIRECT_READS=1` (default) lets the draw-prep worker read
-  guest pages directly into coalesced records instead of going through the slower path (worker side only).
-  `=0` restores the old reads.
-
-## amd5d: audio pacing fixes
+## Audio
 
 - **Buzzing / saw-wave sound after some minutes on certain levels:** this was caused by the emulator's audio-port
   table being limited to 256 ports. Astro Bot opens one port per 3D sound and holds up to several hundred in busy
@@ -84,9 +86,9 @@ the Linux build now does the same. Windows is unchanged apart from this note.
   10 seconds. They reach `_kyty.txt` only when `printf_direction=File` is set in `Kyty.ini`
   (`C:\ProgramData\Kyty\Kyty.ini` on Windows); with `Silent` or `Console` they go to the console only.
   Please send that log with your report.
-- **Going back:** `KYTY_AUDIO_QUEUE_CATCHUP=0 KYTY_AUDIO_PAD_PRIME=0` restores the old behaviour.
-- **Honest status:** the fix has been verified only against a simulated fast sound card, not yet on a PC that
-  actually shows the problem. Reports are welcome.
+- **Going back:** `KYTY_AUDIO_QUEUE_CATCHUP=0 KYTY_AUDIO_PAD_PRIME=0` restores the old pacing behaviour.
+- **Honest status of the pacing fixes:** they have been verified only against a simulated fast sound card, not yet on
+  a PC that actually shows that problem. Reports are welcome.
 
 ## How to test
 
