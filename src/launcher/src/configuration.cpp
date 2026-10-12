@@ -29,7 +29,7 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(printf_output_file);
 	KYTY_CFG_SET(profiler_enabled);
 	KYTY_CFG_SET(renderdoc_enabled);
-	KYTY_CFG_SET(amd_cpu_enabled);
+	KYTY_CFG_SET(amd_cpu_mode);
 #if defined(_WIN32)
 	KYTY_CFG_SET(red_zone_protection_enabled);
 #endif
@@ -77,7 +77,14 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(printf_output_file);
 	KYTY_CFG_GET(profiler_enabled);
 	KYTY_CFG_GET(renderdoc_enabled);
-	amd_cpu_enabled = s.value("amd_cpu_enabled", false).toBool();
+	// "auto" (on unless the CPU is an AMD), "on" or "off". Before "auto", only amd_cpu_enabled was
+	// saved, and false for everyone who never touched it: true stays on, false becomes auto.
+	amd_cpu_mode = s.contains("amd_cpu_mode")              ? s.value("amd_cpu_mode").toString()
+	               : s.value("amd_cpu_enabled", false).toBool() ? QStringLiteral("on")
+	                                                            : QStringLiteral("auto");
+	if (amd_cpu_mode != QStringLiteral("on") && amd_cpu_mode != QStringLiteral("off")) {
+		amd_cpu_mode = QStringLiteral("auto");
+	}
 #if defined(_WIN32)
 	red_zone_protection_enabled =
 	    s.value("red_zone_protection_enabled", red_zone_protection_enabled).toBool();
@@ -96,6 +103,7 @@ void Configuration::WriteSettings(QSettings* s) const {
 	s->setValue("game_path", game_path);
 	s->setValue("custom_settings", QVariant::fromValue(custom_settings).toString());
 	s->setValue("host_input_mapping", host_input_mapping);
+	s->remove("amd_cpu_enabled"); // replaced by amd_cpu_mode
 }
 
 void Configuration::ReadSettings(QSettings* s) {
@@ -107,11 +115,19 @@ void Configuration::ReadSettings(QSettings* s) {
 	host_input_mapping = s->value("host_input_mapping", host_input_mapping).toStringList();
 }
 
-bool Configuration::SetGameSettings(const QJsonObject& settings, QString& error) {
+bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QString& error) {
 	const auto fail = [&error](const QString& message) {
 		error = message;
 		return false;
 	};
+	// Exports from launchers before amd_cpu_mode carry amd_cpu_enabled ("true" / "false").
+	QJsonObject settings = imported_settings;
+	if (settings.contains(QStringLiteral("amd_cpu_enabled"))) {
+		const bool on = settings.take(QStringLiteral("amd_cpu_enabled")).toString() == QStringLiteral("true");
+		if (!settings.contains(QStringLiteral("amd_cpu_mode"))) {
+			settings.insert(QStringLiteral("amd_cpu_mode"), on ? QStringLiteral("on") : QStringLiteral("auto"));
+		}
+	}
 	auto values = GameSettings();
 	for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
 		if (!values.contains(it.key())) {
