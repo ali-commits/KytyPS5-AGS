@@ -644,7 +644,71 @@ int KYTY_SYSV_ABI AudioOut2ContextAdvance(AudioOut2ContextHandle ctx) {
 	return OK;
 }
 
+// KYTY_AUDIO_TRACE: what the guest's pushes did since the last summary.
+struct AudioOut2PushTrace {
+	std::atomic<uint64_t> start {0};
+	std::atomic<uint32_t> pushes {0};
+	std::atomic<uint32_t> blocking {0};
+	std::atomic<uint32_t> not_ready {0};
+	std::atomic<uint32_t> no_device {0}; // Blocking pushes paced by the virtual queue, not SDL.
+	std::atomic<uint32_t> sleeps {0};
+	std::atomic<uint64_t> sleep_us {0};
+	std::atomic<uint64_t> push_us {0}; // Time spent inside the push (SDL pacing included).
+	std::atomic<uint64_t> push_max_us {0};
+	std::atomic<uint32_t> level_polls {0};
+};
+static AudioOut2PushTrace g_audioout2_push_trace;
+
+static int AudioOut2ContextPushImpl(AudioOut2ContextHandle ctx, uint32_t blocking, uint32_t* sleeps,
+                                    uint64_t* slept, bool* device_paced);
+
+static void audioout2_trace_push(uint64_t entered, bool blocking, int result, uint32_t sleeps,
+                                 uint64_t sleep_us, bool no_device) {
+	auto&      t   = g_audioout2_push_trace;
+	const auto now = LibKernel::KernelGetProcessTime();
+	t.pushes++;
+	t.blocking += blocking ? 1 : 0;
+	t.not_ready += result == AUDIO_OUT2_ERROR_NOT_READY ? 1 : 0;
+	t.no_device += no_device ? 1 : 0;
+	t.sleeps += sleeps;
+	t.sleep_us += sleep_us;
+	t.push_us += now - entered;
+	if (now - entered > t.push_max_us.load(std::memory_order_relaxed)) {
+		t.push_max_us = now - entered;
+	}
+	uint64_t start = t.start.load(std::memory_order_relaxed);
+	if (start == 0) {
+		t.start = now;
+		return;
+	}
+	if (now - start < Diag::TRACE_INTERVAL_US || !t.start.compare_exchange_strong(start, now)) {
+		return;
+	}
+	const auto pushes = t.pushes.exchange(0);
+	Diag::Trace("t=%.1f s AudioOut2: %u pushes (%.1f Hz, %u blocking, %u paced without a device), %u "
+	            "NOT_READY, %u push sleeps (%.1f ms), in push avg %.2f max %.2f ms, %u queue-level polls",
+	            static_cast<double>(now) / 1e6, pushes, pushes * 1e6 / static_cast<double>(now - start),
+	            t.blocking.exchange(0), t.no_device.exchange(0), t.not_ready.exchange(0), t.sleeps.exchange(0),
+	            static_cast<double>(t.sleep_us.exchange(0)) / 1000.0,
+	            pushes != 0 ? static_cast<double>(t.push_us.exchange(0)) / pushes / 1000.0 : 0.0,
+	            static_cast<double>(t.push_max_us.exchange(0)) / 1000.0, t.level_polls.exchange(0));
+}
+
 int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
+	if (Diag::TraceEnabled()) {
+		const auto entered = LibKernel::KernelGetProcessTime();
+		uint32_t   sleeps  = 0;
+		uint64_t   slept   = 0;
+		bool       paced   = false;
+		const int  result  = AudioOut2ContextPushImpl(ctx, blocking, &sleeps, &slept, &paced);
+		audioout2_trace_push(entered, blocking != 0, result, sleeps, slept, blocking != 0 && !paced);
+		return result;
+	}
+	return AudioOut2ContextPushImpl(ctx, blocking, nullptr, nullptr, nullptr);
+}
+
+static int AudioOut2ContextPushImpl(AudioOut2ContextHandle ctx, uint32_t blocking, uint32_t* sleeps,
+                                    uint64_t* slept, bool* device_paced) {
 	uint32_t sleep_micros = audioout2_grain_micros(512);
 
 	for (;;) {
@@ -653,6 +717,9 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t bloc
 		// vibration/failed-open handle) has no downstream operation that can block this call.
 		const bool use_device_clock =
 		    blocking != 0 && audioout2_context_has_queueable_device(ctx);
+		if (device_paced != nullptr) {
+			*device_paced = use_device_clock;
+		}
 
 		g_audioout2_context_mutex.Lock();
 		if (auto* state = audioout2_find_context_locked(ctx); state != nullptr) {
@@ -677,11 +744,18 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t bloc
 		}
 
 		Common::Thread::SleepMicro(sleep_micros);
+		if (sleeps != nullptr) {
+			(*sleeps)++;
+			*slept += sleep_micros;
+		}
 	}
 }
 
 int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint32_t* queue_level,
                                                 uint32_t* available_queues) {
+	if (Diag::TraceEnabled()) {
+		g_audioout2_push_trace.level_polls++;
+	}
 	if (queue_level != nullptr) {
 		*queue_level = 0;
 	}

@@ -42,9 +42,13 @@ Stream& GetStream(SDL_AudioStream* stream) {
 	return *reinterpret_cast<Stream*>(stream);
 }
 
+int64_t device_ppm = 0; // How much faster (or slower) than the process clock the device plays.
+
 void Drain(Stream& stream) {
 	if (!stalled) {
-		const auto consumed = (now - stream.updated) * stream.spec.freq;
+		const auto elapsed  = (now - stream.updated) * stream.spec.freq;
+		const auto consumed = static_cast<uint64_t>(static_cast<int64_t>(elapsed) +
+		                                            static_cast<int64_t>(elapsed) * device_ppm / 1000000);
 		stream.frames -= std::min(stream.frames, consumed);
 	}
 	stream.updated = now;
@@ -500,21 +504,131 @@ void TestChannelGains() {
 	Check(queued_pad_gains != nullptr && queued_pad_gains[0] == gains[0] && queued_pad_gains[1] == gains[1],
 	      "connected controller did not receive channel gains");
 }
+
+// A device that plays faster than the process clock drains the cushion until the queue runs dry
+// (one gap per drain, then a re-prime); with the queue catch-up the device sets the pace instead.
+// Returns how many outputs found less than one block queued after the first priming.
+int RunFastDevice(bool catchup, int64_t ppm, int seconds) {
+	Fixture f;
+	Libs::Audio::g_queue_catchup = catchup ? 1 : 0;
+	device_ppm                   = ppm;
+	const auto port              = f.Open();
+	f.Prime(port);
+	processing = 125;
+	oversleep  = 175;
+	int        low   = 0;
+	const auto start = now;
+	while (now - start < static_cast<uint64_t>(seconds) * 1000000) {
+		Drain(*streams.front());
+		low += streams.front()->frames < uint64_t {256} * 1000000 ? 1 : 0;
+		f.Output(port);
+	}
+	Drain(*streams.front());
+	const auto queued_ms = streams.front()->frames / 1000000 / 48;
+	Check(queued_ms <= 60, "the queue grew past its target");
+	device_ppm                   = 0;
+	Libs::Audio::g_queue_catchup = 0;
+	f.audio.AudioOutClose(port);
+	return low;
+}
+
+// A port that joins a batch the first port already paces starts under one block and stays there;
+// KYTY_AUDIO_PAD_PRIME tops it up with silence once.
+uint64_t LateJoinerQueuedFrames(bool pad_prime) {
+	Fixture f;
+	Libs::Audio::g_pad_prime = pad_prime ? 1 : 0;
+	const auto bed           = f.Open(512);
+	for (int i = 0; i < 8; i++) {
+		f.Output(bed);
+	}
+	const auto         speaker = f.Open(512, 4);
+	Audio::OutputParam batch[] {{bed, f.pcm.data()}, {speaker, f.pcm.data()}};
+	uint64_t           min_frames = ~uint64_t {0};
+	for (int i = 0; i < 400; i++) {
+		f.audio.AudioOutOutputs(batch, 2);
+		if (i >= 10) {
+			Drain(*streams[1]);
+			min_frames = std::min(min_frames, streams[1]->frames / 1000000);
+		}
+	}
+	Libs::Audio::g_pad_prime = 0;
+	f.audio.AudioOutClose(speaker);
+	f.audio.AudioOutClose(bed);
+	return min_frames;
+}
+
+// The AudioOut2 shape on a device faster than the process clock: a bed and a late pad speaker
+// port in one batch. With catch-up and pad prime neither queue may run dry.
+void TestFastDeviceBatch() {
+	Fixture f;
+	Libs::Audio::g_queue_catchup = 1;
+	Libs::Audio::g_pad_prime     = 1;
+	device_ppm                   = 500;
+	processing                   = 125;
+	oversleep                    = 175;
+	const auto bed               = f.Open(512);
+	for (int i = 0; i < 8; i++) {
+		f.Output(bed);
+	}
+	const auto         speaker = f.Open(512, 4);
+	Audio::OutputParam batch[] {{bed, f.pcm.data()}, {speaker, f.pcm.data()}};
+	uint64_t           min_bed = ~uint64_t {0}, min_speaker = ~uint64_t {0}, max_bed = 0;
+	const auto         start = now;
+	for (int i = 0; now - start < 300000000; i++) {
+		if (i >= 10) {
+			Drain(*streams[0]);
+			Drain(*streams[1]);
+			min_bed     = std::min(min_bed, streams[0]->frames / 1000000);
+			max_bed     = std::max(max_bed, streams[0]->frames / 1000000);
+			min_speaker = std::min(min_speaker, streams[1]->frames / 1000000);
+		}
+		f.audio.AudioOutOutputs(batch, 2);
+	}
+	device_ppm                   = 0;
+	Libs::Audio::g_queue_catchup = 0;
+	Libs::Audio::g_pad_prime     = 0;
+	f.audio.AudioOutClose(speaker);
+	f.audio.AudioOutClose(bed);
+	Check(min_bed >= 512, "the bed ran under one block on a fast device");
+	Check(min_speaker >= 512, "the late pad speaker port ran under one block on a fast device");
+	Check(max_bed <= 3 * 1024, "the bed grew past its target");
+}
+
+void TestLateJoinerPadPrime() {
+	Check(LateJoinerQueuedFrames(false) < 512, "a late joiner unexpectedly built its own cushion");
+	Check(LateJoinerQueuedFrames(true) >= 1024, "pad prime did not give the late joiner a cushion");
+}
+
+void TestFastDeviceDrift() {
+	Check(RunFastDevice(false, 500, 300) > 0, "without catch-up a 500 ppm fast device never ran dry");
+	Check(RunFastDevice(true, 500, 300) == 0, "catch-up let a 500 ppm fast device run dry");
+	Check(RunFastDevice(true, 20000, 60) == 0, "catch-up let a 2% fast device run dry");
+	Check(RunFastDevice(true, -500, 300) == 0, "a slow device ran dry with catch-up");
+	Check(RunFastDevice(false, -500, 300) == 0, "a slow device ran dry");
+}
 } // namespace
 
 int main() {
-	TestPrimingAndSteadyCadence();
-	TestUnderrunAndStalledQueueRecovery();
-	TestFallbackClockAndLongGap();
-	TestAsyncDoesNotAccumulateDeadlines();
-	TestSynchronizedBatchAndInactivePorts();
-	TestFallbackUsesEachPortsPeriod();
-	TestFailedQueueUsesFallbackClock();
-	TestControllerSpeakerPacing();
-	TestMixGains();
-	TestInvalidBatchSize();
-	TestZeroOutputFrequency();
-	TestChannelGains();
+	TestFastDeviceDrift();
+	TestLateJoinerPadPrime();
+	TestFastDeviceBatch();
+	// The scheduling cases hold with the queue catch-up and pad prime off and on (the default).
+	for (const int fixes: {0, 1}) {
+		Libs::Audio::g_queue_catchup = fixes;
+		Libs::Audio::g_pad_prime     = fixes;
+		TestPrimingAndSteadyCadence();
+		TestUnderrunAndStalledQueueRecovery();
+		TestFallbackClockAndLongGap();
+		TestAsyncDoesNotAccumulateDeadlines();
+		TestSynchronizedBatchAndInactivePorts();
+		TestFallbackUsesEachPortsPeriod();
+		TestFailedQueueUsesFallbackClock();
+		TestControllerSpeakerPacing();
+		TestMixGains();
+		TestInvalidBatchSize();
+		TestZeroOutputFrequency();
+		TestChannelGains();
+	}
 	Check(streams.empty(), "output stream leaked");
 	std::puts("AudioOutTimingTests: all cases passed");
 }
