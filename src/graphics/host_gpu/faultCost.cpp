@@ -256,6 +256,9 @@ struct MapWindow {
 	uint64_t split_concurrent_any[ThreadClasses] {};
 	// Fault handler time by thread name (guest threads by their names).
 	std::unordered_map<std::string, std::array<uint64_t, 2>> by_thread; // faults, ns
+	// Host-call lock waits outside faults (NoteHostLockWait), by thread class.
+	uint64_t lock_waits[ThreadClasses] {};
+	uint64_t lock_wait_ns[ThreadClasses] {};
 	ProtectTable protect {};
 	uint32_t first_frame = 0;
 };
@@ -349,6 +352,11 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 		}
 		std::printf("%s\n", line.c_str());
 	}
+	std::printf("FaultMap   host-lock waits outside faults: cp %.1f/frame %.3f ms/frame, guest %.1f/frame %.3f "
+	            "ms/frame, host %.1f/frame %.3f ms/frame\n",
+	            per(window.lock_waits[Cp]), per(window.lock_wait_ns[Cp]) / 1e6, per(window.lock_waits[Guest]),
+	            per(window.lock_wait_ns[Guest]) / 1e6, per(window.lock_waits[Host]),
+	            per(window.lock_wait_ns[Host]) / 1e6);
 	// Top 4 MiB regions, then top 64 KiB blocks.
 	std::unordered_map<uint64_t, std::array<uint64_t, 4>> regions; // faults by class + ns
 	for (const auto& [key, block]: window.blocks) {
@@ -1299,6 +1307,16 @@ void MapFault(const FaultRecord& record) noexcept {
 	}
 	block.rip = t_fault_rip;
 	std::memcpy(block.thread, name, sizeof(block.thread));
+}
+
+void NoteHostLockWait(uint64_t ns) noexcept {
+	if (!g_map_enabled) {
+		return;
+	}
+	const int        thread = CurrentThreadClass(nullptr, 0);
+	std::scoped_lock lock(g_map_mutex);
+	g_map.lock_waits[thread]++;
+	g_map.lock_wait_ns[thread] += ns;
 }
 
 void MapProtect(bool unprotect, bool no_access, uint64_t pages, uint64_t ns) noexcept {

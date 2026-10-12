@@ -104,6 +104,16 @@ extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 	return Detail::g_acquire.On();
 }
 
+// KYTY_DRAW_RUN_ACQUIRE_MEMO (live, default 0; 1 on, 2 verify): the reuse check above examines every
+// texture of the draw under the texture-cache lock (the image exists, is no attachment and its
+// memory lies over none). An image's identity (slot and generation) fixes its guest range, so the
+// answer for a texture image depends only on the attachment images: textures that passed for the
+// same attachment images (with generations) are not examined again; the check's attachment-state
+// part still runs. Pipeline and structure starts in one rendering instance repeat their textures
+// (Sky Garden: about 1,300 such starts a frame, 0.27-0.32 us each in the check). Verify examines
+// them anyway and reports a memorized texture that fails.
+[[nodiscard]] int AcquireMemoMode() noexcept;
+
 // KYTY_DRAW_RUN_PUSH=1 (default 0; with KYTY_DRAW_RUN=1 or verify): a continuation pushes only its
 // per-draw descriptors (buffers, shader data, flattened SRT, BDA, GDS, mip statistics); its image
 // and sampler descriptors are the previous draw's, still in effect: the same pipeline layout, and

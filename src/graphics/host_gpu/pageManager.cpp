@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/pageManager.h"
 
 #include "common/alignment.h"
+#include "common/liveSwitch.h"
 #include "common/profiler.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/faultCost.h"
@@ -67,24 +68,82 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 
 // The region lock. Deferred write-unprotects hold it across their host call, so waiters spin,
 // then park (KYTY_TRACKER_LOCK_PARK); with parking off they retry back to back as before.
+// Takes `lock`. A contended wait counts as `part` in a write fault's split (FaultCost::SplitAdd),
+// and with the fault map on, a host-lock wait outside a fault as that thread's lock wait.
+void LockTimed(ParkingSpinLock& lock, FaultCost::Split part) noexcept {
+	if (lock.try_lock()) [[likely]] {
+		return;
+	}
+	const bool timed = FaultCost::MapEnabled();
+	const auto start = timed ? FaultCost::NowNs() : 0;
+	(void)lock.LockContended(false);
+	if (timed) {
+		const auto ns = FaultCost::NowNs() - start;
+		if (FaultCost::SplitActive()) {
+			FaultCost::SplitAdd(part, ns);
+		} else if (part == FaultCost::Split::HostLock) {
+			FaultCost::NoteHostLockWait(ns);
+		}
+	}
+}
+
 class SpinGuard final {
 public:
-	// `part`: what a contended wait counts as in a write fault's split (FaultCost::SplitAdd).
 	explicit SpinGuard(ParkingSpinLock& lock, FaultCost::Split part = FaultCost::Split::CountLock)
 	    : m_lock(lock) {
-		if (!m_lock.try_lock()) [[unlikely]] {
-			const auto start = FaultCost::SplitActive() ? FaultCost::NowNs() : 0;
-			(void)m_lock.LockContended(false);
-			if (start != 0) {
-				FaultCost::SplitAdd(part, FaultCost::NowNs() - start);
-			}
-		}
+		LockTimed(m_lock, part);
 	}
 	~SpinGuard() { m_lock.unlock(); }
 	KYTY_CLASS_NO_COPY(SpinGuard);
 
 private:
 	ParkingSpinLock& m_lock;
+};
+
+// KYTY_PAGE_HOST_SUBLOCKS (live, default 0): the host calls of a 4 MiB region and the decisions they
+// rest on are serialized per 512 KiB sub-block instead of per region. Every host-call section takes
+// the sub-block locks of the pages it decides on and protects (in address order); with the switch
+// off it takes the region's host lock first as well. Sections over overlapping pages always share
+// a sub-block lock whatever the switch said when each began, so the region-wide guarantee (no
+// page's host protection looser than its counts at any host-lock release) holds per page as
+// before; only sections over disjoint sub-blocks (a guest thread's fault window and the command
+// processor's re-protection elsewhere in the region) no longer wait for each other.
+Live::Switch g_host_sublocks("KYTY_PAGE_HOST_SUBLOCKS", Live::ParseDefaultOff);
+
+constexpr size_t HOST_SUB_PAGES = 128;
+static_assert(REGION_PAGES % HOST_SUB_PAGES == 0);
+constexpr size_t HOST_SUBS = REGION_PAGES / HOST_SUB_PAGES;
+
+class HostGuard final {
+public:
+	// Pages [first, last) of `region` (an empty range takes the sub-block of `first`).
+	template <typename Region>
+	HostGuard(Region& region, size_t first, size_t last) noexcept
+	    : m_subs(region.host_sub.data()), m_sub_first(static_cast<uint32_t>(first / HOST_SUB_PAGES)),
+	      m_sub_last(static_cast<uint32_t>((last > first ? last - 1 : first) / HOST_SUB_PAGES)) {
+		if (!g_host_sublocks.On()) {
+			m_host = &region.host_lock;
+			LockTimed(*m_host, FaultCost::Split::HostLock);
+		}
+		for (auto sub = m_sub_first; sub <= m_sub_last; sub++) {
+			LockTimed(m_subs[sub], FaultCost::Split::HostLock);
+		}
+	}
+	~HostGuard() {
+		for (auto sub = m_sub_last + 1; sub-- > m_sub_first;) {
+			m_subs[sub].unlock();
+		}
+		if (m_host != nullptr) {
+			m_host->unlock();
+		}
+	}
+	KYTY_CLASS_NO_COPY(HostGuard);
+
+private:
+	ParkingSpinLock* m_subs;
+	ParkingSpinLock* m_host = nullptr;
+	uint32_t         m_sub_first;
+	uint32_t         m_sub_last;
 };
 
 void ValidateRange(uint64_t vaddr, uint64_t size) {
@@ -239,6 +298,8 @@ struct PageManager::Impl {
 	//    than its counts, and the last update to run writes the latest state.
 	struct Region {
 		ParkingSpinLock                     host_lock;
+		// KYTY_PAGE_HOST_SUBLOCKS: the host-call locks of the region's 512 KiB sub-blocks (HostGuard).
+		std::array<ParkingSpinLock, HOST_SUBS> host_sub;
 		ParkingSpinLock                     lock;
 		std::array<PageState, REGION_PAGES> pages;
 		// The protection last requested from the host for each page, under both locks. ReadWrite
@@ -406,7 +467,7 @@ struct PageManager::Impl {
 	// host only for the runs whose recorded protection differs (a run may bridge pages already at
 	// its level). Takes both locks itself. Returns the host calls made.
 	uint32_t ApplySpan(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
-		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
+		HostGuard host(region, first, last);
 		RunList   runs;
 		uint32_t  calls = 0;
 		{
@@ -642,7 +703,7 @@ struct PageManager::Impl {
 				return;
 			}
 		}
-		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
+		HostGuard host(region, first, last);
 		RunList   runs;
 		{
 			SpinGuard counts(region.lock);
@@ -794,7 +855,7 @@ void PageManager::ResyncHostProtection(uint64_t vaddr, uint64_t size) {
 			continue; // never watched: the host protection is not the tracker's
 		}
 		{
-			SpinGuard host(region->host_lock, FaultCost::Split::HostLock);
+			HostGuard host(*region, first, last);
 			SpinGuard counts(region->lock);
 			std::fill(region->applied.data() + first, region->applied.data() + last,
 			          Impl::Level::ReadWrite);

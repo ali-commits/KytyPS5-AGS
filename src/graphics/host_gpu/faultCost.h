@@ -179,6 +179,9 @@ enum class Split : uint8_t { TrackerLock = 0, HostLock, CountLock, HostCall, Flu
 // The calling thread resolves a write fault and the fault map is on.
 [[nodiscard]] bool SplitActive() noexcept;
 void               SplitAdd(Split part, uint64_t ns) noexcept;
+// A contended wait for a page-manager host-call lock outside a write fault (fault map on): the
+// command processor's re-protections waiting behind guest threads' calls and the reverse.
+void NoteHostLockWait(uint64_t ns) noexcept;
 
 } // namespace Libs::Graphics::FaultCost
 
