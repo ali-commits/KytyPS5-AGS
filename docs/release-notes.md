@@ -72,7 +72,8 @@ the Linux build now does the same. Windows is unchanged apart from this note.
   scenes, so new sounds were refused and the game's mixer produced a steady buzz. Ports now grow on demand up to
   4096 (`KYTY_AUDIO_OUT2_MAX_PORTS`; setting it to 256 restores the old behaviour). Confirmed fixed by a tester who
   could reproduce it within a minute. `KYTY_AUDIO_TRACE` now also logs port create/destroy counts and a BUZZ
-  detector for repeated blocks.
+  detector: it watches only ports that play to the main device (not the pad speaker, aux, vibration or 3D object
+  ports) and reports an episode of at least one second of repeated blocks once, when it ends, with its duration.
 - **Sound breaking up after some minutes (secondary robustness improvement, not the cause of the buzz above):**
   on some PCs the sound could turn crackly or cut out a few minutes into play.
   The sound card can run slightly faster than the emulator's own clock, so the audio buffer
@@ -98,6 +99,8 @@ Copy your working folder, unzip this build over it and start the game as usual. 
   goes wrong, send `_kyty.txt` from the emulator folder and say which level.
 - **Astro's Playroom on AMD:** do the clouds still break into blocks?
 - **Everyone:** is it faster or slower than int18 for you?
+- **Developers:** `KYTY_CP_COMMIT_STATS=1` now also prints a `StartPhases` line (draws split by start reason) and
+  `KYTY_FAULT_MAP=1` splits write-fault handler time by cause; both are off by default.
 
 ---
 
