@@ -1353,10 +1353,86 @@ static bool ReadForDrawPrep(Graphics::DrawPrep::Recorder& recorder, uint64_t vad
 	return true;
 }
 
+// KYTY_DRAW_PREP_DIRECT_READS (live, default 1; workers only, the exact predicate path is
+// unchanged): a draw-prep worker's read whose whole 4 KiB page passed the workers' read hint
+// earlier in the same preparation copies straight from the page's host backing bytes, found once
+// per page through the thread's backing mapping records, and checks the backing map generation
+// afterwards (a map change in between redoes the read the usual way). The hint is only a hint:
+// the commit's certificate (logged transitions, then the exact clean predicate or the bytes)
+// decides, as for every worker read, so checking it once per page instead of once per read
+// changes no outcome. The read set also extends a read that continues the previous one
+// (ReadSet::Record). verify: each direct copy is compared with a TryReadBacking of the same bytes;
+// differences that persist on a second read are counted (exit: stop at the first).
+static std::atomic<uint64_t> g_direct_read_checks {0};
+static std::atomic<uint64_t> g_direct_read_mismatches {0};
+
+// The workers' read hint (DrawPrepGate without the exact path and the diagnostics) for a whole
+// page.
+static bool DrawPrepHintClean(uint64_t vaddr, uint64_t size) {
+	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return true;
+	}
+	auto& buffers = GetGpuResources().GetBufferCache();
+	return !GpuDirtyHint(buffers, vaddr, size) && !buffers.HasPendingBackingPublication(vaddr, size);
+}
+
+static void VerifyDirectRead(uint64_t vaddr, const void* data, uint64_t size) {
+	const auto checks = g_direct_read_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+	std::array<uint8_t, 64> reference {};
+	if (size > reference.size()) {
+		return;
+	}
+	const auto differs = [&] {
+		return TryReadBacking(vaddr, reference.data(), size) &&
+		       std::memcmp(reference.data(), data, static_cast<size_t>(size)) != 0;
+	};
+	if (differs() && differs()) {
+		const auto count = g_direct_read_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 16) {
+			std::printf("DrawPrepDirectReads: a direct read of [0x%" PRIx64 ", +%" PRIu64
+			            ") differs from the backing read\n",
+			            vaddr, size);
+		}
+		if (Graphics::DrawPrep::DirectReadsMode() == 3) {
+			EXIT("DrawPrepDirectReads: a direct read differs from the backing read\n");
+		}
+	}
+	if ((checks & 0xffffffu) == 0) {
+		std::printf("DrawPrepDirectReads verify: %" PRIu64 " checks, %" PRIu64 " mismatches\n",
+		            checks, g_direct_read_mismatches.load(std::memory_order_relaxed));
+	}
+}
+
 static bool TryReadForDrawPrep(Graphics::DrawPrep::Recorder& recorder, uint64_t vaddr, void* data,
                                uint64_t size, uint64_t caller) {
-	return ReadForDrawPrep(recorder, vaddr, data, size, caller) &&
-	       recorder.reads->Record(vaddr, data, size);
+	constexpr uint64_t PageMask = 4095u;
+	const bool direct = !recorder.exact && g_guest_address_space != nullptr && Graphics::DrawPrep::DirectReadsMode() != 0;
+	if (direct && (vaddr >> 12u) == recorder.direct_page && size <= 64u &&
+	    (vaddr & PageMask) + size <= 4096u && !recorder.reads->Failed()) {
+		std::memcpy(data, recorder.direct_host + (vaddr & PageMask), static_cast<size_t>(size));
+		std::atomic_thread_fence(std::memory_order_acquire);
+		if (GuestAddressSpace::BackingMapGeneration() == recorder.direct_generation) {
+			if (Graphics::DrawPrep::DirectReadsMode() >= 2) [[unlikely]] {
+				VerifyDirectRead(vaddr, data, size);
+			}
+			return recorder.reads->Record(vaddr, data, size);
+		}
+		recorder.direct_page = UINT64_MAX; // the backing map changed: find the page again
+	}
+	if (!ReadForDrawPrep(recorder, vaddr, data, size, caller)) {
+		return false;
+	}
+	if (direct && (vaddr & PageMask) + size <= 4096u && (vaddr >> 12u) != recorder.direct_page) {
+		const auto page       = vaddr & ~PageMask;
+		uint64_t   generation = 0;
+		const auto* host      = g_guest_address_space->BackingAliasCached(page, 4096u, generation);
+		if (host != nullptr && DrawPrepHintClean(page, 4096u)) {
+			recorder.direct_page       = vaddr >> 12u;
+			recorder.direct_host       = host;
+			recorder.direct_generation = generation;
+		}
+	}
+	return recorder.reads->Record(vaddr, data, size);
 }
 
 bool TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size) {

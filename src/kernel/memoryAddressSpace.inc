@@ -382,6 +382,29 @@ public:
 		return true;
 	}
 
+	// BackingAlias through this thread's mapping records only (no lock): nullptr when no record
+	// covers the range. `generation` receives the map generation the record is valid for; a reader
+	// of the alias checks MapGeneration() after copying, as TryReadCachedMapping does, and
+	// discards the bytes if a map mutation intervened.
+	const uint8_t* BackingAliasCached(uint64_t vaddr, uint64_t size, uint64_t& generation) const {
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return nullptr;
+		}
+		generation = s_map_generation.load(std::memory_order_acquire);
+		for (const auto& entry: t_backing_mapping_cache.entries) {
+			if (entry.owner != this || entry.generation != generation || vaddr < entry.vaddr ||
+			    vaddr - entry.vaddr >= entry.size || size > entry.size - (vaddr - entry.vaddr)) {
+				continue;
+			}
+			// RangeOk held for the whole record when it was cached under m_mutex.
+			return m_backing_base + entry.backing_offset + (vaddr - entry.vaddr);
+		}
+		return nullptr;
+	}
+	[[nodiscard]] static uint64_t MapGeneration() {
+		return s_map_generation.load(std::memory_order_relaxed);
+	}
+
 	// The backing alias of [vaddr, vaddr + size) when one mapping holds the whole range, or
 	// nullptr. The alias view stays mapped and writable for the store's lifetime, so reading it
 	// never faults, whatever the guest view's protection; if the guest unmaps the range later, the
@@ -1150,6 +1173,11 @@ public:
 	const uint8_t* BackingAlias(uint64_t vaddr, uint64_t size) {
 		return m_backing->BackingAlias(vaddr, size);
 	}
+
+	const uint8_t* BackingAliasCached(uint64_t vaddr, uint64_t size, uint64_t& generation) const {
+		return m_backing->BackingAliasCached(vaddr, size, generation);
+	}
+	[[nodiscard]] static uint64_t BackingMapGeneration() { return GuestBackingStore::MapGeneration(); }
 
 	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }
 

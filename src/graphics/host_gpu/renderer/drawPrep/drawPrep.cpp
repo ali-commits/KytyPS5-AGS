@@ -313,6 +313,7 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 	prepared.programs   = {};
 	prepared.pixel_info = {};
 	prepared.reads.Reset();
+	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
 	if (!eligible) {
@@ -369,6 +370,29 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 	prepared.ok = true;
 }
 
+// KYTY_DRAW_PREP_DIRECT_READS (readSet.h, kernel/memory.cpp TryReadForDrawPrep): live, default 1;
+// 0 off, verify / exit compare each direct copy with a backing read.
+static Live::Switch g_direct_reads("KYTY_DRAW_PREP_DIRECT_READS", [](const char* value) -> int64_t {
+	if (value == nullptr || value[0] == '\0') {
+		return 1;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	if (std::strcmp(value, "exit") == 0) {
+		return 3;
+	}
+	return std::strcmp(value, "0") == 0 ? 0 : 1;
+});
+
+int DirectReadsMode() {
+	return static_cast<int>(g_direct_reads.Get());
+}
+
+bool DirectReadsEnabled() {
+	return g_direct_reads.Get() != 0;
+}
+
 // Live (common/liveSwitch.h): the sequencer reads it per dispatch it parses; the op carries the
 // decision to the resolver, so a change applies from the next parsed dispatch.
 static Live::Switch g_dispatch_prep("KYTY_DRAW_PREP_DISPATCH", Live::ParseDefaultOff);
@@ -407,6 +431,7 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 	prepared.failure            = Failure::None;
 	prepared.compute_program    = {};
 	prepared.reads.Reset();
+	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
 	if (!eligible) {
