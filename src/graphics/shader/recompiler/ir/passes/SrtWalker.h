@@ -111,7 +111,7 @@ struct SrtTraceCall;
 // buffer; how the walk batches them (by page ends) does not matter. A guard that does not hold
 // abandons the trace for the rest of the refresh: the walkers' memo was never touched, so
 // evaluation just continues through them from scratch (reads the replay already made are made
-// again, which only adds identical ranges to a read certificate). A plan keeps up to four traces
+// again, which only adds identical ranges to a read certificate). A plan keeps up to eight traces
 // (variants, most recently served first): when the first request does not match one, the next is
 // tried; a refresh that matches none, or a variant that fails later, makes the next refresh record.
 // A plan whose traces keep failing stops recording for a while.

@@ -2238,7 +2238,10 @@ Live::Switch g_srt_trace("KYTY_SRT_TRACE", ParseSrtTrace);
 // one (a condition with another truth, so other active sources) tries the next; one that matches
 // none records a new variant on the next refresh.
 constexpr uint32_t TraceAfterUses = 2;
-constexpr size_t   TraceVariants  = 4;
+constexpr size_t   TraceVariants  = 8;
+// Refreshes in a row whose first request matched no variant before a plan backs off (its cases
+// do not repeat: recording every refresh would cost more than walking).
+constexpr uint32_t TraceMaxNewCases = 16;
 constexpr uint32_t TraceMaxMisses = 4;
 constexpr uint32_t TraceBackoff   = 256;
 constexpr size_t   TraceMaxOps    = 16384;
@@ -2252,9 +2255,12 @@ struct TraceSlot {
 	uint32_t                  misses  = 0;
 	uint32_t                  backoff = 0;
 	bool                      record_next = false; // a refresh matched no variant
+	uint32_t                  new_cases   = 0;     // such refreshes in a row
 };
 
-constexpr size_t TraceSlotBits = 10;
+// Per thread: a worker sees several hundred plans (vertex, pixel and compute stages of every
+// scene); a slot taken by another plan drops this one's traces.
+constexpr size_t TraceSlotBits = 12;
 
 struct TraceEvent {
 	int32_t  ref   = 0;
@@ -2489,6 +2495,9 @@ SrtTraceSession::SrtTraceSession(const ResourcePlan& program, SrtWalker& clean, 
 	const auto key    = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&program));
 	auto&      slot   = traces.slots[((key >> 4u) * 0x9E3779B97F4A7C15ull) >> (64u - TraceSlotBits)];
 	if (slot.plan != &program || slot.identity != program.trace_identity) {
+		if (stats && slot.plan != nullptr) {
+			CountReason("slot", "taken from another plan");
+		}
 		slot.plan     = &program;
 		slot.identity = program.trace_identity;
 		for (auto& trace: slot.traces) {
@@ -2498,6 +2507,7 @@ SrtTraceSession::SrtTraceSession(const ResourcePlan& program, SrtWalker& clean, 
 		slot.misses      = 0;
 		slot.backoff     = 0;
 		slot.record_next = false;
+		slot.new_cases   = 0;
 	}
 	m_slot = &slot;
 	if (slot.backoff != 0) {
@@ -2565,7 +2575,8 @@ SrtTraceSession::~SrtTraceSession() {
 		}
 		m_recording = nullptr;
 	} else if (m_state == State::Serve) {
-		slot.misses = 0;
+		slot.misses    = 0;
+		slot.new_cases = 0;
 		if (m_variant != 0) {
 			std::rotate(slot.traces.begin(), slot.traces.begin() + m_variant,
 			            slot.traces.begin() + m_variant + 1);
@@ -2631,20 +2642,24 @@ void SrtTraceSession::Abandon(const char* reason) {
 		traces[m_variant].reset();
 		std::rotate(traces.begin() + m_variant, traces.begin() + m_variant + 1, traces.end());
 	}
+	const bool new_case = m_cursor == 0;
 	m_trace = nullptr;
-	// Record the case this refresh is, unless that keeps happening.
+	// Record the case this refresh is: a new variant when no variant matched its start (backing
+	// off when such cases keep coming), a replacement when a variant broke (backing off when
+	// that keeps happening).
 	slot.uses        = TraceAfterUses;
 	slot.record_next = true;
-	if (++slot.misses >= TraceMaxMisses) {
-		slot.misses  = 0;
-		slot.backoff = TraceBackoff;
+	if (new_case ? ++slot.new_cases >= TraceMaxNewCases : ++slot.misses >= TraceMaxMisses) {
+		slot.misses    = 0;
+		slot.new_cases = 0;
+		slot.backoff   = TraceBackoff;
 	}
 	if (TraceStatsEnabled()) {
 		Stats().abandoned.fetch_add(1, std::memory_order_relaxed);
 		if (m_served != 0) {
 			Stats().partial.fetch_add(1, std::memory_order_relaxed);
 		}
-		CountReason("abandon", reason);
+		CountReason(new_case ? "new-case" : "abandon", reason);
 	}
 }
 
