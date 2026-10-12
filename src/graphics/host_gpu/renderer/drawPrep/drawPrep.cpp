@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
+
 #include "common/assert.h"
 #include "common/prepPhases.h"
 #include "common/cpuPlacement.h"
@@ -250,7 +252,7 @@ static std::span<const Coherence::Range> CommitCertificateRanges(
 	if (!prepared.certificate_built) {
 		return CertificateRanges(prepared.reads, scratch);
 	}
-	g_totals.cert_ranges_prebuilt.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(g_totals.cert_ranges_prebuilt, 1);
 	if (CertRangesVerifyMode() != 0) {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCertRangesVerifyChecks);
 		g_totals.cert_ranges_verify_checks.fetch_add(1, std::memory_order_relaxed);
@@ -628,14 +630,26 @@ static bool CertificateHolds(PreparedDraw& prepared, Failure& failure) {
 	Profiler::ScopedFrameWait wait(Profiler::FrameWait::DrawPrepValidate);
 	static thread_local std::vector<Coherence::Range> log_scratch;
 	if (GetCertMode() == CertMode::Log) {
+		const auto stats_start = CommitStats::StepsEnabled() ? CommitStats::Now() : 0;
+		const auto cert_ranges = CommitCertificateRanges(prepared, log_scratch);
 		const auto outcome =
 		    Coherence::g_log.Check(prepared.coherence_generation, Coherence::Generation(),
-		                           CommitCertificateRanges(prepared, log_scratch));
+		                           cert_ranges);
+		if (stats_start != 0) {
+			CommitStats::AddSub(CommitStats::Sub::ValLog, CommitStats::Now() - stats_start);
+			CommitStats::AddItems(CommitStats::Item::LogEntries, outcome.entries);
+			CommitStats::AddItems(CommitStats::Item::CertRanges, cert_ranges.size());
+		}
 		// The walk's length grows with the preparation-to-commit interval (KYTY_CP_SEQ=1).
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepLogChecks);
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepLogEntries, outcome.entries);
 		if (outcome.result == Coherence::CheckResult::Clean) {
-			if (!AllCleanAfterLog(prepared)) {
+			const auto clean_start = CommitStats::StepsEnabled() ? CommitStats::Now() : 0;
+			const bool clean       = AllCleanAfterLog(prepared);
+			if (clean_start != 0) {
+				CommitStats::AddSub(CommitStats::Sub::ValClean, CommitStats::Now() - clean_start);
+			}
+			if (!clean) {
 				return fail(Failure::CertUnclean);
 			}
 		} else {
@@ -720,7 +734,7 @@ bool Validate(PreparedDraw& prepared, bool pixel_active,
 		return fail(failure);
 	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitted);
-	g_totals.committed.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(g_totals.committed, 1);
 	CountCertificate(prepared);
 	return true;
 }

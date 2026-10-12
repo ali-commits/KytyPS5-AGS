@@ -141,6 +141,11 @@ public:
 	// FindBuffers for each read binding it discovers (before the stages' image work), instead of a
 	// separate pass in RebindBuffers. `at_find` says which caller asks.
 	void PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find = false) const noexcept;
+	// KYTY_CP_DRAW_BUFFER_PREFETCH (default off, live): a draw's index and vertex ranges' memo
+	// slots are prefetched before its V# bindings, so their ObtainReadBinding lookups after them
+	// find the lines in the cache. A CPU cache hint only: every lookup and check is unchanged.
+	[[nodiscard]] static bool DrawBufferPrefetchEnabled() noexcept;
+	void PrefetchBindingSlot(uint64_t vaddr, uint64_t size) const noexcept;
 	// A writable binding whose shader can only write `written` (sub-ranges of [vaddr, vaddr +
 	// size), e.g. from a write-range proof): the whole range is synchronized as for any binding,
 	// but only `written` becomes GPU-owned (dirty, protected, write-ticked).
@@ -499,6 +504,10 @@ private:
 	bool     m_binding_hot_enabled = false;
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBinding(uint64_t vaddr, uint64_t size,
 	                                                             BufferId id);
+	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainReadBindingMemo(uint64_t vaddr, uint64_t size,
+	                                                                 BufferId id);
+	// KYTY_CP_COMMIT_STATS=steps: the last ObtainReadBindingMemo call was a memo hit.
+	bool m_last_read_hit = false;
 	// The binding without the memo; *obtained receives the cache buffer's id (unchanged for a
 	// stream copy).
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferNow(uint64_t vaddr, uint64_t size,

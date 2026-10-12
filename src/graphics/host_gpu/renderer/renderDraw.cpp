@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
+
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -592,7 +594,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, const CommandS
 				scissors[i].extent = vk::Extent2D {0, 0};
 			}
 		}
-		DrawPrep::GetBindingTotals().viewports_used.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawPrep::GetBindingTotals().viewports_used, 1);
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingViewportsUsed);
 	} else {
 		const auto& outputs = vs_input_info.stage.program->info.outputs;
@@ -796,7 +798,7 @@ static void RunDrawChecks(const CommandBuffer& buffer, const HW::UserConfig& ucf
                           const DrawPrep::BindingPlan* plan) {
 	if (plan != nullptr && plan->hw_checks_quiet) {
 		if (DrawPrep::BindingsVerifyMode() == 0) {
-			DrawPrep::GetBindingTotals().hw_checks_skipped.fetch_add(1, std::memory_order_relaxed);
+			OwnedCounters::Add(DrawPrep::GetBindingTotals().hw_checks_skipped, 1);
 			Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingHwChecksSkipped);
 			return;
 		}
@@ -2352,7 +2354,7 @@ bool RenderExecutor::DrawRunImagesUnchanged(bool compare_serials, bool attachmen
 	if (mode != 0 && m_run.image_epoch != 0 && epoch == m_run.image_epoch) {
 		auto& totals = DrawRun::GetTotals();
 		if (mode == 1) {
-			totals.epoch_skips.fetch_add(1, std::memory_order_relaxed);
+			OwnedCounters::Add(totals.epoch_skips, 1);
 			return true;
 		}
 		totals.epoch_checks.fetch_add(1, std::memory_order_relaxed);
@@ -2417,11 +2419,11 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
                                       uint32_t render_target_slice_offset) {
 	using DrawRun::Miss;
 	auto& totals = DrawRun::GetTotals();
-	totals.draws.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(totals.draws, 1);
 	if (!m_run_prev_valid || m_run_key == 0 || m_run_key != m_run.key) {
 		return false;
 	}
-	totals.key_matches.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(totals.key_matches, 1);
 	if (DrawRun::ActivityEpoch() != m_run.activity) {
 		DrawRun::CountMiss(Miss::Activity);
 		return false;
@@ -2464,9 +2466,9 @@ bool RenderExecutor::DrawRunCandidate(const CommandBuffer& buffer, const DrawRen
 			}
 		}
 	}
-	totals.continued.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(totals.continued, 1);
 	if (writes) {
-		totals.write_continued.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(totals.write_continued, 1);
 	}
 	return true;
 }
@@ -3498,6 +3500,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			descriptor_stages[stage_count++] = &*bindings.pixel;
 		}
 	}
+	if (!mesh_active && BufferCache::DrawBufferPrefetchEnabled()) {
+		// KYTY_CP_DRAW_BUFFER_PREFETCH (bufferCache.h): a hint only.
+		auto& cache = m_context.GetBufferCache();
+		if (index_source.size != 0 && index_source.host_data == nullptr) {
+			cache.PrefetchBindingSlot(index_source.address, index_source.size);
+		}
+		if (plan_stages && plan->vertex_ranges.valid) {
+			for (uint32_t i = 0; i < plan->vertex_ranges.merged_count; i++) {
+				const auto& range = plan->vertex_ranges.merged[i];
+				cache.PrefetchBindingSlot(range.base_address, range.acquired_end - range.base_address);
+			}
+		}
+	}
 	CommitStats::StepMark(CommitStats::Step::PrepStages);
 	CommitStats::Mark(CommitStats::Phase::PrepareBindings);
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
@@ -3518,7 +3533,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		        static_cast<uint32_t>(state.vertex_info[0].buffers_num)) {
 			if (plan->vm_generation == LibKernel::Memory::VirtualRangesGeneration()) {
 				vertex_ranges = &plan->vertex_ranges;
-				DrawPrep::GetBindingTotals().vertex_ranges_used.fetch_add(1, std::memory_order_relaxed);
+				OwnedCounters::Add(DrawPrep::GetBindingTotals().vertex_ranges_used, 1);
 			} else {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingFallbackVm);
 			}
@@ -3710,7 +3725,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    DrawRunAcquireCandidate(buffer, state, stages, bounded ? &written : nullptr);
 		candidate_scope.Stop();
 		if (acquire_reuse) {
-			DrawRun::GetTotals().acquire_reused.fetch_add(1, std::memory_order_relaxed);
+			OwnedCounters::Add(DrawRun::GetTotals().acquire_reused, 1);
 		}
 		if (acquire_reuse && DrawRun::GetMode() == DrawRun::Mode::On) {
 			rendering              = m_run.rendering;
@@ -3791,7 +3806,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages, m_run_active);
 	}
 	if (run_verify_push) {
-		DrawRun::GetTotals().partial_pushes.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawRun::GetTotals().partial_pushes, 1);
 		DrawRun::CountVerifyCheck();
 		if (m_descriptor_images != m_run.pushed_images) {
 			DrawRun::ReportMismatch("pushed image or sampler descriptors",
@@ -4014,7 +4029,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	vk::PipelineStageFlags shader_write_stages = {};
 	if (plan_statics && !plan_verify) {
 		shader_write_stages = plan->shader_write_stages;
-		DrawPrep::GetBindingTotals().statics_used.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawPrep::GetBindingTotals().statics_used, 1);
 	} else {
 		for (const auto& stage: vertex_stages) {
 			if (HasShaderBufferWrites(stage.stage)) {
@@ -4083,28 +4098,56 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		for (uint32_t i = 0; eligible && i < rendering.num_color_attachments; i++) {
 			eligible = !rendering.color_attachments[i].is_clear;
 		}
-		for (const auto* stage: stages) {
-			eligible = eligible && stage->gds.buffer == nullptr &&
-			           DrawRunProgramEligible(*stage->runtime->program, writes_ok);
-			for (const auto& binding: stage->images) {
-				// Storage bindings are transitioned with write access (a barrier every draw).
-				eligible = eligible && !is_attachment(binding.image_id) &&
-				           binding.desc.type != TextureCache::BindingType::Storage;
+		// KYTY_DRAW_RUN_CONT_ELIGIBLE (drawRun.h): a continuation's per-stage part is its record's.
+		const auto cont_mode  = DrawRun::ContEligibleMode();
+		const bool cont_known = cont_mode != 0 && m_run_active && m_run.record_writes_ok == writes_ok;
+		const auto stages_eligible = [&] {
+			bool ok = true;
+			for (const auto* stage: stages) {
+				ok = ok && stage->gds.buffer == nullptr &&
+				     DrawRunProgramEligible(*stage->runtime->program, writes_ok);
+				for (const auto& binding: stage->images) {
+					// Storage bindings are transitioned with write access (a barrier every draw).
+					ok = ok && !is_attachment(binding.image_id) &&
+					     binding.desc.type != TextureCache::BindingType::Storage;
+				}
+			}
+			return ok;
+		};
+		const auto stages_write = [&] {
+			return writes_ok && std::any_of(stages.begin(), stages.end(), [](const auto* stage) {
+				       return !DrawRunProgramEligible(*stage->runtime->program);
+			       });
+		};
+		if (cont_known && cont_mode == 1) {
+			// The record's: eligible (it exists), and its writes flag below.
+		} else {
+			eligible = eligible && stages_eligible();
+		}
+		if (cont_known && cont_mode >= 2 && eligible) {
+			DrawRun::CountVerifyCheck();
+			if (!stages_eligible() || stages_write() != m_run.writes) {
+				DrawRun::ReportMismatch("continuation's record eligibility");
+				if (cont_mode == 3) {
+					EXIT("DrawRunVerify: a continuation's record eligibility differs\n");
+				}
 			}
 		}
 		if (eligible) {
-			DrawRun::GetTotals().eligible.fetch_add(1, std::memory_order_relaxed);
+			OwnedCounters::Add(DrawRun::GetTotals().eligible, 1);
 			const bool program_writes =
-			    writes_ok && std::any_of(stages.begin(), stages.end(), [](const auto* stage) {
-				    return !DrawRunProgramEligible(*stage->runtime->program);
-			    });
+			    cont_known && cont_mode == 1 ? m_run.writes : stages_write();
 			if (program_writes) {
-				DrawRun::GetTotals().write_records.fetch_add(1, std::memory_order_relaxed);
+				OwnedCounters::Add(DrawRun::GetTotals().write_records, 1);
 			}
+			const bool continued = m_run_active;
 			DrawRunRecordDraw(buffer, state, m_run_slice_offset, rendering, stages,
 			                  bounded ? &written : nullptr, pipeline);
 			// A continuation keeps its record's programs (DrawRunCandidate), so the flag holds.
 			m_run.writes = program_writes;
+			if (!continued) {
+				m_run.record_writes_ok = writes_ok;
+			}
 		}
 	}
 	CommitStats::StepMark(CommitStats::Step::RunRecord);

@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -1668,8 +1670,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 						BindImage(binding.image_id, storage(binding));
 					}
 					if (run != 0) {
-						DrawPrep::GetBindingTotals().texture_run_hits.fetch_add(
-						    run, std::memory_order_relaxed);
+						OwnedCounters::Add(DrawPrep::GetBindingTotals().texture_run_hits, run);
 						Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingTextureRunHits,
 						                          run);
 					}
@@ -1727,8 +1728,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		prepared.samplers.push_back(sampler);
 	}
 	if (planned_samplers != 0 && !verify) {
-		DrawPrep::GetBindingTotals().samplers_used.fetch_add(planned_samplers,
-		                                                      std::memory_order_relaxed);
+		OwnedCounters::Add(DrawPrep::GetBindingTotals().samplers_used, planned_samplers);
 	}
 	sampler_scope.Stop();
 	// KYTY_DRAW_PREP_BINDINGS userdata: the worker's shader data (user dwords and mip-statistics
@@ -1738,7 +1738,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	    !verify) {
 		prepared.shader_data.swap(plan->shader_data);
 		prepared.plan_shader_data = true;
-		DrawPrep::GetBindingTotals().shader_data_used.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawPrep::GetBindingTotals().shader_data_used, 1);
 	} else {
 		prepared.shader_data.reserve(dwords);
 		AppendUserShaderData(program, snapshot, prepared.shader_data);
@@ -1810,7 +1810,7 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingFallbackVm);
 	}
 	if (use_plan) {
-		DrawPrep::GetBindingTotals().ranges_used.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawPrep::GetBindingTotals().ranges_used, 1);
 	}
 	const bool verify = use_plan && DrawPrep::BindingsVerifyMode() != 0;
 	const auto& graphics = m_context.GetGraphics();
@@ -2245,7 +2245,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				texture_cache.NoteExactRangeStaleUse(image, false);
 			}
 			if (run != 0) {
-				DrawPrep::GetBindingTotals().view_run_hits.fetch_add(run, std::memory_order_relaxed);
+				OwnedCounters::Add(DrawPrep::GetBindingTotals().view_run_hits, run);
 				Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingViewRunHits, run);
 			}
 			i += run;
@@ -2587,7 +2587,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	const bool partial = keep_images && pipeline_bind_point == vk::PipelineBindPoint::eGraphics &&
 	                     DrawRunPartialPush(buffer, pipeline);
 	if (partial) {
-		DrawRun::GetTotals().partial_pushes.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(DrawRun::GetTotals().partial_pushes, 1);
 	}
 	CommitStats::StepMark(CommitStats::Step::CbHead);
 

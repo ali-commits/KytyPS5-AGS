@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
@@ -626,9 +628,9 @@ void ComputeBindingPlan(const BindingPlanContext& context, const RegisterSnapsho
 }
 
 void CountCommittedPlan(bool used) {
-	g_binding_totals.plans.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(g_binding_totals.plans, 1);
 	if (used) {
-		g_binding_totals.used.fetch_add(1, std::memory_order_relaxed);
+		OwnedCounters::Add(g_binding_totals.used, 1);
 	}
 	Profiler::CountFrameEvent(used ? Profiler::FrameEvent::DrawPrepBindingPlansUsed
 	                               : Profiler::FrameEvent::DrawPrepBindingPlansDropped);
@@ -651,7 +653,7 @@ const PipelineCache::Pipeline* PlannedPipeline(const PipelineCache& cache, const
 		return nullptr;
 	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepBindingPipelinesUsed);
-	g_binding_totals.pipelines_used.fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(g_binding_totals.pipelines_used, 1);
 	return plan.pipeline;
 }
 

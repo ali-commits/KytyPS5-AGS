@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
+
 #include "common/assert.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
@@ -47,6 +49,17 @@ Live::Switch g_recall("KYTY_DRAW_RUN_RECALL", Live::ParseDefaultOff,
 
 // KYTY_DRAW_RUN_IMAGE_EPOCH: unset, "0": 0; "verify": 2; "exit": 3; anything else: 1.
 Live::Switch g_image_epoch("KYTY_DRAW_RUN_IMAGE_EPOCH", [](const char* value) -> int64_t {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+});
+
+// KYTY_DRAW_RUN_CONT_ELIGIBLE: as KYTY_DRAW_RUN_IMAGE_EPOCH (0, 1, verify 2, exit 3).
+Live::Switch g_cont_eligible("KYTY_DRAW_RUN_CONT_ELIGIBLE", [](const char* value) -> int64_t {
 	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
 		return 0;
 	}
@@ -170,7 +183,7 @@ Totals& GetTotals() {
 }
 
 void CountMiss(Miss miss) noexcept {
-	g_totals.misses[static_cast<uint32_t>(miss)].fetch_add(1, std::memory_order_relaxed);
+	OwnedCounters::Add(g_totals.misses[static_cast<uint32_t>(miss)], 1);
 	if (miss == Miss::Activity) {
 		const char* what = g_last_activity.load(std::memory_order_relaxed);
 		for (auto& source: g_activity_misses) {
@@ -222,6 +235,12 @@ void PrintSummary() {
 	static uint64_t                                          last_ns = 0;
 	static std::array<uint64_t, 22>                          last {};
 	static std::array<uint64_t, static_cast<size_t>(Miss::Count)> last_misses {};
+	// KYTY_CP_OWNED_COUNTERS (ownedCounters.h): the clock is read every 256th call (the line is
+	// due every 10 s; the commit path calls this once per draw).
+	static uint32_t calls = 0;
+	if (OwnedCounters::g_mode.Get() != 0 && last_ns != 0 && (++calls & 255u) != 0) {
+		return;
+	}
 	const auto                                               now = NowNs();
 	if (last_ns == 0) {
 		last_ns = now;

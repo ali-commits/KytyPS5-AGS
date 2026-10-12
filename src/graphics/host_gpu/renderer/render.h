@@ -1310,6 +1310,8 @@ private:
 		bool               push_valid  = false; // pushed (not a descriptor set)
 		// KYTY_DRAW_RUN_WRITES: the recorded programs write buffers (recorded with the switch on).
 		bool writes = false;
+		// KYTY_DRAW_RUN_CONT_ELIGIBLE: the KYTY_DRAW_RUN_WRITES value the record was made under.
+		bool record_writes_ok = false;
 		// KYTY_DRAW_RUN_RECALL: the texture bindings each stage committed (the vertex stage's first)
 		// and its samplers: a recall takes each stage's set back from its texture history only when it
 		// still holds exactly these.

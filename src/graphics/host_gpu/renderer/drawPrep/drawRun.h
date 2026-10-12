@@ -77,6 +77,7 @@ extern Live::Switch g_push;    // KYTY_DRAW_RUN_PUSH
 extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
+extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -169,6 +170,20 @@ extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 // "exit" stops at the first.
 [[nodiscard]] inline int64_t ImageEpochMode() {
 	return Detail::g_image_epoch.Get();
+}
+
+// KYTY_DRAW_RUN_CONT_ELIGIBLE (live, default 0; 1 on, verify, exit): a continuation's record
+// eligibility takes its per-stage part from the record it continues. That part (no GDS, eligible
+// programs, no texture that is an attachment or a storage binding, and whether a program writes
+// buffers) reads only the programs, the texture bindings and the attachments, which a continuation
+// keeps from its record (DrawRunCandidate: same programs; keep_images; the record's targets), so it
+// is what the record computed: eligible, with the record's writes flag, under the same
+// KYTY_DRAW_RUN_WRITES value (a change of it ends every run). The other conditions (engine commit,
+// validation, run key, mesh, indirect, stage count, shader writes, feedback, rendering instance,
+// clears) are still checked per draw. verify: the full check runs as well and a difference is a
+// mismatch (DrawRunVerify line); "exit" stops at the first.
+[[nodiscard]] inline int64_t ContEligibleMode() {
+	return Detail::g_cont_eligible.Get();
 }
 
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the

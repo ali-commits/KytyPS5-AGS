@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/cache/uploadDma.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
+#include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -84,6 +85,7 @@ int64_t ParseBatchPrefetch(const char* value) {
 	return Live::ParseDefaultOn(value);
 }
 Live::Switch g_binding_batch_prefetch("KYTY_CP_BINDING_BATCH_PREFETCH", ParseBatchPrefetch);
+Live::Switch g_draw_buffer_prefetch("KYTY_CP_DRAW_BUFFER_PREFETCH", Live::ParseDefaultOff);
 std::atomic<uint64_t> g_binding_hot_generation {1};
 void BindingHotChanged(int64_t, int64_t) {
 	// The live registry serializes callbacks. Saturation makes lookups clear the tier each time.
@@ -3193,6 +3195,23 @@ void BufferCache::PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_fin
 #endif
 }
 
+bool BufferCache::DrawBufferPrefetchEnabled() noexcept {
+	return g_draw_buffer_prefetch.On();
+}
+
+void BufferCache::PrefetchBindingSlot(uint64_t vaddr, uint64_t size) const noexcept {
+	if (m_binding_memo == nullptr || vaddr == 0 || size == 0) {
+		return;
+	}
+	const auto* slot =
+	    &m_binding_memo[static_cast<size_t>(BindingMemoHash(vaddr, size) >> m_binding_memo_shift)];
+#if defined(__clang__) || defined(__GNUC__)
+	__builtin_prefetch(slot, 0, 3);
+#elif defined(_M_X64) || defined(_M_IX86)
+	_mm_prefetch(reinterpret_cast<const char*>(slot), _MM_HINT_T0);
+#endif
+}
+
 // KYTY_BINDING_MEMO_STATS=1 (diagnostic, default off): ObtainReadBinding outcomes, one console line
 // every 10 s (GPU thread only).
 namespace {
@@ -3241,8 +3260,24 @@ void PrintBindingMemoStats() {
 }
 } // namespace
 
+// KYTY_CP_COMMIT_STATS=steps: the memo lookup's time by outcome (diagnostic only).
 std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBinding(uint64_t vaddr, uint64_t size,
                                                             BufferId id) {
+	if (!CommitStats::StepsEnabled()) [[likely]] {
+		return ObtainReadBindingMemo(vaddr, size, id);
+	}
+	m_last_read_hit   = false;
+	const auto start  = CommitStats::Now();
+	const auto result = ObtainReadBindingMemo(vaddr, size, id);
+	const bool hit    = m_last_read_hit;
+	CommitStats::AddSub(hit ? CommitStats::Sub::ReadHit : CommitStats::Sub::ReadMiss,
+	                    CommitStats::Now() - start);
+	CommitStats::AddItems(hit ? CommitStats::Item::ReadHits : CommitStats::Item::ReadMisses, 1);
+	return result;
+}
+
+std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBindingMemo(uint64_t vaddr, uint64_t size,
+                                                                BufferId id) {
 	// KYTY_BINDING_EPOCH_MEMO (bufferCache.h).
 	// KYTY_CP_BINDING_MEMO_PREFETCH (default off, live): issue the read hint before the tracker
 	// query, so its region/serial loads can overlap the random memo-line fetch. This is a CPU cache
@@ -3269,8 +3304,12 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBinding(uint64_t vaddr, uint
 		_mm_prefetch(reinterpret_cast<const char*>(&memo), _MM_HINT_T0);
 #endif
 	}
+	const auto sig_start = CommitStats::StepsEnabled() ? CommitStats::Now() : 0;
 	const auto epoch  = SyncEpoch::Current();
 	const auto before = m_memory_tracker.RangeSignature(vaddr, size);
+	if (sig_start != 0) {
+		CommitStats::AddSub(CommitStats::Sub::ReadSig, CommitStats::Now() - sig_start);
+	}
 	const bool key    = memo.kind != BindingMemoKind::Empty && memo.vaddr == vaddr && memo.size == size;
 	BindingMemoStats* stats = nullptr;
 	if (BindingMemoStatsEnabled()) [[unlikely]] {
@@ -3337,6 +3376,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainReadBinding(uint64_t vaddr, uint
 			}
 		}
 		if (memo.epoch == epoch) {
+			m_last_read_hit = true;
 			if (m_binding_hot_enabled) {
 				if (hot_key) {
 					m_binding_memo_totals.hot_hits++;

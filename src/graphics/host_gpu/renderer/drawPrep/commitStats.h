@@ -73,6 +73,12 @@ enum class Sub : uint8_t {
 	BindPipeline, // pipeline bind and dynamic-state shadow
 	Barriers,     // indirect-argument and shader-write barriers (with their EndRendering)
 	DrawCmd,      // the draw command(s)
+	// KYTY_CP_COMMIT_STATS=steps: BufferCache::ObtainReadBinding calls inside the commit.
+	ReadHit,      // memo hits (whole call)
+	ReadMiss,     // memo misses (whole call, with ObtainBufferNow and the record)
+	ReadSig,      // of which: the range signature read (MemoryTracker::RangeSignature)
+	ValLog,       // DrawPrep::Validate: the coherence log check
+	ValClean,     // DrawPrep::Validate: the clean verdicts after it
 	Count
 };
 // Per-draw counts (averaged per draw of the class): "items[...]".
@@ -92,6 +98,10 @@ enum class Item : uint8_t {
 	DescWrites,     // descriptor writes pushed or written (graphics)
 	Transitions,    // image transitions recorded while the draw was committed
 	PipelineNew,    // the draw's pipeline differs from the one bound before it
+	ReadHits,       // KYTY_CP_COMMIT_STATS=steps: ObtainReadBinding memo hits
+	ReadMisses,     // and misses
+	LogEntries,     // KYTY_CP_COMMIT_STATS=steps: coherence log entries a certificate check read
+	CertRanges,     // and the certificate's ranges
 	Count
 };
 

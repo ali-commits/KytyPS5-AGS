@@ -225,11 +225,13 @@ const char* const kSubNames[SubCount]     = {
     "textures",    "samplers",  "views",     "colors",   "depth",    "acqcolor",
     "acqdepth",    "push",      "dynamic",   "begin",    "acqcand",  "runrecord",
     "prefetch",    "latefallback", "vtxcommit", "transitions", "descbuild", "pushconst",
-    "descpush",    "descset",   "bindpipe",  "barriers", "drawcmd"};
+    "descpush",    "descset",   "bindpipe",  "barriers", "drawcmd",
+    "readhit",     "readmiss",  "readsig",  "vallog",   "valclean"};
 const char* const kItemNames[ItemCount] = {
     "textures",  "samplers",   "set-current", "set-history",   "set-miss",
     "set-repeated", "color-hit", "color-miss", "depth-hit",    "depth-miss",
-    "target-repeat", "target-lookup", "descwrites", "transitions", "pipeline-new"};
+    "target-repeat", "target-lookup", "descwrites", "transitions", "pipeline-new",
+    "read-hits",  "read-misses", "log-entries", "cert-ranges"};
 
 const char* const kStepNames[StepCount] = {
     "g.committail", "g.retire",      "g.opexit",     "g.loop",        "g.ophead",      "g.drawop",
