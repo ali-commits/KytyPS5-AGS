@@ -56,19 +56,7 @@ Live::Switch g_image_epoch("KYTY_DRAW_RUN_IMAGE_EPOCH", [](const char* value) ->
 	return std::strcmp(value, "exit") == 0 ? 3 : 1;
 });
 
-// KYTY_DRAW_RUN_ACQUIRE_MEMO: unset, "0": 0; "verify": 2; anything else: 1.
-Live::Switch g_acquire_memo("KYTY_DRAW_RUN_ACQUIRE_MEMO", [](const char* value) -> int64_t {
-	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
-		return 0;
-	}
-	return std::strcmp(value, "verify") == 0 ? 2 : 1;
-});
-
 } // namespace Detail
-
-int AcquireMemoMode() noexcept {
-	return static_cast<int>(Detail::g_acquire_memo.Get());
-}
 
 namespace {
 

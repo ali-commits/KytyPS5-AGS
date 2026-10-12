@@ -1396,17 +1396,6 @@ private:
 	}
 	std::array<DrawRunRecord, 32> m_run_kept;
 	uint32_t                     m_run_kept_next = 0;
-	// KYTY_DRAW_RUN_ACQUIRE_MEMO (drawRun.h): texture images DrawRunAcquireCandidate found to be no
-	// attachment and to lie over none, for the attachment images (with generations) listed here.
-	struct AcquireTextureMemo {
-		static constexpr uint32_t           MaxAttachments = 9;
-		static constexpr uint32_t           MaxTextures    = 48;
-		std::array<ImageId, MaxAttachments> attachments {};
-		uint32_t                            attachment_count = 0;
-		std::array<ImageId, MaxTextures>    textures {};
-		uint32_t                            texture_count = 0;
-	};
-	mutable AcquireTextureMemo m_acquire_memo;
 	bool                         m_run_recall    = false;
 	bool                         m_run_keepable  = false;
 	bool          m_run_prev_valid     = false; // m_run.valid when the committed draw began

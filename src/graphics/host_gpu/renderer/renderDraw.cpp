@@ -2686,69 +2686,26 @@ bool RenderExecutor::DrawRunAcquireCandidate(const CommandBuffer&               
 	}
 	// No texture of the draw is an attachment or lies over one (AcquireRenderTargets would detect a
 	// feedback loop or choose other layouts; an alias is synchronized from the attachment).
-	// The record's attachments follow its textures.
-	const auto attachments = std::span<const DrawRunImage>(run.images).subspan(
-	    std::min<size_t>(run.attachments_begin, run.images.size()));
-	// KYTY_DRAW_RUN_ACQUIRE_MEMO: textures that passed for the same attachment images.
-	const int memo_mode = DrawRun::AcquireMemoMode();
-	auto&     memo      = m_acquire_memo;
-	bool      memorized = false;
-	if (memo_mode != 0) {
-		bool same = attachments.size() == memo.attachment_count;
-		for (uint32_t i = 0; same && i < attachments.size(); i++) {
-			same = attachments[i].id == memo.attachments[i];
-		}
-		if (!same) {
-			memo.texture_count    = 0;
-			memo.attachment_count = 0;
-			if (attachments.size() <= AcquireTextureMemo::MaxAttachments) {
-				for (const auto& mark: attachments) {
-					memo.attachments[memo.attachment_count++] = mark.id;
-				}
-			}
-		}
-		const auto textures = std::span<const ImageId>(memo.textures.data(), memo.texture_count);
-		memorized           = same;
-		for (const auto* stage: stages) {
-			for (const auto& binding: stage->images) {
-				memorized = memorized && std::find(textures.begin(), textures.end(), binding.image_id) !=
-				                             textures.end();
-			}
-		}
-	}
-	if (!memorized || memo_mode == 2) {
+	{
 		auto&            cache = m_context.GetTextureCache();
 		std::scoped_lock lock {cache.m_lock};
+		// The record's attachments follow its textures.
+		const auto attachments = std::span<const DrawRunImage>(run.images).subspan(
+		    std::min<size_t>(run.attachments_begin, run.images.size()));
 		for (const auto* stage: stages) {
 			for (const auto& binding: stage->images) {
 				const auto* image = cache.m_slot_images.try_get(binding.image_id);
-				bool        pass  = image != nullptr;
-				for (const auto& mark: attachments) {
-					pass = pass && !(!mark.texture && mark.id == binding.image_id);
-				}
-				pass = pass && !DrawRunOverAttachment(attachments, image->info.data.address,
-				                                      image->info.data.size);
-				if (!pass) {
-					if (memorized) {
-						DrawRun::CountVerifyCheck();
-						DrawRun::ReportMismatch("memorized acquisition texture", binding.image_id.index);
-					}
+				if (image == nullptr) {
 					return false;
 				}
-			}
-		}
-		if (memorized) {
-			DrawRun::CountVerifyCheck();
-		}
-		// Every texture passed: remember them for these attachments (when they fit).
-		if (memo_mode != 0 && memo.attachment_count == attachments.size() && !attachments.empty()) {
-			for (const auto* stage: stages) {
-				for (const auto& binding: stage->images) {
-					const auto end = memo.textures.begin() + memo.texture_count;
-					if (std::find(memo.textures.begin(), end, binding.image_id) == end &&
-					    memo.texture_count < AcquireTextureMemo::MaxTextures) {
-						memo.textures[memo.texture_count++] = binding.image_id;
+				for (const auto& mark: attachments) {
+					if (!mark.texture && mark.id == binding.image_id) {
+						return false;
 					}
+				}
+				if (DrawRunOverAttachment(attachments, image->info.data.address,
+				                          image->info.data.size)) {
+					return false;
 				}
 			}
 		}
