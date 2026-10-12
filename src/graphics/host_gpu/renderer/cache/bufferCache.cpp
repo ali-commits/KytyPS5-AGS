@@ -85,7 +85,6 @@ int64_t ParseBatchPrefetch(const char* value) {
 	return Live::ParseDefaultOn(value);
 }
 Live::Switch g_binding_batch_prefetch("KYTY_CP_BINDING_BATCH_PREFETCH", ParseBatchPrefetch);
-Live::Switch g_draw_buffer_prefetch("KYTY_CP_DRAW_BUFFER_PREFETCH", Live::ParseDefaultOff);
 std::atomic<uint64_t> g_binding_hot_generation {1};
 void BindingHotChanged(int64_t, int64_t) {
 	// The live registry serializes callbacks. Saturation makes lookups clear the tier each time.
@@ -3184,23 +3183,6 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 
 void BufferCache::PrefetchReadBinding(uint64_t vaddr, uint64_t size, bool at_find) const noexcept {
 	if (m_binding_memo == nullptr || g_binding_batch_prefetch.Get() != (at_find ? 2 : 1)) {
-		return;
-	}
-	const auto* slot =
-	    &m_binding_memo[static_cast<size_t>(BindingMemoHash(vaddr, size) >> m_binding_memo_shift)];
-#if defined(__clang__) || defined(__GNUC__)
-	__builtin_prefetch(slot, 0, 3);
-#elif defined(_M_X64) || defined(_M_IX86)
-	_mm_prefetch(reinterpret_cast<const char*>(slot), _MM_HINT_T0);
-#endif
-}
-
-bool BufferCache::DrawBufferPrefetchEnabled() noexcept {
-	return g_draw_buffer_prefetch.On();
-}
-
-void BufferCache::PrefetchBindingSlot(uint64_t vaddr, uint64_t size) const noexcept {
-	if (m_binding_memo == nullptr || vaddr == 0 || size == 0) {
 		return;
 	}
 	const auto* slot =

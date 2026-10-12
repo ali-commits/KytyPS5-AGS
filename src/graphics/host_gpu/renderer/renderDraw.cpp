@@ -3500,19 +3500,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			descriptor_stages[stage_count++] = &*bindings.pixel;
 		}
 	}
-	if (!mesh_active && BufferCache::DrawBufferPrefetchEnabled()) {
-		// KYTY_CP_DRAW_BUFFER_PREFETCH (bufferCache.h): a hint only.
-		auto& cache = m_context.GetBufferCache();
-		if (index_source.size != 0 && index_source.host_data == nullptr) {
-			cache.PrefetchBindingSlot(index_source.address, index_source.size);
-		}
-		if (plan_stages && plan->vertex_ranges.valid) {
-			for (uint32_t i = 0; i < plan->vertex_ranges.merged_count; i++) {
-				const auto& range = plan->vertex_ranges.merged[i];
-				cache.PrefetchBindingSlot(range.base_address, range.acquired_end - range.base_address);
-			}
-		}
-	}
 	CommitStats::StepMark(CommitStats::Step::PrepStages);
 	CommitStats::Mark(CommitStats::Phase::PrepareBindings);
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
