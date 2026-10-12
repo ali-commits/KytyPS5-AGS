@@ -112,6 +112,7 @@ struct DrawShape {
 	uint64_t bind_input       = 0; // cross-frame: complete binding inputs
 	uint64_t struct_input     = 0; // cross-frame: structure only
 	bool     shader_writes    = false;
+	bool     run_continued    = false; // KYTY_DRAW_RUN continued the previous draw's run
 };
 
 // GPU thread (the command processor's resolver), around DrawPrep::Engine::Commit.

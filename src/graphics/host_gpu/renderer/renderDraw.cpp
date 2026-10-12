@@ -4073,9 +4073,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		CommitStats::AddItems(CommitStats::Item::Textures, textures);
 		CommitStats::AddItems(CommitStats::Item::Samplers, samplers);
-		CommitStats::NoteRecorded(MakeCommitShape(buffer, stages, pipeline, rendering,
-		                                          m_dynamic_state, vertex_bindings, index_binding,
-		                                          draw, emit, index_source, shader_write_stages));
+		auto shape = MakeCommitShape(buffer, stages, pipeline, rendering, m_dynamic_state,
+		                             vertex_bindings, index_binding, draw, emit, index_source,
+		                             shader_write_stages);
+		shape.run_continued = m_run_active;
+		CommitStats::NoteRecorded(shape);
 		// The hashing above is the diagnostic's own cost: not counted in any phase.
 		CommitStats::Skip();
 	}

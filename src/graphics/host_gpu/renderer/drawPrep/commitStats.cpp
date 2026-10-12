@@ -122,6 +122,14 @@ struct State {
 	uint64_t why_structure = 0;
 	uint64_t why_dynamic   = 0;
 	uint64_t why_writes    = 0;
+	// The draws KYTY_DRAW_RUN actually continued (DrawShape::run_continued), and their shares:
+	// of the "writes" starts above, and every draw's phase time by the actual run decision.
+	uint64_t why_writes_run   = 0;
+	uint64_t actual_cont      = 0;
+	uint64_t actual_cont_cyc  = 0;
+	uint64_t actual_start     = 0;
+	uint64_t actual_start_cyc = 0;
+	uint64_t writes_prev_cont = 0; // continued draws whose previous draw wrote (run writes)
 	// Starts whose pipeline and structure (DrawShape) an earlier draw of the same rendering
 	// instance, or of the same frame, recorded; and whose structure inputs the previous frame or the
 	// one before had.
@@ -253,6 +261,20 @@ void Print(State& s, uint64_t now_ns, uint64_t now_tsc) {
 	              pct(s.why_first, starts), pct(s.why_instance, starts), pct(s.why_pipeline, starts),
 	              pct(s.why_structure, starts), pct(s.why_dynamic, starts), pct(s.why_writes, starts));
 	line += text;
+	{
+		const double ticks_us = ns_per_tick * 1e-3;
+		std::snprintf(text, sizeof(text),
+		              " | writes starts run-continued %.1f%% | actual run: cont %" PRIu64
+		              " (%.2f us/draw, after a writing draw %" PRIu64 ") start %" PRIu64
+		              " (%.2f us/draw)",
+		              pct(s.why_writes_run, s.why_writes), s.actual_cont,
+		              static_cast<double>(s.actual_cont_cyc) * ticks_us /
+		                  static_cast<double>(std::max<uint64_t>(1, s.actual_cont)),
+		              s.writes_prev_cont, s.actual_start,
+		              static_cast<double>(s.actual_start_cyc) * ticks_us /
+		                  static_cast<double>(std::max<uint64_t>(1, s.actual_start)));
+		line += text;
+	}
 	std::snprintf(text, sizeof(text),
 	              " | start repeats: instance %.1f%% frame %.1f%% xframe struct f-1|2 %.1f%%",
 	              pct(s.start_inst_repeat, starts), pct(s.start_frame_repeat, starts),
@@ -281,6 +303,8 @@ void Print(State& s, uint64_t now_ns, uint64_t now_tsc) {
 	s.same_buffers = s.same_push = s.same_tables = s.same_index = s.same_vertex = s.same_all = 0;
 	s.why_first = s.why_instance = s.why_pipeline = s.why_structure = s.why_dynamic =
 	    s.why_writes                                                 = 0;
+	s.why_writes_run = s.actual_cont = s.actual_cont_cyc = s.actual_start = s.actual_start_cyc =
+	    s.writes_prev_cont                                               = 0;
 	s.start_inst_repeat = s.start_frame_repeat = s.start_xf_struct12 = 0;
 	s.frames = s.xf_draws = s.xf_bind_1 = s.xf_bind_12 = s.xf_struct_1 = s.xf_struct_12 =
 	    s.xf_bind_in                                                    = 0;
@@ -379,6 +403,7 @@ void EndDraw() {
 			klass = ClassStart;
 		} else if (a.shader_writes) {
 			s.why_writes++;
+			s.why_writes_run += b.run_continued ? 1u : 0u;
 			klass = ClassStart;
 		} else {
 			klass = ClassContinue;
@@ -411,6 +436,20 @@ void EndDraw() {
 		s.instance_shapes.insert(shape_key);
 		s.frame_shapes.insert(shape_key);
 		s.run_length++;
+		{
+			uint64_t cycles = 0;
+			for (size_t p = 0; p < PhaseCount; p++) {
+				cycles += s.cycles[p];
+			}
+			if (b.run_continued) {
+				s.actual_cont++;
+				s.actual_cont_cyc += cycles;
+				s.writes_prev_cont += s.previous_valid && a.shader_writes ? 1u : 0u;
+			} else {
+				s.actual_start++;
+				s.actual_start_cyc += cycles;
+			}
+		}
 		s.previous       = b;
 		s.previous_valid = true;
 		// Cross-frame.
