@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Audio {
@@ -183,6 +185,32 @@ struct AudioOut2ContextState {
 	uint32_t               queued      = 0;
 	uint32_t               num_grains  = 512;
 	uint64_t               last_update = 0;
+	uint32_t               max_ports        = 0; // As the guest asked; diagnostics only.
+	uint32_t               max_object_ports = 0;
+};
+
+// KYTY_AUDIO_TRACE: what the guest handed one non-object port at each push. A block identical to
+// the one before (or to one of the last few: a stuck double buffer) is what a steady buzz at the
+// block rate (48000 / 512 = 93.75 Hz) is made of.
+struct AudioOut2BlockTrace {
+	static constexpr int HISTORY = 8;
+	std::array<uint64_t, HISTORY> history {}; // Hashes of the last pushed blocks, newest at [0].
+	uint32_t                      history_n     = 0;
+	uint32_t                      run           = 0; // Consecutive identical non-silent blocks.
+	uint32_t                      periodic_run  = 0; // Consecutive blocks equal to an older one.
+	bool                          buzz_reported = false;
+	const void*                   last_pointer  = nullptr;
+	uint64_t                      start         = 0; // Start of the summary window.
+	// Since the last summary.
+	uint32_t pushes        = 0;
+	uint32_t stale         = 0; // Pushed without a PCM attribute set since the previous push.
+	uint32_t identical     = 0; // Non-silent and equal to the previous block.
+	uint32_t periodic      = 0; // Non-silent and equal to one of the 2nd..8th previous blocks.
+	uint32_t silent        = 0;
+	uint32_t pointer_moves = 0; // PCM attribute pointer differed from the previous one.
+	uint32_t longest_run   = 0;
+	uint32_t buzz_events   = 0;
+	uint32_t gain_changes  = 0;
 };
 
 struct AudioOut2PortStateEntry {
@@ -206,6 +234,10 @@ struct AudioOut2PortStateEntry {
 	// that is not fed again is silent, not a repeated block).
 	Objects::Params        object;
 	bool                   pcm_fresh = false;
+	// PCM attributes set since the last push (any port type), and where the last one pointed.
+	uint32_t               pcm_sets_since_push = 0;
+	const void*            pcm_pointer         = nullptr;
+	AudioOut2BlockTrace    block_trace;
 };
 
 struct AudioOut2SpeakerArrayState {
@@ -226,7 +258,10 @@ struct AudioOut2LatencyState {
 static Common::Mutex                              g_audioout2_context_mutex;
 static std::array<AudioOut2ContextState, 16>      g_audioout2_contexts;
 static Common::Mutex                              g_audioout2_port_mutex;
-static std::array<AudioOut2PortStateEntry, 256>   g_audioout2_ports;
+// Port slots grow on demand up to audioout2_port_capacity(); a deque keeps entries in place, so a
+// slot reserved in PortCreate stays valid while the lock is dropped. Indexed by handle.
+static std::deque<AudioOut2PortStateEntry>        g_audioout2_ports;
+static std::unordered_map<AudioOut2PortHandle, AudioOut2PortStateEntry*> g_audioout2_port_index;
 static std::vector<AudioOut2UserHandle>          g_audioout2_users;
 static Common::Mutex                              g_audioout2_speaker_array_mutex;
 static std::array<AudioOut2SpeakerArrayState, 32> g_audioout2_speaker_arrays;
@@ -353,13 +388,37 @@ static void audioout2_update_context_locked(AudioOut2ContextState* state) {
 }
 
 static AudioOut2PortStateEntry* audioout2_find_port_locked(AudioOut2PortHandle port) {
-	for (auto& state: g_audioout2_ports) {
-		if (state.used && state.handle == port) {
-			return &state;
+	const auto it = g_audioout2_port_index.find(port);
+	return it != g_audioout2_port_index.end() && it->second->used && it->second->handle == port
+	           ? it->second
+	           : nullptr;
+}
+
+// How many AudioOut2 ports (bed, object, pad, vibration; all contexts) may exist at once. Astro Bot
+// asks for max ports 20 and creates one object port per 3D voice; with the library's default of
+// 256 object ports on top of its bed/pad/vibration ports it needs more than 256 slots, and the old
+// fixed 256-slot table answered PORT_FULL (0x80268012) after enough voices. KYTY_AUDIO_OUT2_MAX_PORTS
+// (64-65536, default 4096; 256 is the old table) sets the limit.
+static size_t audioout2_port_capacity() {
+	static const size_t capacity = [] {
+		const char* value = std::getenv("KYTY_AUDIO_OUT2_MAX_PORTS");
+		if (value == nullptr || value[0] == '\0') {
+			return static_cast<size_t>(4096);
+		}
+		return static_cast<size_t>(std::clamp<long long>(std::strtoll(value, nullptr, 10), 64, 65536));
+	}();
+	return capacity;
+}
+
+// Ports of one context, split into plain (bed, pad speaker, vibration, ...) and object ports.
+static void audioout2_count_ports_locked(AudioOut2ContextHandle ctx, uint32_t* plain, uint32_t* objects) {
+	*plain   = 0;
+	*objects = 0;
+	for (const auto& state: g_audioout2_ports) {
+		if (state.used && state.context == ctx) {
+			(((state.port_type & 0xff00u) == 0x0100u) ? *objects : *plain) += 1;
 		}
 	}
-
-	return nullptr;
 }
 
 static size_t audioout2_pcm_size(const AudioOut2PortStateEntry& state) {
@@ -464,6 +523,114 @@ static const void* audioout2_mix_objects_locked(AudioOut2ContextHandle         c
 	return mixed ? static_cast<const void*>(mix->data()) : bed.pcm_data.data();
 }
 
+// FNV-1a over the block; *silent is set when every byte is zero.
+static uint64_t audioout2_hash_block(const std::vector<uint8_t>& pcm, bool* silent) {
+	uint64_t hash    = 1469598103934665603ULL;
+	uint8_t  any_bit = 0;
+	for (const uint8_t byte: pcm) {
+		hash = (hash ^ byte) * 1099511628211ULL;
+		any_bit |= byte;
+	}
+	*silent = any_bit == 0;
+	return hash;
+}
+
+static const char* audioout2_port_kind(uint16_t port_type) {
+	switch (port_type & 0xffu) {
+		case 0: return "main";
+		case 1: return "bgm";
+		case 2: return "voice";
+		case 3: return "pad speaker";
+		case 4: return "personal";
+		case 5: return "aux";
+		case 6: return "vibration";
+		default: return "other";
+	}
+}
+
+// KYTY_AUDIO_TRACE: compares the PCM a plain port is about to play with its last blocks. BUZZ when
+// more than 8 consecutive non-silent blocks are identical (one block replayed: a 93.75 Hz tone) or
+// equal to one of the 2nd-8th previous blocks (a stuck double/triple buffer). Caller holds
+// g_audioout2_port_mutex.
+static void audioout2_trace_block_locked(AudioOut2PortStateEntry* state) {
+	auto&      b   = state->block_trace;
+	const auto now = LibKernel::KernelGetProcessTime();
+	if (b.start == 0) {
+		b.start = now;
+	}
+	b.pushes++;
+	b.stale += state->pcm_sets_since_push == 0 ? 1 : 0;
+	if (state->pcm_pointer != b.last_pointer) {
+		b.pointer_moves++;
+		b.last_pointer = state->pcm_pointer;
+	}
+	bool       silent = true;
+	const auto hash   = state->pcm_data.empty() ? 0 : audioout2_hash_block(state->pcm_data, &silent);
+	bool       same   = false;
+	int        period = 0;
+	if (!silent && b.history_n > 0) {
+		same = b.history[0] == hash;
+		for (uint32_t i = 1; !same && i < std::min<uint32_t>(b.history_n, AudioOut2BlockTrace::HISTORY); i++) {
+			if (b.history[i] == hash) {
+				period = static_cast<int>(i) + 1;
+				break;
+			}
+		}
+	}
+	b.silent += silent ? 1 : 0;
+	b.identical += same ? 1 : 0;
+	b.periodic += period != 0 ? 1 : 0;
+	const uint32_t previous_run = std::max(b.run, b.periodic_run);
+	b.run          = same ? b.run + 1 : 0;
+	b.periodic_run = (same || period != 0) ? b.periodic_run + 1 : 0;
+	const uint32_t run = std::max(b.run, b.periodic_run);
+	b.longest_run      = std::max(b.longest_run, run);
+	if (run > 8 && !b.buzz_reported) {
+		b.buzz_reported = true;
+		b.buzz_events++;
+		Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s BUZZ: %u consecutive repeated non-silent blocks (%s, "
+		            "period %d block(s), %.2f Hz); guest PCM 0x%" PRIx64 ", format 0x%x %u ch %u Hz %u frames, "
+		            "output handle %d; PCM sets since the previous push %u (0 = the guest did not set PCM, the "
+		            "last block is replayed); hash %016" PRIx64,
+		            static_cast<double>(now) / 1e6, static_cast<uint64_t>(state->handle),
+		            audioout2_port_kind(state->port_type), run, same ? "identical to the previous block" : "equal to an older block",
+		            same ? 1 : period, state->sampling_freq / static_cast<double>(state->samples_num * (same ? 1 : period)),
+		            reinterpret_cast<uint64_t>(state->pcm_pointer), state->data_format,
+		            audioout2_data_format_channels(state->data_format), state->sampling_freq, state->samples_num,
+		            state->audio_handle, state->pcm_sets_since_push, hash);
+	} else if (run == 0 && b.buzz_reported) {
+		b.buzz_reported = false;
+		Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s BUZZ END after %u repeated blocks (%.2f s)",
+		            static_cast<double>(now) / 1e6, static_cast<uint64_t>(state->handle),
+		            audioout2_port_kind(state->port_type), previous_run,
+		            previous_run * static_cast<double>(state->samples_num) / std::max(state->sampling_freq, 1u));
+	}
+	for (int i = AudioOut2BlockTrace::HISTORY - 1; i > 0; i--) {
+		b.history[i] = b.history[i - 1];
+	}
+	b.history[0] = hash;
+	b.history_n++;
+	if (now - b.start < Diag::TRACE_INTERVAL_US) {
+		return;
+	}
+	Diag::Trace("t=%.1f s AudioOut2 port %" PRIu64 " %s blocks: %u pushed, %u without a new PCM set, %u identical to "
+	            "the previous, %u equal to an older one, %u silent, longest repeat run %u, %u BUZZ, %u PCM pointer "
+	            "changes, %u gain changes; format 0x%x",
+	            static_cast<double>(now) / 1e6, static_cast<uint64_t>(state->handle),
+	            audioout2_port_kind(state->port_type), b.pushes, b.stale, b.identical, b.periodic, b.silent,
+	            b.longest_run, b.buzz_events, b.pointer_moves, b.gain_changes, state->data_format);
+	b.start         = now;
+	b.pushes        = 0;
+	b.stale         = 0;
+	b.identical     = 0;
+	b.periodic      = 0;
+	b.silent        = 0;
+	b.pointer_moves = 0;
+	b.longest_run   = run;
+	b.buzz_events   = 0;
+	b.gain_changes  = 0;
+}
+
 static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
 	// The backend consumes the buffers synchronously, but can block while pacing SDL's queue.
 	// Keep both PCM storage and port handles alive until it returns.
@@ -476,6 +643,15 @@ static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool block
 	// Objects switched off: no bed takes them, so every object block is dropped below.
 	const bool objects_on    = AudioInternal::AudioOutObjectsEnabled();
 	bool       objects_mixed = false;
+	const bool trace         = Diag::TraceEnabled();
+	for (auto& state: g_audioout2_ports) {
+		if (state.used && state.context == ctx && !audioout2_port_type_is_object(state.port_type)) {
+			if (trace) {
+				audioout2_trace_block_locked(&state);
+			}
+			state.pcm_sets_since_push = 0;
+		}
+	}
 	for (const auto& state: g_audioout2_ports) {
 		if (state.used && state.context == ctx && state.audio_handle > 0 &&
 		    !state.pcm_data.empty() && params.size() < AudioInternal::OUT_PORTS_MAX) {
@@ -576,6 +752,8 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const AudioOut2ContextParam* params, vo
 	state->queued      = 0;
 	state->num_grains  = (params->num_grains == 0 ? 512u : params->num_grains);
 	state->last_update = LibKernel::KernelGetProcessTime();
+	state->max_ports        = params->max_ports;
+	state->max_object_ports = params->max_object_ports;
 	g_audioout2_context_mutex.Unlock();
 
 	LOGF("\t buffer      = 0x%016" PRIx64 "\n"
@@ -585,10 +763,13 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const AudioOut2ContextParam* params, vo
 	     reinterpret_cast<uint64_t>(buffer), static_cast<uint64_t>(buffer_size), *ctx,
 	     state->queue_depth, state->num_grains);
 	Diag::Print("sceAudioOut2ContextCreate -> context %" PRIu64 " (max ports %" PRIu32
-	            ", queue depth %" PRIu32 ", %" PRIu32 " grains, flags 0x%x, buffer 0x%" PRIx64
-	            " size 0x%" PRIx64 ")",
-	            *ctx, params->max_ports, params->queue_depth, params->num_grains, params->flags,
-	            reinterpret_cast<uint64_t>(buffer), static_cast<uint64_t>(buffer_size));
+	            ", max object ports %" PRIu32 " (%" PRIu32 " guaranteed), queue depth %" PRIu32
+	            ", %" PRIu32 " grains, flags 0x%x, buffer 0x%" PRIx64 " size 0x%" PRIx64
+	            "); emulator port limit %zu (all contexts)",
+	            *ctx, params->max_ports, params->max_object_ports, params->guarantee_object_ports,
+	            params->queue_depth, params->num_grains, params->flags,
+	            reinterpret_cast<uint64_t>(buffer), static_cast<uint64_t>(buffer_size),
+	            audioout2_port_capacity());
 
 	return OK;
 }
@@ -604,22 +785,22 @@ int KYTY_SYSV_ABI AudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
 	}
 	g_audioout2_context_mutex.Unlock();
 
-	std::array<int, 256> audio_handles {};
-	size_t               audio_handles_num = 0;
+	std::vector<int> audio_handles;
 
 	g_audioout2_port_mutex.Lock();
 	for (auto& port_state: g_audioout2_ports) {
 		if (port_state.used && port_state.context == ctx) {
-			if (port_state.audio_handle > 0 && audio_handles_num < audio_handles.size()) {
-				audio_handles[audio_handles_num++] = port_state.audio_handle;
+			if (port_state.audio_handle > 0) {
+				audio_handles.push_back(port_state.audio_handle);
 			}
+			g_audioout2_port_index.erase(port_state.handle);
 			port_state = AudioOut2PortStateEntry {};
 		}
 	}
 	g_audioout2_port_mutex.Unlock();
 
-	for (size_t i = 0; i < audio_handles_num; i++) {
-		audioout2_close_audio_handle(audio_handles[i]);
+	for (const int audio_handle: audio_handles) {
+		audioout2_close_audio_handle(audio_handle);
 	}
 
 	return OK;
@@ -659,6 +840,51 @@ struct AudioOut2PushTrace {
 };
 static AudioOut2PushTrace g_audioout2_push_trace;
 
+// KYTY_AUDIO_TRACE: port lifetimes. Every create/destroy gets a line (up to PORT_LINE_BUDGET, then
+// only the 10 s totals in the AudioOut2 summary), with the context's live plain/object port counts.
+struct AudioOut2PortTrace {
+	static constexpr int  PORT_LINE_BUDGET = 3000;
+	std::atomic<int>      lines {0};
+	std::atomic<uint32_t> creates {0};
+	std::atomic<uint32_t> destroys {0};
+	std::atomic<uint32_t> failures {0};
+	std::atomic<uint32_t> live_plain {0};   // At the last create/destroy.
+	std::atomic<uint32_t> live_objects {0};
+	std::atomic<uint32_t> max_objects {0};  // Since the last summary.
+	std::atomic<uint32_t> max_objects_ever {0};
+};
+static AudioOut2PortTrace g_audioout2_port_trace;
+
+static void audioout2_trace_port_event(const char* what, AudioOut2ContextHandle ctx, AudioOut2PortHandle port,
+                                       uint16_t port_type, uint32_t data_format, int result) {
+	if (!Diag::TraceEnabled()) {
+		return;
+	}
+	uint32_t plain   = 0;
+	uint32_t objects = 0;
+	size_t   slots   = 0;
+	{
+		Common::LockGuard lock(g_audioout2_port_mutex);
+		audioout2_count_ports_locked(ctx, &plain, &objects);
+		slots = g_audioout2_ports.size();
+	}
+	auto& t = g_audioout2_port_trace;
+	t.live_plain   = plain;
+	t.live_objects = objects;
+	if (objects > t.max_objects.load(std::memory_order_relaxed)) {
+		t.max_objects = objects;
+	}
+	if (objects > t.max_objects_ever.load(std::memory_order_relaxed)) {
+		t.max_objects_ever = objects;
+	}
+	if (t.lines.fetch_add(1, std::memory_order_relaxed) < AudioOut2PortTrace::PORT_LINE_BUDGET) {
+		Diag::Trace("t=%.3f s AudioOut2 port %s: context %" PRIu64 " port %" PRIu64 " type 0x%x format 0x%x -> "
+		            "0x%08x; live %u plain + %u object ports (%zu slots, limit %zu)",
+		            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6, what, ctx, port, port_type,
+		            data_format, static_cast<unsigned>(result), plain, objects, slots, audioout2_port_capacity());
+	}
+}
+
 static int AudioOut2ContextPushImpl(AudioOut2ContextHandle ctx, uint32_t blocking, uint32_t* sleeps,
                                     uint64_t* slept, bool* device_paced);
 
@@ -692,6 +918,12 @@ static void audioout2_trace_push(uint64_t entered, bool blocking, int result, ui
 	            static_cast<double>(t.sleep_us.exchange(0)) / 1000.0,
 	            pushes != 0 ? static_cast<double>(t.push_us.exchange(0)) / pushes / 1000.0 : 0.0,
 	            static_cast<double>(t.push_max_us.exchange(0)) / 1000.0, t.level_polls.exchange(0));
+	auto& p = g_audioout2_port_trace;
+	Diag::Trace("t=%.1f s AudioOut2 ports: %u created, %u destroyed, %u creates failed; live %u plain + %u object "
+	            "(max %u in this window, %u ever; limit %zu)",
+	            static_cast<double>(now) / 1e6, p.creates.exchange(0), p.destroys.exchange(0), p.failures.exchange(0),
+	            p.live_plain.load(), p.live_objects.load(), p.max_objects.exchange(p.live_objects.load()),
+	            p.max_objects_ever.load(), audioout2_port_capacity());
 }
 
 int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
@@ -814,7 +1046,11 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 			break;
 		}
 	}
+	if (port_state == nullptr && g_audioout2_ports.size() < audioout2_port_capacity()) {
+		port_state = &g_audioout2_ports.emplace_back();
+	}
 	if (port_state != nullptr) {
+		g_audioout2_port_index[next_port] = port_state;
 		*port_state               = AudioOut2PortStateEntry {};
 		port_state->used          = true;
 		port_state->handle        = next_port;
@@ -831,6 +1067,9 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	g_audioout2_context_mutex.Unlock();
 
 	if (port_state == nullptr) {
+		g_audioout2_port_trace.failures++;
+		audioout2_trace_port_event("create FULL", ctx, next_port, params->port_type, params->data_format,
+		                           AUDIO_OUT2_ERROR_PORT_FULL);
 		return Diag::Error("sceAudioOut2PortCreate", AUDIO_OUT2_ERROR_PORT_FULL, params->port_type);
 	}
 
@@ -850,10 +1089,15 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	g_audioout2_port_mutex.Unlock();
 	if (!reserved) {
 		audioout2_close_audio_handle(audio_handle);
+		g_audioout2_port_trace.failures++;
+		audioout2_trace_port_event("create cancelled", ctx, next_port, params->port_type, params->data_format,
+		                           AUDIO_OUT2_ERROR_INVALID_PARAM);
 		return Diag::Error("sceAudioOut2PortCreate", AUDIO_OUT2_ERROR_INVALID_PARAM, 3);
 	}
 
 	*port = next_port;
+	g_audioout2_port_trace.creates++;
+	audioout2_trace_port_event("create", ctx, next_port, params->port_type, params->data_format, OK);
 
 	// Object ports can be created per sound; the first ones and every non-object port suffice.
 	if (!audioout2_port_type_is_object(params->port_type) || next_port <= 16) {
@@ -883,17 +1127,29 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(AudioOut2PortHandle port) {
 	PRINT_NAME();
 	LOGF("\t port = 0x%016" PRIx64 "\n", port);
 
-	int      audio_handle = 0;
-	bool     found        = false;
-	uint16_t port_type    = 0;
+	int                    audio_handle = 0;
+	bool                   found        = false;
+	uint16_t               port_type    = 0;
+	uint32_t               data_format  = 0;
+	AudioOut2ContextHandle context      = 0;
 	g_audioout2_port_mutex.Lock();
 	if (auto* state = audioout2_find_port_locked(port); state != nullptr) {
 		audio_handle = state->audio_handle;
 		port_type    = state->port_type;
+		data_format  = state->data_format;
+		context      = state->context;
 		found        = true;
 		*state       = AudioOut2PortStateEntry {};
+		g_audioout2_port_index.erase(port);
 	}
 	g_audioout2_port_mutex.Unlock();
+	if (found) {
+		g_audioout2_port_trace.destroys++;
+		audioout2_trace_port_event("destroy", context, port, port_type, data_format, OK);
+	} else if (Diag::TraceEnabled()) {
+		Diag::Trace("t=%.3f s AudioOut2 port destroy: port %" PRIu64 " does not exist",
+		            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6, port);
+	}
 
 	if (!found) {
 		Diag::Print("sceAudioOut2PortDestroy(port %" PRIu64 "): no such port", port);
@@ -1042,7 +1298,8 @@ static void audioout2_log_object_attributes_locked(const AudioOut2PortStateEntry
 int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
                                              const AudioOut2Attribute* attributes, uint32_t num) {
 	if (num != 0 && attributes == nullptr) {
-		return AUDIO_OUT2_ERROR_INVALID_PARAM;
+		return Diag::Error("sceAudioOut2PortSetAttributes", AUDIO_OUT2_ERROR_INVALID_PARAM,
+		                   static_cast<int64_t>(port));
 	}
 
 	const void* pcm_data = nullptr;
@@ -1088,6 +1345,20 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
 					std::memcpy(gains.data(), attribute.value, attribute.value_size);
 					if (std::all_of(gains.begin(), gains.begin() + channels,
 					                [](float gain) { return std::isfinite(gain) && gain >= 0.0f; })) {
+						if (Diag::TraceEnabled() && gains != state->gains) {
+							state->block_trace.gain_changes++;
+							static std::atomic<int> lines {0};
+							if (lines.fetch_add(1, std::memory_order_relaxed) < 64) {
+								Diag::Trace("t=%.3f s AudioOut2 port %" PRIu64 " %s gain: %.3f %.3f %.3f %.3f %.3f "
+								            "%.3f %.3f %.3f",
+								            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6,
+								            static_cast<uint64_t>(state->handle), audioout2_port_kind(state->port_type),
+								            static_cast<double>(gains[0]), static_cast<double>(gains[1]),
+								            static_cast<double>(gains[2]), static_cast<double>(gains[3]),
+								            static_cast<double>(gains[4]), static_cast<double>(gains[5]),
+								            static_cast<double>(gains[6]), static_cast<double>(gains[7]));
+							}
+						}
 						state->gains = gains;
 					}
 				}
@@ -1096,6 +1367,8 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(AudioOut2PortHandle       port,
 				audioout2_log_object_attributes_locked(*state, attributes, num);
 			}
 			if (has_pcm) {
+				state->pcm_sets_since_push++;
+				state->pcm_pointer = pcm_data;
 				if (pcm_data != nullptr && state->audio_format != AudioInternal::Format::Unknown) {
 					const auto* bytes = static_cast<const uint8_t*>(pcm_data);
 					state->pcm_data.assign(bytes, bytes + audioout2_pcm_size(*state));

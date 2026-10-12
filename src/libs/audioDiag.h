@@ -134,10 +134,6 @@ inline void Print(const char* format, ...) {
 	va_end(args);
 }
 
-inline int Error(const char* api, int code, int64_t detail = 0) {
-	return Console().Error(api, code, detail);
-}
-
 // KYTY_AUDIO_TRACE=1: output timing trace (SDL queue levels, clears, re-primes, device-side
 // shortfalls, AudioOut2 push results) with a summary per port every TRACE_INTERVAL_US. Off by
 // default; the lines go to the console and the log file and have no line budget.
@@ -166,6 +162,20 @@ inline void Trace(const char* format, ...) {
 		std::printf("AudioTrace: %s\n", text);
 		std::fflush(stdout);
 	}
+}
+
+// An error result handed to the guest: one AudioDiag line per (api, code), and with
+// KYTY_AUDIO_TRACE one AudioTrace line per occurrence (the first ERROR_TRACE_BUDGET).
+inline constexpr int ERROR_TRACE_BUDGET = 512;
+inline int Error(const char* api, int code, int64_t detail = 0) {
+	if (TraceEnabled()) {
+		static std::atomic<int> lines {0};
+		if (lines.fetch_add(1, std::memory_order_relaxed) < ERROR_TRACE_BUDGET) {
+			Trace("%s returned 0x%08x to the game (detail %lld)", api, static_cast<unsigned>(code),
+			      static_cast<long long>(detail));
+		}
+	}
+	return Console().Error(api, code, detail);
 }
 
 } // namespace Libs::Audio::Diag

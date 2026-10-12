@@ -266,18 +266,21 @@ void TestFullTableRecovers() {
 	const auto                                  context = CreateContext();
 	const auto                                  param   = MakeParam();
 	std::vector<AudioOut2::AudioOut2PortHandle> ports;
-	ports.reserve(256);
+	ports.reserve(4096);
 
-	for (int i = 0; i < 256; i++) {
+	// The table grows to its limit (KYTY_AUDIO_OUT2_MAX_PORTS, 4096 by default) and then refuses.
+	constexpr int port_full = static_cast<int32_t>(0x80268012u);
+	int           result    = OK;
+	for (int i = 0; i < 70000; i++) {
 		AudioOut2::AudioOut2PortHandle port = 0;
-		Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port) == OK,
-		      "port table filled early");
+		result = AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port);
+		if (result != OK) {
+			break;
+		}
 		ports.push_back(port);
 	}
-
-	AudioOut2::AudioOut2PortHandle overflow = 0;
-	Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &overflow) != OK,
-	      "full port table accepted another port");
+	Check(result == port_full, "full port table accepted another port or failed with another code");
+	Check(ports.size() == 4096, "port table limit is not 4096");
 
 	for (auto port: ports) {
 		AudioOut2::AudioOut2PortDestroy(port);
@@ -288,6 +291,53 @@ void TestFullTableRecovers() {
 	      "port table did not recover");
 	AudioOut2::AudioOut2PortDestroy(port);
 	AudioOut2::AudioOut2ContextDestroy(context);
+}
+
+// Astro Bot: max ports 20, a bed, a BGM bed, pad speaker and vibration ports, and one object port
+// per 3D voice. With the library's 256 object ports on top of its plain ports the old fixed table of
+// 256 slots answered PORT_FULL (0x80268012, detail 0x100) mid-game. Objects come and go in bursts.
+void TestObjectPortsBeyond256() {
+	ContextParam context_param {};
+	context_param.max_ports        = 20;
+	context_param.max_object_ports = 256;
+	context_param.queue_depth      = 1;
+	context_param.num_grains       = 512;
+	AudioOut2::AudioOut2ContextHandle context = 0;
+	Check(AudioOut2::AudioOut2ContextCreate(AsParam(&context_param), nullptr, 0, &context) == OK,
+	      "context create failed");
+	std::vector<AudioOut2::AudioOut2PortHandle> plain;
+	for (const uint16_t type: {uint16_t {0}, uint16_t {1}, uint16_t {3}, uint16_t {6}}) {
+		auto param      = MakeParam(type == 6 ? 0x200 : (type == 3 ? 0x100 : 0x800));
+		param.port_type = type;
+		plain.push_back(CreatePort(context, param));
+	}
+	auto object_param      = MakeParam(0x100);
+	object_param.port_type = 0x100;
+	std::vector<AudioOut2::AudioOut2PortHandle> objects;
+	for (int i = 0; i < 300; i++) {
+		objects.push_back(CreatePort(context, object_param));
+	}
+	// Churn: destroy every other object and create new ones, many times over.
+	for (int round = 0; round < 20; round++) {
+		for (size_t i = round % 2; i < objects.size(); i += 2) {
+			AudioOut2::AudioOut2PortDestroy(objects[i]);
+			objects[i] = CreatePort(context, object_param);
+		}
+	}
+	// Every handle still resolves to its own port.
+	for (const auto port: objects) {
+		PortState state {};
+		AudioOut2::AudioOut2PortGetState(port, AsState(&state));
+		Check(state.num_channels == 1, "object port lost after churn");
+	}
+	for (const auto port: plain) {
+		AudioOut2::AudioOut2PortDestroy(port);
+	}
+	for (const auto port: objects) {
+		AudioOut2::AudioOut2PortDestroy(port);
+	}
+	AudioOut2::AudioOut2ContextDestroy(context);
+	Check(LiveDeviceCount() == 0, "object port test leaked a device");
 }
 
 void TestConcurrentCreates() {
@@ -668,8 +718,43 @@ uint64_t KYTY_SYSV_ABI KernelGetProcessTime() {
 
 } // namespace Libs::LibKernel
 
+namespace {
+
+// With KYTY_AUDIO_TRACE on: a bed whose PCM is never set again replays its last block (BUZZ), then
+// recovers when fresh blocks arrive. Exercises the trace path; the output itself is checked here.
+void TestRepeatedBlockTrace() {
+	const auto context = CreateContext(1);
+	const auto port    = CreatePort(context, MakeParam(0x200));
+	std::array<float, 512 * 2> pcm {};
+	pcm.fill(0.25f);
+	SetPcm(port, pcm.data());
+	for (int i = 0; i < 12; i++) {
+		const auto output = PushPcm(context, sizeof(pcm));
+		Check(output.size() == 1, "repeated block was not played");
+		CheckSamples(output[0], {0.25f, 0.25f}, "repeated block changed");
+	}
+	for (int i = 0; i < 4; i++) {
+		pcm.fill(0.1f * static_cast<float>(i + 1));
+		SetPcm(port, pcm.data());
+		const auto output = PushPcm(context, sizeof(pcm));
+		CheckSamples(output[0], {0.1f * static_cast<float>(i + 1), 0.1f * static_cast<float>(i + 1)},
+		             "fresh block not played");
+	}
+	AudioOut2::AudioOut2PortDestroy(port);
+	AudioOut2::AudioOut2ContextDestroy(context);
+}
+
+} // namespace
+
 int main() {
+#ifdef _WIN32
+	_putenv("KYTY_AUDIO_TRACE=1");
+#else
+	setenv("KYTY_AUDIO_TRACE", "1", 1);
+#endif
 	Check(AudioOut2::AudioOut2UserCreate(1000, &g_user_handle) == OK, "test user create failed");
+	TestObjectPortsBeyond256();
+	TestRepeatedBlockTrace();
 	TestUserSupportedAttributes();
 	TestSlotReuse();
 	TestFullTableRecovers();
