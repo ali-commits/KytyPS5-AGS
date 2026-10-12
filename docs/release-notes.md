@@ -56,6 +56,12 @@ the Linux build now does the same. Windows is unchanged apart from this note.
   default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
 - **Diagnostic:** `KYTY_DRAW_PREP_PHASES=1` prints the time a draw-prep slot spends in each phase of its preparation.
   Off by default.
+- **SRT trace replay:** the descriptor walks that refresh a draw's resources are recorded once per program and
+  replayed with guards (`KYTY_SRT_TRACE=1`, the default; `=0` turns it off, `=verify` checks every replay against
+  the full walk). Measured +5.4-5.9% fps in Sky Garden on top of the lock fix.
+- **Direct reads in draw preparation:** `KYTY_DRAW_PREP_DIRECT_READS=1` (default) lets the draw-prep worker read
+  guest pages directly into coalesced records instead of going through the slower path (worker side only).
+  `=0` restores the old reads.
 
 ## How to test
 
