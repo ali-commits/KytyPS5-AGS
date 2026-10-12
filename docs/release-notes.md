@@ -63,6 +63,22 @@ the Linux build now does the same. Windows is unchanged apart from this note.
   guest pages directly into coalesced records instead of going through the slower path (worker side only).
   `=0` restores the old reads.
 
+## amd5d: audio pacing fixes
+
+- **Sound breaking up after some minutes:** on some PCs the sound turned crackly or cut out a few minutes into play.
+  We traced this to the sound card running slightly faster than the emulator's own clock, so the audio buffer
+  slowly drained until it ran dry. Two fixes, both on by default:
+  - `KYTY_AUDIO_QUEUE_CATCHUP=1` lets the sound card set the pace when the buffer runs low, instead of the
+    emulator's clock.
+  - `KYTY_AUDIO_PAD_PRIME=1` fills the controller-speaker port with a little silence when it opens late, so it
+    starts with a cushion instead of an empty buffer.
+- **Buffer size:** `KYTY_AUDIO_LATENCY_MS` (10-500, default 40) sets how much audio is kept queued.
+- **Reporting a sound problem:** start with `KYTY_AUDIO_TRACE=1` and the emulator writes audio statistics every
+  10 seconds to `_kyty.txt`. Please send that log with your report.
+- **Going back:** `KYTY_AUDIO_QUEUE_CATCHUP=0 KYTY_AUDIO_PAD_PRIME=0` restores the old behaviour.
+- **Honest status:** the fix has been verified only against a simulated fast sound card, not yet on a PC that
+  actually shows the problem. Reports are welcome.
+
 ## How to test
 
 Copy your working folder, unzip this build over it and start the game as usual. Play the first levels for a while.
