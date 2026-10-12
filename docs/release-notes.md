@@ -73,8 +73,10 @@ the Linux build now does the same. Windows is unchanged apart from this note.
   - `KYTY_AUDIO_PAD_PRIME=1` fills the controller-speaker port with a little silence when it opens late, so it
     starts with a cushion instead of an empty buffer.
 - **Buffer size:** `KYTY_AUDIO_LATENCY_MS` (10-500, default 40) sets how much audio is kept queued.
-- **Reporting a sound problem:** start with `KYTY_AUDIO_TRACE=1` and the emulator writes audio statistics every
-  10 seconds to `_kyty.txt`. Please send that log with your report.
+- **Reporting a sound problem:** start with `KYTY_AUDIO_TRACE=1` and the emulator prints audio statistics every
+  10 seconds. They reach `_kyty.txt` only when `printf_direction=File` is set in `Kyty.ini`
+  (`C:\ProgramData\Kyty\Kyty.ini` on Windows); with `Silent` or `Console` they go to the console only.
+  Please send that log with your report.
 - **Going back:** `KYTY_AUDIO_QUEUE_CATCHUP=0 KYTY_AUDIO_PAD_PRIME=0` restores the old behaviour.
 - **Honest status:** the fix has been verified only against a simulated fast sound card, not yet on a PC that
   actually shows the problem. Reports are welcome.
