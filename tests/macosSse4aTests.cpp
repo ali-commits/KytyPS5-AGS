@@ -254,7 +254,7 @@ void TestRexHighRegisterInsertqWithIndex() {
 	fn(out, src, dest);
 	Check(IllegalHits() > before, "host raises SIGILL for a REX.R/REX.B INSERTQ");
 	Check(out[0] == 0xaaaaaaaaaa2211aaull, "insertq xmm10, xmm9, 16, 8 inserts bits [15:0] at index 8");
-	Check(out[1] == 0xbbbbbbbbbbbbbbbbull, "insertq xmm10, xmm9, 16, 8 leaves the upper 64 bits untouched");
+	Check(out[1] == 0, "insertq xmm10, xmm9, 16, 8 zeroes the upper 64 bits, as AMD CPUs do");
 }
 
 void TestInsertqRegister() {
@@ -276,8 +276,8 @@ void TestInsertqRegister() {
 			const int before = IllegalHits();
 			fn(out, source, destination);
 			Check(IllegalHits() == before + 1, "register INSERTQ raises one SIGILL");
-			Check(out[0] == expected && out[1] == initial[1],
-			      "register INSERTQ uses upper source controls and preserves upper destination");
+			Check(out[0] == expected && out[1] == 0,
+			      "register INSERTQ uses upper source controls and zeroes the upper destination");
 		}
 	}
 }

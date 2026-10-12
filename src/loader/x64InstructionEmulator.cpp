@@ -640,12 +640,14 @@ static bool TryEmulateSse4a(Context& context) {
 		index  = rip[offset + 4];
 		instruction_length += 2;
 	}
+	// The manual leaves bits 127:64 undefined for both; AMD CPUs zero them (measured on Zen 4 by
+	// amd_cpu_emulation_tests, as is the clamping of length + index > 64 above).
 	if (prefix == 0x66) {
 		dest[0] = ExtractBitField(dest[0], length, index);
-		dest[1] = 0;
 	} else {
 		dest[0] = InsertBitField(dest[0], source[0], length, index);
 	}
+	dest[1] = 0;
 	std::memcpy(dest_xmm, dest, sizeof(dest));
 	context.Advance(instruction_length);
 	return true;
@@ -845,6 +847,24 @@ ReciprocalSqrtStats GetReciprocalSqrtStats() {
 		stats.emulate_ns += slot.ns.load(std::memory_order_relaxed);
 	}
 	return stats;
+}
+
+std::string HostCpuVendor() {
+	uint32_t eax = 0;
+	uint32_t ebx = 0;
+	uint32_t ecx = 0;
+	uint32_t edx = 0;
+	__cpuid(0, eax, ebx, ecx, edx);
+	char vendor[12];
+	std::memcpy(vendor, &ebx, 4);
+	std::memcpy(vendor + 4, &edx, 4);
+	std::memcpy(vendor + 8, &ecx, 4);
+	return {vendor, sizeof(vendor)};
+}
+
+bool IsAmdCpuVendor(std::string_view vendor) {
+	// Hygon's Dhyana is a licensed Zen design with AMD's instruction behaviour.
+	return vendor == "AuthenticAMD" || vendor == "HygonGenuine";
 }
 
 bool TryEmulate(void* native_context) {

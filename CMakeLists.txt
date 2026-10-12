@@ -2395,6 +2395,23 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	endif()
 endif()
 
+# Windows: the runtime #UD emulator and the --amd-cpu patch against the AMD CPU (or the AMD manual),
+# CONTEXT write-back, and the guest red zone across a trap.
+if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+	add_executable(amd_cpu_emulation_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/AmdCpuEmulationTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestInstructionPatcher.cpp"
+	)
+	target_link_libraries(amd_cpu_emulation_tests common fmt::fmt Zydis::Zydis xbyak::xbyak)
+	target_include_directories(amd_cpu_emulation_tests PRIVATE ${inc_headers})
+	if(BUILD_TESTING)
+		add_test(NAME amd_cpu_emulation COMMAND $<TARGET_FILE:amd_cpu_emulation_tests>)
+		set_tests_properties(amd_cpu_emulation PROPERTIES TIMEOUT 120)
+		add_dependencies(kyty_tests amd_cpu_emulation_tests)
+	endif()
+endif()
+
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
 configure_macos_guest_address_space(kyty_emulator)
 
