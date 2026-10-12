@@ -21,6 +21,12 @@
 // draw arguments) occurred in the previous frame or the one before (exact reuse), and the same for
 // their structure (programs, pipeline, attachments, T#, S#, V# words without base addresses).
 // One console line every 10 s (flushed), "CommitStats 10s: ...".
+// A second line, "StartPhases 10s: ...", splits the draws by the actual KYTY_DRAW_RUN decision:
+// continued, or started for the first shape difference to the previous draw (first of a frame,
+// rendering instance or command buffer, pipeline, structure, dynamic state, a previous writing
+// draw the run did not continue, or none: the run missed). Per reason: phases, sub-phases, items
+// and, with KYTY_CP_GAP_STATS=1, the gap before the draw split by the command processor's
+// categories (cpGaps.h; the time of scopes that closed in the gap, the rest "unscoped").
 namespace Libs::Graphics::CommitStats {
 
 enum class Phase : uint8_t {
@@ -55,6 +61,18 @@ enum class Sub : uint8_t {
 	Begin,        // BeginRendering (with the barrier flush)
 	AcqCandidate, // KYTY_DRAW_RUN_ACQUIRE: the reuse check (DrawRunAcquireCandidate)
 	RunRecord,    // KYTY_DRAW_RUN: the eligibility check and the record (DrawRunRecordDraw)
+	// Start-draw breakdown ("StartPhases" line):
+	Prefetch,     // PipelineCache::PrefetchGraphicsPipeline (draws without a planned pipeline)
+	LateFallback, // a draw-run continuation that fell back late (images/command changed)
+	VertexCommit, // CommitVertexBuffers
+	Transitions,  // CommitBindings: image transitions (barrier batcher requests)
+	DescBuild,    // CommitBindings: descriptor write list
+	PushConst,    // CommitBindings: push constants
+	DescPush,     // CommitBindings: push descriptors
+	DescSet,      // CommitBindings: descriptor set (reuse lookup, allocation, update, bind)
+	BindPipeline, // pipeline bind and dynamic-state shadow
+	Barriers,     // indirect-argument and shader-write barriers (with their EndRendering)
+	DrawCmd,      // the draw command(s)
 	Count
 };
 // Per-draw counts (averaged per draw of the class): "items[...]".
@@ -71,6 +89,9 @@ enum class Item : uint8_t {
 	DepthMemoMiss,
 	TargetRepeat,   // a target lookup repeated (TryRepeatLookup)
 	TargetLookup,   // a full target FindImage
+	DescWrites,     // descriptor writes pushed or written (graphics)
+	Transitions,    // image transitions recorded while the draw was committed
+	PipelineNew,    // the draw's pipeline differs from the one bound before it
 	Count
 };
 

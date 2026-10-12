@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/cleanVerdictCache.h"
+#include "graphics/host_gpu/faultCost.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/regionManager.h"
@@ -163,7 +164,11 @@ private:
 				// Perform both the GPU modification check and CPU state change with the lock in
 				// case the GPU thread is racing to mark the page modified. If a flush is needed,
 				// on_flush performs the CPU state change.
+				const auto lock_start = FaultCost::SplitActive() ? FaultCost::NowNs() : 0;
 				std::scoped_lock lock(manager->lock);
+				if (lock_start != 0) {
+					FaultCost::SplitAdd(FaultCost::Split::TrackerLock, FaultCost::NowNs() - lock_start);
+				}
 				if (manager->IsModified<DirtySource::Gpu>(offset, bytes)) {
 					return true;
 				}
@@ -183,7 +188,11 @@ private:
 				return false;
 			}();
 			if (should_flush) {
+				const auto flush_start = FaultCost::SplitActive() ? FaultCost::NowNs() : 0;
 				on_flush();
+				if (flush_start != 0) {
+					FaultCost::SplitAdd(FaultCost::Split::Flush, FaultCost::NowNs() - flush_start);
+				}
 			}
 			if (fault.already_dirty) {
 				t_fault_found_dirty = true;

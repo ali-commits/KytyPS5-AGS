@@ -69,9 +69,15 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 // then park (KYTY_TRACKER_LOCK_PARK); with parking off they retry back to back as before.
 class SpinGuard final {
 public:
-	explicit SpinGuard(ParkingSpinLock& lock): m_lock(lock) {
+	// `part`: what a contended wait counts as in a write fault's split (FaultCost::SplitAdd).
+	explicit SpinGuard(ParkingSpinLock& lock, FaultCost::Split part = FaultCost::Split::CountLock)
+	    : m_lock(lock) {
 		if (!m_lock.try_lock()) [[unlikely]] {
+			const auto start = FaultCost::SplitActive() ? FaultCost::NowNs() : 0;
 			(void)m_lock.LockContended(false);
+			if (start != 0) {
+				FaultCost::SplitAdd(part, FaultCost::NowNs() - start);
+			}
 		}
 	}
 	~SpinGuard() { m_lock.unlock(); }
@@ -349,6 +355,7 @@ struct PageManager::Impl {
 		FaultCost::SimProtectEnd();
 		const auto ns = FaultCost::NowNs() - start;
 		FaultCost::NoteProtect(unprotect, pages, ns);
+		FaultCost::SplitAdd(FaultCost::Split::HostCall, ns);
 		if (FaultCost::MapEnabled()) {
 			FaultCost::MapProtect(unprotect, mode == Common::VirtualMemory::Mode::NoAccess, pages, ns);
 		}
@@ -399,7 +406,7 @@ struct PageManager::Impl {
 	// host only for the runs whose recorded protection differs (a run may bridge pages already at
 	// its level). Takes both locks itself. Returns the host calls made.
 	uint32_t ApplySpan(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
-		SpinGuard host(region.host_lock);
+		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
 		RunList   runs;
 		uint32_t  calls = 0;
 		{
@@ -635,7 +642,7 @@ struct PageManager::Impl {
 				return;
 			}
 		}
-		SpinGuard host(region.host_lock);
+		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
 		RunList   runs;
 		{
 			SpinGuard counts(region.lock);
@@ -787,7 +794,7 @@ void PageManager::ResyncHostProtection(uint64_t vaddr, uint64_t size) {
 			continue; // never watched: the host protection is not the tracker's
 		}
 		{
-			SpinGuard host(region->host_lock);
+			SpinGuard host(region->host_lock, FaultCost::Split::HostLock);
 			SpinGuard counts(region->lock);
 			std::fill(region->applied.data() + first, region->applied.data() + last,
 			          Impl::Level::ReadWrite);

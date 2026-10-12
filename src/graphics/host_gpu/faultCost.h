@@ -170,6 +170,15 @@ void MapFault(const FaultRecord& record) noexcept;
 void MapProtect(bool unprotect, bool no_access, uint64_t pages, uint64_t ns) noexcept;
 // Inside the tracker's write-fault resolution on this thread (protection calls count as "in fault").
 void MapInFault(bool inside) noexcept;
+// Fault split (with the fault map): where a write fault's handler time goes on its own thread,
+// as "FaultMap   <thread> fault split" lines: waits for a memory-tracker region lock, for the page
+// manager's host-call lock (held across another thread's protection call) and count lock, the
+// protection calls this thread makes, GPU-data flushes (readbacks of GPU-dirty pages), the rest
+// (bookkeeping); and how many other faults were in flight when it began.
+enum class Split : uint8_t { TrackerLock = 0, HostLock, CountLock, HostCall, Flush, Count };
+// The calling thread resolves a write fault and the fault map is on.
+[[nodiscard]] bool SplitActive() noexcept;
+void               SplitAdd(Split part, uint64_t ns) noexcept;
 
 } // namespace Libs::Graphics::FaultCost
 

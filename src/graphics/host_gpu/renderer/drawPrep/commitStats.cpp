@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
 
+#include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -59,6 +61,32 @@ constexpr size_t SubCount   = static_cast<size_t>(Sub::Count);
 constexpr size_t ItemCount  = static_cast<size_t>(Item::Count);
 
 enum DrawClass : uint32_t { ClassStart, ClassContinue, ClassOther, ClassCount };
+
+// StartPhases: the actual draw-run decision, and for a start the first shape difference.
+enum Reason : uint32_t {
+	ReasonCont,
+	ReasonFirst,
+	ReasonInstance,
+	ReasonPipeline,
+	ReasonStructure,
+	ReasonDynamic,
+	ReasonWrites,
+	ReasonRunMiss,
+	ReasonCount
+};
+const char* const kReasonNames[ReasonCount] = {"cont",      "first",   "instance", "pipeline",
+                                               "structure", "dynamic", "writes",   "runmiss"};
+
+struct ReasonAggregate {
+	uint64_t                               draws     = 0;
+	uint64_t                               gap       = 0;
+	uint64_t                               gap_draws = 0; // draws whose gap split is known
+	uint64_t                               gap_known = 0; // their gap
+	std::array<uint64_t, PhaseCount>       cycles {};
+	std::array<uint64_t, SubCount>         sub {};
+	std::array<uint64_t, ItemCount>        items {};
+	std::array<uint64_t, CpGaps::CatCount> gap_cats {};
+};
 
 struct Aggregate {
 	uint64_t                           draws  = 0;
@@ -150,10 +178,120 @@ struct State {
 	uint64_t                     xf_struct_12  = 0;
 	uint64_t                     xf_bind_in    = 0; // within the frame (an earlier draw of it)
 	std::unordered_set<uint64_t> bind_frame_set;
+	// StartPhases.
+	std::array<ReasonAggregate, ReasonCount> reasons {};
+	// CpGaps ledger totals at the previous draw's end and their change up to this draw's start.
+	std::array<uint64_t, CpGaps::CatCount> gap_snapshot {};
+	bool                                   gap_snapshot_valid = false;
+	std::array<uint64_t, CpGaps::CatCount> gap_delta {};
+	bool                                   gap_delta_valid = false;
 	// Interval.
 	uint64_t interval_ns  = 0;
 	uint64_t interval_tsc = 0;
 };
+
+// The GPU thread's CpGaps ledger totals (false when that diagnostic is off).
+bool ReadLedger(std::array<uint64_t, CpGaps::CatCount>& ticks) {
+	if (!CpGaps::Enabled()) {
+		return false;
+	}
+	const auto* state = CpGaps::t_state;
+	if (state == nullptr) {
+		return false;
+	}
+	for (size_t i = 0; i < CpGaps::CatCount; i++) {
+		ticks[i] = state->ledger.Ticks(static_cast<CpGaps::Cat>(i));
+	}
+	return true;
+}
+
+const char* const kPhaseNames[PhaseCount] = {"setup",  "programs", "targets", "prepbind", "findbuf",
+                                             "images", "buffers",  "vtxidx",  "pipeline", "acquire",
+                                             "commitbind", "emit", "post"};
+const char* const kSubNames[SubCount]     = {
+    "textures",    "samplers",  "views",     "colors",   "depth",    "acqcolor",
+    "acqdepth",    "push",      "dynamic",   "begin",    "acqcand",  "runrecord",
+    "prefetch",    "latefallback", "vtxcommit", "transitions", "descbuild", "pushconst",
+    "descpush",    "descset",   "bindpipe",  "barriers", "drawcmd"};
+const char* const kItemNames[ItemCount] = {
+    "textures",  "samplers",   "set-current", "set-history",   "set-miss",
+    "set-repeated", "color-hit", "color-miss", "depth-hit",    "depth-miss",
+    "target-repeat", "target-lookup", "descwrites", "transitions", "pipeline-new"};
+
+void PrintStartPhases(State& s, double seconds, double ns_per_tick) {
+	const double frames = static_cast<double>(std::max<uint64_t>(1, s.frames));
+	std::string  line;
+	char         text[256];
+	std::snprintf(text, sizeof(text), "StartPhases %.0fs: frames %" PRIu64, seconds, s.frames);
+	line += text;
+	for (uint32_t r = 0; r < ReasonCount; r++) {
+		const auto& a = s.reasons[r];
+		if (a.draws == 0) {
+			continue;
+		}
+		uint64_t total = 0;
+		for (const auto v: a.cycles) {
+			total += v;
+		}
+		const double scale = ns_per_tick * 1e-3 / static_cast<double>(a.draws);
+		std::snprintf(text, sizeof(text), " | %s %.1f/f us/draw %.2f gap %.2f [", kReasonNames[r],
+		              static_cast<double>(a.draws) / frames, static_cast<double>(total) * scale,
+		              static_cast<double>(a.gap) * scale);
+		line += text;
+		for (size_t p = 0; p < PhaseCount; p++) {
+			std::snprintf(text, sizeof(text), "%s%s %.2f", p == 0 ? "" : " ", kPhaseNames[p],
+			              static_cast<double>(a.cycles[p]) * scale);
+			line += text;
+		}
+		line += "] sub[";
+		for (size_t p = 0; p < SubCount; p++) {
+			std::snprintf(text, sizeof(text), "%s%s %.2f", p == 0 ? "" : " ", kSubNames[p],
+			              static_cast<double>(a.sub[p]) * scale);
+			line += text;
+		}
+		line += "] items[";
+		for (size_t p = 0; p < ItemCount; p++) {
+			std::snprintf(text, sizeof(text), "%s%s %.2f", p == 0 ? "" : " ", kItemNames[p],
+			              static_cast<double>(a.items[p]) / static_cast<double>(a.draws));
+			line += text;
+		}
+		line += "]";
+		if (a.gap_draws != 0) {
+			// The gap's categories in us per draw of those with a known split. The previous
+			// commit's own time ("commit", accounted when its scope closes after the end mark) is
+			// not part of the gap and left out.
+			const double gscale = ns_per_tick * 1e-3 / static_cast<double>(a.gap_draws);
+			std::array<std::pair<uint64_t, size_t>, CpGaps::CatCount> order {};
+			uint64_t                                                    scoped = 0;
+			for (size_t i = 0; i < CpGaps::CatCount; i++) {
+				const bool commit = static_cast<CpGaps::Cat>(i) == CpGaps::Cat::Commit;
+				order[i]          = {commit ? 0 : a.gap_cats[i], i};
+				scoped += commit ? 0 : a.gap_cats[i];
+			}
+			std::sort(order.begin(), order.end(),
+			          [](const auto& x, const auto& y) { return x.first > y.first; });
+			std::snprintf(text, sizeof(text), " gapsplit(%.0f%%)[",
+			              100.0 * static_cast<double>(a.gap_draws) / static_cast<double>(a.draws));
+			line += text;
+			bool first = true;
+			for (const auto& [ticks, index]: order) {
+				const double us = static_cast<double>(ticks) * gscale;
+				if (us < 0.01) {
+					break;
+				}
+				std::snprintf(text, sizeof(text), "%s%s %.2f", first ? "" : " ",
+				              CpGaps::CatName(static_cast<CpGaps::Cat>(index)), us);
+				line += text;
+				first = false;
+			}
+			std::snprintf(text, sizeof(text), "%sunscoped %.2f]", first ? "" : " ",
+			              static_cast<double>(a.gap_known - std::min(a.gap_known, scoped)) * gscale);
+			line += text;
+		}
+	}
+	std::printf("%s\n", line.c_str());
+	s.reasons = {};
+}
 
 State& GetState() {
 	// GPU thread only.
@@ -183,9 +321,7 @@ void Print(State& s, uint64_t now_ns, uint64_t now_tsc) {
 	const double ns_per_tick = static_cast<double>(now_ns - s.interval_ns) /
 	                           static_cast<double>(std::max<uint64_t>(1, now_tsc - s.interval_tsc));
 	const double seconds     = static_cast<double>(now_ns - s.interval_ns) * 1e-9;
-	static const char* const phase_names[PhaseCount] = {
-	    "setup", "programs", "targets", "prepbind", "findbuf", "images", "buffers",
-	    "vtxidx", "pipeline", "acquire", "commitbind", "emit", "post"};
+	const auto* const phase_names = kPhaseNames;
 	static const char* const class_names[ClassCount] = {"start", "cont", "other"};
 	uint64_t draws = 0;
 	for (const auto& c: s.classes) {
@@ -224,17 +360,13 @@ void Print(State& s, uint64_t now_ns, uint64_t now_tsc) {
 			line += text;
 		}
 		line += "] sub[";
-		static const char* const sub_names[SubCount] = {"textures", "samplers", "views", "colors",
-		                                                "depth", "acqcolor", "acqdepth", "push",
-		                                                "dynamic", "begin", "acqcand", "runrecord"};
+		const auto* const sub_names = kSubNames;
 		for (size_t p = 0; p < SubCount; p++) {
 			std::snprintf(text, sizeof(text), "%s%s %.2f", p == 0 ? "" : " ", sub_names[p],
 			              static_cast<double>(c.sub[p]) * scale);
 			line += text;
 		}
-		static const char* const item_names[ItemCount] = {
-		    "textures", "samplers", "set-current", "set-history", "set-miss", "set-repeated",
-		    "color-hit", "color-miss", "depth-hit", "depth-miss", "target-repeat", "target-lookup"};
+		const auto* const item_names = kItemNames;
 		line += "] items[";
 		for (size_t p = 0; p < ItemCount; p++) {
 			std::snprintf(text, sizeof(text), "%s%s %.2f", p == 0 ? "" : " ", item_names[p],
@@ -296,6 +428,7 @@ void Print(State& s, uint64_t now_ns, uint64_t now_tsc) {
 	              pct(s.xf_struct_12, s.xf_draws));
 	line += text;
 	std::printf("%s\n", line.c_str());
+	PrintStartPhases(s, seconds, ns_per_tick);
 	std::fflush(stdout);
 	s.classes      = {};
 	s.runs         = {};
@@ -332,6 +465,20 @@ void BeginDraw() {
 	s.cycles       = {};
 	s.sub          = {};
 	s.items        = {};
+	s.gap_delta_valid = false;
+	if (s.gap_snapshot_valid && s.previous_end != 0) {
+		std::array<uint64_t, CpGaps::CatCount> ticks {};
+		if (ReadLedger(ticks)) {
+			bool valid = true;
+			for (size_t i = 0; i < CpGaps::CatCount; i++) {
+				// A report in between reset the totals: no split for this gap.
+				valid = valid && ticks[i] >= s.gap_snapshot[i];
+				s.gap_delta[i] = ticks[i] - s.gap_snapshot[i];
+			}
+			s.gap_delta_valid = valid;
+		}
+	}
+	s.gap_snapshot_valid = false;
 }
 
 void Mark(Phase phase) {
@@ -382,31 +529,39 @@ void EndDraw() {
 	s.active         = false;
 	s.previous_end   = now;
 	DrawClass klass  = ClassOther;
+	Reason    reason = ReasonCount;
 	if (s.recorded) {
 		const auto& a = s.previous;
 		const auto& b = s.shape;
 		if (!s.previous_valid) {
 			s.why_first++;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonFirst;
 		} else if (a.rendering_serial == 0 || a.rendering_serial != b.rendering_serial ||
 		           a.command != b.command) {
 			s.why_instance++;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonInstance;
 		} else if (a.pipeline != b.pipeline) {
 			s.why_pipeline++;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonPipeline;
 		} else if (a.structure != b.structure) {
 			s.why_structure++;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonStructure;
 		} else if (a.dynamic != b.dynamic) {
 			s.why_dynamic++;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonDynamic;
 		} else if (a.shader_writes) {
 			s.why_writes++;
 			s.why_writes_run += b.run_continued ? 1u : 0u;
-			klass = ClassStart;
+			klass  = ClassStart;
+			reason = ReasonWrites;
 		} else {
-			klass = ClassContinue;
+			klass  = ClassContinue;
+			reason = ReasonRunMiss;
 			const bool buffers = a.buffers == b.buffers;
 			const bool push    = a.push == b.push;
 			const bool tables  = a.tables == b.tables;
@@ -464,6 +619,31 @@ void EndDraw() {
 		s.frame_struct.push_back(b.struct_input);
 		s.bind_frame_set.insert(b.bind_input);
 	}
+	if (reason != ReasonCount) {
+		if (s.shape.run_continued) {
+			reason = ReasonCont;
+		}
+		auto& r = s.reasons[reason];
+		r.draws++;
+		r.gap += s.gap;
+		if (s.gap_delta_valid) {
+			r.gap_draws++;
+			r.gap_known += s.gap;
+			for (size_t i = 0; i < CpGaps::CatCount; i++) {
+				r.gap_cats[i] += s.gap_delta[i];
+			}
+		}
+		for (size_t p = 0; p < PhaseCount; p++) {
+			r.cycles[p] += s.cycles[p];
+		}
+		for (size_t p = 0; p < SubCount; p++) {
+			r.sub[p] += s.sub[p];
+		}
+		for (size_t p = 0; p < ItemCount; p++) {
+			r.items[p] += s.items[p];
+		}
+	}
+	s.gap_snapshot_valid = ReadLedger(s.gap_snapshot);
 	auto& c = s.classes[klass];
 	c.draws++;
 	c.gap += s.gap;

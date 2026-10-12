@@ -2620,6 +2620,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 
 		// KYTY_GUEST_STORAGE_REPEAT: these are the guest draw's or dispatch's own transitions.
 		const Image::GuestTransitScope guest_transitions;
+		CommitStats::SubScope          transitions_scope(CommitStats::Sub::Transitions);
 		// KYTY_DRAW_RUN continuation: every image is in the state the previous draw's transitions
 		// left it in (RenderExecutor::DrawRunImagesUnchanged), which the bindings' layouts record.
 		for (uint32_t i = 0; !keep_images && i < program.info.images.size(); i++) {
@@ -2673,6 +2674,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			binding.layout = image.backing.state.layout;
 		}
 
+		transitions_scope.Stop();
+		const CommitStats::SubScope build_scope(CommitStats::Sub::DescBuild);
 		m_image_occurrences.assign(descriptors.images.size(), 0);
 		for (const auto& binding: program.bindings.descriptors) {
 			if (partial && (binding.kind == BindingKind::Samplers ||
@@ -2771,8 +2774,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (has_push_data) {
+		const CommitStats::SubScope push_scope(CommitStats::Sub::PushConst);
 		buffer.PushConstants(pipeline.pipeline_layout, push_stages, sizeof(push_data),
 		                     push_data.dwords.data());
+	}
+	if (pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
+		CommitStats::AddItems(CommitStats::Item::DescWrites, m_descriptor_writes.size());
 	}
 	if (mesh_stage) {
 		// The mesh draw path then records its draw arguments over the first push-constant dwords
@@ -2809,6 +2816,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 		}
 		if (pipeline.uses_push_descriptors) {
+			const CommitStats::SubScope desc_scope(CommitStats::Sub::DescPush);
 			// KYTY_PUSH_SHADOW_FRESH_SKIP: a stage's shader data or flattened SRT was uploaded for
 			// this command, so its descriptor differs from every earlier push of this recording.
 			const bool known_miss =
@@ -2821,6 +2829,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    known_miss);
 			CountDescriptorPushMiss(result, m_descriptor_writes);
 		} else {
+			const CommitStats::SubScope desc_scope(CommitStats::Sub::DescSet);
 			const bool fresh = std::ranges::any_of(
 			    prepared_bindings, [](const auto* prepared) { return prepared->fresh_upload; });
 			CommitDescriptorSet(buffer, pipeline_bind_point, pipeline, fresh);

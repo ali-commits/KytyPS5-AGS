@@ -3350,8 +3350,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
+	// CommitStats: image transitions recorded while this draw is committed.
+	const auto stats_transitions = CommitStats::Enabled() ? Image::RecordedTransitions() : uint64_t {0};
 	if (m_context.GetPipelineCache().PipelinePrefetchEnabled() &&
 	    (m_binding_plan == nullptr || m_binding_plan->pipeline == nullptr)) {
+		const CommitStats::SubScope prefetch_scope(CommitStats::Sub::Prefetch);
 		m_context.GetPipelineCache().PrefetchGraphicsPipeline(
 		    {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 		    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
@@ -3541,6 +3544,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    indirect != nullptr && buffer.ActiveRenderingSerial() != m_indirect_barrier_rendering;
 	if (m_run_active && (!DrawRunCommandUnchanged(buffer) || !DrawRunImagesUnchanged(true) ||
 	                     run_indirect_barrier)) {
+		const CommitStats::SubScope late_scope(CommitStats::Sub::LateFallback);
 		DrawRun::GetTotals().late_fallbacks.fetch_add(1, std::memory_order_relaxed);
 		DrawRun::CountMiss(DrawRun::Miss::Images);
 		m_run_active = false;
@@ -3750,6 +3754,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto vk_buffer = buffer.EmissionSink();
 	SetDrawDebugPhase(buffer, submit_id, draw, emit, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
+		const CommitStats::SubScope vertex_scope(CommitStats::Sub::VertexCommit);
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
 	if (state.ps_active && !draw.IsIndexed()) {
@@ -3834,6 +3839,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		// begun right after the previous barrier needs no new one while it remains active.
 		const auto active = buffer.ActiveRenderingSerial();
 		if (active == 0 || active != m_indirect_barrier_rendering) {
+			const CommitStats::SubScope barrier_scope(CommitStats::Sub::Barriers);
 			{
 				KYTY_GPU_OP_SITE("draw.indirect_args");
 				m_context.GetCommandScheduler().EndRendering();
@@ -3852,15 +3858,23 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		// A state change above only switched instances; no buffer write came in between.
 		m_indirect_barrier_rendering = buffer.ActiveRenderingSerial();
 	}
-	buffer.BindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
-	// The shadow now describes this command buffer with this pipeline bound. A pipeline without
-	// color attachments declares no dynamic color-write enable, so binding it invalidated that
-	// state for later pipelines.
-	m_dynamic_state.command  = vk_buffer.Identity();
-	m_dynamic_state.pipeline = pipeline.pipeline;
-	if (state.color_count == 0) {
-		m_dynamic_state.color_write_valid = false;
+	{
+		const CommitStats::SubScope bind_scope(CommitStats::Sub::BindPipeline);
+		if (CommitStats::Enabled() &&
+		    buffer.BoundPipeline(vk::PipelineBindPoint::eGraphics) != pipeline.pipeline) [[unlikely]] {
+			CommitStats::AddItems(CommitStats::Item::PipelineNew, 1);
+		}
+		buffer.BindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		// The shadow now describes this command buffer with this pipeline bound. A pipeline
+		// without color attachments declares no dynamic color-write enable, so binding it
+		// invalidated that state for later pipelines.
+		m_dynamic_state.command  = vk_buffer.Identity();
+		m_dynamic_state.pipeline = pipeline.pipeline;
+		if (state.color_count == 0) {
+			m_dynamic_state.color_write_valid = false;
+		}
 	}
+	CommitStats::SubScope draw_cmd_scope(CommitStats::Sub::DrawCmd);
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, emit, 0x500u);
 	}
@@ -3924,6 +3938,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
+	draw_cmd_scope.Stop();
 	static const bool occlusion_draw_rows = [] {
 		const char* value = std::getenv("KYTY_HANG_TRACE_OCCLUSION_DRAWS");
 		return value != nullptr && value[0] == '1';
@@ -3990,6 +4005,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 	if (shader_write_stages) {
+		const CommitStats::SubScope barrier_scope(CommitStats::Sub::Barriers);
 		if (DrawWriteSinkEnabled()) {
 			// Queued without ending the instance (render.h, KYTY_DRAW_WRITE_SINK): a later draw of
 			// this instance may pass it, anything else records it first.
@@ -4073,6 +4089,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		CommitStats::AddItems(CommitStats::Item::Textures, textures);
 		CommitStats::AddItems(CommitStats::Item::Samplers, samplers);
+		CommitStats::AddItems(CommitStats::Item::Transitions,
+		                      Image::RecordedTransitions() - stats_transitions);
 		auto shape = MakeCommitShape(buffer, stages, pipeline, rendering, m_dynamic_state,
 		                             vertex_bindings, index_binding, draw, emit, index_source,
 		                             shader_write_stages);
