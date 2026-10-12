@@ -2737,7 +2737,21 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	// leaves its guest bytes to the DMA worker. The pages are already clean and write-protected
 	// when upload() runs (ForEachUploadRange), as for the copy made here.
 	std::vector<UploadHostCopy> host_copies;
+	// KYTY_DEFER_PROTECTS (pageManager.h): the collection of a read upload that may go to the DMA
+	// worker defers the write protections of the pages it cleans. The worker applies them before
+	// it copies the pages; every copy of their guest bytes made on this thread applies them first
+	// (below when the upload stays on this thread, UploadCopies, StageUploadDma), and the scope's
+	// end applies what is left.
+	const int  defer_mode     = PageManager::DeferProtectsMode();
+	const bool defer_protects = defer_mode != 0 && !is_written && UploadBatchEnabled() &&
+	                            m_upload_dma != nullptr && UploadDmaHostCopyEnabled() &&
+	                            !UploadDmaVerify() && m_staging_buffer.IsCoherent();
+	const PageManager::DeferProtectsScope defer_scope(defer_protects);
+	bool                                  force_dma = false;
 	const auto upload = [&]() noexcept {
+		if (defer_protects) {
+			PageManager::DeferProtectsScope::Stop(); // the collection is over
+		}
 		// A normal upload replaces whatever a hot page shadow described.
 		for (const auto& copy: copies) {
 			EraseHotShadows(buffer.CpuAddress() + copy.dstOffset, copy.size);
@@ -2757,10 +2771,16 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 			if (!copies.empty()) source = m_staging_buffer.Handle();
 		} else {
 			reserved             = nullptr;
+			// KYTY_DEFER_PROTECTS=all: an upload with deferred protections goes to the worker
+			// whatever its size.
+			force_dma = defer_protects && (defer_mode & 2) != 0 && PageManager::HasPendingProtects();
 			const bool defer_host = !is_written && UploadBatchEnabled() && m_upload_dma != nullptr &&
 			                        UploadDmaHostCopyEnabled() && !UploadDmaVerify() &&
 			                        m_staging_buffer.IsCoherent() &&
-			                        total_size >= m_upload_dma->MinBytes();
+			                        (total_size >= m_upload_dma->MinBytes() || force_dma);
+			if (!defer_host) {
+				PageManager::ApplyPendingProtects(); // this thread copies the pages next
+			}
 			source = UploadCopies(buffer, copies, total_size, guest_copies, m_hot_scratch.data(),
 			                      host_base, defer_host ? &host_copies : nullptr);
 		}
@@ -2861,7 +2881,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		if (UploadBatchEnabled() && !late_source) {
 			// One barrier pair per flush for all queued uploads instead of one per upload. Inside
 			// an UploadBatch scope the copy waits for the scope end (or an earlier flush point).
-			source = StageUploadDma(source, copies, &host_copies);
+			source = StageUploadDma(source, copies, &host_copies, force_dma);
 			command.RequestUploadCopy(source, buffer.Handle(), copies);
 			buffer.MarkContentWritten();
 			if (m_upload_batch_depth == 0) {
@@ -2925,10 +2945,11 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 }
 
 vk::Buffer BufferCache::StageUploadDma(vk::Buffer source, std::span<vk::BufferCopy> copies,
-                                       std::vector<UploadHostCopy>* host_copies) {
+                                       std::vector<UploadHostCopy>* host_copies, bool allow_small) {
 	// Staging bytes UploadCopies left to the DMA worker, written here when the copy is not
 	// staged after all (the graphics copies then read the staging ring directly).
 	const auto write_host_copies = [host_copies] {
+		PageManager::ApplyPendingProtects(); // KYTY_DEFER_PROTECTS: before the bytes are read
 		if (host_copies != nullptr) {
 			for (const auto& copy: *host_copies) {
 				std::memcpy(copy.destination, copy.source, static_cast<size_t>(copy.size));
@@ -2949,8 +2970,12 @@ vk::Buffer BufferCache::StageUploadDma(vk::Buffer source, std::span<vk::BufferCo
 		end   = std::max(end, copy.srcOffset + copy.size);
 	}
 	const auto size        = end - begin;
-	const auto ring_offset = m_upload_dma->Stage(source, begin, size, host_copies);
+	// KYTY_DEFER_PROTECTS: the deferred protections go to the worker with the host copies.
+	auto       protects    = PageManager::TakePendingProtects();
+	const auto ring_offset = m_upload_dma->Stage(source, begin, size, host_copies, &protects,
+	                                             allow_small && !protects.empty());
 	if (!ring_offset.has_value()) {
+		PageManager::ApplyProtects(protects, false);
 		write_host_copies();
 		return source;
 	}
@@ -3015,6 +3040,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 				alias = LibKernel::Memory::GuestBackingAlias(buffer.CpuAddress() + copy.dstOffset,
 				                                             copy.size);
 			}
+			if (alias == nullptr && index < guest_copies) {
+				PageManager::ApplyPendingProtects(); // KYTY_DEFER_PROTECTS: copied here
+			}
 			if (alias != nullptr) {
 				deferred->push_back({mapped + copy.srcOffset, static_cast<const uint8_t*>(alias),
 				                     copy.size});
@@ -3029,6 +3057,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 
 	auto temporary = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
 	                                         vk::BufferUsageFlagBits::eTransferSrc, total_size);
+	PageManager::ApplyPendingProtects(); // KYTY_DEFER_PROTECTS: copied here
 	for (size_t index = 0; index < copies.size(); index++) {
 		const auto& copy = copies[index];
 		std::memcpy(temporary->Mapped().data() + copy.srcOffset, source_of(index, copy),

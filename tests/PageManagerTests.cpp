@@ -1,3 +1,4 @@
+#include "common/liveSwitch.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/parkingLock.h"
@@ -901,6 +902,68 @@ void TestFatalPaths() {
   }
 }
 
+// KYTY_DEFER_PROTECTS: a deferred write watch leaves the pages writable until its pending list is
+// applied (on another thread here); a synchronous change in between wins; the scope's end applies
+// what nobody took; verify mode checks every applied span.
+void TestDeferredProtects(const char *mode) {
+  Live::Testing::StageText(std::string("KYTY_DEFER_PROTECTS=") + mode + "\n");
+  Live::OnCpFlip();
+  Check(PageManager::DeferProtectsMode() != 0, "KYTY_DEFER_PROTECTS did not switch on");
+  PageManager manager;
+  const auto page_size = manager.GetPageSize();
+  auto *memory = Allocate(page_size * 4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto before = PageManager::GetDeferProtectsStats();
+
+  PageManager::PendingProtects list;
+  {
+    const PageManager::DeferProtectsScope scope(true);
+    manager.UpdatePageWatchers<true>(address, page_size * 2);
+    Check(IsWritable(memory) && IsWritable(memory + page_size),
+          "a deferred write watch protected the pages at once");
+    Check(PageManager::HasPendingProtects(), "a deferred write watch left no pending span");
+    list = PageManager::TakePendingProtects();
+    PageManager::DeferProtectsScope::Stop();
+  }
+  Check(list.size() == 1 && IsWritable(memory), "the pending span was applied before it was taken");
+  std::thread([&] { PageManager::ApplyProtects(list, true); }).join();
+  Check(Protection(memory) == PAGE_READONLY &&
+            Protection(memory + page_size) == PAGE_READONLY && IsWritable(memory + page_size * 2),
+        "applying the pending span set the wrong protections");
+
+  // A synchronous release before the deferred protection is applied.
+  {
+    const PageManager::DeferProtectsScope scope(true);
+    manager.UpdatePageWatchers<true>(address + page_size * 2, page_size);
+    list = PageManager::TakePendingProtects();
+  }
+  manager.UpdatePageWatchers<false>(address + page_size * 2, page_size);
+  PageManager::ApplyProtects(list, false);
+  Check(IsWritable(memory + page_size * 2), "a stale pending span protected a released page");
+
+  // Nobody takes the list: the scope's end applies it.
+  {
+    const PageManager::DeferProtectsScope scope(true);
+    manager.UpdatePageWatchers<true>(address + page_size * 3, page_size);
+    Check(IsWritable(memory + page_size * 3), "a deferred write watch protected the page at once");
+  }
+  Check(Protection(memory + page_size * 3) == PAGE_READONLY, "the scope's end left a page pending");
+
+  manager.UpdatePageWatchers<false>(address, page_size * 2);
+  manager.UpdatePageWatchers<false>(address + page_size * 3, page_size);
+  Check(IsWritable(memory) && IsWritable(memory + page_size * 3), "unwatch did not restore access");
+  const auto after = PageManager::GetDeferProtectsStats();
+  Check(after.pending_pages == 0, "pages stayed pending");
+  Check(after.pages - before.pages == 4 && after.leftover_spans - before.leftover_spans == 1 &&
+            after.worker_spans - before.worker_spans == 1,
+        "deferred protection counters are wrong");
+  Check(after.verify_mismatches == 0, "deferred protection verify found mismatches");
+  Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
+  Live::Testing::StageText("KYTY_DEFER_PROTECTS=\n");
+  Live::OnCpFlip();
+  Check(PageManager::DeferProtectsMode() == 0, "KYTY_DEFER_PROTECTS did not switch off");
+}
+
 } // namespace
 
 namespace Libs::LibKernel::Memory {
@@ -951,6 +1014,10 @@ int main(int argc, char **argv) {
     TestDeferredReleaseStress(mode);
   }
   TestDeferredBatchOverflow();
+  TestDeferredProtects("1");
+  TestDeferredProtects("verify");
+  Check(PageManager::GetDeferProtectsStats().verify_checks != 0,
+        "deferred protection verify checked nothing");
   TestParkingLock();
   const auto stats = PageManager::GetDeferStats();
   Check(stats.verify_mismatches == 0, "verify mode found mismatches");

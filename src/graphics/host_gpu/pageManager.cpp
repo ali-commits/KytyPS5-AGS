@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/pageManager.h"
 
 #include "common/alignment.h"
+#include "common/liveSwitch.h"
 #include "common/profiler.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/faultCost.h"
@@ -13,6 +14,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
+#include <chrono>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
@@ -129,6 +132,44 @@ PageManager::DeferMode ReadDeferMode() {
 	std::fflush(stdout);
 	return mode;
 }
+
+// KYTY_DEFER_PROTECTS (pageManager.h). Bits: 1 on, 2 all, 4 verify.
+int64_t ParseDeferProtects(const char* value) {
+	if (value == nullptr || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "all") == 0) {
+		return 3;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 5;
+	}
+	if (std::strcmp(value, "verify-all") == 0) {
+		return 7;
+	}
+	return 1;
+}
+Live::Switch g_defer_protects("KYTY_DEFER_PROTECTS", ParseDeferProtects);
+
+struct DeferProtectCounters {
+	std::atomic<uint64_t> spans {0};
+	std::atomic<uint64_t> pages {0};
+	std::atomic<uint64_t> worker_spans {0};
+	std::atomic<uint64_t> worker_calls {0};
+	std::atomic<uint64_t> worker_ns {0};
+	std::atomic<uint64_t> local_spans {0};
+	std::atomic<uint64_t> local_calls {0};
+	std::atomic<uint64_t> leftover_spans {0};
+	std::atomic<int64_t>  pending_pages {0};
+	std::atomic<uint64_t> verify_checks {0};
+	std::atomic<uint64_t> verify_mismatches {0};
+};
+DeferProtectCounters  g_dp;
+std::atomic<uint32_t> g_dp_logged {0};
+
+thread_local bool                             t_defer_protects = false;
+thread_local PageManager::PendingProtects     t_pending;
+thread_local PageManager::ThreadProtectTotals t_protects;
 
 } // namespace
 
@@ -251,7 +292,30 @@ struct PageManager::Impl {
 		// The protection last requested from the host for each page, under both locks. ReadWrite
 		// until a watcher first protects the page: what this class always assumed of unwatched pages.
 		std::array<Level, REGION_PAGES> applied {};
+		// KYTY_DEFER_PROTECTS: pages whose counts ask for more than `applied` because their write
+		// protection was deferred (until a host update records them). Under `lock`.
+		std::bitset<REGION_PAGES> pending;
+		uint32_t                  pending_count = 0;
 	};
+
+	// Caller holds `lock`.
+	static void ClearPending(Region& region, size_t first, size_t last) noexcept {
+		if (region.pending_count == 0) {
+			return;
+		}
+		for (size_t page = first; page < last; page++) {
+			if (region.pending.test(page)) {
+				region.pending.reset(page);
+				region.pending_count--;
+				g_dp.pending_pages.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+	}
+	// Caller holds both locks: records the host protection just requested for [first, last).
+	static void SetApplied(Region& region, size_t first, size_t last, Level level) noexcept {
+		std::fill(region.applied.data() + first, region.applied.data() + last, level);
+		ClearPending(region, first, last);
+	}
 
 	// Host calls collected under `lock` and made after it is released (under host_lock).
 	struct Run {
@@ -362,6 +426,9 @@ struct PageManager::Impl {
 		FaultCost::SimProtectEnd();
 		const auto ns = FaultCost::NowNs() - start;
 		FaultCost::NoteProtect(unprotect, pages, ns);
+		t_protects.calls++;
+		t_protects.pages += pages;
+		t_protects.ns += ns;
 		FaultCost::SplitAdd(FaultCost::Split::HostCall, ns);
 		if (FaultCost::MapEnabled()) {
 			FaultCost::MapProtect(unprotect, mode == Common::VirtualMemory::Mode::NoAccess, pages, ns);
@@ -376,7 +443,7 @@ struct PageManager::Impl {
 	void ProtectRun(Region& region, uint64_t base_addr, size_t first, size_t last,
 	                Common::VirtualMemory::Mode mode) noexcept {
 		Protect(base_addr + first * PAGE_SIZE, (last - first) * PAGE_SIZE, mode);
-		std::fill(region.applied.data() + first, region.applied.data() + last, ToLevel(mode));
+		SetApplied(region, first, last, ToLevel(mode));
 		if (GetDeferMode() == DeferMode::Verify) {
 			VerifyHostLocked(region, base_addr, first, last);
 		}
@@ -398,8 +465,7 @@ struct PageManager::Impl {
 		SpinGuard counts(region.lock);
 		for (size_t index = 0; index < runs.count; index++) {
 			const auto& run = runs.runs[index];
-			std::fill(region.applied.data() + run.first, region.applied.data() + run.last,
-			          run.level);
+			SetApplied(region, run.first, run.last, run.level);
 			if (verify) {
 				VerifyHostLocked(region, base_addr, run.first, run.last);
 			}
@@ -434,6 +500,9 @@ struct PageManager::Impl {
 			};
 			for (size_t page = first; page < last; page++) {
 				const auto desired = ToLevel(region.pages[page].Perms());
+				if (desired == region.applied[page] && region.pending_count != 0) {
+					ClearPending(region, page, page + 1); // made current by another update
+				}
 				if (desired != region.applied[page]) {
 					if (open && run_level == desired) {
 						run_end = page + 1;
@@ -610,14 +679,14 @@ struct PageManager::Impl {
 		for (size_t page = first; page < last; page++) {
 			const auto counts  = static_cast<int>(ToLevel(region.pages[page].Perms()));
 			const auto applied = static_cast<int>(region.applied[page]);
-			if (applied < counts) {
+			if (applied < counts && !region.pending.test(page)) { // pending: KYTY_DEFER_PROTECTS
 				ReportMismatch("recorded protection looser than its watchers",
 				               base_addr + page * PAGE_SIZE, counts, applied, -1);
 			}
 		}
 		ForEachHostLevel(base_addr, first, last, [&](size_t page, int host) {
 			const auto counts = static_cast<int>(ToLevel(region.pages[page].Perms()));
-			if (host < counts) {
+			if (host < counts && !region.pending.test(page)) {
 				ReportMismatch("host protection looser than its watchers",
 				               base_addr + page * PAGE_SIZE, counts,
 				               static_cast<int>(region.applied[page]), host);
@@ -625,9 +694,99 @@ struct PageManager::Impl {
 		});
 	}
 
+	// KYTY_DEFER_PROTECTS (pageManager.h), inside a DeferProtectsScope: adds one write watcher to
+	// the selected pages under `lock` only; the pages this makes stricter than their recorded host
+	// protection become pending and join the thread's pending list. No host call, no host_lock.
+	template <bool masked>
+	void TightenDeferred(Region& region, uint64_t base_addr, size_t first, size_t last,
+	                     const RegionBits* mask) noexcept {
+		size_t   lo    = REGION_PAGES;
+		size_t   hi    = 0;
+		uint64_t pages = 0;
+		{
+			SpinGuard counts(region.lock);
+			for (size_t page_index = first; page_index < last; page_index++) {
+				if constexpr (masked) {
+					if (!mask->Get(page_index)) {
+						continue;
+					}
+				}
+				auto& page = region.pages[page_index];
+				(void)page.AddDelta<1, false>(base_addr + page_index * PAGE_SIZE);
+				if (ToLevel(page.Perms()) > region.applied[page_index]) {
+					if (!region.pending.test(page_index)) {
+						region.pending.set(page_index);
+						region.pending_count++;
+						g_dp.pending_pages.fetch_add(1, std::memory_order_relaxed);
+					}
+					lo = std::min(lo, page_index);
+					hi = page_index + 1;
+					pages++;
+				}
+			}
+		}
+		if (lo >= hi) {
+			return;
+		}
+		g_dp.pages.fetch_add(pages, std::memory_order_relaxed);
+		auto& list = t_pending;
+		if (!list.empty()) {
+			auto& previous = list.back();
+			if (previous.region == &region && lo <= size_t {previous.last} + DeferredMergeGap &&
+			    hi + DeferredMergeGap >= size_t {previous.first}) {
+				previous.first = static_cast<uint32_t>(std::min<size_t>(previous.first, lo));
+				previous.last  = static_cast<uint32_t>(std::max<size_t>(previous.last, hi));
+				return;
+			}
+		}
+		list.push_back({owner, &region, base_addr, static_cast<uint32_t>(lo),
+		                static_cast<uint32_t>(hi)});
+		g_dp.spans.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	// KYTY_DEFER_PROTECTS=verify, after a pending span was applied: with the region's host calls
+	// quiesced, no page of it that is not pending again may be looser than its counts, as recorded
+	// or on the host (Windows): a guest write there would not fault, so the copy that follows
+	// would be the last one to see it.
+	void VerifyDeferredApplied(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
+		SpinGuard host(region.host_lock, FaultCost::Split::HostLock);
+		SpinGuard counts(region.lock);
+		g_dp.verify_checks.fetch_add(1, std::memory_order_relaxed);
+		const auto report = [&](const char* what, size_t page, int counts_level, int level) {
+			g_dp.verify_mismatches.fetch_add(1, std::memory_order_relaxed);
+			if (g_dp_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+				std::fprintf(stderr,
+				             "DeferProtects verify: %s at 0x%016" PRIx64 ": watchers ask %s, have %s\n",
+				             what, base_addr + page * PAGE_SIZE, LevelName(counts_level),
+				             LevelName(level));
+				std::fflush(stderr);
+			}
+		};
+		for (size_t page = first; page < last; page++) {
+			const auto counts_level = static_cast<int>(ToLevel(region.pages[page].Perms()));
+			const auto applied      = static_cast<int>(region.applied[page]);
+			if (applied < counts_level && !region.pending.test(page)) {
+				report("recorded protection looser after the deferred update", page, counts_level,
+				       applied);
+			}
+		}
+		ForEachHostLevel(base_addr, first, last, [&](size_t page, int host) {
+			const auto counts_level = static_cast<int>(ToLevel(region.pages[page].Perms()));
+			if (host < counts_level && !region.pending.test(page)) {
+				report("host protection looser after the deferred update", page, counts_level, host);
+			}
+		});
+	}
+
 	template <bool track, bool is_read, bool masked>
 	void UpdateRegionWatchers(Region& region, uint64_t base_addr, size_t first, size_t last,
 	                          const RegionBits* mask = nullptr) {
+		if constexpr (track && !is_read) {
+			if (t_defer_protects) [[unlikely]] {
+				TightenDeferred<masked>(region, base_addr, first, last, mask);
+				return;
+			}
+		}
 		const auto mode = GetDeferMode();
 		if constexpr (!track && !is_read) {
 			if (t_deferred.depth != 0 && mode != DeferMode::Off) {
@@ -736,6 +895,7 @@ struct PageManager::Impl {
 		}
 	}
 
+	PageManager*                            owner = nullptr;
 	std::unique_ptr<std::atomic<Region*>[]> regions;
 	std::vector<std::unique_ptr<Region>>    region_storage;
 	std::mutex                              region_mutex;
@@ -803,14 +963,130 @@ void PageManager::ResyncHostProtection(uint64_t vaddr, uint64_t size) {
 		{
 			SpinGuard host(region->host_lock, FaultCost::Split::HostLock);
 			SpinGuard counts(region->lock);
-			std::fill(region->applied.data() + first, region->applied.data() + last,
-			          Impl::Level::ReadWrite);
+			Impl::SetApplied(*region, first, last, Impl::Level::ReadWrite);
 		}
 		Impl::CountApplied(m_impl->ApplySpan(*region, region_base, first, last));
 	}
 }
 
-PageManager::PageManager(): m_impl(std::make_unique<Impl>()) {}
+PageManager::PageManager(): m_impl(std::make_unique<Impl>()) {
+	m_impl->owner = this;
+}
+
+PageManager::DeferProtectsScope::DeferProtectsScope(bool enable) noexcept: m_enabled(enable) {
+	if (enable) {
+		t_defer_protects = true;
+	}
+}
+
+PageManager::DeferProtectsScope::~DeferProtectsScope() {
+	if (!m_enabled) {
+		return;
+	}
+	t_defer_protects = false;
+	if (!t_pending.empty()) {
+		g_dp.leftover_spans.fetch_add(t_pending.size(), std::memory_order_relaxed);
+		ApplyPendingProtects();
+	}
+}
+
+void PageManager::DeferProtectsScope::Stop() noexcept {
+	t_defer_protects = false;
+}
+
+bool PageManager::HasPendingProtects() noexcept {
+	return !t_pending.empty();
+}
+
+PageManager::PendingProtects PageManager::TakePendingProtects() noexcept {
+	return std::exchange(t_pending, {});
+}
+
+void PageManager::ApplyPendingProtects() noexcept {
+	if (t_pending.empty()) {
+		return;
+	}
+	const auto list = TakePendingProtects();
+	ApplyProtects(list, false);
+}
+
+void PageManager::ApplyProtects(const PendingProtects& list, bool worker) noexcept {
+	if (list.empty()) {
+		return;
+	}
+	const bool verify = (g_defer_protects.Get() & 4) != 0;
+	const auto start  = FaultCost::NowNs();
+	uint64_t   calls  = 0;
+	for (const auto& span: list) {
+		auto& impl   = *span.manager->m_impl;
+		auto& region = *static_cast<Impl::Region*>(span.region);
+		calls += impl.ApplySpan(region, span.base, span.first, span.last);
+		if (verify) {
+			impl.VerifyDeferredApplied(region, span.base, span.first, span.last);
+		}
+	}
+	if (worker) {
+		g_dp.worker_spans.fetch_add(list.size(), std::memory_order_relaxed);
+		g_dp.worker_calls.fetch_add(calls, std::memory_order_relaxed);
+		g_dp.worker_ns.fetch_add(FaultCost::NowNs() - start, std::memory_order_relaxed);
+	} else {
+		g_dp.local_spans.fetch_add(list.size(), std::memory_order_relaxed);
+		g_dp.local_calls.fetch_add(calls, std::memory_order_relaxed);
+	}
+}
+
+int PageManager::DeferProtectsMode() noexcept {
+	return static_cast<int>(g_defer_protects.Get());
+}
+
+PageManager::DeferProtectsStats PageManager::GetDeferProtectsStats() noexcept {
+	DeferProtectsStats stats;
+	stats.spans             = g_dp.spans.load(std::memory_order_relaxed);
+	stats.pages             = g_dp.pages.load(std::memory_order_relaxed);
+	stats.worker_spans      = g_dp.worker_spans.load(std::memory_order_relaxed);
+	stats.worker_calls      = g_dp.worker_calls.load(std::memory_order_relaxed);
+	stats.worker_ns         = g_dp.worker_ns.load(std::memory_order_relaxed);
+	stats.local_spans       = g_dp.local_spans.load(std::memory_order_relaxed);
+	stats.local_calls       = g_dp.local_calls.load(std::memory_order_relaxed);
+	stats.leftover_spans    = g_dp.leftover_spans.load(std::memory_order_relaxed);
+	stats.pending_pages =
+	    static_cast<uint64_t>(std::max<int64_t>(0, g_dp.pending_pages.load(std::memory_order_relaxed)));
+	stats.verify_checks     = g_dp.verify_checks.load(std::memory_order_relaxed);
+	stats.verify_mismatches = g_dp.verify_mismatches.load(std::memory_order_relaxed);
+	return stats;
+}
+
+PageManager::ThreadProtectTotals PageManager::ThreadProtects() noexcept {
+	return t_protects;
+}
+
+void PageManager::NoteCpFlip() noexcept {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_DEFER_PROTECTS_STATS");
+		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+	}();
+	if (!enabled) {
+		return;
+	}
+	static uint64_t last_ns = 0;
+	const auto      now     = FaultCost::NowNs();
+	if (now - last_ns < 250'000'000ull) {
+		return;
+	}
+	last_ns         = now;
+	const auto cp   = t_protects;
+	const auto dp   = GetDeferProtectsStats();
+	std::printf("DeferProtects: flip %" PRIu64 " mode %d cp_calls %" PRIu64 " cp_pages %" PRIu64
+	            " cp_ns %" PRIu64 " spans %" PRIu64 " pages %" PRIu64 " worker_spans %" PRIu64
+	            " worker_calls %" PRIu64 " worker_ns %" PRIu64 " local_spans %" PRIu64
+	            " local_calls %" PRIu64 " leftover %" PRIu64 " pending %" PRIu64 " vchecks %" PRIu64
+	            " vmismatches %" PRIu64 "\n",
+	            Live::Testing::CpFlips(), DeferProtectsMode(), cp.calls, cp.pages, cp.ns, dp.spans,
+	            dp.pages, dp.worker_spans, dp.worker_calls, dp.worker_ns, dp.local_spans,
+	            dp.local_calls, dp.leftover_spans, dp.pending_pages, dp.verify_checks,
+	            dp.verify_mismatches);
+	std::fflush(stdout);
+}
 
 PageManager::~PageManager() = default;
 

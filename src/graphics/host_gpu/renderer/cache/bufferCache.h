@@ -381,9 +381,12 @@ private:
 	// ring to the copy engine (UploadDma) and returns the source the graphics copies then read
 	// (the DMA ring, with the copies' source offsets rebased); otherwise `source` unchanged.
 	// `host_copies` (KYTY_UPLOAD_DMA_HOST_COPY: staging bytes UploadCopies left unwritten) go to
-	// the DMA worker with the copy, or are performed here when the copy is not staged.
+	// the DMA worker with the copy, or are performed here when the copy is not staged. The
+	// calling thread's deferred protections (KYTY_DEFER_PROTECTS) go with them, or are applied
+	// here first. `allow_small`: stage it even below the DMA minimum (KYTY_DEFER_PROTECTS=all).
 	[[nodiscard]] vk::Buffer StageUploadDma(vk::Buffer source, std::span<vk::BufferCopy> copies,
-	                                        std::vector<UploadHostCopy>* host_copies = nullptr);
+	                                        std::vector<UploadHostCopy>* host_copies = nullptr,
+	                                        bool allow_small = false);
 	// A verify-mode difference that only pages turned CPU-dirty since the lookup can cause: a race
 	// when the range's dirtying serials moved since `dirtied_before` (0: unknown, a race), a
 	// mismatch otherwise.
