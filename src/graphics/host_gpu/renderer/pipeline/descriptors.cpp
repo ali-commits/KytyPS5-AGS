@@ -2053,6 +2053,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		}
 	}
 	prefetch_scope.Stop();
+	CommitStats::StepMark(CommitStats::Step::RbHead);
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		uint32_t   buffer_offset = 0;
 		const auto ranges_start  = program.info.buffers[i].written ? BufferLookupStats::Now() : 0;
@@ -2067,12 +2068,14 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		                                               buffer_offset, written));
 		pack_memory_offset(i, buffer_offset);
 	}
+	CommitStats::StepMark(CommitStats::Step::RbBindings);
 	prepared.mip_stats_canary = false;
 	BufferLookupStats::PartScope mip_scope(BufferLookupStats::Part::MipStats);
 	prepared.mip_stats_active = plan_shader_data
 	                                ? prepared.plan->mip_stats_active
 	                                : WriteMipStatsFields(program, snapshot, prepared.shader_data);
 	mip_scope.Stop();
+	CommitStats::StepMark(CommitStats::Step::RbMipStats);
 	const BufferLookupStats::PartScope tables_scope(BufferLookupStats::Part::Tables);
 	// Upload sites: stage type and table kind (the dedup checks the site's last entry first).
 	const auto site = static_cast<uint32_t>(program.stage) * 2u;
@@ -2092,6 +2095,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	if (BufferLookupStats::Enabled()) {
 		BufferLookupStats::NoteStage(SyncEpoch::Current());
 	}
+	CommitStats::StepMark(CommitStats::Step::RbTables);
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
@@ -2280,10 +2284,12 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 		uses_dma |= stage->runtime->program->info.uses_dma;
 		uses_bvh |= stage->runtime->program->info.uses_bvh;
 	}
+	CommitStats::StepMark(CommitStats::Step::FindBuffers);
 	if (uses_dma) {
 		const BufferLookupStats::PartScope stats_scope(BufferLookupStats::Part::PrepareBda);
 		m_context.PrepareBda();
 	}
+	CommitStats::StepMark(CommitStats::Step::Bda);
 	CommitStats::Mark(CommitStats::Phase::FindBuffers);
 	// KYTY_DRAW_RUN continuation: the views and targets are the previous draw's (checked against the
 	// image state after the buffer work, RenderExecutor::DrawRunImagesUnchanged).
@@ -2317,6 +2323,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 			BindRenderTarget(target.image_id);
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::Images);
 	CommitStats::Mark(CommitStats::Phase::RebindImages);
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
 	// after image identities are final; attachment layout transitions follow buffer alias copies.
@@ -2327,6 +2334,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 			RebindBuffers(*stage);
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::RbBatchEnd);
 	CommitStats::Mark(CommitStats::Phase::RebindBuffers);
 }
 
@@ -2581,6 +2589,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	if (partial) {
 		DrawRun::GetTotals().partial_pushes.fetch_add(1, std::memory_order_relaxed);
 	}
+	CommitStats::StepMark(CommitStats::Step::CbHead);
 
 	for (auto* prepared: prepared_bindings) {
 		const auto& program       = *prepared->runtime->program;
@@ -2675,6 +2684,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 
 		transitions_scope.Stop();
+		CommitStats::StepMark(CommitStats::Step::CbTransitions);
 		const CommitStats::SubScope build_scope(CommitStats::Sub::DescBuild);
 		m_image_occurrences.assign(descriptors.images.size(), 0);
 		for (const auto& binding: program.bindings.descriptors) {
@@ -2771,6 +2781,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                  push_data.dwords.begin() + program.bindings.push_data_start_dword);
 			has_push_data = true;
 		}
+		CommitStats::StepMark(CommitStats::Step::CbBuild);
 	}
 
 	if (has_push_data) {
@@ -2781,6 +2792,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	if (pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
 		CommitStats::AddItems(CommitStats::Item::DescWrites, m_descriptor_writes.size());
 	}
+	CommitStats::StepMark(CommitStats::Step::CbPushConst);
 	if (mesh_stage) {
 		// The mesh draw path then records its draw arguments over the first push-constant dwords
 		// through StateHandle(); the shadow no longer describes what is in effect.
@@ -2835,6 +2847,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			CommitDescriptorSet(buffer, pipeline_bind_point, pipeline, fresh);
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::CbDescriptors);
 }
 
 // KYTY_SET_REUSE_FRESH (default on; 0 off; verify): a descriptor set whose writes refer to a

@@ -2250,6 +2250,7 @@ void CommandProcessor::ExecDrawIndex(const CpSeq::DrawIndexOp& op) {
 		    op.window, m_submit_id,
 		    (op.flags & CpSeq::DrawFlagInheritInstances) != 0 ? args.instance_count : UINT32_MAX);
 		MaybeYieldSlice();
+		CommitStats::StepMark(CommitStats::Step::GapRetire);
 		return;
 	}
 	if (GraphicsRunDebugDumpEnabled() && (args.base_vertex != 0 || args.first_instance != 0)) {
@@ -2881,6 +2882,7 @@ void CommandProcessor::ExecDrawAuto(const CpSeq::DrawAutoOp& op) {
 		    op.window, m_submit_id,
 		    (op.flags & CpSeq::DrawFlagInheritInstances) != 0 ? args.instance_count : UINT32_MAX);
 		MaybeYieldSlice();
+		CommitStats::StepMark(CommitStats::Step::GapRetire);
 		return;
 	}
 	if (RepeatTrace::Enabled()) {
@@ -4153,6 +4155,7 @@ CpSeq::Result CommandProcessor::ExecuteOp(CpSeq::OpKind kind, const void* payloa
 		        ? EventWriteActivityName(static_cast<const CpSeq::EventWriteOp*>(payload)->event_type)
 		        : CpSeq::OpKindName(kind));
 	}
+	CommitStats::StepMark(CommitStats::Step::GapOpHead);
 	switch (kind) {
 		case OpKind::DrawIndex: ExecDrawIndex(*static_cast<const CpSeq::DrawIndexOp*>(payload)); break;
 		case OpKind::DrawAuto: ExecDrawAuto(*static_cast<const CpSeq::DrawAutoOp*>(payload)); break;
@@ -5249,6 +5252,7 @@ Pm4ProcessResult CommandProcessor::ResolveSubmission(Pm4Execution& execution, ui
 	} scope(*this, execution);
 	auto& sequencer = *m_sequencer;
 	for (;;) {
+		CommitStats::StepMark(CommitStats::Step::GapOpExit);
 		// Service commands run between ops: every op before this one has executed and no later
 		// one has, the serial point (P3-SEQUENCER.md 2.4).
 		if (g_gpu_state != nullptr && g_gpu_state->HasPendingCommands()) {
@@ -5387,6 +5391,7 @@ Pm4ProcessResult CommandProcessor::ResolveSubmission(Pm4Execution& execution, ui
 			                         diagnostic_args[0], diagnostic_args[1], diagnostic_args[2],
 			                         diagnostic_args[3], CpSeq::OpKindName(kind));
 		}
+		CommitStats::StepMark(CommitStats::Step::GapLoop);
 		const auto result = ExecuteOp(kind, view.payload, view.data);
 		m_executing       = false;
 		if (snapshot != nullptr) {

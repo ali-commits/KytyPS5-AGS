@@ -95,10 +95,97 @@ enum class Item : uint8_t {
 	Count
 };
 
+// KYTY_CP_COMMIT_STATS=steps (adds to =1): a third line, "Steps 10s: ...", splits every draw's
+// commit and the gap before it into consecutive steps (one TSC read per step boundary, so the
+// steps add up to the commit and the gap), per KYTY_DRAW_RUN decision as in StartPhases. A step's
+// time is from the previous boundary to its own; "calib" is an empty step (the cost of one
+// boundary, included in every step). Gap steps run on the GPU thread between draws: what a
+// boundary closes after the previous draw's end belongs to the next draw's gap.
+enum class Step : uint8_t {
+	// The gap, from the previous commit's end (after its statistics) to BeginDraw.
+	GapCommitTail,  // Engine::Commit after EndDraw: periodic summaries
+	GapRetire,      // CommitHead: window retire; ExecDrawIndex tail (MaybeYieldSlice)
+	GapOpExit,      // ExecuteOp's scope exit, register restore, op pop, NoteExecuted, loop top
+	GapLoop,        // resolver loop: commands check, Peek, placement, epoch, snapshot, bind
+	GapOpHead,      // ExecuteOp: scope, run activity checks, the switch
+	GapDrawOp,      // ExecDrawIndex/ExecDrawAuto up to CommitPublished
+	GapHead,        // ReadyHead: claim/prepare/wait for the head
+	GapCommitIn,    // Engine::Commit entry up to BeginDraw
+	// The commit (BeginDraw to EndDraw).
+	BindRegs,       // Engine::Commit: BindRegisters, executor fields
+	PopReady,       // DrawIndex: PopReadyOperations
+	DebugInfo,      // SetDebugInfo
+	Lock,           // the render mutex
+	BeginRun,       // BeginDrawRun
+	TargetOps,      // ConsumeMetadataColorOperation, DepthStencilCopy, ResolveColorTargets
+	VsCheck,        // DrawHasValidVertexShader, debug dump check
+	DrawChecks,     // RunDrawChecks
+	StateReset,     // topology, index source, state.Reset
+	PsActive,       // DrawHasActivePixelShader
+	TakePrepared,   // RefreshShaders up to Validate (prepared draw, export mapping)
+	Validate,       // DrawPrep::Validate (certificate)
+	Apply,          // ApplyPreparedDraw, plan activation
+	RunCandidate,   // DrawRunCandidate (and recall)
+	MarkBindings,   // DrawRunMarkBindings / target resolution
+	Restart,        // ResolvePrimitiveRestart, 8-bit indices, LogDrawState, offsets
+	ExecHead,       // ExecutePreparedDraw up to PrepareBindings (prefetch, mesh, indirect)
+	PrepStages,     // PrepareBindings of every stage
+	FindBuffers,    // FindBuffers of every stage
+	Bda,            // PrepareBda
+	Images,         // RebindImages, colour targets
+	RbHead,         // RebindBuffers: tick, shader-data reset, upload batch, memo prefetch
+	RbBindings,     // RebindBuffers: write ranges, NativeStorageBuffer per V#
+	RbMipStats,     // RebindBuffers: WriteMipStatsFields
+	RbTables,       // RebindBuffers: flattened SRT and shader-data uploads
+	RbBatchEnd,     // the stages' upload batch end
+	VertexAcquire,  // AcquireVertexBuffers
+	IndexPrepare,   // PrepareIndexBuffer, indirect buffers
+	LateCheck,      // the continuation's late check (command, images), verify
+	PipelineSel,    // plain-pixel choice, planned pipeline / lookup
+	Acquire,        // written rectangle, rendering state (acquisition or reuse)
+	BarrierSafe,    // DrawIsBarrierSafe
+	DrawScope,      // DrawScope, EmissionSink, debug phase
+	VertexCommit,   // CommitVertexBuffers
+	CbHead,         // CommitBindings: retick, address writes, counts, vector resets
+	CbTransitions,  // CommitBindings: image transitions (per stage)
+	CbBuild,        // CommitBindings: descriptor write list and push data (per stage)
+	CbPushConst,    // CommitBindings: push constants
+	CbDescriptors,  // CommitBindings: descriptor push or set
+	CbTail,         // the run push verify, transition check
+	IndexCommit,    // CommitIndexBuffer
+	DynamicState,   // the dynamic-state check and emission
+	Begin,          // BeginRendering, depth feedback
+	BindPipeline,   // pipeline bind and shadow
+	DrawCmd,        // the draw command
+	Occlusion,      // occlusion diagnostics checks, shader write stages and barrier
+	RunRecord,      // the run eligibility and record
+	ResetBindings,  // DrawIndex: ResetBindings
+	CommitTail,     // Engine::Commit: plan count, repeat trace, register restore, after-commit
+	Calib,          // an empty step (the boundary's own cost)
+	Count
+};
+
 namespace Detail {
 [[nodiscard]] bool ReadEnabled();
 [[nodiscard]] bool ReadIndirectOnly();
+[[nodiscard]] bool ReadSteps();
+void               StepAt(Step step);
 } // namespace Detail
+
+[[nodiscard]] inline bool StepsEnabled() {
+	static std::atomic<int64_t> steps_once {Common::OnceUnset};
+	const auto steps = static_cast<bool>(Common::Once(steps_once, [&] {
+		return Detail::ReadSteps();
+	}));
+	return steps;
+}
+
+// A step boundary (GPU thread): the time since the previous boundary belongs to `step`.
+inline void StepMark(Step step) {
+	if (StepsEnabled()) [[unlikely]] {
+		Detail::StepAt(step);
+	}
+}
 
 [[nodiscard]] inline bool Enabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};

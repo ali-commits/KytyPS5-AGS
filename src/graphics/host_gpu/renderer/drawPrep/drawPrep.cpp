@@ -1363,6 +1363,7 @@ Engine::Slot& Engine::ReadyHead() {
 	// per-thread scratch the preparations below use are idle here.
 	EXIT_IF(Speculative());
 	auto& slot = window.HeadPayload();
+	CommitStats::StepMark(CommitStats::Step::GapDrawOp);
 	const auto stats_start = CommitStats::Now();
 	if (window.TryClaimHead()) {
 		// No worker has started it: prepare it here, with the exact clean predicate.
@@ -1448,6 +1449,7 @@ Engine::Slot& Engine::ReadyHead() {
 			CommitStats::NoteHead(0, CommitStats::Now() - stats_start);
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::GapHead);
 	return slot;
 }
 
@@ -1681,6 +1683,8 @@ void Engine::Commit(Slot& slot) {
 	// KYTY_DRAW_RUN (drawRun.h): the draw is an engine commit with this structure key.
 	executor.m_run_key          = slot.run_key;
 	executor.m_in_engine_commit = true;
+	CommitStats::StepMark(CommitStats::Step::BindRegs);
+	CommitStats::StepMark(CommitStats::Step::Calib);
 	if (slot.kind == DrawKind::Index) {
 		executor.DrawIndex(slot.submit_id, scheduler.Current(), slot.index_args);
 	} else {
@@ -1717,6 +1721,7 @@ void Engine::Commit(Slot& slot) {
 	DrawRun::PrintSummary();
 	TexelImageLookup::PrintSummary();
 	XFrameReuse::PrintSummary();
+	CommitStats::StepMark(CommitStats::Step::GapCommitTail);
 }
 
 void Engine::NoteFence() {

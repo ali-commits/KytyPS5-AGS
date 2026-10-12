@@ -32,6 +32,10 @@ bool ReadIndirectOnly() {
 	const auto* value = std::getenv("KYTY_CP_COMMIT_STATS");
 	return value != nullptr && std::strcmp(value, "indirect") == 0;
 }
+bool ReadSteps() {
+	const auto* value = std::getenv("KYTY_CP_COMMIT_STATS");
+	return value != nullptr && std::strcmp(value, "steps") == 0;
+}
 } // namespace Detail
 
 uint64_t Hash(const void* data, uint64_t size, uint64_t seed) {
@@ -59,6 +63,7 @@ uint64_t NowNs() {
 constexpr size_t PhaseCount = static_cast<size_t>(Phase::Count);
 constexpr size_t SubCount   = static_cast<size_t>(Sub::Count);
 constexpr size_t ItemCount  = static_cast<size_t>(Item::Count);
+constexpr size_t StepCount  = static_cast<size_t>(Step::Count);
 
 enum DrawClass : uint32_t { ClassStart, ClassContinue, ClassOther, ClassCount };
 
@@ -86,6 +91,8 @@ struct ReasonAggregate {
 	std::array<uint64_t, SubCount>         sub {};
 	std::array<uint64_t, ItemCount>        items {};
 	std::array<uint64_t, CpGaps::CatCount> gap_cats {};
+	std::array<uint64_t, StepCount>        steps {};     // KYTY_CP_COMMIT_STATS=steps: commit
+	std::array<uint64_t, StepCount>        gap_steps {}; // and the gap before the draw
 };
 
 struct Aggregate {
@@ -185,6 +192,12 @@ struct State {
 	bool                                   gap_snapshot_valid = false;
 	std::array<uint64_t, CpGaps::CatCount> gap_delta {};
 	bool                                   gap_delta_valid = false;
+	// KYTY_CP_COMMIT_STATS=steps: the boundary cursor, this draw's steps and the gap's steps
+	// closed since the previous draw ended (moved into gap_steps at BeginDraw).
+	uint64_t                        step_last = 0;
+	std::array<uint64_t, StepCount> steps {};
+	std::array<uint64_t, StepCount> gap_steps {};
+	std::array<uint64_t, StepCount> pending_gap_steps {};
 	// Interval.
 	uint64_t interval_ns  = 0;
 	uint64_t interval_tsc = 0;
@@ -217,6 +230,66 @@ const char* const kItemNames[ItemCount] = {
     "textures",  "samplers",   "set-current", "set-history",   "set-miss",
     "set-repeated", "color-hit", "color-miss", "depth-hit",    "depth-miss",
     "target-repeat", "target-lookup", "descwrites", "transitions", "pipeline-new"};
+
+const char* const kStepNames[StepCount] = {
+    "g.committail", "g.retire",      "g.opexit",     "g.loop",        "g.ophead",      "g.drawop",
+    "g.head",       "g.commitin",    "bindregs",     "popready",      "debuginfo",     "lock",
+    "beginrun",     "targetops",     "vscheck",      "drawchecks",    "statereset",    "psactive",
+    "takeprepared", "validate",      "apply",        "runcandidate",  "markbindings",  "restart",
+    "exechead",     "prepstages",    "findbuffers",  "bda",           "images",        "rbhead",
+    "rbbindings",   "rbmipstats",    "rbtables",     "rbbatchend",    "vertexacquire", "indexprepare",
+    "latecheck",    "pipelinesel",   "acquire",      "barriersafe",   "drawscope",     "vertexcommit",
+    "cbhead",       "cbtransitions", "cbbuild",      "cbpushconst",   "cbdescriptors", "cbtail",
+    "indexcommit",  "dynamicstate",  "begin",        "bindpipeline",  "drawcmd",       "occlusion",
+    "runrecord",    "resetbindings", "committail",   "calib"};
+
+void PrintSteps(State& s, double seconds, double ns_per_tick) {
+	const double frames = static_cast<double>(std::max<uint64_t>(1, s.frames));
+	std::string  line;
+	char         text[256];
+	std::snprintf(text, sizeof(text), "Steps %.0fs: frames %" PRIu64, seconds, s.frames);
+	line += text;
+	for (uint32_t r = 0; r < ReasonCount; r++) {
+		const auto& a = s.reasons[r];
+		if (a.draws == 0) {
+			continue;
+		}
+		const double scale  = ns_per_tick * 1e-3 / static_cast<double>(a.draws);
+		uint64_t     commit = 0;
+		uint64_t     gap    = 0;
+		for (size_t p = 0; p < StepCount; p++) {
+			commit += a.steps[p];
+			gap += a.gap_steps[p];
+		}
+		std::snprintf(text, sizeof(text), " | %s %.1f/f commit %.3f gap %.3f [", kReasonNames[r],
+		              static_cast<double>(a.draws) / frames, static_cast<double>(commit) * scale,
+		              static_cast<double>(gap) * scale);
+		line += text;
+		bool first = true;
+		for (size_t p = 0; p < StepCount; p++) {
+			const double us = static_cast<double>(a.steps[p]) * scale;
+			if (us < 0.0005) {
+				continue;
+			}
+			std::snprintf(text, sizeof(text), "%s%s %.3f", first ? "" : " ", kStepNames[p], us);
+			line += text;
+			first = false;
+		}
+		line += "] gapsteps[";
+		first = true;
+		for (size_t p = 0; p < StepCount; p++) {
+			const double us = static_cast<double>(a.gap_steps[p]) * scale;
+			if (us < 0.0005) {
+				continue;
+			}
+			std::snprintf(text, sizeof(text), "%s%s %.3f", first ? "" : " ", kStepNames[p], us);
+			line += text;
+			first = false;
+		}
+		line += "]";
+	}
+	std::printf("%s\n", line.c_str());
+}
 
 void PrintStartPhases(State& s, double seconds, double ns_per_tick) {
 	const double frames = static_cast<double>(std::max<uint64_t>(1, s.frames));
@@ -290,6 +363,9 @@ void PrintStartPhases(State& s, double seconds, double ns_per_tick) {
 		}
 	}
 	std::printf("%s\n", line.c_str());
+	if (StepsEnabled()) {
+		PrintSteps(s, seconds, ns_per_tick);
+	}
 	s.reasons = {};
 }
 
@@ -465,6 +541,15 @@ void BeginDraw() {
 	s.cycles       = {};
 	s.sub          = {};
 	s.items        = {};
+	if (StepsEnabled()) {
+		if (s.step_last != 0) {
+			s.pending_gap_steps[static_cast<size_t>(Step::GapCommitIn)] += now - s.step_last;
+		}
+		s.gap_steps         = s.pending_gap_steps;
+		s.pending_gap_steps = {};
+		s.steps             = {};
+		s.step_last         = now;
+	}
 	s.gap_delta_valid = false;
 	if (s.gap_snapshot_valid && s.previous_end != 0) {
 		std::array<uint64_t, CpGaps::CatCount> ticks {};
@@ -500,7 +585,8 @@ void Skip() {
 	}
 	auto& s = GetState();
 	if (s.active) {
-		s.last = Tsc();
+		s.last      = Tsc();
+		s.step_last = s.last;
 	}
 }
 
@@ -526,6 +612,9 @@ void EndDraw() {
 	}
 	const auto now = Tsc();
 	s.cycles[static_cast<size_t>(Phase::Post)] += now - s.last;
+	if (StepsEnabled()) {
+		s.steps[static_cast<size_t>(Step::CommitTail)] += now - s.step_last;
+	}
 	s.active         = false;
 	s.previous_end   = now;
 	DrawClass klass  = ClassOther;
@@ -642,6 +731,10 @@ void EndDraw() {
 		for (size_t p = 0; p < ItemCount; p++) {
 			r.items[p] += s.items[p];
 		}
+		for (size_t p = 0; p < StepCount; p++) {
+			r.steps[p] += s.steps[p];
+			r.gap_steps[p] += s.gap_steps[p];
+		}
 	}
 	s.gap_snapshot_valid = ReadLedger(s.gap_snapshot);
 	auto& c = s.classes[klass];
@@ -661,6 +754,23 @@ void EndDraw() {
 		c.items[p] += s.items[p];
 	}
 	Print(s, NowNs(), now);
+	// The next gap starts after this diagnostic's own work (the classification and sets above).
+	s.previous_end = Tsc();
+	s.step_last    = s.previous_end;
+}
+
+void Detail::StepAt(Step step) {
+	auto&      s   = GetState();
+	const auto now = Tsc();
+	if (s.step_last != 0) {
+		const auto index = static_cast<size_t>(step);
+		if (s.active && step >= Step::BindRegs) {
+			s.steps[index] += now - s.step_last;
+		} else {
+			s.pending_gap_steps[index] += now - s.step_last;
+		}
+	}
+	s.step_last = now;
 }
 
 void AddSub(Sub sub, uint64_t cycles) {

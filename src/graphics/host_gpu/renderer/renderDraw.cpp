@@ -2005,11 +2005,16 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	}
 	state.vertex_stages_written = PipelineCache::TessellationActive(buffer.GetUserConfig()) ? 3u : 1u;
 	// Draw-prep: use the draw's speculative preparation when its certificate holds now.
-	if (prepared != nullptr && DrawPrep::Validate(*prepared, state.ps_active, target_export_mapping)) {
+	CommitStats::StepMark(CommitStats::Step::TakePrepared);
+	const bool prepared_valid =
+	    prepared != nullptr && DrawPrep::Validate(*prepared, state.ps_active, target_export_mapping);
+	CommitStats::StepMark(CommitStats::Step::Validate);
+	if (prepared_valid) {
 		ApplyPreparedDraw(*prepared, state);
 		// The binding plan was computed from this preparation (KYTY_DRAW_PREP_BINDINGS).
 		executor.ActivateBindingPlan();
 		executor.NotePreparedValidated();
+		CommitStats::StepMark(CommitStats::Step::Apply);
 		if (DrawPrep::VerifyMode() != 0) {
 			// The serial preparation on copies, from the same (snapshot) registers.
 			auto vertex_copy = std::make_unique<std::array<ShaderVertexInputInfo, 3>>();
@@ -2038,6 +2043,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                                        DrawRenderState& state) {
 	KYTY_PROFILER_DETAIL_FUNCTION();
 	state.ps_active = DrawHasActivePixelShader(buffer);
+	CommitStats::StepMark(CommitStats::Step::PsActive);
 	{
 		KYTY_PROFILER_DETAIL_BLOCK("Draw::RefreshShaders");
 		RefreshShaders(buffer, draw, state);
@@ -2058,15 +2064,19 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// KYTY_DRAW_RUN (drawPrep/drawRun.h): a continuation keeps the previous draw's targets (the
 	// entries are still in `state`: the fast reset leaves them, DrawRunCandidate requires it).
 	m_run_slice_offset = render_target_slice_offset;
-	if (DrawRun::Enabled() &&
+	const bool run_candidate =
+	    DrawRun::Enabled() &&
 	    (DrawRunCandidate(buffer, state, render_target_slice_offset) ||
 	     (DrawRun::RecallEnabled() &&
-	      DrawRunRecallCandidate(buffer, state, render_target_slice_offset)))) {
+	      DrawRunRecallCandidate(buffer, state, render_target_slice_offset)));
+	CommitStats::StepMark(CommitStats::Step::RunCandidate);
+	if (run_candidate) {
 		if (DrawRun::GetMode() == DrawRun::Mode::On) {
 			state.color_count         = m_run.color_count;
 			state.color_slots_written = m_run.color_slots;
 			m_run_active              = true;
 			DrawRunMarkBindings();
+			CommitStats::StepMark(CommitStats::Step::MarkBindings);
 			CommitStats::Mark(CommitStats::Phase::Targets);
 			return true;
 		}
@@ -2081,6 +2091,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		return false;
 	}
 
+	CommitStats::StepMark(CommitStats::Step::MarkBindings);
 	CommitStats::Mark(CommitStats::Phase::Targets);
 	return true;
 }
@@ -3466,6 +3477,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto* const plan        = m_binding_plan_active ? m_binding_plan : nullptr;
 	const bool  plan_verify = plan != nullptr && DrawPrep::BindingsVerifyMode() != 0;
 	const bool  plan_stages = plan != nullptr && vertex_stages.size() == 1;
+	CommitStats::StepMark(CommitStats::Step::ExecHead);
 	LogDrawPhase(draw.Name(), "PrepareBindings");
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
@@ -3486,6 +3498,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			descriptor_stages[stage_count++] = &*bindings.pixel;
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::PrepStages);
 	CommitStats::Mark(CommitStats::Phase::PrepareBindings);
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	{
@@ -3515,6 +3528,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		} else {
 			vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0], vertex_ranges);
 		}
+		CommitStats::StepMark(CommitStats::Step::VertexAcquire);
 		index_binding = PrepareIndexBuffer(buffer, index_source);
 	}
 	PreparedIndirectBuffers indirect_buffers;
@@ -3529,6 +3543,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (indirect != nullptr) {
 		indirect_buffers = ObtainIndirectBuffers(buffer, *indirect);
 	}
+	CommitStats::StepMark(CommitStats::Step::IndexPrepare);
 	CommitStats::Mark(CommitStats::Phase::VertexIndex);
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
@@ -3584,6 +3599,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_run_verify = false;
 		DrawRunRecallFallback();
 	}
+	CommitStats::StepMark(CommitStats::Step::LateCheck);
 
 	// KYTY_LOD_STATS_PLAIN_VARIANT: without a mip-statistics counter on any image the pixel
 	// program's feedback records nothing; its feedback-free variant then gives the same results
@@ -3640,6 +3656,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 	const auto& pipeline = *pipeline_object;
+	CommitStats::StepMark(CommitStats::Step::PipelineSel);
 	CommitStats::Mark(CommitStats::Phase::Pipeline);
 	if (mesh_indirect) {
 		// The conversion of the argument record into this draw's dispatches and draw dwords:
@@ -3726,6 +3743,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			}
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::Acquire);
 	CommitStats::Mark(CommitStats::Phase::AcquireTargets);
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
@@ -3748,15 +3766,18 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			DrawPrep::ReportBindingMismatch("barrier safety");
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::BarrierSafe);
 	const CommandBuffer::DrawScope draw_scope(buffer, barrier_safe);
 	// Emission safe point (KYTY_CP_RECORDER): no native handle obtained during the preparation above
 	// is alive; from here the draw's commands go to the recorder (render.h, CommandBuffer::Sink).
 	const auto vk_buffer = buffer.EmissionSink();
 	SetDrawDebugPhase(buffer, submit_id, draw, emit, draw.IsIndexed() ? 0x100u : 0x200u);
+	CommitStats::StepMark(CommitStats::Step::DrawScope);
 	if (!mesh_active) {
 		const CommitStats::SubScope vertex_scope(CommitStats::Sub::VertexCommit);
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
+	CommitStats::StepMark(CommitStats::Step::VertexCommit);
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, emit, 0x300u);
 	}
@@ -3782,8 +3803,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		// Detail: which recorded image's state the transition changed (0: another image's).
 		DrawRun::ReportMismatch("image transition", DrawRunImagesChange(false, false, true));
 	}
+	CommitStats::StepMark(CommitStats::Step::CbTail);
 	CommitStats::Mark(CommitStats::Phase::CommitBindings);
 	if (!mesh_active) CommitIndexBuffer(vk_buffer, index_binding);
+	CommitStats::StepMark(CommitStats::Step::IndexCommit);
 
 	// KYTY_DRAW_RUN continuation: the dynamic state is a function of the same registers, targets and
 	// vertex program as the previous draw's, which recorded it into this command buffer; the
@@ -3829,6 +3852,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		DrawRun::ReportMismatch("dynamic state", g_dynamic_state_emitted - run_dynamic_emitted);
 	}
 
+	CommitStats::StepMark(CommitStats::Step::DynamicState);
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, emit, 0x400u);
@@ -3858,6 +3882,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		// A state change above only switched instances; no buffer write came in between.
 		m_indirect_barrier_rendering = buffer.ActiveRenderingSerial();
 	}
+	CommitStats::StepMark(CommitStats::Step::Begin);
 	{
 		const CommitStats::SubScope bind_scope(CommitStats::Sub::BindPipeline);
 		if (CommitStats::Enabled() &&
@@ -3874,6 +3899,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			m_dynamic_state.color_write_valid = false;
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::BindPipeline);
 	CommitStats::SubScope draw_cmd_scope(CommitStats::Sub::DrawCmd);
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, emit, 0x500u);
@@ -3939,6 +3965,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
 	draw_cmd_scope.Stop();
+	CommitStats::StepMark(CommitStats::Step::DrawCmd);
 	static const bool occlusion_draw_rows = [] {
 		const char* value = std::getenv("KYTY_HANG_TRACE_OCCLUSION_DRAWS");
 		return value != nullptr && value[0] == '1';
@@ -4025,6 +4052,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, emit, 0x700u);
 	}
+	CommitStats::StepMark(CommitStats::Step::Occlusion);
 	// KYTY_DRAW_RUN: whether the next draw may continue this one (drawPrep/drawRun.h), and in verify
 	// mode what this draw's normal path computed against what a continuation would have reused.
 	if (DrawRun::Enabled()) {
@@ -4079,6 +4107,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			m_run.writes = program_writes;
 		}
 	}
+	CommitStats::StepMark(CommitStats::Step::RunRecord);
 	if (CommitStats::Enabled()) [[unlikely]] {
 		CommitStats::Mark(CommitStats::Phase::Emit);
 		uint64_t textures = 0;
@@ -4113,6 +4142,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		KYTY_PROFILER_DETAIL_BLOCK("Draw::DrainPendingOperations");
 		m_context.GetCommandScheduler().PopReadyOperations();
 	}
+	CommitStats::StepMark(CommitStats::Step::PopReady);
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -4123,9 +4153,12 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	// Self time here includes renderer-lock acquisition and setup outside the
 	// separately timed preparation/execution phases.
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::SetupAndExecution");
+	CommitStats::StepMark(CommitStats::Step::DebugInfo);
 	RenderLockGuard lock(m_context.GetMutex());
+	CommitStats::StepMark(CommitStats::Step::Lock);
 	// KYTY_DRAW_RUN: only a draw that records through the eligible path seeds the next continuation.
 	BeginDrawRun();
+	CommitStats::StepMark(CommitStats::Step::BeginRun);
 	if (args.index_count == 0 || args.instance_count == 0) {
 		return;
 	}
@@ -4136,6 +4169,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
+	CommitStats::StepMark(CommitStats::Step::TargetOps);
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
 		return;
@@ -4158,7 +4192,9 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		     static_cast<uint32_t>(args.base_vertex), args.first_instance);
 	}
 
+	CommitStats::StepMark(CommitStats::Step::VsCheck);
 	RunDrawChecks(buffer, ucfg, m_binding_plan);
+	CommitStats::StepMark(CommitStats::Step::DrawChecks);
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
@@ -4187,6 +4223,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	// The member state is reused; the render mutex held above makes it exclusive to this draw.
 	auto& state = *m_draw_state;
 	state.Reset();
+	CommitStats::StepMark(CommitStats::Step::StateReset);
 	CommitStats::Mark(CommitStats::Phase::Setup);
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
@@ -4220,9 +4257,11 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.vertex_offset  = vertex_offset + args.base_vertex;
 	emit.first_instance = instance_offset;
 
+	CommitStats::StepMark(CommitStats::Step::Restart);
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
 	                    primitive_restart);
 	ResetBindings();
+	CommitStats::StepMark(CommitStats::Step::ResetBindings);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -4237,6 +4276,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		KYTY_PROFILER_DETAIL_BLOCK("Draw::DrainPendingOperations");
 		m_context.GetCommandScheduler().PopReadyOperations();
 	}
+	CommitStats::StepMark(CommitStats::Step::PopReady);
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -4245,9 +4285,12 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                    args.first_instance);
 
 	KYTY_PROFILER_DETAIL_BLOCK("Draw::SetupAndExecution");
+	CommitStats::StepMark(CommitStats::Step::DebugInfo);
 	RenderLockGuard lock(m_context.GetMutex());
+	CommitStats::StepMark(CommitStats::Step::Lock);
 	// KYTY_DRAW_RUN: only a draw that records through the eligible path seeds the next continuation.
 	BeginDrawRun();
+	CommitStats::StepMark(CommitStats::Step::BeginRun);
 	if (args.vertex_count == 0 || args.instance_count == 0) {
 		return;
 	}
@@ -4258,6 +4301,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
+	CommitStats::StepMark(CommitStats::Step::TargetOps);
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
 		return;
@@ -4276,7 +4320,9 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		     args.vertex_count, args.instance_count, args.first_vertex, args.first_instance);
 	}
 
+	CommitStats::StepMark(CommitStats::Step::VsCheck);
 	RunDrawChecks(buffer, ucfg, m_binding_plan);
+	CommitStats::StepMark(CommitStats::Step::DrawChecks);
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
@@ -4289,6 +4335,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	// The member state is reused; the render mutex held above makes it exclusive to this draw.
 	auto& state = *m_draw_state;
 	state.Reset();
+	CommitStats::StepMark(CommitStats::Step::StateReset);
 	CommitStats::Mark(CommitStats::Phase::Setup);
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
@@ -4320,8 +4367,10 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	emit.first_instance = instance_offset;
 
 	DrawIndexBufferSource index_source {};
+	CommitStats::StepMark(CommitStats::Step::Restart);
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
 	ResetBindings();
+	CommitStats::StepMark(CommitStats::Step::ResetBindings);
 }
 
 // Mirrors DrawIndex/DrawAuto with DrawOffsetSource::IndirectArgs, except that the counts, first
@@ -4439,6 +4488,7 @@ bool RenderExecutor::DrawIndirectNative(uint64_t submit_id, CommandBuffer& buffe
 		KYTY_PROFILER_DETAIL_BLOCK("Draw::DrainPendingOperations");
 		m_context.GetCommandScheduler().PopReadyOperations();
 	}
+	CommitStats::StepMark(CommitStats::Step::PopReady);
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
