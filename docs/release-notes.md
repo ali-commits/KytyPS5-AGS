@@ -25,6 +25,11 @@ it is no longer needed. If you still crash, please say so and send your `_kyty.t
 
 ## Everyone
 
+- **Intel CPUs: "Intel CPU compatibility" is now on automatically.** With it off, the audio engine thread could crash
+  early (`Mutex.cpp:363 m_initialized`, or a crash in `memset`): the game's AMD-only `EXTRQ` instructions then went
+  through a slow trap whose Windows exception frame can overwrite data the game keeps just below its stack pointer.
+  The setting is now partly checked by default (automatic: on unless the CPU is an AMD); checked or unchecked forces
+  it on or off (`--amd-cpu`, `--no-amd-cpu`, `KYTY_AMD_CPU=1|0|auto`). AMD CPUs are unchanged.
 - **Faster command processing:** measured on an RTX 3090 (Ryzen 9 7950X3D), Sky Garden went from 32.8 fps with int18
   to 35.1 with the draw-run changes below (+7%), and the sequencer prefetch adds another 5-8% (launches in A B B A
   order: Sky Garden 34.9 -> 36.5 fps, pirate island 29.3 -> 31.6, clock tower 38.4 -> 40.9).
