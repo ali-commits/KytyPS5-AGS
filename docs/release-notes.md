@@ -65,9 +65,16 @@ the Linux build now does the same. Windows is unchanged apart from this note.
 
 ## amd5d: audio pacing fixes
 
-- **Sound breaking up after some minutes:** on some PCs the sound turned crackly or cut out a few minutes into play.
-  We traced this to the sound card running slightly faster than the emulator's own clock, so the audio buffer
-  slowly drained until it ran dry. Two fixes, both on by default:
+- **Buzzing / saw-wave sound after some minutes on certain levels:** this was caused by the emulator's audio-port
+  table being limited to 256 ports. Astro Bot opens one port per 3D sound and holds up to several hundred in busy
+  scenes, so new sounds were refused and the game's mixer produced a steady buzz. Ports now grow on demand up to
+  4096 (`KYTY_AUDIO_OUT2_MAX_PORTS`; setting it to 256 restores the old behaviour). Confirmed fixed by a tester who
+  could reproduce it within a minute. `KYTY_AUDIO_TRACE` now also logs port create/destroy counts and a BUZZ
+  detector for repeated blocks.
+- **Sound breaking up after some minutes (secondary robustness improvement, not the cause of the buzz above):**
+  on some PCs the sound could turn crackly or cut out a few minutes into play.
+  The sound card can run slightly faster than the emulator's own clock, so the audio buffer
+  slowly drains until it runs dry. Two fixes, both on by default:
   - `KYTY_AUDIO_QUEUE_CATCHUP=1` lets the sound card set the pace when the buffer runs low, instead of the
     emulator's clock.
   - `KYTY_AUDIO_PAD_PRIME=1` fills the controller-speaker port with a little silence when it opens late, so it
