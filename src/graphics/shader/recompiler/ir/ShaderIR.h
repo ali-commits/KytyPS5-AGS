@@ -13,6 +13,7 @@
 #include "graphics/shader/shader.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <deque>
 #include <list>
@@ -825,6 +826,14 @@ struct ResourcePlan {
 	// a sealed plan assigned every slot when it was extracted and never writes it again.
 	mutable uint32_t                    evaluation_value_count = 0;
 	bool                                evaluation_sealed      = false;
+	// Unique per sealed plan (AssignTraceIdentity, when sealed, cloned or decoded); keys the
+	// per-thread SRT replay traces (KYTY_SRT_TRACE).
+	uint64_t                            trace_identity         = 0;
+
+	void AssignTraceIdentity() {
+		static std::atomic<uint64_t> next_identity {0};
+		trace_identity = next_identity.fetch_add(1, std::memory_order_relaxed) + 1;
+	}
 };
 
 // Per-thread scratch for nested clean/EXEC memos, activity and material keys. Plans stay

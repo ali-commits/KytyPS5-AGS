@@ -1183,7 +1183,8 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 template <bool Optimize>
 static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRuntime& runtime,
                                     EvaluationScratch& scratch, ResourceSnapshot& snapshot,
-                                    ResourceSpecialization& specialization) {
+                                    ResourceSpecialization& specialization, bool& trace_used) {
+	trace_used = false;
 	if (!program.resource_tracking_complete ||
 	    (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr)) {
 		return false;
@@ -1219,6 +1220,8 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	}
 	SrtWalker clean(program, scratch, CleanRuntime(observed));
 	SrtWalker walker(program, scratch, observed, program.clean_flat_slots, &clean);
+	// KYTY_SRT_TRACE (SrtWalker.h): replays of this plan's earlier refreshes on this thread.
+	SrtTraceSession trace(program, clean, walker, observed, !capture_reads);
 	std::span<const uint8_t> active;
 	namespace Phases = Common::PrepPhases; // KYTY_DRAW_PREP_PHASES sub-buckets
 	auto phase_start = Phases::SubStart();
@@ -1368,6 +1371,10 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 		const bool built = BuildResourceSpecialization(program, snapshot, specialization, fuse_buffers);
 		Phases::SubAdd(Phases::Sub::Samplers, phase_start);
+		if (built) {
+			trace.Succeeded();
+			trace_used = trace.UsedTrace();
+		}
 		return built;
 	}
 }
@@ -1381,9 +1388,36 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		const auto* setting = std::getenv("KYTY_RESOURCE_MATERIALIZATION");
 		return setting != nullptr && std::strcmp(setting, "optimized") == 0;
 	}();
-	return optimized
-	           ? MaterializeResourcesImpl<true>(program, runtime, scratch, snapshot, specialization)
-	           : MaterializeResourcesImpl<false>(program, runtime, scratch, snapshot, specialization);
+	bool       trace_used = false;
+	const bool ok =
+	    optimized
+	        ? MaterializeResourcesImpl<true>(program, runtime, scratch, snapshot, specialization, trace_used)
+	        : MaterializeResourcesImpl<false>(program, runtime, scratch, snapshot, specialization, trace_used);
+	if (ok && trace_used && SrtTraceSession::Mode() >= 2) [[unlikely]] {
+		// KYTY_SRT_TRACE=verify: the refresh again without traces, compared field by field.
+		ResourceSnapshot       reference;
+		ResourceSpecialization reference_specialization;
+		bool                   unused     = false;
+		auto&                  suppressed = SrtTraceSession::Suppressed();
+		suppressed                        = true;
+		const bool reference_ok =
+		    optimized ? MaterializeResourcesImpl<true>(program, runtime, scratch, reference,
+		                                               reference_specialization, unused)
+		              : MaterializeResourcesImpl<false>(program, runtime, scratch, reference,
+		                                                reference_specialization, unused);
+		suppressed = false;
+		const char* field = nullptr;
+		if (!reference_ok) field = "reference refresh failed";
+		else if (snapshot.flattened_srt != reference.flattened_srt) field = "flattened_srt";
+		else if (snapshot.buffers != reference.buffers) field = "buffers";
+		else if (snapshot.images != reference.images) field = "images";
+		else if (snapshot.samplers != reference.samplers) field = "samplers";
+		else if (snapshot.user_data != reference.user_data) field = "user_data";
+		else if (!(snapshot.uniform_fill == reference.uniform_fill)) field = "uniform_fill";
+		else if (!(specialization == reference_specialization)) field = "specialization";
+		SrtTraceSession::NoteVerified(program, field);
+	}
+	return ok;
 }
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
