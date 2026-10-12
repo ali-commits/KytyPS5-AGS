@@ -51,9 +51,10 @@ static void PrintSystemInfo() {
 	     "Host\n"
 	     "  os:      %s\n"
 	     "  cpu:     %s\n"
-	     "  threads: %u\n\n",
+	     "  threads: %u\n"
+	     "  Intel CPU compatibility (AMD instruction patch): %s\n\n",
 	     KYTY_BUILD_LABEL, platform_name, info.ProcessorName.c_str(),
-	     std::thread::hardware_concurrency());
+	     std::thread::hardware_concurrency(), Config::GetAmdCpuDecision().c_str());
 }
 
 static void KytyClose() {

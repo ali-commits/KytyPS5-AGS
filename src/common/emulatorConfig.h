@@ -69,6 +69,7 @@ struct ConfigOptions {
 	bool                   hide_cursor_enabled         = false;
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
+	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
 	uint32_t               vblank_frequency            = 60;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
@@ -119,6 +120,7 @@ bool     FullscreenEnabled();
 bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
+const std::string& GetAmdCpuDecision();
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();

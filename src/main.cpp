@@ -8,6 +8,7 @@
 #include "common/virtualMemory.h"
 #include "emulator.h"
 #include "kytyGitVersion.h"
+#include "loader/x64InstructionEmulator.h"
 
 #include <charconv>
 #include <cstdio>
@@ -122,7 +123,9 @@ static void PrintUsage() {
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's AMD-only\n"
 	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS results).\n"
-	         "                                       Not needed on AMD CPUs.\n");
+	         "                                       Default: on unless the CPU is an AMD (KYTY_AMD_CPU=\n"
+	         "                                       1|0|auto overrides).\n");
+	::printf("  --no-amd-cpu                         Turn Intel CPU compatibility off on a non-AMD CPU.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
@@ -253,8 +256,34 @@ static bool ParseUserId(const std::string& value, int32_t& out) {
 	return true;
 }
 
+// --amd-cpu forces the AMD instruction patch on, --no-amd-cpu off; without either it follows the
+// CPU vendor: off on an AMD CPU, which runs the instructions natively. On any other CPU the game's
+// EXTRQ would otherwise trap at run time, where on Windows the exception frame can overwrite the
+// guest's red zone (amd_cpu_emulation_tests), and VRSQRTPS would give the host's approximation.
+enum class AmdCpuChoice { Automatic, On, Off };
+
+static void ResolveAmdCpu(AmdCpuChoice choice, const std::string& source, Config::ConfigOptions& config) {
+	if (choice != AmdCpuChoice::Automatic) {
+		config.amd_cpu_enabled  = choice == AmdCpuChoice::On;
+		config.amd_cpu_decision = fmt::format("{} ({})", config.amd_cpu_enabled ? "on" : "off", source);
+		return;
+	}
+	const auto vendor = Loader::X64InstructionEmulator::HostCpuVendor();
+#if defined(__APPLE__)
+	// The launcher does not offer the patch on macOS, and Darwin's signal frames keep the red zone.
+	config.amd_cpu_enabled  = false;
+	config.amd_cpu_decision = fmt::format("off (automatic on macOS, CPU vendor {})", vendor);
+#else
+	config.amd_cpu_enabled  = !Loader::X64InstructionEmulator::IsAmdCpuVendor(vendor);
+	config.amd_cpu_decision = fmt::format("{} (automatic: CPU vendor {}{})", config.amd_cpu_enabled ? "on" : "off",
+	                                      vendor, config.amd_cpu_enabled ? " is not AMD" : "");
+#endif
+}
+
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
 	show_help = false;
+	AmdCpuChoice amd_cpu        = AmdCpuChoice::Automatic;
+	std::string  amd_cpu_source = "automatic";
 
 	for (int i = 1; i < argc; i++) {
 		std::string arg = std::string(argv[i]);
@@ -285,8 +314,9 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
-		if (arg == "--amd-cpu") {
-			options.config.amd_cpu_enabled = true;
+		if (arg == "--amd-cpu" || arg == "--no-amd-cpu") {
+			amd_cpu        = arg == "--amd-cpu" ? AmdCpuChoice::On : AmdCpuChoice::Off;
+			amd_cpu_source = arg;
 			continue;
 		}
 
@@ -553,11 +583,15 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		options.config.vulkan_validation_enabled = true;
 	}
 
-	// KYTY_AMD_CPU=1|0 forces the launcher's "AMD CPU patch" (--amd-cpu: guest VRSQRTPS emulated
-	// with an accurate 1/sqrt) on or off, for presets and test harnesses.
-	if (const char* amd_cpu = std::getenv("KYTY_AMD_CPU"); amd_cpu != nullptr && amd_cpu[0] != '\0') {
-		options.config.amd_cpu_enabled = std::strcmp(amd_cpu, "0") != 0;
+	// KYTY_AMD_CPU=1|0|auto overrides --amd-cpu / --no-amd-cpu (the launcher's "Intel CPU
+	// compatibility"), for presets and test harnesses.
+	if (const char* env = std::getenv("KYTY_AMD_CPU"); env != nullptr && env[0] != '\0') {
+		amd_cpu        = std::strcmp(env, "auto") == 0 ? AmdCpuChoice::Automatic
+		                 : std::strcmp(env, "0") == 0  ? AmdCpuChoice::Off
+		                                               : AmdCpuChoice::On;
+		amd_cpu_source = amd_cpu == AmdCpuChoice::Automatic ? "automatic" : fmt::format("KYTY_AMD_CPU={}", env);
 	}
+	ResolveAmdCpu(amd_cpu, amd_cpu_source, options.config);
 
 	return show_help || (!options.app0_dir.empty() && !options.elf.empty());
 }
