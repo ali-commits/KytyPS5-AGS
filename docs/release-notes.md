@@ -20,7 +20,7 @@
 - **Batched page re-protection after read uploads:** the write protection of pages after a read upload is now applied
   in a batch on the upload worker instead of one call each on the command-processor thread. Sky Garden command
   processing takes 0.5 ms less per frame (+2% fps). `KYTY_DEFER_PROTECTS=0` turns it off. The idea comes from the
-  peepostare fork; this is a re-implementation, not their code.
+  peepostare fork; this is a re-implementation, not their code. A race between a deferred write watch and a concurrent protection update (which left a page writable while tracked as clean, and caused Vulkan device loss on NVIDIA within minutes) was found and fixed before release, with a unit test; `KYTY_DEFER_PROTECTS_STATS` now reports `race_pages`/`lost_pages`.
 - **Less waiting between draw preparation and the command processor (publication snapshot):** a lock shared by the
   draw-prep workers and the command processor (the pending-publication check) is now read lock-free
   (`KYTY_PUBLICATION_SNAPSHOT=1`, the default; `=0` restores the old scan). Measured +3-4.6% fps in Sky Garden.
