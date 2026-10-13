@@ -10,12 +10,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <semaphore>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -130,9 +132,16 @@ struct ProtectionCall {
 };
 std::vector<ProtectionCall> g_protection_ranges;
 std::mutex g_protection_log_mutex;
+// Runs once, on the calling thread, before the next host protection call (a window inside the
+// page manager's host update: host_lock held, the counts read, the result not yet recorded).
+std::function<void()> g_before_protection;
 
 bool ProtectAddressSpace(uint64_t vaddr, uint64_t size,
                          Common::VirtualMemory::Mode mode) {
+  if (g_before_protection) {
+    const auto hook = std::exchange(g_before_protection, nullptr);
+    hook();
+  }
   uint32_t protection = PAGE_NOACCESS;
   if (mode == Common::VirtualMemory::Mode::Read) {
     protection = PAGE_READONLY;
@@ -964,6 +973,55 @@ void TestDeferredProtects(const char *mode) {
   Check(PageManager::DeferProtectsMode() == 0, "KYTY_DEFER_PROTECTS did not switch off");
 }
 
+// A deferred write watch made while another thread's deferred unprotect of the same page is
+// between reading the counts and recording its host call (a write fault's release applied at its
+// scope end, racing the command processor's next upload of the page). The tighten must not trust
+// the recorded protection the release is about to replace: the page goes on the pending list, and
+// applying it protects the page the release left writable.
+void TestDeferredProtectRacingRelease() {
+  SetDeferMode(DeferMode::On);
+  Live::Testing::StageText("KYTY_DEFER_PROTECTS=1\n");
+  Live::OnCpFlip();
+  PageManager manager;
+  const auto page_size = manager.GetPageSize();
+  auto *memory = Allocate(page_size);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto before = PageManager::GetDeferProtectsStats();
+
+  manager.UpdatePageWatchers<true>(address, page_size);
+  Check(Protection(memory) == PAGE_READONLY, "watch did not protect");
+  PageManager::PendingProtects list;
+  std::thread([&] {
+    const PageManager::DeferUnprotectScope scope;
+    manager.UpdatePageWatchers<false>(address, page_size);
+    // The scope's end unprotects the page; just before its host call, another thread watches it
+    // again with its protection deferred.
+    g_before_protection = [&] {
+      std::thread([&] {
+        const PageManager::DeferProtectsScope defer(true);
+        manager.UpdatePageWatchers<true>(address, page_size);
+        list = PageManager::TakePendingProtects();
+        PageManager::DeferProtectsScope::Stop();
+      }).join();
+    };
+  }).join();
+  Check(!g_before_protection, "the release made no host call");
+  Check(IsWritable(memory), "the release did not unprotect");
+  Check(!list.empty(), "a watch racing a release was not deferred: nothing protects the page");
+  PageManager::ApplyProtects(list, true);
+  Check(Protection(memory) == PAGE_READONLY, "applying the raced watch left the page writable");
+  const auto after = PageManager::GetDeferProtectsStats();
+  Check(after.race_pages > before.race_pages, "the race was not counted");
+  Check(after.lost_pages == before.lost_pages, "a raced page was left writable and not pending");
+  Check(after.pending_pages == 0, "pages stayed pending");
+
+  manager.UpdatePageWatchers<false>(address, page_size);
+  Check(IsWritable(memory), "unwatch did not restore access");
+  Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
+  Live::Testing::StageText("KYTY_DEFER_PROTECTS=\n");
+  Live::OnCpFlip();
+}
+
 } // namespace
 
 namespace Libs::LibKernel::Memory {
@@ -1016,6 +1074,7 @@ int main(int argc, char **argv) {
   TestDeferredBatchOverflow();
   TestDeferredProtects("1");
   TestDeferredProtects("verify");
+  TestDeferredProtectRacingRelease();
   Check(PageManager::GetDeferProtectsStats().verify_checks != 0,
         "deferred protection verify checked nothing");
   TestParkingLock();

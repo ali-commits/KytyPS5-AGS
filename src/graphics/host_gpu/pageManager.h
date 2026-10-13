@@ -131,6 +131,11 @@ public:
 		uint64_t pending_pages  = 0; // pages pending now
 		uint64_t verify_checks  = 0;
 		uint64_t verify_mismatches = 0;
+		// Pages a deferred tighten made while another thread's host update of the region was in
+		// flight (pending whatever `applied` said), and pages an update recorded looser than their
+		// counts without being pending (0 unless KYTY_DEFER_PROTECTS_RACE=old).
+		uint64_t race_pages = 0;
+		uint64_t lost_pages = 0;
 	};
 	[[nodiscard]] static DeferProtectsStats GetDeferProtectsStats() noexcept;
 	// Host protection calls made by the calling thread (cumulative): count, pages, ns.
