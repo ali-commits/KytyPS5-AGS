@@ -1,4 +1,19 @@
-# KytyPS5 U59 int19
+# KytyPS5 U59 int19.1
+
+## What int19.1 changes
+
+- **Fixed:** a crash (the emulator closed at `occlusion.cpp:405`) in rocket_hourglass and possibly other levels when
+  "Accurate occlusion queries" is on. A query could be ended twice and the counter then ran out of query slots; each
+  query is now ended once, and a query left open or a full pool is recovered instead of closing the emulator.
+  Performance mode (the default) was not affected.
+- **Stability:** deferred page re-protection (`KYTY_DEFER_PROTECTS`) is now off by default, after rare GPU device
+  losses on NVIDIA that appeared with int19. Players who want to test it can set it to `all` in `u59-preset.json`;
+  it was worth about 2% in Sky Garden.
+- **Faster:** the release build's profile-guided optimisation profile was retrained on the int19 code (the old
+  profile no longer matched 390 functions). Measured about +8% fps in Sky Garden on an RTX 3090 / Ryzen 9 7950X3D.
+
+## What int19 brought
+
 
 > **int19 is mainly for AMD Radeon owners whose game crashed (`amdvlk64.dll+0x22240fc`) or showed broken
 > graphics with int18, and for anyone who heard a buzzing sound after some minutes.** NVIDIA users benefit too: Sky
@@ -35,12 +50,6 @@
 - **Fixes from chenxiao07's fork:** an image write-back no longer overwrites bytes the CPU wrote since (`KYTY_IMAGE_WRITEBACK_GUARD`),
   a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
   of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
-- **Crash with accurate occlusion queries fixed (rocket_hourglass):** with "Accurate occlusion queries" on, the
-  emulator could close with `condition (m_active || m_pending >= QueryCapacity) is true in ... occlusion.cpp`. An
-  occlusion query was ended twice when a pending GPU barrier was recorded in the middle of it, so the query pool's
-  count skipped its clean-up point. Query commands no longer record pending barriers; should the counter ever find
-  a query left open or its pool full again, it ends the query or empties the pool (with one console line) instead
-  of closing the emulator. Performance mode (the default) was not affected.
 
 ## AMD GPUs
 
