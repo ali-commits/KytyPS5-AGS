@@ -321,6 +321,60 @@ occlusion on.
 
 - **Level title text fixed:** the level name shown when Astro Bot enters a level is drawn as in int14 again.
 
+## What's new in int16.1 (main release)
+
+- **Galaxy map fixed:** the red trails, pillars and blocky red areas around the volcano (the hidden world) and the
+  red band at the bottom of the screen are gone. The game fast-clears one of its 64-bit render targets every frame and
+  Kyty decoded that clear with a 32-bit decoder, so the clear was dropped and old frames piled up. The same fix covers
+  R16F, RG16F, R16, RG16, R8, RG8 and B10G11R11 register clears (`KYTY_CLEAR_REGISTER_WIDE=0` restores the old
+  behaviour). This bug was also in upstream Kyty.
+
+- **Performance mode by default: occlusion queries off.** The game asks the GPU, thousands of times per frame,
+  whether objects are hidden behind others. Answering those queries accurately costs about half the frame rate in
+  the heaviest levels. int16.1 now answers "visible" to all of them by default (`KYTY_GPU_OCCLUSION=0`, as other
+  Kyty forks do), which roughly doubles the frame rate in the snow level, the clock tower and Ape Escape.
+  On the test PC (RTX 3090, Ryzen 9 7950X3D; a test build without the release build's profile optimization, which
+  adds about 15%): snow 41 fps, clock tower 31, Ape Escape 31, Sky Garden 30, volcano 59 (accurate mode: snow 20).
+  Possible side effects: the game may draw objects or effects that it would normally hide behind walls (rarely
+  visible, and it can cost GPU time where a lot is hidden).
+- **Accurate occlusion toggle:** Global settings > Graphics & display > "Accurate occlusion queries (slower; fixes
+  rare visibility issues)" turns the accurate mode back on (it passes `--gpu-occlusion on`, which overrides the
+  preset). Use it if you see objects through walls or other visibility problems, and please report where. The
+  accurate mode includes the volcano lava fix below.
+- **Volcano lava fixed (accurate occlusion mode):** with the camera tilted down in the volcano level, the lava lake
+  disappeared (flat orange fog). The emulator paired the game's occlusion queries by a wrong address rule; it now
+  pairs them by address, which also keeps the occlusion gate on in Sky Garden.
+- **Hang watchdog no longer kills the game:** on RTX 50 cards (where the watchdog is on by default) a 5 s stall could
+  end the emulator with "Unhandled host exception ... RtlVirtualUnwind". The watchdog's stack dump is now guarded.
+- **Out of video memory no longer ends the emulator:** an image that does not fit goes to system memory (slower; the
+  console prints "Vulkan: video memory full ..."), and a buffer that does not fit is retried.
+- **File id fix:** Astro Bot file ids are assigned one per file; six pairs of game files shared an id and one of each
+  pair could be read in place of the other (one of them a galaxy-map icon).
+- **Audio:** sounds the game sends to the DualSense speaker now play at 30% on the PC speakers (they were up to 19 dB
+  louder than music and effects). Four new volume sliders (master, game sound, music, controller speaker on PC) are in
+  the launcher's global Audio settings. The console also prints audio port diagnostics (`AudioDiag` lines).
+- **"AMD CPU patch" renamed** to "Intel CPU compatibility (AMD instruction patch)" in the launcher's Compatibility
+  settings. It is the same setting (saved configurations and `--amd-cpu` keep working): on Intel CPUs it emulates the
+  PS5's AMD-only instructions (EXTRQ/INSERTQ) and AMD's `VRSQRTPS` results. It is not needed on AMD CPUs.
+- **Smaller fixes** ported from chenxiao07's fork: a clean process exit after a fatal error (no more unkillable
+  emulator processes), a faster guest memory search while streaming, and faster release shader translation.
+- **Level title text fixed** (fixed after the int16 pre-release): the level name is drawn as in int14 again.
+
+### int16.1 defaults and how to turn each off
+
+| Switch | Default | Off / old behaviour | What it does |
+| --- | --- | --- | --- |
+| `KYTY_GPU_OCCLUSION` (preset) | `0` (performance mode) | `1`, or the launcher's "Accurate occlusion queries" (`--gpu-occlusion on`) | Occlusion queries answered "visible" instead of counted on the GPU |
+| `KYTY_IMAGE_SYSMEM_FALLBACK` | on | `0` | Images that do not fit in video memory go to system memory |
+| `KYTY_APR_HASHED_IDS` | off | `1` restores the old hashed ids | One file id per file path |
+| `KYTY_FATAL_EXIT_PROCESS` | off | `1` restores the old exit path | Fatal errors end the process with TerminateProcess |
+| `KYTY_IR_VALIDATE` | off in release | `1` runs it | Shader IR validation |
+| `KYTY_AUDIO_DIAG` | on | `0` | Audio port open/close lines in the console (256 lines max) |
+| Audio volumes | master/main/music 100%, pad speaker on PC 30% | launcher sliders, or `KYTY_AUDIO_MASTER_VOLUME`, `KYTY_AUDIO_MAIN_VOLUME`, `KYTY_AUDIO_MUSIC_VOLUME`, `KYTY_AUDIO_PAD_SPEAKER_ON_MAIN_VOLUME` (percent, 0-200) | |
+
+Optional (off by default): `KYTY_WIDE_FILL_CLEAR=1`, `KYTY_GUEST_STORAGE_REPEAT=1`, `KYTY_READBACK_MERGE_GAP_KB=64`,
+and the test tool `KYTY_VRAM_LIMIT_MB=<MiB>` (imitates a smaller GPU).
+
 ## From int16
 
 - **Astro Bot without the "non RT patch":** the game's own tiled lighting, GI probes and ray traced shadows now run,
