@@ -6,9 +6,10 @@
   "Accurate occlusion queries" is on. A query could be ended twice and the counter then ran out of query slots; each
   query is now ended once, and a query left open or a full pool is recovered instead of closing the emulator.
   Performance mode (the default) was not affected.
-- **Stability:** deferred page re-protection (`KYTY_DEFER_PROTECTS`) is now off by default, after rare GPU device
-  losses on NVIDIA that appeared with int19. Players who want to test it can set it to `all` in `u59-preset.json`;
-  it was worth about 2% in Sky Garden.
+- **Known issue:** rare GPU device loss reports on NVIDIA are under investigation (none from players so far; seen
+  on the developer's RTX 3090). If the game stops with `ErrorDeviceLost`, set `KYTY_DEFER_PROTECTS=0` in
+  `u59-preset.json` as a workaround. If you can, reproduce it once with `KYTY_DEVICE_FAULT_DIAGNOSTICS=1` and Printf
+  output set to File, then attach `_kyty.txt` and the `_kyty` crash folder to an issue.
 - **Faster:** the release build's profile-guided optimisation profile was retrained on the int19 code (the old
   profile no longer matched 390 functions). Measured about +8% fps in Sky Garden on an RTX 3090 / Ryzen 9 7950X3D.
 
