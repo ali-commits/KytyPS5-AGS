@@ -241,7 +241,7 @@ From int5 (`u59-windows-20261003-int5`):
     and a peak since the start of 7.5 GB instead of 12.4 GB, with no measurable change in frame rate. With another
     process holding 12 GiB or 16 GiB of the card from boot, Astro Bot reaches the Sky Garden and runs at 32-33 fps
     there. Tested on NVIDIA only.
-- Release builds compile from the PGO profile's source path (`C:\kyty-src`). clang-cl names functions in anonymous
+- Release builds compile from the PGO profile's source path (`C:\kyty-src19`). clang-cl names functions in anonymous
   namespaces after a hash of the source path, so earlier GitHub builds missed the profile for all of them.
 - Draw-run batching (`KYTY_DRAW_RUN`, `KYTY_DRAW_RUN_ACQUIRE` and `KYTY_DRAW_RUN_PUSH`, on in the preset): a draw that
   continues the previous draw's structure (targets, programs, textures, samplers) is committed as a delta
@@ -346,10 +346,10 @@ Release with Ninja in an x64 Visual Studio developer shell, as in `.github/workf
 
 - Use clang-cl, lld-link and llvm-lib from LLVM 22.1.3: the profile needs the compiler version that recorded it.
   Standard-library code only matches it with the same MSVC headers (14.51, Visual Studio 2026 18.10).
-- Configure from `C:\kyty-src`, a directory junction to the checkout (`mklink /J C:\kyty-src <checkout>`, then
-  `cmake -S C:\kyty-src -B <new build directory>`). clang-cl names functions in anonymous namespaces after a hash
+- Configure from `C:\kyty-src19`, a directory junction to the checkout (`mklink /J C:\kyty-src19 <checkout>`, then
+  `cmake -S C:\kyty-src19 -B <new build directory>`). clang-cl names functions in anonymous namespaces after a hash
   of the source path, so a build from any other path loses their part of the profile.
-- Add `-DKYTY_EMULATOR_IPO=ON` and `-DKYTY_PGO_USE=C:/kyty-src/tools/pgo/u59-int9-sg-1.profdata`. Without
+- Add `-DKYTY_EMULATOR_IPO=ON` and `-DKYTY_PGO_USE=C:/kyty-src19/tools/pgo/u59-int19-sg-1.profdata`. Without
   `KYTY_PGO_USE` the build works, but without the profile's speedup.
 - Build `launcher` and `kyty_emulator`, install to `_Build/windows/install`, and copy `tools/u59-preset.json` beside
   `launcher.exe`.
