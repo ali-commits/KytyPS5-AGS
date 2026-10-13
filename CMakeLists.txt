@@ -1024,6 +1024,12 @@ add_executable(occlusion_pairs_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/Occlusi
 target_include_directories(occlusion_pairs_tests PRIVATE ${inc_headers})
 add_test(NAME occlusion_pairs COMMAND $<TARGET_FILE:occlusion_pairs_tests>)
 
+# The occlusion counter's query bookkeeping (occlusionQueryState.h): a scope left open and a full
+# pool are recovered, and a re-entrant end ends one query (rocket_hourglass exit, int19).
+add_executable(occlusion_query_state_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/OcclusionQueryStateTests.cpp")
+target_include_directories(occlusion_query_state_tests PRIVATE ${inc_headers})
+add_test(NAME occlusion_query_state COMMAND $<TARGET_FILE:occlusion_query_state_tests>)
+
 # Pure helpers of the texture/descriptor binding path; no Vulkan device is created.
 add_executable(binding_path_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/BindingPathTests.cpp"
@@ -2341,6 +2347,7 @@ if(BUILD_TESTING)
 		bit_array_tests
 		lod_stats_report_tests
 		occlusion_pairs_tests
+		occlusion_query_state_tests
 		game_patch_filter_tests
 		u59_preset_tests
 		lru_cache_tests

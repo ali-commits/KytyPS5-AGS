@@ -197,6 +197,8 @@ constexpr std::array<const char*, kFrameEventCount> kFrameEventNames {
     "FrameEvent.GpuRenderingEnds.Cumulative",
     "FrameEvent.GpuDrawWriteSinks.Cumulative",
     "FrameEvent.OcclusionScopesGated.Cumulative",
+    "FrameEvent.OcclusionUnendedScopes.Cumulative",
+    "FrameEvent.OcclusionCapacityDropped.Cumulative",
     "FrameEvent.DccGpuRecords.Cumulative",
     "FrameEvent.DccGpuReuses.Cumulative",
     "FrameEvent.DccCpuFallbacks.Cumulative",

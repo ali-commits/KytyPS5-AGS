@@ -35,6 +35,12 @@
 - **Fixes from chenxiao07's fork:** an image write-back no longer overwrites bytes the CPU wrote since (`KYTY_IMAGE_WRITEBACK_GUARD`),
   a CPU write keeps the GPU's other bytes of an image (`KYTY_IMAGE_GPU_KEEP`), invalid guest data is skipped instead
   of closing the emulator (`KYTY_SKIP_INVALID`), and the present thread no longer waits for the renderer's lock.
+- **Crash with accurate occlusion queries fixed (rocket_hourglass):** with "Accurate occlusion queries" on, the
+  emulator could close with `condition (m_active || m_pending >= QueryCapacity) is true in ... occlusion.cpp`. An
+  occlusion query was ended twice when a pending GPU barrier was recorded in the middle of it, so the query pool's
+  count skipped its clean-up point. Query commands no longer record pending barriers; should the counter ever find
+  a query left open or its pool full again, it ends the query or empties the pool (with one console line) instead
+  of closing the emulator. Performance mode (the default) was not affected.
 
 ## AMD GPUs
 

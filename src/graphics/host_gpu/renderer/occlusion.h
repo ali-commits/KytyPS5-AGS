@@ -3,6 +3,7 @@
 
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/occlusionPairs.h"
+#include "graphics/host_gpu/renderer/occlusionQueryState.h"
 #include "graphics/host_gpu/renderer/occlusionReset.h"
 #include <array>
 #include <atomic>
@@ -101,7 +102,7 @@ public:
 	[[nodiscard]] bool HasUnpublishedDumps() const noexcept {
 		return m_published.load(std::memory_order_acquire) != m_issued;
 	}
-	[[nodiscard]] bool Active() const noexcept { return m_active; }
+	[[nodiscard]] bool Active() const noexcept { return m_queries.Active(); }
 	// KYTY_OCCLUSION_LOG=<file> (diagnostics): while <file>.on exists, every dump ("D"), its
 	// publication ("P", the cumulative value) and every draw recorded while a dump pair is open
 	// ("d") are written to <file>. Pair results are P(end) - P(begin).
@@ -146,6 +147,11 @@ private:
 	uint64_t           m_pairs_dropped = 0;
 	bool m_gate_broken = false;
 	static constexpr uint32_t QueryCapacity = 1024;
+	// A query left open or a full pool found by Prepare (not expected since the query commands
+	// stopped flushing batched barriers): the query is ended / the pool reduced, with a console
+	// line once, instead of exiting. KYTY_OCCLUSION_STRICT=1 exits as before (development).
+	void RecoverBeforePrepare();
+	[[nodiscard]] static bool StrictState();
 	RenderContext& m_context;
 	vk::QueryPool m_pool;
 	vk::DescriptorSetLayout m_descriptors;
@@ -179,8 +185,7 @@ private:
 	uint64_t m_issued = 0;
 	std::atomic<uint64_t> m_published {0};
 	bool m_prepared = false;
-	bool m_active = false;
-	uint32_t m_pending = 0;
+	OcclusionQueryState m_queries {QueryCapacity}; // the open query, the ended ones awaiting reduction
 	uint32_t m_scopes_since_dump = 0; // hang-trace diagnostics only
 	struct ScopeInfo {
 		uint64_t depth_address = 0;
