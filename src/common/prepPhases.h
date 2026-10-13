@@ -6,8 +6,10 @@
 #include <atomic>
 #include <cstdint>
 
-#if defined(_M_X64) || defined(__x86_64__)
+#if defined(_MSC_VER)
 #include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
 #endif
 
 // KYTY_DRAW_PREP_PHASES=1 (measurement only, default off): the split of a draw-prep slot's
