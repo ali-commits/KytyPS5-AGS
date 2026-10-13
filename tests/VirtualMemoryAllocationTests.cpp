@@ -4024,8 +4024,8 @@ void TestPackedReciprocalSquareRoot() {
 	fpstate._xmm[8].element[2] = 0xdeadbeef;
 	fpstate._xmm[9].element[0] = 0xab;
 	emulate({0xf2, 0x45, 0x0f, 0x78, 0xc1, 8, 4}, 7); // insertq xmm8, xmm9, 8, 4
-	Check(test, fpstate._xmm[8].element[0] == 0x1ab1 && fpstate._xmm[8].element[2] == 0xdeadbeef,
-	      "SSE4a insertion corrupted its destination lanes");
+	Check(test, fpstate._xmm[8].element[0] == 0x1ab1 && fpstate._xmm[8].element[2] == 0,
+	      "SSE4a insertion corrupted its destination lanes or kept bits 127:64 (AMD CPUs zero them)");
 	std::array<uint32_t, 8> sha_source {0, 0, 0, 0, 5, 6, 7, 8};
 	context.uc_mcontext.gregs[REG_RDI] = reinterpret_cast<greg_t>(sha_source.data());
 	for (uint32_t lane = 0; lane < 4; ++lane) {
