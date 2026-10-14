@@ -1,0 +1,7 @@
+{
+  "game": "/path/to/Astro-Bot-PPSA21567-v1.018",
+  "emulator": "/path/to/installed/kyty_emulator",
+  "runtime": "/path/to/runtime-with-your-saves",
+  "preset": "/path/to/installed/u59-preset.json",
+  "profile": "/path/to/installed/_Patches/PPSA21567.json"
+}
