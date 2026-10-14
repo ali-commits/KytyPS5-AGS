@@ -71,40 +71,46 @@ public:
 	[[nodiscard]] Buffer& CounterBuffer();
 	// Records a report at the current command position. Must be outside rendering.
 	void Report(uint64_t destination, uint32_t size, uint32_t control);
+	// GPU-thread query. Completion/rewrite callbacks can still replace clean backing bytes.
+	// Conservatively count every outstanding copy in these modes, including no-destination copies.
+	[[nodiscard]] bool HasPendingWrites() const noexcept {
+		return PublishMode() != Publish::Record &&
+		       m_issued != m_completed.load(std::memory_order_acquire);
+	}
 
 private:
 	static constexpr uint32_t PublishSlots    = 32;
 	static constexpr uint64_t PublishSlotSize = 4096;
 
-	RenderContext&                         m_context;
-	std::unique_ptr<Buffer>                m_counters;
-	std::unique_ptr<Buffer>                m_publish;
-	std::array<uint64_t, PublishSlots>     m_slot_ticks {};
+	RenderContext&                     m_context;
+	std::unique_ptr<Buffer>            m_counters;
+	std::unique_ptr<Buffer>            m_publish;
+	std::array<uint64_t, PublishSlots> m_slot_ticks {};
 	// KYTY_LOD_STATS_PLAIN_VARIANT=verify.
-	void                                   CheckCanary(uint64_t slot_offset);
-	std::unique_ptr<Buffer>                m_canary;
-	std::unique_ptr<Buffer>                m_canary_publish;
-	bool                                   m_canary_ready = false;
-	std::atomic<uint64_t>                  m_canary_mismatches {0};
-	std::atomic<uint32_t>                  m_canary_logged {0};
-	uint64_t                               m_issued      = 0;
-	bool                                   m_initialized = false;
+	void                    CheckCanary(uint64_t slot_offset);
+	std::unique_ptr<Buffer> m_canary;
+	std::unique_ptr<Buffer> m_canary_publish;
+	bool                    m_canary_ready = false;
+	std::atomic<uint64_t>   m_canary_mismatches {0};
+	std::atomic<uint32_t>   m_canary_logged {0};
+	uint64_t                m_issued      = 0;
+	bool                    m_initialized = false;
 	// Publish::Rewrite / Publish::Record: the newest report packed from completed GPU counters,
 	// written when the next GET_LOD_STATS is recorded (Kyty writes EOP labels at record time).
-	std::mutex                             m_latest_mutex;
-	std::array<uint8_t, ReportSize>        m_latest {};
-	bool                                   m_has_latest = false;
-	std::array<uint32_t, Counters>         m_previous_finest = [] {
+	std::mutex                      m_latest_mutex;
+	std::array<uint8_t, ReportSize> m_latest {};
+	bool                            m_has_latest      = false;
+	std::array<uint32_t, Counters>  m_previous_finest = [] {
 		std::array<uint32_t, Counters> values {};
 		values.fill(LodStatsReport::Unsampled);
 		return values;
 	}();
-	std::array<uint32_t, Counters>         m_previous_count {};
+	std::array<uint32_t, Counters> m_previous_count {};
 	// Hang-trace diagnostics (lodreports.csv): summary of m_latest and completed copies.
-	uint32_t                               m_latest_sampled     = 0;
-	uint64_t                               m_latest_samples     = 0;
-	double                                 m_latest_mean_finest = 0.0;
-	std::atomic<uint64_t>                  m_completed {0};
+	uint32_t              m_latest_sampled     = 0;
+	uint64_t              m_latest_samples     = 0;
+	double                m_latest_mean_finest = 0.0;
+	std::atomic<uint64_t> m_completed {0};
 };
 
 } // namespace Libs::Graphics
