@@ -44,6 +44,7 @@ class InstallTests(unittest.TestCase):
             self.assertIn(str(prefix), (home/'.local/bin/kytyps5').read_text())
             self.assertIn('amd_cpu_mode=on',(state/'Kyty.ini').read_text())
             self.assertIn('shader_validation_enabled=false',(state/'Kyty.ini').read_text())
+            self.assertIn('printf_direction=Silent',(state/'Kyty.ini').read_text())
 
 
 if __name__ == '__main__':

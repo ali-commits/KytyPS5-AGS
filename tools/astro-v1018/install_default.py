@@ -82,7 +82,7 @@ def main():
         vblank_frequency='60', user_id='1000', user_name='Kyty',
         gpu_occlusion_accurate='false', shader_validation_enabled='false',
         vulkan_validation_enabled='false', shader_optimization_type='Performance',
-        present_mode='Mailbox', printf_direction='File', printf_output_file='_kyty.txt')
+        present_mode='Mailbox', printf_direction='Silent', printf_output_file='_kyty.txt')
     settings['GlobalConfiguration'].pop('amd_cpu_enabled', None)
     settings['MainDialog']['check_updates_on_startup'] = 'false'
     settings['Launcher']['game_dirs'] = str(game)
