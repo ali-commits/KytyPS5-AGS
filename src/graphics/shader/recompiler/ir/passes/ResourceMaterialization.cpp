@@ -51,6 +51,65 @@ bool SpecializationFail(std::string_view message) {
 	return false;
 }
 
+// KYTY_SPEC_UNMAPPED_NULL (default on; =0 off): a buffer V# the renderer would bind as empty
+// (base 0, no records, or a base outside every guest mapping: FindBuffers' ClampRangeSizeQuiet)
+// specializes as the null descriptor, as a V# with a non-zero type does. Its stride, swizzle,
+// ADD_TID and format bits cannot change what the shader reads (nothing) or writes (dropped), so
+// the garbage words a game leaves in a descriptor slot it only uses on a branch it does not take
+// no longer compile a new permutation per value (Astro Bot's [Performance] patches: a vertex
+// shader's atomic V# gave ~80 permutations in minutes). The probe answers exactly the binding's
+// question (is the base mapped), so a V# with a mapped base is never nulled. The decision is made
+// per materialization from the current words: the same slot holding a real V# later specializes
+// normally (a different key, so the null permutation is not reused for it).
+std::atomic<SrtMappedRange> g_unmapped_buffer_probe {nullptr};
+std::atomic<uint64_t>       g_unmapped_buffer_nulls {0};
+
+thread_local std::array<uint64_t, 16> t_mapped_blocks {}; // 64 KiB blocks seen mapped (+1)
+
+bool BufferBaseMapped(SrtMappedRange probe, uint64_t base, uint64_t size) {
+	const auto block = (base >> 16u) + 1u;
+	auto&      slot  = t_mapped_blocks[block & (t_mapped_blocks.size() - 1u)];
+	if (slot == block) {
+		return true;
+	}
+	if (!probe(base, size)) {
+		return false;
+	}
+	slot = block; // only positive verdicts are cached: a stale one keeps the V# (old behaviour)
+	return true;
+}
+
+// Whether the buffer descriptor must specialize (and bind) as null.
+bool NullBufferDescriptor(const ShaderBufferResource& descriptor, bool count = true) {
+	if (descriptor.Type() != 0) {
+		return true;
+	}
+	const auto probe = g_unmapped_buffer_probe.load(std::memory_order_relaxed);
+	if (probe == nullptr) {
+		return false;
+	}
+	const uint64_t base = descriptor.Base48();
+	const uint64_t size = descriptor.GetSize();
+	if (base != 0u && size != 0u && BufferBaseMapped(probe, base, size)) {
+		return false;
+	}
+	if ((descriptor.fields[0] | descriptor.fields[1] | descriptor.fields[2] | descriptor.fields[3]) == 0u) {
+		return false; // already the null descriptor
+	}
+	if (!count) {
+		return true;
+	}
+	const auto nulls = g_unmapped_buffer_nulls.fetch_add(1, std::memory_order_relaxed);
+	if (nulls < 8u) {
+		std::fprintf(stderr,
+		             "Kyty spec: buffer V# with unmapped base 0x%012" PRIx64
+		             " specialized as null (%08x %08x %08x %08x)%s\n",
+		             base, descriptor.fields[0], descriptor.fields[1], descriptor.fields[2],
+		             descriptor.fields[3], nulls == 7u ? "; further ones are counted only" : "");
+	}
+	return true;
+}
+
 Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
                                             Decoder::ImageDimension requested) {
 	const bool is_array = requested == Decoder::ImageDimension::Dim1DArray ||
@@ -571,13 +630,21 @@ private:
 template <typename Images>
 bool BuildSamplerPlan(const ShaderInfo& base, const Images& images, SamplerPlan& plan);
 
+void SetUnmappedBufferProbe(SrtMappedRange probe) {
+	g_unmapped_buffer_probe.store(probe, std::memory_order_relaxed);
+}
+
+uint64_t UnmappedBufferNulls() {
+	return g_unmapped_buffer_nulls.load(std::memory_order_relaxed);
+}
+
 static bool SpecializeBuffer(const BufferResource& buffer, DescriptorValue& descriptor_value,
                              ResourceSpecialization& specialization, uint32_t i) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(descriptor_value, descriptor)) {
 		return SpecializationFail(fmt::format("buffer descriptor {} has invalid width", i));
 	}
-	if (descriptor.Type() != 0) {
+	if (NullBufferDescriptor(descriptor)) {
 		descriptor_value.dwords.fill(0);
 		descriptor = {};
 	}
@@ -1275,8 +1342,15 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 				const auto& buffer = program.info.buffers[i];
 				if (!buffer.written || (!active.empty() && !active[buffer.source])) continue;
 				DescriptorValue strict;
-				if (!clean.EvaluateDescriptor(buffer.source, strict) ||
-				    strict != snapshot.buffers[i]) return false;
+				if (!clean.EvaluateDescriptor(buffer.source, strict)) return false;
+				if (fuse_buffers) {
+					// SpecializeBuffer nulled the snapshot's copy the same way.
+					ShaderBufferResource decoded;
+					if (DecodeBufferDescriptor(strict, decoded) && NullBufferDescriptor(decoded, false)) {
+						strict.dwords.fill(0);
+					}
+				}
+				if (strict != snapshot.buffers[i]) return false;
 			}
 		}
 	}

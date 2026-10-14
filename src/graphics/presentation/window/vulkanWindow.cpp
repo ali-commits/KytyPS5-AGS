@@ -29,6 +29,7 @@
 #include "graphics/presentation/window.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "kernel/memory.h"
 #include "libs/controller.h"
@@ -2044,6 +2045,13 @@ void WindowContext::CreateVulkan() {
 	graphic_ctx.submission_queue.Initialize(graphic_ctx);
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());
+	// KYTY_SPEC_UNMAPPED_NULL (default on): a V# the renderer binds as empty specializes as null.
+	if (const auto* env = std::getenv("KYTY_SPEC_UNMAPPED_NULL"); env == nullptr || std::strcmp(env, "0") != 0) {
+		ShaderRecompiler::IR::SetUnmappedBufferProbe([](uint64_t base, uint64_t size) {
+			// The question FindBuffers asks: a V# whose base no guest mapping holds binds as empty.
+			return LibKernel::Memory::ClampRangeSizeQuiet(base, size) != 0;
+		});
+	}
 	presenter = std::make_unique<Presenter>(*this);
 }
 
@@ -2069,6 +2077,7 @@ void WindowContext::RecreateSurface() {
 WindowContext::~WindowContext() {
 	ShutdownSystemOverlayInput();
 	presenter.reset();
+	ShaderRecompiler::IR::SetUnmappedBufferProbe(nullptr);
 	LibKernel::Memory::InstallGpuResources(nullptr);
 	render_context.reset();
 	graphic_ctx.submission_queue.Shutdown();

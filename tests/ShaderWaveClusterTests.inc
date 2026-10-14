@@ -381,4 +381,100 @@ void CheckGraphicsBufferAddTid() {
   std::printf("[codegen] %-32s ok\n", name);
 }
 
+// KYTY_SPEC_UNMAPPED_NULL: a V# the renderer would bind as empty (its base is in no guest mapping,
+// or base/records 0) specializes as null, so the garbage words a game leaves in an untaken
+// branch's descriptor slot do not create a permutation per value (Astro Bot's [Performance]
+// patches); a V# with a mapped base in the same slot specializes normally.
+namespace UnmappedNull {
+constexpr uint64_t MappedBase = 0x200000000ull, MappedSize = 0x100000ull;
+// The renderer's probe: whether the base lies in a mapping (ClampRangeSizeQuiet != 0).
+bool TestMapped(uint64_t address, uint64_t /*size*/) {
+  return address >= MappedBase && address - MappedBase < MappedSize;
+}
+} // namespace UnmappedNull
+
+void CheckUnmappedBufferNull() {
+  constexpr const char *name = "UnmappedBufferNull";
+  namespace IR = ShaderRecompiler::IR;
+  // buffer_atomic_umax v4, v0, s[0:3] idxen (the Astro Bot vertex shader's access); end.
+  std::vector<u32> code;
+  code.push_back(EncodeMubuf0(0x38u /* BUFFER_ATOMIC_UMAX (GFX10) */, 0, true, false));
+  code.push_back(EncodeMubuf1(4, 0, 0));
+  AppendEnd(&code);
+  ShaderPixelInputInfo pixel{};
+  pixel.input_num = 1;
+  pixel.ps_system_input_base = 2;
+  ShaderRecompiler::CompileOptions options;
+  options.stage = ShaderType::Pixel;
+  options.dump_ir = false;
+  options.wave_size = 64;
+  pixel.wave_size = 64;
+  options.input_info.pixel = &pixel;
+  std::array<u32, 64> user_data{};
+  user_data[3] = DstSel(4, 5, 6, 7) | (1u << 24u);
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(code, options);
+  const auto plan = IR::ExtractResourcePlan(translated.program);
+  Require(name, "buffer", plan.info.buffers.size() == 1u, "the atomic has no tracked buffer");
+  const auto materialize = [&](u32 w0, u32 w1, u32 w2, u32 w3, IR::ResourceSnapshot &resources) {
+    user_data[0] = w0;
+    user_data[1] = w1;
+    user_data[2] = w2;
+    user_data[3] = w3;
+    IR::ResourceSpecialization specialization;
+    const IR::SrtRuntime runtime{.user_data = user_data, .shader_base = reinterpret_cast<uint64_t>(code.data())};
+    Require(name, "materialization", IR::MaterializeResources(plan, runtime, resources, specialization),
+            "resources could not be materialized");
+    return specialization.buffers.at(0);
+  };
+  const auto word3 = [](bool add_tid, u32 index_stride) {
+    return DstSel(4, 5, 6, 7) | (1u << 24u) | (add_tid ? 1u << 23u : 0u) | (index_stride << 21u);
+  };
+  IR::SetUnmappedBufferProbe(UnmappedNull::TestMapped);
+  // Garbage V#s (unmapped 48-bit bases, random strides, swizzle, ADD_TID): one specialization.
+  std::set<std::tuple<u32, u32, bool>> garbage;
+  u32 seed = 0x3f4ade30u;
+  const auto next = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+  for (u32 i = 0; i < 64; i++) {
+    IR::ResourceSnapshot resources;
+    const u32 w0 = next(), w1 = (next() & 0xffff0000u) | 0x7000u /* base hi: far from the mapped range */;
+    const auto b = materialize(w0, w1, next(), word3((i & 1u) != 0u, i & 3u), resources);
+    garbage.insert({b.packed_stride, b.descriptor_swizzle, b.zero_stride_oob});
+    Require(name, "garbage snapshot", resources.buffers.at(0).dwords[0] == 0u &&
+            resources.buffers.at(0).dwords[3] == 0u, "a garbage V# kept its words for the binding");
+  }
+  Require(name, "garbage", garbage.size() == 1u && std::get<0>(*garbage.begin()) == 0u,
+          "unmapped garbage V#s specialized into more than one permutation");
+  // The same slot with a real, mapped V# (stride 4, ADD_TID): a normal specialization.
+  {
+    IR::ResourceSnapshot resources;
+    const auto b = materialize(static_cast<u32>(UnmappedNull::MappedBase), (4u << 16u) | 2u, 64, word3(true, 0), resources);
+    Require(name, "mapped", b.packed_stride == (4u | (1u << 20u)) && resources.buffers.at(0).dwords[1] != 0u,
+            "a mapped V# was nulled");
+  }
+  // Edge cases. Nulled (the binding is empty either way): a low base (Astro Bot's walk froze
+  // after a V# with base 0x107), an unmapped base whose range ends in mapped memory, an unmapped
+  // raw V# with no records. Kept: a mapped base whose range runs past the mapping (the binding
+  // clamps it), and everything with the switch off.
+  {
+    IR::ResourceSnapshot resources;
+    const auto low = materialize(0x107u, 0u, 0x108u, word3(true, 0), resources);
+    Require(name, "low base", low.packed_stride == 0u && resources.buffers.at(0).dwords[0] == 0u,
+            "an unmapped low-base V# was not nulled");
+    const u32 below = static_cast<u32>(UnmappedNull::MappedBase - 0x1000u);
+    const auto spans = materialize(below, (16u << 16u) | 1u, 0x1000u, word3(false, 0), resources);
+    Require(name, "spanning range", spans.packed_stride == 0u, "an unmapped base reaching mapped memory was kept");
+    const auto raw = materialize(0x12340000u, 0x00007000u, 0, word3(false, 0), resources);
+    Require(name, "raw records 0", raw.packed_stride == 0u && resources.buffers.at(0).dwords[0] == 0u,
+            "an unmapped raw V# with no records was not nulled");
+    const auto past = materialize(static_cast<u32>(UnmappedNull::MappedBase + UnmappedNull::MappedSize - 0x100u),
+                                  (8u << 16u) | 2u, 0x10000u, word3(false, 0), resources);
+    Require(name, "mapped base, long range", past.packed_stride == 8u, "a V# with a mapped base was nulled");
+    IR::SetUnmappedBufferProbe(nullptr);
+    const auto off = materialize(0x12340000u, (12u << 16u) | 0x7000u, 64, word3(false, 0), resources);
+    Require(name, "switch off", off.packed_stride == 12u, "the switch off still nulled a V#");
+  }
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 } // namespace WaveClusterTests

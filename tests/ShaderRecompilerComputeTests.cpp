@@ -56318,6 +56318,10 @@ int main(int argc, char **argv) {
     WaveClusterTests::CheckLdsWaitcntBarrierScope(nullptr);
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--unmapped-buffer-null-only") == 0) {
+    WaveClusterTests::CheckUnmappedBufferNull();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--graphics-add-tid-only") == 0) {
     WaveClusterTests::CheckGraphicsBufferAddTid();
     return 0;

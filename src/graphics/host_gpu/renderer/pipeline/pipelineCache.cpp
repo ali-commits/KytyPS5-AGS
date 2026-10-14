@@ -53,6 +53,7 @@
 #include <atomic>
 #include <bit>
 #include <cctype>
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -542,6 +543,54 @@ struct ProgramCompileTimes {
 	uint64_t load_ns   = 0;
 	bool     from_disk = false;
 };
+
+// Permutation churn report (stderr): once per second, the shaders that compiled new
+// specializations of an already compiled source in that second (not first compiles, prefetches or
+// journal replays), and once per shader when it reaches 8 such permutations, with the number of
+// V#s KYTY_SPEC_UNMAPPED_NULL has nulled so far. KYTY_SPEC_CHURN_LOG=0 turns it off.
+void NotePermutationChurn(uint64_t hash, size_t permutations) {
+	static const bool enabled = [] {
+		const auto* env = std::getenv("KYTY_SPEC_CHURN_LOG");
+		return env == nullptr || std::strcmp(env, "0") != 0;
+	}();
+	if (!enabled) return;
+	static std::mutex                                mutex;
+	static std::vector<std::pair<uint64_t, uint32_t>> window;
+	static std::unordered_set<uint64_t>              reported;
+	static auto                                      window_start = std::chrono::steady_clock::now();
+	std::string lines;
+	{
+		const std::lock_guard lock(mutex);
+		const auto now = std::chrono::steady_clock::now();
+		if (now - window_start >= std::chrono::seconds(1) && !window.empty()) {
+			lines += "Kyty new permutations (last 1 s):";
+			size_t shown = 0;
+			for (const auto& [h, n]: window) {
+				if (shown++ == 8) {
+					lines += fmt::format(" +{} more", window.size() - 8);
+					break;
+				}
+				lines += fmt::format(" {:016x}x{}", h, n);
+			}
+			lines += fmt::format(" (null V#s so far {})\n", ShaderRecompiler::IR::UnmappedBufferNulls());
+			window.clear();
+		}
+		if (window.empty()) window_start = now;
+		auto found = std::find_if(window.begin(), window.end(), [&](const auto& e) { return e.first == hash; });
+		if (found == window.end()) {
+			window.emplace_back(hash, 1u);
+		} else {
+			found->second++;
+		}
+		if (permutations >= 8 && reported.insert(hash).second) {
+			lines += fmt::format("Kyty spec churn: shader {:016x} has {} permutations (null V#s so far {})\n",
+			                     hash, permutations, ShaderRecompiler::IR::UnmappedBufferNulls());
+		}
+	}
+	if (!lines.empty()) {
+		std::fputs(lines.c_str(), stderr);
+	}
+}
 
 void RecordProgramCompile(const char* stage_name, uint64_t guest_hash, uint64_t id,
                           const ProgramCompileTimes& times, uint64_t total_ns,
@@ -3089,6 +3138,9 @@ struct PipelineCache::ProgramCache {
 		RecordProgramCompile(ProgramStageName(stage), params.hash, permutation.handle.id, times,
 		                     CompileClockNs() - stall.begin, detail);
 		CountCompiledPermutation(stage);
+		if (!replay && !speculative && !same_specialization && source->permutations.Size() > 1) {
+			NotePermutationChurn(params.hash, source->permutations.Size());
+		}
 		if (from_disk && DiskVerifyMode() == DiskVerify::Background) {
 			BackgroundCheck check;
 			check.stage                   = stage;

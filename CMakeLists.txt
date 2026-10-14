@@ -1283,6 +1283,9 @@ if(BUILD_TESTING)
 	# Buffer ADD_TID in vertex and pixel shaders (wave64, wave32, wave32 clusters): codegen only.
 	add_test(NAME graphics_buffer_add_tid
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --graphics-add-tid-only)
+	# KYTY_SPEC_UNMAPPED_NULL: garbage V#s with unmapped bases specialize as one null permutation.
+	add_test(NAME unmapped_buffer_null
+	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --unmapped-buffer-null-only)
 	# KYTY_LDS_DEVICE_BUFFER: compute LDS above the device limit (48 KiB in some Astro Bot shaders,
 	# 32 KiB on AMD) in a device buffer. The 48 KiB exchange natively, through the AMD limit
 	# (KYTY_LDS_LIMIT_OVERRIDE) and forced, in the harness and the renderer; and every shader case
