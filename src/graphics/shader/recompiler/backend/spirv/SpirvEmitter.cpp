@@ -222,6 +222,36 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 // KYTY_WAVE32_CLUSTERS: one log line per wave32 graphics program that shares a wider host subgroup
 // (AMD fragment and vertex waves are 64 wide), with its cross-lane operations, so a player's log
 // names the shaders whose wave-level code runs on clusters (Playroom cloud blocks, AMD test 2).
+// Once per graphics program whose buffer descriptors set ADD_TID (compute uses it routinely).
+void NoteGraphicsAddTid(const IR::Program& program, uint32_t lane_count, bool wave_clusters) {
+	uint32_t buffers = 0, swizzled = 0, stride = 0;
+	for (const auto& buffer: program.info.buffers) {
+		if ((buffer.packed_stride & (1u << 20u)) != 0u) {
+			buffers++;
+			swizzled += (buffer.packed_stride & (1u << 14u)) != 0u ? 1u : 0u;
+			stride = std::max(stride, buffer.packed_stride & 0x3fffu);
+		}
+	}
+	if (buffers == 0) {
+		return;
+	}
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> noted;
+	{
+		const std::lock_guard lock(mutex);
+		if (!noted.insert(program.shader_hash ^ (static_cast<uint64_t>(program.stage) << 60u)).second) {
+			return;
+		}
+	}
+	char text[256];
+	std::snprintf(text, sizeof(text),
+	              "Kyty buffer ADD_TID: stage %u shader 0x%016" PRIx64
+	              " wave%u, %u lane(s) per invocation%s: %u buffer(s), %u swizzled, max stride %u\n",
+	              static_cast<unsigned>(program.stage), program.shader_hash, program.wave_size,
+	              lane_count, wave_clusters ? ", wave32 clusters" : "", buffers, swizzled, stride);
+	Log::WriteToConsoleAndLog(text);
+}
+
 void NoteClusteredProgram(const IR::Program& program) {
 	static std::mutex                   mutex;
 	static std::unordered_set<uint64_t> noted;
@@ -322,9 +352,16 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					const auto bits = StorageBufferElementBits(program, memory);
 					requirements.buffer_u8 |= bits == 8u;
 					requirements.buffer_u16 |= bits == 16u;
+					// ADD_TID adds the lane's id within its wave to the index. BufferLane takes it from
+					// EmitSubgroupLocalInvocationId, the lane id every cross-lane op of the stage uses
+					// (wave64 halves, wave32 clusters). A wave64 vertex or pixel shader on a 32-wide
+					// host subgroup runs each 32 lanes as a wave of their own, so its lane is 0-31,
+					// the lane its LaneId (v_mbcnt) and shuffles see too. A hull shader's lane is its
+					// control-point invocation id (EmitLaneId), not a lane of the guest wave that packs several
+					// patches, so the guest address cannot be formed there.
 					if ((program.info.buffers[memory.resource].packed_stride & (1u << 20u)) != 0u) {
-						if (program.stage != ShaderType::Compute) {
-							Fail(program, "buffer ADD_TID is only valid for compute shaders");
+						if (program.stage == ShaderType::TessellationControl) {
+							Fail(program, "buffer ADD_TID in a hull shader has no guest wave lane");
 						}
 						requirements.subgroup_local_invocation_id = true;
 					}
@@ -575,6 +612,9 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	state.wave_clusters = state.lane_count == 1 && WaveClustersActive(program);
 	if (state.wave_clusters && program.stage != ShaderType::Compute) {
 		NoteClusteredProgram(program);
+	}
+	if (program.stage != ShaderType::Compute) {
+		NoteGraphicsAddTid(program, state.lane_count, state.wave_clusters);
 	}
 	DefineModule(state);
 	EmitProgram(state);

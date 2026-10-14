@@ -283,4 +283,102 @@ void CheckLdsWaitcntBarrierScope(VulkanHarness *vulkan) {
   std::printf("[%s] %-32s ok\n", vulkan != nullptr ? "compute" : "codegen", name);
 }
 
+// Buffer ADD_TID outside compute (Astro Bot's performance patches select a vertex shader whose
+// MUBUF loads set it; the emitter used to reject it). The index gets the lane id the stage's
+// cross-lane ops use: the host subgroup lane, the wave's own 32 lanes under clusters. Without
+// ADD_TID the lane id is not declared, so programs without it keep their SPIR-V.
+std::vector<u32> CompileAddTidVertex(const char *name, const std::vector<u32> &code,
+                                     const std::array<u32, 64> &data, u32 wave_size) {
+  namespace IR = ShaderRecompiler::IR;
+  const auto user_data = MakeNativeUserData(&data);
+  ShaderVertexInputInfo vertex{};
+  vertex.wave_size = wave_size;
+  ShaderRecompiler::CompileOptions options;
+  options.stage = ShaderType::Vertex;
+  options.dump_ir = false;
+  options.wave_size = wave_size;
+  options.input_info.vertex = &vertex;
+  options.user_data_base = 8;
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(code, options);
+  auto plan = IR::ExtractResourcePlan(translated.program);
+  IR::ResourceSnapshot resources;
+  IR::ResourceSpecialization specialization;
+  IR::SrtRuntime runtime{.user_data = options.user_data,
+                         .shader_base = reinterpret_cast<uint64_t>(code.data())};
+  Require(name, "resource materialization",
+          IR::MaterializeResources(plan, runtime, resources, specialization),
+          "vertex resources could not be materialized");
+  auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
+  Require(name, "SPIR-V emit", !result.spirv.empty(), "recompiler returned empty SPIR-V");
+  ValidateSpirv(name, result.spirv);
+  return std::move(result.spirv);
+}
+
+void CheckGraphicsBufferAddTid() {
+  constexpr const char *name = "GraphicsBufferAddTid";
+  // buffer_load_dword v0, off, s[n:n+3], 0 (index 0, plus the lane id with ADD_TID); export v0.
+  // The V# is the first user data: s0 in a pixel shader, s8 in a vertex (NGG) shader, whose
+  // s0-s7 are system registers.
+  const auto make_code = [](u32 target, u32 srsrc) {
+    std::vector<u32> code;
+    code.push_back(EncodeMubuf0(0x0cu, 0, false, false));
+    code.push_back(EncodeMubuf1(0, srsrc, 0));
+    code.push_back(EncodeExp0(target, 0xfu));
+    code.push_back(EncodeExp1(0, 0, 0, 0));
+    AppendEnd(&code);
+    return code;
+  };
+  const auto pixel = [&](bool add_tid, u32 wave_size) {
+    GraphicsCase test;
+    test.name = name;
+    test.fragment_code = make_code(0x00u, 0u);
+    test.user_data = MakeStructuredStorageBufferData(4, 64, add_tid);
+    test.has_user_data = true;
+    test.wave_size = wave_size;
+    return CompileFragmentCase(test).spirv;
+  };
+  const auto vertex = [&](bool add_tid, u32 wave_size) {
+    return CompileAddTidVertex(name, make_code(0x0cu, 2u),
+                               MakeStructuredStorageBufferData(4, 64, add_tid), wave_size);
+  };
+  const auto lane_ids = [](const std::vector<u32> &spirv) {
+    return CountSpirv(spirv, "BuiltIn SubgroupLocalInvocationId");
+  };
+  const Spirv::HostWaveClusters none{};
+  for (const u32 wave_size : {64u, 32u}) {
+    ScopedHostWaveClusters host(none);
+    ScopedCodegenOptions scoped(WithClusters(Wave32Clusters::Auto));
+    const auto label = "wave" + std::to_string(wave_size);
+    for (const bool is_pixel : {true, false}) {
+      const auto stage = std::string(is_pixel ? "pixel " : "vertex ") + label;
+      const auto with = is_pixel ? pixel(true, wave_size) : vertex(true, wave_size);
+      const auto without = is_pixel ? pixel(false, wave_size) : vertex(false, wave_size);
+      Require(name, stage.c_str(), lane_ids(with) == 1u,
+              "an ADD_TID load did not read the subgroup lane id");
+      Require(name, stage.c_str(), lane_ids(without) == 0u && without != with,
+              "a load without ADD_TID declared the subgroup lane id");
+    }
+  }
+  // Clusters (wave32 on a 64-wide host): the lane is masked to the wave's own 32 lanes first.
+  for (const bool is_pixel : {true, false}) {
+    std::vector<u32> plain, clustered;
+    {
+      ScopedHostWaveClusters host(none);
+      ScopedCodegenOptions scoped(WithClusters(Wave32Clusters::Off));
+      plain = is_pixel ? pixel(true, 32u) : vertex(true, 32u);
+    }
+    {
+      ScopedHostWaveClusters host(none);
+      ScopedCodegenOptions scoped(WithClusters(Wave32Clusters::Force));
+      clustered = is_pixel ? pixel(true, 32u) : vertex(true, 32u);
+    }
+    Require(name, is_pixel ? "pixel clusters" : "vertex clusters",
+            lane_ids(clustered) == 1u &&
+                CountSpirv(clustered, "OpBitwiseAnd") > CountSpirv(plain, "OpBitwiseAnd"),
+            "forced clusters did not mask the ADD_TID lane to the wave's 32 lanes");
+  }
+  std::printf("[codegen] %-32s ok\n", name);
+}
+
 } // namespace WaveClusterTests

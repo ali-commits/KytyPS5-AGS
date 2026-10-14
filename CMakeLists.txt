@@ -1280,6 +1280,9 @@ if(BUILD_TESTING)
 	add_test(NAME wave32_clusters_wave_branch
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --wave-branch-only)
 	set_tests_properties(wave32_clusters_shader_cases wave32_clusters_wave_branch PROPERTIES ENVIRONMENT "KYTY_WAVE32_CLUSTERS=force")
+	# Buffer ADD_TID in vertex and pixel shaders (wave64, wave32, wave32 clusters): codegen only.
+	add_test(NAME graphics_buffer_add_tid
+	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --graphics-add-tid-only)
 	# KYTY_LDS_DEVICE_BUFFER: compute LDS above the device limit (48 KiB in some Astro Bot shaders,
 	# 32 KiB on AMD) in a device buffer. The 48 KiB exchange natively, through the AMD limit
 	# (KYTY_LDS_LIMIT_OVERRIDE) and forced, in the harness and the renderer; and every shader case
