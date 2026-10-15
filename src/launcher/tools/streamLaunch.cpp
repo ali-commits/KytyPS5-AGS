@@ -1,3 +1,5 @@
+#include "../include/streamingProcess.h"
+
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
@@ -6,9 +8,11 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QSaveFile>
+#include <QSocketNotifier>
 #include <QTextStream>
 #include <QTimer>
 
+#include <chrono>
 #include <csignal>
 #ifdef __linux__
 #include <cerrno>
@@ -24,9 +28,43 @@ volatile std::sig_atomic_t stop_requested = 0;
 void                       OnSignal(int) {
 	stop_requested = 1;
 }
+#ifdef __linux__
+int GuardianMain(int argc, char** argv) {
+	if (argc != 7) return 2;
+	const int group = std::atoi(argv[2]);
+	const int host  = std::atoi(argv[3]);
+	const int owner = std::atoi(argv[4]);
+	const int ready = std::atoi(argv[5]);
+	if (group < 2 || group != ::getpgrp() || group == ::getpid()) return 2;
+	std::signal(SIGTERM, OnSignal);
+	std::signal(SIGINT, OnSignal);
+	if (::write(ready, "R", 1) != 1) return 2;
+	::close(ready);
+	while (!stop_requested && !StreamingProcess::Exited(host) && !StreamingProcess::Exited(owner)) {
+		pollfd watched[2] {{host, POLLIN, 0}, {owner, POLLIN, 0}};
+		::poll(watched, 2, 100);
+	}
+	// This live guardian reserves the PGID until normal completion or one
+	// atomic group SIGKILL. It must exclude itself from the completion test.
+	::kill(-group, SIGTERM);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+	while (StreamingProcess::GroupAlive(group, int(::getpid()))) {
+		if (std::chrono::steady_clock::now() >= deadline) {
+			::kill(-group, SIGKILL);
+			return 1;
+		}
+		::poll(nullptr, 0, 50);
+	}
+	::unlink(argv[6]);
+	return 0;
+}
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef __linux__
+	if (argc > 1 && std::strcmp(argv[1], "--guardian") == 0) return GuardianMain(argc, argv);
+#endif
 	QCoreApplication app(argc, argv);
 	const auto       fail = [](const QString& text) {
 		QTextStream(stderr) << "Kyty streaming: " << text << '\n';
@@ -53,6 +91,46 @@ int main(int argc, char** argv) {
 	const auto program = game.value("program").toString();
 	if (game.isEmpty() || !QFileInfo(program).isAbsolute() || !QFileInfo(program).isExecutable())
 		return fail("Catalog entry is missing or its emulator is unavailable.");
+	const auto nonce      = manifest.value("host_nonce").toString();
+	const auto owner_path = QFile::encodeName(manifest.value("host_owner_file").toString());
+	if (nonce.size() != 32 || qEnvironmentVariable("KYTY_STREAM_HOST_NONCE") != nonce ||
+	    owner_path.isEmpty())
+		return fail("Managed host ownership is missing.");
+	int host_pidfd = -1;
+	for (int attempt = 0; attempt < 100 && host_pidfd < 0; ++attempt) {
+		const int owner_file = ::open(owner_path.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+		if (owner_file >= 0) {
+			QFile       owner;
+			struct stat owner_info {};
+			if (::fstat(owner_file, &owner_info) != 0 || !S_ISREG(owner_info.st_mode) ||
+			    owner_info.st_uid != ::getuid() || (owner_info.st_mode & 0077) != 0 ||
+			    owner_info.st_size > 8192 ||
+			    !owner.open(owner_file, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+				::close(owner_file);
+				return fail("Invalid private host ownership file.");
+			}
+			const auto                 data = QJsonDocument::fromJson(owner.readAll()).object();
+			StreamingProcess::Identity identity;
+			bool                       parsed = false;
+			const auto start     = data.value("start_time").toString().toULongLong(&parsed);
+			const auto owner_pid = data.value("pid").toInteger();
+			if (data.value("nonce").toString() == nonce && parsed && owner_pid > 1 &&
+			    owner_pid <= std::numeric_limits<int>::max() &&
+			    StreamingProcess::ReadIdentity(int(owner_pid), &identity) &&
+			    identity.start == start &&
+			    identity.executable ==
+			        data.value("executable").toString().toLocal8Bit().toStdString())
+				host_pidfd = StreamingProcess::Open(identity);
+			if (data.value("nonce").toString() == nonce && host_pidfd < 0)
+				return fail("The managed host has already exited or changed identity.");
+		}
+		if (host_pidfd < 0) ::poll(nullptr, 0, 10);
+	}
+	if (host_pidfd < 0) return fail("Managed host ownership was not published in time.");
+	if (::getpgrp() != ::getpid() && ::setpgid(0, 0) != 0) {
+		::close(host_pidfd);
+		return fail("Cannot isolate the streaming game process group.");
+	}
 	const auto lock_path = QFile::encodeName(manifest.value("lock_file").toString());
 	const int  lock      = ::open(lock_path.constData(), O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
 	if (lock < 0 || ::fstat(lock, &info) != 0 || info.st_uid != ::getuid() ||
@@ -82,25 +160,87 @@ int main(int argc, char** argv) {
 			return fail("Invalid emulator argument.");
 		arguments.append(arg.toString());
 	}
-	const auto session_path = manifest.value("session_file").toString();
-	QProcess   child;
+	const auto                 session_path = manifest.value("session_file").toString();
+	StreamingProcess::Identity self;
+	if (!StreamingProcess::ReadIdentity(int(::getpid()), &self))
+		return fail("Cannot verify game supervisor identity.");
+	const int self_pidfd = StreamingProcess::Open(self);
+	if (self_pidfd < 0) return fail("Linux pidfd supervision is unavailable.");
+	int handshake[2];
+	if (::pipe2(handshake, O_CLOEXEC) != 0)
+		return fail("Cannot create guardian startup handshake.");
+	const auto executable  = QFile::encodeName(QCoreApplication::applicationFilePath());
+	const auto group_arg   = QByteArray::number(::getpgrp());
+	const auto host_arg    = QByteArray::number(host_pidfd);
+	const auto self_arg    = QByteArray::number(self_pidfd);
+	const auto ready_arg   = QByteArray::number(handshake[1]);
+	const auto session_arg = QFile::encodeName(session_path);
+	std::signal(SIGTERM, OnSignal);
+	std::signal(SIGINT, OnSignal);
+	const char* native_exe     = executable.constData();
+	const char* native_group   = group_arg.constData();
+	const char* native_host    = host_arg.constData();
+	const char* native_self    = self_arg.constData();
+	const char* native_ready   = ready_arg.constData();
+	const char* native_session = session_arg.constData();
+	// The guardian intentionally inherits this stream-lock FD until the entire
+	// owned game group is gone, even if its original wrapper dies first.
+	const pid_t guardian = ::fork();
+	if (guardian == 0) {
+		// Only async-signal-safe operations between fork and exec.
+		::close(handshake[0]);
+		::fcntl(host_pidfd, F_SETFD, 0);
+		::fcntl(self_pidfd, F_SETFD, 0);
+		::fcntl(handshake[1], F_SETFD, 0);
+		::execl(native_exe, native_exe, "--guardian", native_group, native_host, native_self,
+		        native_ready, native_session, static_cast<char*>(nullptr));
+		::_exit(127);
+	}
+	::close(handshake[1]);
+	::close(self_pidfd);
+	pollfd     ready {handshake[0], POLLIN, 0};
+	char       acknowledgement = 0;
+	const bool armed = guardian > 0 && ::poll(&ready, 1, 3000) > 0 &&
+	                   ::read(handshake[0], &acknowledgement, 1) == 1 && acknowledgement == 'R';
+	::close(handshake[0]);
+	if (!armed) return fail("Cannot arm the independent game guardian.");
+	StreamingProcess::Identity guardian_identity;
+	if (!StreamingProcess::ReadIdentity(int(guardian), &guardian_identity))
+		return fail("Game guardian exited before launch.");
+	QJsonObject session {
+	    {"pid", qint64(::getpid())},
+	    {"pgid", qint64(::getpgrp())},
+	    {"start_time", QString::number(qulonglong(self.start))},
+	    {"guardian_pid", qint64(guardian)},
+	    {"guardian_start_time", QString::number(qulonglong(guardian_identity.start))},
+	    {"host_nonce", nonce},
+	    {"game", app.arguments()[2]},
+	    {"phase", "starting"},
+	    {"width", qEnvironmentVariable("SUNSHINE_CLIENT_WIDTH")},
+	    {"height", qEnvironmentVariable("SUNSHINE_CLIENT_HEIGHT")},
+	    {"fps", qEnvironmentVariable("SUNSHINE_CLIENT_FPS")},
+	    {"client", qEnvironmentVariable("SUNSHINE_CLIENT_NAME")}};
+	const auto publish = [&] {
+		QSaveFile status(session_path);
+		return status.open(QIODevice::WriteOnly) &&
+		       status.setPermissions(QFile::ReadOwner | QFile::WriteOwner) &&
+		       status.write(QJsonDocument(session).toJson()) >= 0 && status.commit();
+	};
+	if (!publish()) return fail("Cannot publish private game ownership before launch.");
+	if (StreamingProcess::Exited(host_pidfd) || stop_requested)
+		return fail("Managed host exited before game launch.");
+	QProcess child;
 	child.setProcessChannelMode(QProcess::ForwardedChannels);
 	QObject::connect(&child, &QProcess::started, &app, [&] {
-		QJsonObject session {{"pid", qint64(::getpid())},
-		                     {"game", app.arguments()[2]},
-		                     {"width", qEnvironmentVariable("SUNSHINE_CLIENT_WIDTH")},
-		                     {"height", qEnvironmentVariable("SUNSHINE_CLIENT_HEIGHT")},
-		                     {"fps", qEnvironmentVariable("SUNSHINE_CLIENT_FPS")},
-		                     {"client", qEnvironmentVariable("SUNSHINE_CLIENT_NAME")}};
-		QSaveFile   status(session_path);
-		if (!status.open(QIODevice::WriteOnly) ||
-		    !status.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
-		    status.write(QJsonDocument(session).toJson()) < 0 || !status.commit()) {
-			QTextStream(stderr) << "Cannot publish private session diagnostics.\n";
-		}
+		session.insert("phase", "running");
+		publish();
+	});
+	QSocketNotifier host_death(host_pidfd, QSocketNotifier::Read, &app);
+	QObject::connect(&host_death, &QSocketNotifier::activated, &app, [&] {
+		host_death.setEnabled(false);
+		stop_requested = 1;
 	});
 	QObject::connect(&child, &QProcess::finished, &app, [&](int code, QProcess::ExitStatus status) {
-		QFile::remove(session_path);
 		app.exit(status == QProcess::NormalExit ? code : 1);
 	});
 	QObject::connect(&child, &QProcess::errorOccurred, &app, [&](QProcess::ProcessError error) {
@@ -109,24 +249,24 @@ int main(int argc, char** argv) {
 			app.exit(1);
 		}
 	});
-	std::signal(SIGTERM, OnSignal);
-	std::signal(SIGINT, OnSignal);
+	bool   stopping = false;
 	QTimer signal_timer;
 	signal_timer.setInterval(100);
 	QObject::connect(&signal_timer, &QTimer::timeout, &app, [&] {
-		if (stop_requested && child.state() != QProcess::NotRunning) {
+		if (stop_requested && !stopping) {
+			stopping       = true;
 			stop_requested = 0;
-			child.terminate();
+			::kill(-::getpgrp(), SIGTERM);
 			// Native teardown and the packaged guard's capture footer can take over three seconds.
 			QTimer::singleShot(6000, &child, [&] {
-				if (child.state() != QProcess::NotRunning) child.kill();
+				if (child.state() != QProcess::NotRunning) ::kill(-::getpgrp(), SIGKILL);
 			});
 		}
 	});
 	signal_timer.start();
 	child.start(program, arguments);
 	const int result = app.exec();
-	QFile::remove(session_path);
+	::close(host_pidfd);
 	::close(lock);
 	return result;
 #else

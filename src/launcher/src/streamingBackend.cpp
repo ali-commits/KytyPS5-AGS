@@ -1,5 +1,7 @@
 #include "streamingBackend.h"
 
+#include "streamingProcess.h"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -24,6 +26,7 @@ StreamingBackend::StreamingBackend(const QString& profile, QObject* parent)
 #ifdef __linux__
 	m_host.setChildProcessModifier([] { ::umask(0077); });
 #endif
+	connect(&m_host, &QProcess::started, this, &StreamingBackend::WriteHostIdentity);
 	connect(&m_host, &QProcess::readyReadStandardOutput, this,
 	        [this] { Log(QString::fromUtf8(m_host.readAllStandardOutput())); });
 	connect(&m_host, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
@@ -64,6 +67,8 @@ StreamingBackend::StreamingBackend(const QString& profile, QObject* parent)
 	connect(&m_audio, &StreamingAudio::Failed, this, &StreamingBackend::Fail);
 	connect(&m_audio, &StreamingAudio::Diagnostic, this, &StreamingBackend::Log);
 	connect(&m_audio, &StreamingAudio::Stopped, this, &StreamingBackend::TryFinishStop);
+	m_game_stop_poll.setInterval(100);
+	connect(&m_game_stop_poll, &QTimer::timeout, this, &StreamingBackend::DrainOwnedGames);
 	m_poll.setInterval(1500);
 	connect(&m_poll, &QTimer::timeout, this, &StreamingBackend::Refresh);
 	m_start_timeout.setSingleShot(true);
@@ -79,7 +84,8 @@ StreamingBackend::~StreamingBackend() {
 	disconnect(this, nullptr, nullptr, nullptr);
 	Stop();
 	const auto complete = [this] {
-		return m_tools.isEmpty() && m_host.state() == QProcess::NotRunning && m_audio.IsStopped();
+		return m_tools.isEmpty() && m_host.state() == QProcess::NotRunning && m_audio.IsStopped() &&
+		       !m_games_stopping;
 	};
 	if (!complete()) {
 		QEventLoop loop;
@@ -91,7 +97,7 @@ StreamingBackend::~StreamingBackend() {
 		connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
 		// Setup/cleanup commands have individual four-second deadlines; host
 		// termination and private audio-daemon shutdown are bounded as well.
-		timeout.start(25000);
+		timeout.start(40000);
 		loop.exec();
 	}
 	disconnect(&m_host, nullptr, this, nullptr);
@@ -254,6 +260,8 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 	m_error.clear();
 	m_version.clear();
 	m_settings = settings;
+	m_host_nonce = QUuid::createUuid().toString(QUuid::Id128);
+	m_host_executable.clear();
 	++m_generation;
 	SetState(State::Starting);
 	auto error = settings.Validate();
@@ -306,6 +314,8 @@ bool StreamingBackend::WriteConfiguration() {
 	                                                 QDir(m_runtime).filePath("emulator.lock"),
 	                                                 m_settings.resolution, m_settings.fps);
 	auto       actual_manifest = manifest;
+	actual_manifest.insert("host_nonce", m_host_nonce);
+	actual_manifest.insert("host_owner_file", QDir(m_runtime).filePath("host-owner.json"));
 	if (!m_audio.Server().isEmpty()) {
 		auto env = actual_manifest.value("environment").toObject();
 		env.insert("PULSE_SERVER", m_audio.Server());
@@ -352,6 +362,7 @@ void StreamingBackend::StartProcess() {
 	if (m_state != State::Starting) return;
 	m_host.setWorkingDirectory(m_profile);
 	auto environment = QProcessEnvironment::systemEnvironment();
+	environment.insert("KYTY_STREAM_HOST_NONCE", m_host_nonce);
 	if (!m_audio.Server().isEmpty()) environment.insert("PULSE_SERVER", m_audio.Server());
 	m_host.setProcessEnvironment(environment);
 	m_host.start(m_settings.backend, {QDir(m_profile).filePath("host.conf")});
@@ -368,7 +379,7 @@ void StreamingBackend::Stop() {
 	if (m_state == State::Stopped) return;
 	if (m_state == State::Stopping) {
 		CancelTools();
-		if (m_host.state() == QProcess::NotRunning) m_audio.Stop();
+		if (m_host.state() == QProcess::NotRunning && !m_games_stopping) AfterHostExit();
 		TryFinishStop();
 		return;
 	}
@@ -395,12 +406,99 @@ void StreamingBackend::Stop() {
 	m_api.Request("POST", "/api/apps/close", {},
 	              [terminate](const QJsonObject&, const QString&) { terminate(); });
 }
+void StreamingBackend::WriteHostIdentity() {
+	if (m_state != State::Starting) {
+		m_host.terminate();
+		return;
+	}
+#ifdef __linux__
+	StreamingProcess::Identity identity;
+	if (!StreamingProcess::ReadIdentity(int(m_host.processId()), &identity)) {
+		Fail("Cannot verify the managed host process identity.");
+		return;
+	}
+	m_host_executable = QString::fromLocal8Bit(identity.executable.c_str());
+	const QJsonObject owner {{"nonce", m_host_nonce},
+	                         {"pid", qint64(identity.pid)},
+	                         {"start_time", QString::number(qulonglong(identity.start))},
+	                         {"executable", m_host_executable}};
+	QString           error;
+	if (!StreamingCatalog::WritePrivate(QDir(m_runtime).filePath("host-owner.json"),
+	                                    QJsonDocument(owner).toJson(), &error))
+		Fail(error);
+#endif
+}
 void StreamingBackend::AfterHostExit() {
 	m_poll.stop();
 	m_start_timeout.stop();
 	m_refreshing = false;
 	m_api.Abort();
-	if (!m_runtime.isEmpty()) QFile::remove(QDir(m_runtime).filePath("session.json"));
+	if (!m_games_stopping) {
+		m_games_stopping = true;
+		Log("Managed host exited; draining owned game processes before private audio cleanup.");
+		m_game_stop_elapsed.start();
+		m_game_stop_poll.start();
+	}
+	DrainOwnedGames();
+}
+void StreamingBackend::DrainOwnedGames() {
+	if (!m_games_stopping) return;
+#ifdef __linux__
+	const auto nonce = m_host_nonce.toStdString();
+	const auto wrapper =
+	    QFileInfo(
+	        QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch"))
+	        .canonicalFilePath()
+	        .toLocal8Bit()
+	        .toStdString();
+	for (const auto& candidate: StreamingProcess::Processes()) {
+		if (m_game_pidfds.contains(candidate.pid) ||
+		    !StreamingProcess::HasNonce(candidate.pid, nonce))
+			continue;
+		StreamingProcess::Identity identity;
+		if (!StreamingProcess::ReadIdentity(candidate.pid, &identity)) continue;
+		// The host executable covers a fork stopped before exec; a game cannot
+		// spawn until the native wrapper has armed its host-death guardian.
+		if (identity.executable != wrapper &&
+		    identity.executable != m_host_executable.toLocal8Bit().toStdString())
+			continue;
+		const int pidfd = StreamingProcess::Open(identity, nonce);
+		if (pidfd < 0) continue;
+		m_game_pidfds.insert(identity.pid, pidfd);
+		if (identity.executable != wrapper) m_game_preexec_pids.insert(identity.pid);
+		if (identity.pgid > 1 && identity.pgid != ::getpgrp()) m_game_groups.insert(identity.pgid);
+		StreamingProcess::Signal(pidfd, SIGTERM);
+	}
+	bool alive = false;
+	for (auto it = m_game_pidfds.begin(); it != m_game_pidfds.end(); ++it) {
+		if (StreamingProcess::Exited(it.value())) continue;
+		alive = true;
+		if (m_game_stop_elapsed.elapsed() >= 6500 && m_game_preexec_pids.contains(it.key())) {
+			StreamingProcess::Identity current;
+			if (StreamingProcess::ReadIdentity(int(it.key()), &current) &&
+			    current.executable != wrapper)
+				StreamingProcess::Signal(it.value(), SIGKILL);
+		}
+		// Never individually kill the guardian: it reserves the owned PGID and
+		// atomically kills that complete group after its six-second grace.
+	}
+	for (qint64 group: m_game_groups) {
+		if (!StreamingProcess::GroupAlive(int(group))) continue;
+		alive = true;
+	}
+	if (alive) return;
+	for (int pidfd: m_game_pidfds)
+		::close(pidfd);
+#endif
+	m_game_pidfds.clear();
+	m_game_groups.clear();
+	m_game_preexec_pids.clear();
+	m_games_stopping = false;
+	m_game_stop_poll.stop();
+	if (!m_runtime.isEmpty()) {
+		QFile::remove(QDir(m_runtime).filePath("session.json"));
+		QFile::remove(QDir(m_runtime).filePath("host-owner.json"));
+	}
 	m_audio.Stop();
 	TryFinishStop();
 }
@@ -414,7 +512,7 @@ void StreamingBackend::CancelTools() {
 	}
 }
 void StreamingBackend::TryFinishStop() {
-	if (m_state != State::Stopping || !m_tools.isEmpty() ||
+	if (m_state != State::Stopping || m_games_stopping || !m_tools.isEmpty() ||
 	    m_host.state() != QProcess::NotRunning || !m_audio.IsStopped())
 		return;
 	m_lock.reset();

@@ -8,6 +8,7 @@ import shutil
 import signal
 import ssl
 import sys
+import subprocess
 import time
 
 root = pathlib.Path(__file__).parent
@@ -77,6 +78,21 @@ if "--creds-stdin" in sys.argv:
     sys.exit(0)
 if (root / "crash-host").exists():
     sys.exit(42)
+(root / "host-pid").write_text(str(os.getpid()))
+launch_file = root / "launch-game.json"
+if launch_file.exists():
+    launch = json.loads(launch_file.read_text())
+    command = [launch["wrapper"], str(pathlib.Path(sys.argv[1]).parent / "launch.json"), "supervised"]
+    if launch.get("stop_before_exec"):
+        child = os.fork()
+        if child == 0:
+            os.setsid()
+            os.kill(os.getpid(), signal.SIGSTOP)
+            os.execve(command[0], command, dict(os.environ))
+    else:
+        log = (root / "wrapper.log").open("ab")
+        child = subprocess.Popen(command, start_new_session=True, stdout=log, stderr=log).pid
+    (root / "wrapper-pid").write_text(str(child))
 shutil.copyfile(root / "cert.pem", config["cert"])
 shutil.copyfile(root / "key.pem", config["pkey"])
 

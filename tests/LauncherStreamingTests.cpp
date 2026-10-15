@@ -2,6 +2,7 @@
 #include "streamingAudio.h"
 #include "streamingBackend.h"
 #include "streamingCatalog.h"
+#include "streamingProcess.h"
 #include "streamingSettings.h"
 #include "streamingWidget.h"
 
@@ -24,10 +25,15 @@
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QUuid>
 #include <QtTest>
 
 #include <cmath>
 #include <cstring>
+#ifdef __linux__
+#include <signal.h>
+#include <unistd.h>
+#endif
 class LocalTlsServer: public QTcpServer {
 public:
 	QSslCertificate    certificate;
@@ -76,6 +82,16 @@ protected:
 	}
 };
 
+class FixtureGameGroup {
+public:
+	qint64 pid = 0;
+	~FixtureGameGroup() {
+#ifdef __linux__
+		if (pid > 1 && pid != ::getpgrp()) ::kill(-pid_t(pid), SIGKILL);
+#endif
+	}
+};
+
 class FixtureEnvironment {
 public:
 	explicit FixtureEnvironment(const QString& directory): m_path(qgetenv("PATH")) {
@@ -107,6 +123,44 @@ class LauncherStreamingTests: public QObject {
 		QFile file(path);
 		if (!file.open(QIODevice::WriteOnly)) return false;
 		return file.write(bytes) == bytes.size();
+	}
+	static bool AttachHostOwner(QJsonObject* manifest, const QString& directory) {
+#ifdef __linux__
+		StreamingProcess::Identity identity;
+		if (!StreamingProcess::ReadIdentity(int(QCoreApplication::applicationPid()), &identity))
+			return false;
+		const auto nonce = QUuid::createUuid().toString(QUuid::Id128);
+		const auto owner = QDir(directory).filePath("owner.json");
+		QString    error;
+		if (!StreamingCatalog::WritePrivate(
+		        owner,
+		        QJsonDocument(
+		            QJsonObject {{"nonce", nonce},
+		                         {"pid", qint64(identity.pid)},
+		                         {"start_time", QString::number(qulonglong(identity.start))},
+		                         { "executable",
+			                       QString::fromLocal8Bit(identity.executable.c_str()) }})
+		            .toJson(),
+		        &error))
+			return false;
+		manifest->insert("host_nonce", nonce);
+		manifest->insert("host_owner_file", owner);
+		return true;
+#else
+		return false;
+#endif
+	}
+	static void HostEnvironment(QProcess* process, const QJsonObject& manifest) {
+		auto environment = QProcessEnvironment::systemEnvironment();
+		environment.insert("KYTY_STREAM_HOST_NONCE", manifest.value("host_nonce").toString());
+		process->setProcessEnvironment(environment);
+	}
+	static bool ProcessRunning(qint64 pid) {
+		if (pid < 2) return false;
+		const auto stat  = Read(QStringLiteral("/proc/%1/stat").arg(pid));
+		const auto close = stat.lastIndexOf(") ");
+		return close >= 0 && stat.size() > close + 2 && stat[close + 2] != 'Z' &&
+		       stat[close + 2] != 'X';
 	}
 	static int FreeBasePort() {
 		for (int port = 50000; port < 64000; port += 37)
@@ -430,6 +484,251 @@ private slots:
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 5000);
 	}
+	void ownerDeathStopsWholeGameGroup_data() {
+		QTest::addColumn<bool>("kill_wrapper");
+		QTest::newRow("managed-host-sigkill") << false;
+		QTest::newRow("wrapper-sigkill") << true;
+	}
+	void ownerDeathStopsWholeGameGroup() {
+#ifdef __linux__
+		QFETCH(bool, kill_wrapper);
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		const auto         guard     = dir.filePath("guard.py");
+		const auto         pids_file = dir.filePath("game-pids.json");
+		QVERIFY(Put(guard, R"PY(import json, os, pathlib, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(["/usr/bin/sleep", "60"])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"guard":os.getpid(), "descendant":child.pid}))
+while True: time.sleep(0.05)
+)PY"));
+		const auto wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		QVERIFY(Put(dir.filePath("launch-game.json"), QJsonDocument(QJsonObject {{
+			                                              "wrapper",
+			                                              wrapper
+		                                              }}).toJson()));
+		StreamingBackend backend(dir.filePath("profile"));
+		FixtureGameGroup cleanup;
+		backend.SetCatalog(
+		    {{ "supervised",
+			   "Game",
+			   "/usr/bin/python3",
+			   {guard, pids_file},
+			   dir.path() }});
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(pids_file), 3000);
+		cleanup.pid = QString::fromUtf8(Read(dir.filePath("wrapper-pid"))).trimmed().toLongLong();
+		const auto pids       = QJsonDocument::fromJson(Read(pids_file)).object();
+		const auto guard_pid  = pids.value("guard").toInteger();
+		const auto descendant = pids.value("descendant").toInteger();
+		const auto host_pid =
+		    QString::fromUtf8(Read(dir.filePath("host-pid"))).trimmed().toLongLong();
+		QVERIFY(cleanup.pid > 1 && host_pid > 1 && guard_pid > 1 && descendant > 1);
+		QCOMPARE(::kill(pid_t(kill_wrapper ? cleanup.pid : host_pid), SIGKILL), 0);
+		QTest::qWait(200);
+		QVERIFY(QFile::exists(dir.filePath("profile/launcher.lock")));
+		QVERIFY(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size() > 0);
+		if (!kill_wrapper) QCOMPARE(backend.GetState(), StreamingBackend::State::Stopping);
+		QTRY_VERIFY_WITH_TIMEOUT(!ProcessRunning(guard_pid) && !ProcessRunning(descendant) &&
+		                             !ProcessRunning(cleanup.pid),
+		                         9000);
+		if (!kill_wrapper) {
+			QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Error, 3000);
+			QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+			QVERIFY(!QFile::exists(dir.filePath("profile/launcher.lock")));
+			QFile::remove(dir.filePath("launch-game.json"));
+			backend.Start(settings);
+			QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		}
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 5000);
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
+	void hostDeathBeforeWrapperExecCannotLaunchAnUnmanagedGame() {
+#ifdef __linux__
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		const auto         wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		QVERIFY(
+		    Put(dir.filePath("launch-game.json"), QJsonDocument(QJsonObject {{"wrapper", wrapper},
+		                                                                     { "stop_before_exec",
+			                                                                   true }})
+		                                              .toJson()));
+		StreamingBackend backend(dir.filePath("profile"));
+		FixtureGameGroup cleanup;
+		backend.SetCatalog(
+		    {{ "supervised",
+			   "Game",
+			   "/usr/bin/touch",
+			   {dir.filePath("game-was-launched")},
+			   dir.path() }});
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		cleanup.pid = QString::fromUtf8(Read(dir.filePath("wrapper-pid"))).trimmed().toLongLong();
+		const auto host_pid =
+		    QString::fromUtf8(Read(dir.filePath("host-pid"))).trimmed().toLongLong();
+		QVERIFY(cleanup.pid > 1 && host_pid > 1);
+		QVERIFY(!QFile::exists(QFileInfo(backend.Socket()).dir().filePath("session.json")));
+		QCOMPARE(::kill(pid_t(host_pid), SIGKILL), 0);
+		QTest::qWait(200);
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopping);
+		QVERIFY(QFile::exists(dir.filePath("profile/launcher.lock")));
+		::kill(pid_t(cleanup.pid), SIGCONT);
+		QTRY_VERIFY_WITH_TIMEOUT(!ProcessRunning(cleanup.pid), 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Error, 3000);
+		QVERIFY(!QFile::exists(dir.filePath("game-was-launched")));
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
+	void forgedSessionRecordCannotKillForeignProcessGroup_data() {
+		QTest::addColumn<bool>("foreign_wrapper");
+		QTest::newRow("foreign-sleep-group") << false;
+		QTest::newRow("foreign-wrapper-with-different-nonce") << true;
+	}
+	void forgedSessionRecordCannotKillForeignProcessGroup() {
+#ifdef __linux__
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		QProcess           foreign;
+		QFETCH(bool, foreign_wrapper);
+		foreign.setChildProcessModifier([] { ::setsid(); });
+		if (foreign_wrapper) {
+			const StreamingLaunchEntry game {
+			    "foreign", "Foreign", "/usr/bin/sleep", {"60"}, dir.path()};
+			auto manifest =
+			    StreamingCatalog::Manifest({game}, dir.filePath("foreign.sock"), "Private",
+			                               dir.filePath("foreign.lock"), "Native", 60);
+			manifest.insert("session_file", dir.filePath("foreign-session.json"));
+			QVERIFY(AttachHostOwner(&manifest, dir.path()));
+			QString error;
+			QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("foreign-launch.json"),
+			                                       QJsonDocument(manifest).toJson(), &error));
+			HostEnvironment(&foreign, manifest);
+			foreign.start(
+			    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch"),
+			    {dir.filePath("foreign-launch.json"), "foreign"});
+		} else
+			foreign.start("/usr/bin/sleep", {"60"});
+		QVERIFY(foreign.waitForStarted(1000));
+		if (foreign_wrapper)
+			QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath("foreign-session.json")), 2000);
+		StreamingBackend  backend(dir.filePath("profile"));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		const auto        nonce = QJsonDocument::fromJson(Read(dir.filePath("profile/launch.json")))
+		                              .object()
+		                              .value("host_nonce");
+		const QJsonObject forged {{"pid", foreign.processId()},
+		                          {"pgid", foreign.processId()},
+		                          {"guardian_pid", foreign.processId()},
+		                          {"host_nonce", nonce},
+		                          {"start_time", "stale-or-forged"}};
+		QString           error;
+		QVERIFY(StreamingCatalog::WritePrivate(
+		    QFileInfo(backend.Socket()).dir().filePath("session.json"),
+		    QJsonDocument(forged).toJson(), &error));
+		const auto host_pid =
+		    QString::fromUtf8(Read(dir.filePath("host-pid"))).trimmed().toLongLong();
+		QCOMPARE(::kill(pid_t(host_pid), SIGKILL), 0);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Error, 5000);
+		QVERIFY(ProcessRunning(foreign.processId()));
+		foreign.terminate();
+		QVERIFY(foreign.waitForFinished(2000));
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
+	void wrapperRejectsDeadOrStaleHostBeforeLockOrGame_data() {
+		QTest::addColumn<bool>("dead_host");
+		QTest::newRow("host-already-dead") << true;
+		QTest::newRow("stale-start-time") << false;
+	}
+	void wrapperRejectsDeadOrStaleHostBeforeLockOrGame() {
+#ifdef __linux__
+		QFETCH(bool, dead_host);
+		QTemporaryDir dir;
+		QProcess      owner;
+		owner.start("/usr/bin/sleep", {"60"});
+		QVERIFY(owner.waitForStarted(1000));
+		StreamingProcess::Identity identity;
+		QVERIFY(StreamingProcess::ReadIdentity(int(owner.processId()), &identity));
+		const StreamingLaunchEntry game {
+		    "dead", "Game", "/usr/bin/touch", {dir.filePath("game-was-launched")}, dir.path()};
+		auto manifest = StreamingCatalog::Manifest({game}, dir.filePath("frames.sock"), "Private",
+		                                           dir.filePath("game.lock"), "Native", 60);
+		manifest.insert("session_file", dir.filePath("session.json"));
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
+		const QJsonObject record {
+		    {"nonce", manifest.value("host_nonce")},
+		    {"pid", qint64(identity.pid)},
+		    {"start_time", QString::number(qulonglong(identity.start + (dead_host ? 0 : 1)))},
+		    { "executable",
+			  QString::fromLocal8Bit(identity.executable.c_str()) }};
+		QString error;
+		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("owner.json"),
+		                                       QJsonDocument(record).toJson(), &error));
+		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
+		                                       QJsonDocument(manifest).toJson(), &error));
+		if (dead_host) {
+			owner.terminate();
+			QVERIFY(owner.waitForFinished(1000));
+		}
+		QProcess wrapper;
+		HostEnvironment(&wrapper, manifest);
+		wrapper.start(
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch"),
+		    {dir.filePath("launch.json"), "dead"});
+		QVERIFY(wrapper.waitForFinished(3000));
+		QCOMPARE(wrapper.exitCode(), 1);
+		QVERIFY(wrapper.readAllStandardError().contains("already exited or changed identity"));
+		QVERIFY(!QFile::exists(dir.filePath("game-was-launched")));
+		QVERIFY(!QFile::exists(dir.filePath("game.lock")));
+		QVERIFY(!QFile::exists(dir.filePath("session.json")));
+		if (!dead_host) {
+			QVERIFY(ProcessRunning(owner.processId()));
+			owner.terminate();
+			QVERIFY(owner.waitForFinished(1000));
+		}
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
 	void hostLifecycleUsesRealAsyncApiAndRestartsAfterFailure() {
 		QTemporaryDir dir;
 		QVERIFY(GenerateCertificate(dir.path()));
@@ -527,9 +826,11 @@ private slots:
 		                               dir.filePath("game.lock"), "1440p", 60);
 		manifest.insert("session_file", dir.filePath("session.json"));
 		QString error;
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
 		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
 		                                       QJsonDocument(manifest).toJson(), &error));
 		QProcess launch;
+		HostEnvironment(&launch, manifest);
 		launch.start(wrapper, {dir.filePath("launch.json"), "game1"});
 		QVERIFY(launch.waitForFinished(5000));
 		QCOMPARE(launch.exitCode(), 0);
@@ -539,26 +840,29 @@ private slots:
 		QCOMPARE(output.value("driver").toString(), QString("pulseaudio"));
 		QCOMPARE(output.value("width").toString(), QString("2560"));
 		QVERIFY(!QFile::exists(dir.filePath("NEVER")));
-		QVERIFY(!QFile::exists(dir.filePath("session.json")));
+		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 		game.program   = "/usr/bin/sleep";
 		game.arguments = {"10"};
 		manifest       = StreamingCatalog::Manifest({game}, dir.filePath("frames.sock"), "private",
 		                                            dir.filePath("game.lock"), "Native", 30);
 		manifest.insert("session_file", dir.filePath("session.json"));
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
 		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
 		                                       QJsonDocument(manifest).toJson(), &error));
 		QProcess first;
+		HostEnvironment(&first, manifest);
 		first.start(wrapper, {dir.filePath("launch.json"), "game1"});
 		QVERIFY(first.waitForStarted(1000));
 		QTRY_VERIFY(QFile::exists(dir.filePath("session.json")));
 		QProcess second;
+		HostEnvironment(&second, manifest);
 		second.start(wrapper, {dir.filePath("launch.json"), "game1"});
 		QVERIFY(second.waitForFinished(2000));
 		QCOMPARE(second.exitCode(), 1);
 		QVERIFY(second.readAllStandardError().contains("already running"));
 		first.terminate();
 		QVERIFY(first.waitForFinished(5000));
-		QVERIFY(!QFile::exists(dir.filePath("session.json")));
+		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 	}
 	void launchWrapperAllowsGuardToFinishCaptureMetadata() {
 		QTemporaryDir dir;
@@ -588,9 +892,11 @@ while True:
 		                               dir.filePath("game.lock"), "Native", 60);
 		manifest.insert("session_file", dir.filePath("session.json"));
 		QString error;
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
 		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
 		                                       QJsonDocument(manifest).toJson(), &error));
 		QProcess launch;
+		HostEnvironment(&launch, manifest);
 		launch.start(wrapper, {dir.filePath("launch.json"), "guard"});
 		QVERIFY(launch.waitForStarted(1000));
 		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(ready), 3000);
@@ -598,7 +904,7 @@ while True:
 		QVERIFY(launch.waitForFinished(7000));
 		QCOMPARE(Read(ended), QByteArray("capture complete"));
 		QCOMPARE(launch.exitCode(), 0);
-		QVERIFY(!QFile::exists(dir.filePath("session.json")));
+		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 	}
 	void portPreflightDetectsConflict() {
 		const int base = FreeBasePort();

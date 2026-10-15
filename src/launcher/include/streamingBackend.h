@@ -5,7 +5,9 @@
 #include "streamingCatalog.h"
 #include "streamingSettings.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
+#include <QMap>
 #include <QProcess>
 #include <QSet>
 #include <QTimer>
@@ -51,6 +53,8 @@ private:
 	bool    WriteConfiguration();
 	void    StartProcess();
 	void    AfterHostExit();
+	void    WriteHostIdentity();
+	void    DrainOwnedGames();
 	void    CancelTools();
 	void    TryFinishStop();
 	void    PublishCatalog();
@@ -71,5 +75,13 @@ private:
 	bool                        m_failed     = false;
 	int                         m_generation = 0;
 	QSet<QProcess*>             m_tools;
+	QString                     m_host_nonce;
+	QString                     m_host_executable;
+	QTimer                      m_game_stop_poll;
+	QElapsedTimer               m_game_stop_elapsed;
+	QMap<qint64, int>           m_game_pidfds;
+	QSet<qint64>                m_game_groups;
+	QSet<qint64>                m_game_preexec_pids;
+	bool                        m_games_stopping = false;
 };
 #endif
