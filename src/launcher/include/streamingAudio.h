@@ -18,6 +18,7 @@ public:
 	QString     Sink() const { return m_sink; }
 	QString     Device() const { return m_device; }
 	QString     Server() const { return m_server; }
+	bool        IsStopped() const { return m_stop_complete; }
 	void        SetPactl(const QString& program) { m_pactl = program; }
 	static bool IsOwnedModule(const QString& arguments, const QString& sink, bool loopback);
 signals:
@@ -52,5 +53,8 @@ private:
 	bool                           m_isolated   = false;
 	bool                           m_unloading  = false;
 	int                            m_generation = 0;
+	bool                           m_stop_complete  = true;
+	bool                           m_sink_attempted = false;
+	bool                           m_loop_attempted = false;
 };
 #endif

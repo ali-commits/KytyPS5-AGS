@@ -49,6 +49,9 @@ void StreamingAudio::Command(const QStringList&                    arguments,
 		if (m_active == process) m_active = nullptr;
 		process->deleteLater();
 		done(success, output);
+		// A pending setup command must advance an already-requested stop on every
+		// completion path, including failure before its callback reaches Stop().
+		if (m_stopping && !m_stop_complete && !m_active && !m_unloading) Stop();
 	};
 	connect(process, &QProcess::finished, this, [finish](int code, QProcess::ExitStatus status) {
 		finish(code == 0 && status == QProcess::NormalExit);
@@ -65,6 +68,9 @@ void StreamingAudio::Start(bool monitor) {
 		return;
 	}
 	++m_generation;
+	m_stop_complete  = false;
+	m_sink_attempted = false;
+	m_loop_attempted = false;
 	m_stopping       = false;
 	m_unloading      = false;
 	m_isolated       = false;
@@ -91,6 +97,7 @@ void StreamingAudio::Start(bool monitor) {
 	});
 }
 void StreamingAudio::CreateSink(bool monitor) {
+	m_sink_attempted = true;
 	Command(
 	    {"load-module", "module-null-sink", "sink_name=" + m_sink, "rate=48000", "channels=2",
 	     "format=float32le",
@@ -242,6 +249,7 @@ void StreamingAudio::VerifyRoute(bool monitor) {
 			emit Ready();
 			return;
 		}
+		m_loop_attempted = true;
 		Command({"load-module", "module-loopback", "source=" + m_sink + ".monitor",
 		         "sink=" + m_original_sink, "latency_msec=35"},
 		        [this](bool loaded, const QByteArray& output) {
@@ -260,11 +268,12 @@ void StreamingAudio::VerifyRoute(bool monitor) {
 	});
 }
 void StreamingAudio::Stop() {
+	if (m_stop_complete) return;
 	if (!m_stopping) ++m_generation;
 	m_stopping = true;
 	if (m_active || m_unloading) return;
 	m_unloading = true;
-	if (m_sink_module.isEmpty() && m_loop_module.isEmpty()) {
+	if (!m_sink_attempted && !m_loop_attempted) {
 		StopDaemons();
 		return;
 	}
@@ -275,10 +284,12 @@ void StreamingAudio::Stop() {
 				const auto module    = value.toObject();
 				const auto id        = QString::number(module.value("index").toInt(-1));
 				const auto arguments = module.value("argument").toString();
-				if (id == m_loop_module && module.value("name") == "module-loopback" &&
+				if (m_loop_attempted && (m_loop_module.isEmpty() || id == m_loop_module) &&
+				    module.value("name") == "module-loopback" &&
 				    IsOwnedModule(arguments, m_sink, true))
 					m_unload.prepend(id);
-				if (id == m_sink_module && module.value("name") == "module-null-sink" &&
+				if (m_sink_attempted && (m_sink_module.isEmpty() || id == m_sink_module) &&
+				    module.value("name") == "module-null-sink" &&
 				    IsOwnedModule(arguments, m_sink, false))
 					m_unload.append(id);
 			}
@@ -312,7 +323,8 @@ void StreamingAudio::StopDaemons() {
 	FinishStop();
 }
 void StreamingAudio::FinishStop() {
-	if (!m_stopping || (m_private_policy && m_private_policy->state() != QProcess::NotRunning) ||
+	if (m_stop_complete || !m_stopping ||
+	    (m_private_policy && m_private_policy->state() != QProcess::NotRunning) ||
 	    (m_private_server && m_private_server->state() != QProcess::NotRunning))
 		return;
 	if (m_private_policy) {
@@ -330,5 +342,8 @@ void StreamingAudio::FinishStop() {
 	m_isolated    = false;
 	m_unloading   = false;
 	m_environment = QProcessEnvironment::systemEnvironment();
+	m_sink_attempted = false;
+	m_loop_attempted = false;
+	m_stop_complete  = true;
 	emit Stopped();
 }

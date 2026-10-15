@@ -5,22 +5,38 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import ssl
 import sys
+import time
 
 root = pathlib.Path(__file__).parent
+if pathlib.Path(sys.argv[0]).name != "pactl" and (root / "ignore-termination").exists():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if pathlib.Path(sys.argv[0]).name == "pactl":
     path = root / "modules.json"
     modules = json.loads(path.read_text()) if path.exists() else []
     args = sys.argv[1:]
     with (root / "pactl-commands.jsonl").open("a") as file:
         file.write(json.dumps(args) + "\n")
+    behavior_path = root / "pactl-behavior.json"
+    behavior = json.loads(behavior_path.read_text()) if behavior_path.exists() else {}
+    prefix = behavior.get("prefix", [])
+    delayed = bool(prefix) and args[:len(prefix)] == prefix and (not behavior.get("after_load") or bool(modules))
+    def finish_command():
+        if delayed:
+            (root / "command-pending").write_text(json.dumps({"pid": os.getpid(), "args": args}))
+            time.sleep(behavior.get("delay", 0.35))
+            if behavior.get("fail"):
+                sys.exit(1)
     if args == ["get-default-sink"]:
+        finish_command()
         print(os.environ.get("KYTY_FIXTURE_DEFAULT_SINK", "original_sink"))
     elif args[:1] == ["load-module"]:
         index = max([item["index"] for item in modules] + [4100]) + 1
         modules.append({"index": index, "name": args[1], "argument": " ".join(args[2:])})
         path.write_text(json.dumps(modules))
+        finish_command()
         print(index)
     elif args == ["--format=json", "list", "modules"]:
         print(json.dumps(modules))
@@ -32,6 +48,9 @@ if pathlib.Path(sys.argv[0]).name == "pactl":
     sys.exit(0)
 
 if "--kyty-capabilities" in sys.argv:
+    if (root / "capability-delay").exists():
+        (root / "capability-active").write_text(str(os.getpid()))
+        time.sleep(float((root / "capability-delay").read_text()))
     print(json.dumps({"protocol_version": 1, "capture": "kyty", "gpu_transport": "vulkan-buffer-fd", "private_audio": True, "private_input": True, "credentials_stdin": True, "version": "Test host 1"}))
     sys.exit(0)
 config = {}
@@ -42,6 +61,18 @@ for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
 if "--creds-stdin" in sys.argv:
     credentials = json.loads(sys.stdin.readline())
     assert credentials["username"] and len(credentials["password"]) >= 32
+    active = root / "credential-active"
+    if active.exists():
+        try:
+            os.kill(int(active.read_text()), 0)
+            (root / "credential-overlap").write_text("yes")
+        except (ProcessLookupError, ValueError):
+            pass
+    active.write_text(str(os.getpid()))
+    if (root / "credential-delay").exists():
+        time.sleep(float((root / "credential-delay").read_text()))
+    if active.exists() and active.read_text() == str(os.getpid()):
+        active.unlink()
     (root / "stdin-credentials-used").write_text("yes")
     sys.exit(0)
 if (root / "crash-host").exists():

@@ -7,6 +7,7 @@
 
 #include <QJsonArray>
 #include <QProcess>
+#include <QSet>
 #include <QTimer>
 
 #include <memory>
@@ -50,6 +51,8 @@ private:
 	bool    WriteConfiguration();
 	void    StartProcess();
 	void    AfterHostExit();
+	void    CancelTools();
+	void    TryFinishStop();
 	void    PublishCatalog();
 	void    ApiError(const QString& error);
 	void    SetState(State state);
@@ -67,5 +70,6 @@ private:
 	bool                        m_local_game = false, m_refreshing = false, m_catalog_dirty = false;
 	bool                        m_failed     = false;
 	int                         m_generation = 0;
+	QSet<QProcess*>             m_tools;
 };
 #endif

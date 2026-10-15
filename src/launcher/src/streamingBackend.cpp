@@ -31,13 +31,14 @@ StreamingBackend::StreamingBackend(const QString& profile, QObject* parent)
 			Fail("Cannot start the streaming helper: " + m_host.errorString());
 	});
 	connect(&m_host, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-		if (m_state != State::Stopping && m_state != State::Error) {
+		if (m_state != State::Stopping) {
 			m_failed = true;
 			m_error  = QStringLiteral(
 			               "Streaming helper exited (code %1). Check diagnostics before restarting.")
 			               .arg(code);
-		}
-		AfterHostExit();
+			Stop();
+		} else
+			AfterHostExit();
 	});
 	connect(&m_audio, &StreamingAudio::Ready, this, [this] {
 		if (m_state != State::Starting) {
@@ -62,13 +63,7 @@ StreamingBackend::StreamingBackend(const QString& profile, QObject* parent)
 	});
 	connect(&m_audio, &StreamingAudio::Failed, this, &StreamingBackend::Fail);
 	connect(&m_audio, &StreamingAudio::Diagnostic, this, &StreamingBackend::Log);
-	connect(&m_audio, &StreamingAudio::Stopped, this, [this] {
-		m_lock.reset();
-		m_session.clear();
-		m_pairings = {};
-		m_clients  = {};
-		SetState(m_failed ? State::Error : State::Stopped);
-	});
+	connect(&m_audio, &StreamingAudio::Stopped, this, &StreamingBackend::TryFinishStop);
 	m_poll.setInterval(1500);
 	connect(&m_poll, &QTimer::timeout, this, &StreamingBackend::Refresh);
 	m_start_timeout.setSingleShot(true);
@@ -79,32 +74,32 @@ StreamingBackend::StreamingBackend(const QString& profile, QObject* parent)
 	});
 }
 StreamingBackend::~StreamingBackend() {
+	// Keep the internal completion handlers alive while shutdown drains. In
+	// particular, pactl may already have created a module whose ID is in flight.
+	disconnect(this, nullptr, nullptr, nullptr);
+	Stop();
+	const auto complete = [this] {
+		return m_tools.isEmpty() && m_host.state() == QProcess::NotRunning && m_audio.IsStopped();
+	};
+	if (!complete()) {
+		QEventLoop loop;
+		QTimer     timeout;
+		timeout.setSingleShot(true);
+		connect(this, &StreamingBackend::Changed, &loop, [&] {
+			if (complete()) loop.quit();
+		});
+		connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+		// Setup/cleanup commands have individual four-second deadlines; host
+		// termination and private audio-daemon shutdown are bounded as well.
+		timeout.start(25000);
+		loop.exec();
+	}
 	disconnect(&m_host, nullptr, this, nullptr);
 	disconnect(&m_audio, nullptr, this, nullptr);
-	m_poll.stop();
-	m_start_timeout.stop();
-	++m_generation;
-	m_api.Abort();
-	for (auto* process: findChildren<QProcess*>()) {
-		process->disconnect(this);
+	for (auto* process: m_tools.values()) {
 		process->kill();
 		process->waitForFinished(1000);
 	}
-	if (m_host.state() != QProcess::NotRunning) {
-		m_host.terminate();
-		if (!m_host.waitForFinished(2000)) {
-			m_host.kill();
-			m_host.waitForFinished(1000);
-		}
-	}
-	QEventLoop loop;
-	QTimer     timeout;
-	timeout.setSingleShot(true);
-	connect(&m_audio, &StreamingAudio::Stopped, &loop, &QEventLoop::quit);
-	connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-	timeout.start(9000);
-	m_audio.Stop();
-	if (!m_audio.Sink().isEmpty()) loop.exec();
 }
 void StreamingBackend::SetState(State state) {
 	m_state = state;
@@ -122,6 +117,7 @@ void StreamingBackend::Tool(const QString& program, const QStringList& arguments
                             const QByteArray& input) {
 	const int generation = m_generation;
 	auto*     process    = new QProcess(this);
+	m_tools.insert(process);
 #ifdef __linux__
 	process->setChildProcessModifier([] { ::umask(0077); });
 #endif
@@ -133,8 +129,10 @@ void StreamingBackend::Tool(const QString& program, const QStringList& arguments
 		*completed = true;
 		timeout->stop();
 		const auto output = process->readAllStandardOutput();
+		m_tools.remove(process);
 		process->deleteLater();
-		if (generation == m_generation) done(ok, output);
+		if (generation == m_generation && m_state != State::Stopping) done(ok, output);
+		TryFinishStop();
 	};
 	connect(timeout, &QTimer::timeout, process, [process] { process->kill(); });
 	connect(process, &QProcess::finished, this, [finish](int code, QProcess::ExitStatus status) {
@@ -143,7 +141,11 @@ void StreamingBackend::Tool(const QString& program, const QStringList& arguments
 	connect(process, &QProcess::errorOccurred, this, [finish](QProcess::ProcessError error) {
 		if (error == QProcess::FailedToStart) finish(false);
 	});
-	connect(process, &QProcess::started, this, [process, input] {
+	connect(process, &QProcess::started, this, [this, process, input, generation] {
+		if (m_state == State::Stopping || generation != m_generation) {
+			process->kill();
+			return;
+		}
 		if (!input.isEmpty()) process->write(input);
 		process->closeWriteChannel();
 	});
@@ -363,13 +365,20 @@ void StreamingBackend::Fail(const QString& error) {
 	Stop();
 }
 void StreamingBackend::Stop() {
-	if (m_state == State::Stopped || m_state == State::Stopping) return;
+	if (m_state == State::Stopped) return;
+	if (m_state == State::Stopping) {
+		CancelTools();
+		if (m_host.state() == QProcess::NotRunning) m_audio.Stop();
+		TryFinishStop();
+		return;
+	}
 	++m_generation;
 	m_poll.stop();
 	m_start_timeout.stop();
 	m_api.Abort();
 	m_refreshing = false;
 	SetState(State::Stopping);
+	CancelTools();
 	if (m_host.state() == QProcess::NotRunning) {
 		AfterHostExit();
 		return;
@@ -393,6 +402,26 @@ void StreamingBackend::AfterHostExit() {
 	m_api.Abort();
 	if (!m_runtime.isEmpty()) QFile::remove(QDir(m_runtime).filePath("session.json"));
 	m_audio.Stop();
+	TryFinishStop();
+}
+void StreamingBackend::CancelTools() {
+	for (auto* process: m_tools.values()) {
+		if (process->state() == QProcess::NotRunning) continue;
+		process->terminate();
+		QTimer::singleShot(1000, process, [process] {
+			if (process->state() != QProcess::NotRunning) process->kill();
+		});
+	}
+}
+void StreamingBackend::TryFinishStop() {
+	if (m_state != State::Stopping || !m_tools.isEmpty() ||
+	    m_host.state() != QProcess::NotRunning || !m_audio.IsStopped())
+		return;
+	m_lock.reset();
+	m_session.clear();
+	m_pairings = {};
+	m_clients  = {};
+	SetState(m_failed ? State::Error : State::Stopped);
 }
 void StreamingBackend::Refresh() {
 	if (m_refreshing || (m_state != State::Starting && m_state != State::Ready) ||

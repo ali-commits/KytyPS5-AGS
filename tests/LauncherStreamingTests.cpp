@@ -68,6 +68,17 @@ protected:
 	}
 };
 
+class FixtureEnvironment {
+public:
+	explicit FixtureEnvironment(const QString& directory): m_path(qgetenv("PATH")) {
+		qputenv("PATH", QFile::encodeName(directory) + ':' + m_path);
+	}
+	~FixtureEnvironment() { qputenv("PATH", m_path); }
+
+private:
+	QByteArray m_path;
+};
+
 class LauncherStreamingTests: public QObject {
 	Q_OBJECT
 	static bool GenerateCertificate(const QString& dir) {
@@ -261,6 +272,117 @@ private slots:
 		QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 7000);
 		QVERIFY(audio.Server().isEmpty());
 		QCOMPARE(default_sink(), before);
+	}
+	void stopDuringFailedAudioCommand_data() {
+		QTest::addColumn<QStringList>("prefix");
+		QTest::addColumn<bool>("after_load");
+		QTest::newRow("default-query") << QStringList {"get-default-sink"} << false;
+		QTest::newRow("sink-created-without-id")
+		    << QStringList {"load-module", "module-null-sink"} << false;
+		QTest::newRow("verify-default") << QStringList {"get-default-sink"} << true;
+		QTest::newRow("loopback-created-without-id")
+		    << QStringList {"load-module", "module-loopback"} << false;
+	}
+	void stopDuringFailedAudioCommand() {
+		QFETCH(QStringList, prefix);
+		QFETCH(bool, after_load);
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		QVERIFY(Put(dir.filePath("pactl-behavior.json"),
+		            QJsonDocument(QJsonObject {{"prefix", QJsonArray::fromStringList(prefix)},
+		                                       {"after_load", after_load},
+		                                       {"delay", 0.35},
+		                                       {"fail", true}})
+		                .toJson()));
+		StreamingBackend  backend(dir.filePath("profile"));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend.Start(settings);
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath("command-pending")), 3000);
+		backend.Stop();
+		QTRY_VERIFY_WITH_TIMEOUT(backend.GetState() != StreamingBackend::State::Stopping, 2000);
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+		QFile::remove(dir.filePath("pactl-behavior.json"));
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 5000);
+	}
+	void closeDuringModuleCreationCapturesIdAndCleansUp() {
+		QTemporaryDir dir;
+		const auto    fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		QVERIFY(Put(
+		    dir.filePath("pactl-behavior.json"),
+		    QJsonDocument(QJsonObject {{"prefix", QJsonArray {"load-module", "module-null-sink"}},
+		                               {"delay", 0.35}})
+		        .toJson()));
+		auto              backend = std::make_unique<StreamingBackend>(dir.filePath("profile"));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend->Start(settings);
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath("command-pending")), 3000);
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 1);
+		backend.reset();
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+		QVERIFY(!QFile::exists(dir.filePath("profile/launcher.lock")));
+	}
+	void stopReapsStartupToolsBeforeUnlocking_data() {
+		QTest::addColumn<QString>("stage");
+		QTest::newRow("capability-helper") << QString("capability");
+		QTest::newRow("credential-writer") << QString("credential");
+	}
+	void stopReapsStartupToolsBeforeUnlocking() {
+		QFETCH(QString, stage);
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		QVERIFY(Put(dir.filePath(stage + "-delay"), "2.0"));
+		QVERIFY(Put(dir.filePath("ignore-termination"), "yes"));
+		StreamingBackend  backend(dir.filePath("profile"));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		backend.Start(settings);
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath(stage + "-active")), 3000);
+		const auto pid = QString::fromUtf8(Read(dir.filePath(stage + "-active"))).trimmed();
+		QVERIFY(!pid.isEmpty());
+		backend.Stop();
+		QTest::qWait(100);
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopping);
+		QVERIFY(QFile::exists(dir.filePath("profile/launcher.lock")));
+		QVERIFY(QFileInfo::exists("/proc/" + pid));
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 5000);
+		QVERIFY2(!QFileInfo::exists("/proc/" + pid),
+		         "Startup helper was still alive after profile unlock");
+		QVERIFY(!QFile::exists(dir.filePath("profile/launcher.lock")));
+		QFile::remove(dir.filePath(stage + "-delay"));
+		QFile::remove(dir.filePath("ignore-termination"));
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		QVERIFY(!QFile::exists(dir.filePath("credential-overlap")));
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 5000);
 	}
 	void hostLifecycleUsesRealAsyncApiAndRestartsAfterFailure() {
 		QTemporaryDir dir;
