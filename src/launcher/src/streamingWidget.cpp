@@ -1,0 +1,360 @@
+#include "streamingWidget.h"
+
+#include "streamingBackend.h"
+#include "streamingCatalog.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QClipboard>
+#include <QComboBox>
+#include <QDir>
+#include <QFileDialog>
+#include <QFormLayout>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QIntValidator>
+#include <QJsonObject>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QNetworkInterface>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSettings>
+#include <QSpinBox>
+#include <QVBoxLayout>
+
+StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
+    : QWidget(parent), m_backend(backend) {
+	setObjectName("streamingWidget");
+	QSettings  file(QDir(backend->Profile()).filePath("streaming.ini"), QSettings::IniFormat);
+	const auto settings = StreamingSettings::Read(file);
+	auto*      outer    = new QVBoxLayout(this);
+	auto*      scroll   = new QScrollArea(this);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	auto* content = new QWidget(scroll);
+	auto* layout  = new QVBoxLayout(content);
+	layout->setSpacing(14);
+	outer->addWidget(scroll);
+	scroll->setWidget(content);
+	auto* title = new QLabel(tr("Game-only streaming"), content);
+	auto  font  = title->font();
+	font.setPointSize(font.pointSize() + 4);
+	font.setBold(true);
+	title->setFont(font);
+	layout->addWidget(title);
+	auto* description =
+	    new QLabel(tr("Host your Kyty library for Moonlight. Video comes from the game before "
+	                  "local window scaling; only private game audio is captured."),
+	               content);
+	description->setWordWrap(true);
+	layout->addWidget(description);
+	auto* host      = new QGroupBox(tr("Host"), content);
+	auto* host_form = new QFormLayout(host);
+	auto* path_row  = new QHBoxLayout;
+	m_path          = new QLineEdit(settings.backend, host);
+	m_path->setObjectName("streamBackendPath");
+	path_row->addWidget(m_path);
+	m_browse = new QPushButton(tr("Browse…"), host);
+	path_row->addWidget(m_browse);
+	host_form->addRow(tr("Streaming helper"), path_row);
+	m_version = new QLabel(tr("Version checked when hosting starts"), host);
+	m_version->setWordWrap(true);
+	host_form->addRow(tr("Backend"), m_version);
+	auto* address_row = new QHBoxLayout;
+	m_address         = new QComboBox(host);
+	m_address->setObjectName("streamLanAddress");
+	m_address->setMinimumContentsLength(18);
+	address_row->addWidget(m_address, 1);
+	auto* copy = new QPushButton(tr("Copy address"), host);
+	address_row->addWidget(copy);
+	host_form->addRow(tr("Moonlight address"), address_row);
+	auto* actions = new QHBoxLayout;
+	m_start       = new QPushButton(tr("Start hosting"), host);
+	m_start->setObjectName("streamStart");
+	m_start->setDefault(false);
+	m_stop = new QPushButton(tr("Stop hosting"), host);
+	m_stop->setObjectName("streamStop");
+	m_status = new QLabel(host);
+	m_status->setObjectName("streamStatus");
+	m_status->setWordWrap(true);
+	actions->addWidget(m_start);
+	actions->addWidget(m_stop);
+	actions->addWidget(m_status, 1);
+	host_form->addRow(actions);
+	m_error = new QLabel(host);
+	m_error->setObjectName("streamError");
+	m_error->setWordWrap(true);
+	m_error->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	host_form->addRow(m_error);
+	layout->addWidget(host);
+	m_quality          = new QGroupBox(tr("Capture and delivery preferences"), content);
+	auto* quality_form = new QFormLayout(m_quality);
+	auto* profile_row  = new QHBoxLayout;
+	m_resolution       = new QComboBox(m_quality);
+	m_resolution->setObjectName("streamResolution");
+	m_resolution->addItems({"Native", "1080p", "1440p"});
+	m_resolution->setCurrentText(settings.resolution);
+	profile_row->addWidget(m_resolution);
+	m_fps = new QComboBox(m_quality);
+	m_fps->setObjectName("streamFps");
+	m_fps->addItem("30 FPS", 30);
+	m_fps->addItem("60 FPS", 60);
+	m_fps->setCurrentIndex(settings.fps == 30 ? 0 : 1);
+	profile_row->addWidget(m_fps);
+	m_bitrate = new QSpinBox(m_quality);
+	m_bitrate->setObjectName("streamBitrate");
+	m_bitrate->setRange(5, 100);
+	m_bitrate->setSuffix(" Mbps");
+	m_bitrate->setValue(settings.bitrate);
+	profile_row->addWidget(m_bitrate);
+	m_codec = new QComboBox(m_quality);
+	m_codec->setObjectName("streamCodec");
+	m_codec->addItems({"HEVC", "H264"});
+	m_codec->setCurrentText(settings.codec);
+	profile_row->addWidget(m_codec);
+	quality_form->addRow(tr("Preferred output"), profile_row);
+	auto* hint =
+	    new QLabel(tr("Capture resolution scales the exported game image, not the game’s internal "
+	                  "rendering. Moonlight chooses the encoded resolution/FPS; match its settings "
+	                  "to the capture target. Bitrate is the host’s maximum."),
+	               m_quality);
+	hint->setWordWrap(true);
+	quality_form->addRow(hint);
+	m_adapter = new QLineEdit(settings.adapter, m_quality);
+	m_adapter->setObjectName("streamAdapter");
+	m_adapter->setPlaceholderText(tr("Automatic NVIDIA device (RTX 3090)"));
+	quality_form->addRow(tr("NVENC adapter name"), m_adapter);
+	m_port = new QSpinBox(m_quality);
+	m_port->setObjectName("streamPort");
+	m_port->setRange(1024, 65514);
+	m_port->setValue(settings.port);
+	quality_form->addRow(tr("GameStream base port"), m_port);
+	m_monitor = new QCheckBox(tr("Also play game audio on this computer"), m_quality);
+	m_monitor->setObjectName("streamLocalAudio");
+	m_monitor->setChecked(settings.local_audio);
+	quality_form->addRow(m_monitor);
+	m_save = new QPushButton(tr("Save preferences"), m_quality);
+	quality_form->addRow(m_save);
+	layout->addWidget(m_quality);
+	auto* sessions       = new QGroupBox(tr("Session"), content);
+	auto* session_layout = new QHBoxLayout(sessions);
+	m_session            = new QLabel(sessions);
+	m_session->setWordWrap(true);
+	session_layout->addWidget(m_session, 1);
+	m_close = new QPushButton(tr("Stop game"), sessions);
+	session_layout->addWidget(m_close);
+	layout->addWidget(sessions);
+	auto* devices     = new QHBoxLayout;
+	auto* pairing     = new QGroupBox(tr("Pending pairing requests"), content);
+	auto* pair_layout = new QVBoxLayout(pairing);
+	m_pending         = new QListWidget(pairing);
+	m_pending->setObjectName("streamPending");
+	m_pending->setMaximumHeight(110);
+	pair_layout->addWidget(m_pending);
+	auto* pairing_hint = new QLabel(tr("Add this host in Moonlight, select the request, then enter "
+	                                   "the PIN shown by that client."),
+	                                pairing);
+	pairing_hint->setWordWrap(true);
+	pair_layout->addWidget(pairing_hint);
+	auto* pair_form = new QFormLayout;
+	m_pin           = new QLineEdit(pairing);
+	m_pin->setObjectName("streamPin");
+	m_pin->setMaxLength(4);
+	m_pin->setEchoMode(QLineEdit::Password);
+	m_pin->setValidator(new QIntValidator(0, 9999, m_pin));
+	m_pin->setPlaceholderText("0000");
+	pair_form->addRow(tr("PIN"), m_pin);
+	m_name = new QLineEdit(pairing);
+	m_name->setObjectName("streamClientName");
+	m_name->setMaxLength(128);
+	m_name->setPlaceholderText(tr("Living-room TV"));
+	pair_form->addRow(tr("Client name"), m_name);
+	pair_layout->addLayout(pair_form);
+	m_pair = new QPushButton(tr("Pair selected client"), pairing);
+	m_pair->setObjectName("streamPair");
+	pair_layout->addWidget(m_pair);
+	devices->addWidget(pairing, 1);
+	auto* clients        = new QGroupBox(tr("Paired clients"), content);
+	auto* clients_layout = new QVBoxLayout(clients);
+	m_clients            = new QListWidget(clients);
+	m_clients->setObjectName("streamClients");
+	clients_layout->addWidget(m_clients);
+	m_forget = new QPushButton(tr("Forget selected client"), clients);
+	m_forget->setObjectName("streamUnpair");
+	clients_layout->addWidget(m_forget);
+	devices->addWidget(clients, 1);
+	layout->addLayout(devices);
+	auto* logs        = new QGroupBox(tr("Diagnostics"), content);
+	auto* logs_layout = new QVBoxLayout(logs);
+	m_logs            = new QPlainTextEdit(logs);
+	m_logs->setObjectName("streamLogs");
+	m_logs->setReadOnly(true);
+	m_logs->setMaximumBlockCount(500);
+	m_logs->setMinimumHeight(100);
+	m_logs->setMaximumHeight(170);
+	logs_layout->addWidget(m_logs);
+	auto* private_path =
+	    new QLabel(tr("Private profile: %1\nManagement: HTTPS on 127.0.0.1 only (base port + 1)")
+	                   .arg(backend->Profile()),
+	               logs);
+	private_path->setWordWrap(true);
+	private_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	logs_layout->addWidget(private_path);
+	layout->addWidget(logs);
+	connect(m_browse, &QPushButton::clicked, this, [this] {
+		const auto path =
+		    QFileDialog::getOpenFileName(this, tr("Choose Kyty streaming helper"), m_path->text());
+		if (!path.isEmpty()) m_path->setText(path);
+	});
+	connect(copy, &QPushButton::clicked, this,
+	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
+	connect(m_save, &QPushButton::clicked, this, [this] { Save(); });
+	connect(m_start, &QPushButton::clicked, this, [this] {
+		if (Save()) m_backend->Start(Settings());
+	});
+	connect(m_stop, &QPushButton::clicked, backend, &StreamingBackend::Stop);
+	connect(m_close, &QPushButton::clicked, backend, &StreamingBackend::CloseSession);
+	connect(m_pair, &QPushButton::clicked, this, [this] {
+		if (auto* item = m_pending->currentItem()) {
+			m_backend->Pair(item->data(Qt::UserRole).toString(), m_pin->text(), m_name->text());
+			m_pin->clear();
+		}
+	});
+	connect(m_forget, &QPushButton::clicked, this, [this] {
+		if (auto* item = m_clients->currentItem())
+			m_backend->Unpair(item->data(Qt::UserRole).toString());
+	});
+	connect(m_pending, &QListWidget::currentRowChanged, this, [this] {
+		m_pair->setEnabled(m_backend->GetState() == StreamingBackend::State::Ready &&
+		                   m_pending->currentItem());
+	});
+	connect(m_clients, &QListWidget::currentRowChanged, this, [this] {
+		m_forget->setEnabled(m_backend->GetState() == StreamingBackend::State::Ready &&
+		                     m_clients->currentItem());
+	});
+	connect(m_port, &QSpinBox::valueChanged, this, [this] { Update(); });
+	connect(backend, &StreamingBackend::Changed, this, &StreamingWidget::Update);
+	Update();
+}
+StreamingSettings StreamingWidget::Settings() const {
+	StreamingSettings s;
+	s.backend     = m_path->text();
+	s.port        = m_port->value();
+	s.resolution  = m_resolution->currentText();
+	s.fps         = m_fps->currentData().toInt();
+	s.bitrate     = m_bitrate->value();
+	s.codec       = m_codec->currentText();
+	s.adapter     = m_adapter->text();
+	s.local_audio = m_monitor->isChecked();
+	return s;
+}
+bool StreamingWidget::Save() {
+	const auto settings = Settings();
+	const auto error    = settings.Validate();
+	if (!error.isEmpty()) {
+		m_error->setText(error);
+		m_error->show();
+		return false;
+	}
+	if (!QDir().mkpath(m_backend->Profile()) ||
+	    !QFile::setPermissions(m_backend->Profile(),
+	                           QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) {
+		m_error->setText(tr("Cannot create private settings directory."));
+		m_error->show();
+		return false;
+	}
+	const auto path = QDir(m_backend->Profile()).filePath("streaming.ini");
+	QSettings  file(path, QSettings::IniFormat);
+	settings.Write(file);
+	file.sync();
+	if (file.status() != QSettings::NoError ||
+	    !QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner)) {
+		m_error->setText(tr("Cannot save streaming preferences."));
+		m_error->show();
+		return false;
+	}
+	return true;
+}
+void StreamingWidget::Update() {
+	const auto state = m_backend->GetState();
+	const bool ready = state == StreamingBackend::State::Ready;
+	const bool stopped =
+	    state == StreamingBackend::State::Stopped || state == StreamingBackend::State::Error;
+	m_start->setEnabled(stopped);
+	m_stop->setEnabled(!stopped && state != StreamingBackend::State::Stopping);
+	m_quality->setEnabled(stopped);
+	m_path->setEnabled(stopped);
+	m_browse->setEnabled(stopped);
+	switch (state) {
+		case StreamingBackend::State::Stopped: m_status->setText(tr("Stopped")); break;
+		case StreamingBackend::State::Starting:
+			m_status->setText(tr("Starting · checking host and private audio…"));
+			break;
+		case StreamingBackend::State::Ready:
+			m_status->setText(tr("Hosting ready · choose a game in Moonlight"));
+			break;
+		case StreamingBackend::State::Stopping:
+			m_status->setText(tr("Stopping host and owned audio routes…"));
+			break;
+		case StreamingBackend::State::Error:
+			m_status->setText(tr("Host stopped after an error"));
+			break;
+	}
+	m_error->setText(m_backend->Error());
+	m_error->setVisible(!m_backend->Error().isEmpty());
+	if (!m_backend->Version().isEmpty()) m_version->setText(m_backend->Version());
+	m_session->setText(ready ? m_backend->Session() : tr("No managed stream session"));
+	m_close->setEnabled(ready && m_backend->Session().startsWith("Game running"));
+	QStringList addresses;
+	for (const auto& interface: QNetworkInterface::allInterfaces()) {
+		if (!interface.flags().testFlag(QNetworkInterface::IsUp) ||
+		    interface.flags().testFlag(QNetworkInterface::IsLoopBack))
+			continue;
+		for (const auto& entry: interface.addressEntries())
+			if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
+				addresses.append(entry.ip().toString() + ':' + QString::number(m_port->value()));
+	}
+	if (addresses.isEmpty()) addresses.append(tr("No LAN IPv4 address available"));
+	const auto chosen = m_address->currentText();
+	if (addresses != [this] {
+		    QStringList list;
+		    for (int i = 0; i < m_address->count(); ++i)
+			    list << m_address->itemText(i);
+		    return list;
+	    }()) {
+		m_address->clear();
+		m_address->addItems(addresses);
+		const int index = m_address->findText(chosen);
+		if (index >= 0) m_address->setCurrentIndex(index);
+	}
+	const auto refresh_list = [](QListWidget* list, const QJsonArray& entries, bool paired) {
+		const auto selected =
+		    list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString {};
+		QSignalBlocker blocker(list);
+		list->clear();
+		for (const auto& value: entries) {
+			const auto entry = value.toObject();
+			const auto id    = entry.value(paired ? "uuid" : "id").toString();
+			const auto text =
+			    paired ? entry.value("name").toString()
+			           : entry.value("name").toString() + " · " + entry.value("address").toString();
+			auto* item = new QListWidgetItem(text, list);
+			item->setData(Qt::UserRole, id);
+			if (id == selected) list->setCurrentItem(item);
+		}
+	};
+	refresh_list(m_pending, m_backend->Pairings(), false);
+	refresh_list(m_clients, m_backend->Clients(), true);
+	m_pair->setEnabled(ready && m_pending->currentItem());
+	m_forget->setEnabled(ready && m_clients->currentItem());
+	m_pin->setEnabled(ready);
+	m_name->setEnabled(ready);
+	if (m_logs->toPlainText() != m_backend->Logs()) {
+		m_logs->setPlainText(m_backend->Logs());
+		m_logs->moveCursor(QTextCursor::End);
+	}
+}

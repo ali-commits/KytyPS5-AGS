@@ -31,6 +31,9 @@ static QString ApplyBundledPreset() {
 	}
 
 	for (const QString& key : QProcessEnvironment::systemEnvironment().keys()) {
+		if (key == "KYTY_STREAMING_CONFIG_DIR") {
+			continue;
+		}
 		if (key.startsWith("KYTY_", Qt::CaseInsensitive) ||
 		    key.startsWith("TRACY_", Qt::CaseInsensitive)) {
 			qunsetenv(key.toLocal8Bit().constData());

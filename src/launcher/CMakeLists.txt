@@ -208,3 +208,30 @@ list(APPEND inc_headers
 include_what_you_use_with_mappings(launcher "${inc_headers}" "${iwyu_maps}")
 
 clang_tidy_check(launcher "" "${tidy_dirs}" "${inc_headers}")
+
+# The launch wrapper is a process boundary; it links QtCore, never the streaming host.
+if(LINUX)
+    add_executable(kyty_stream_launch tools/streamLaunch.cpp)
+    add_dependencies(launcher kyty_stream_launch)
+    target_link_libraries(kyty_stream_launch PRIVATE Qt6::Core)
+    set_target_properties(kyty_stream_launch PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/libexec")
+    install(TARGETS kyty_stream_launch RUNTIME DESTINATION libexec)
+endif()
+
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    add_executable(launcher_streaming_tests
+        "${PROJECT_SOURCE_DIR}/tests/LauncherStreamingTests.cpp"
+        src/streamingSettings.cpp src/streamingCatalog.cpp src/streamingAudio.cpp
+        src/streamingApi.cpp src/streamingBackend.cpp src/streamingWidget.cpp
+        include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h)
+    target_include_directories(launcher_streaming_tests PRIVATE include)
+    target_link_libraries(launcher_streaming_tests PRIVATE Qt6::Widgets Qt6::Network Qt6::Test)
+    set_target_properties(launcher_streaming_tests PROPERTIES AUTOMOC ON)
+    if(TARGET kyty_stream_launch)
+        add_dependencies(launcher_streaming_tests kyty_stream_launch)
+    endif()
+    add_test(NAME launcher_streaming COMMAND launcher_streaming_tests)
+    set_tests_properties(launcher_streaming PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    target_compile_definitions(launcher_streaming_tests PRIVATE KYTY_LAUNCHER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/LauncherStreamingFixtures.py")
+endif()

@@ -2,6 +2,7 @@
 #define CONFIGURATION_LIST_WIDGET_H
 
 #include "configuration.h"
+#include "streamingCatalog.h"
 
 #include <QMap>
 #include <QString>
@@ -40,6 +41,7 @@ public:
 	[[nodiscard]] std::unique_ptr<Configuration>
 	CreateConfiguration(const ConfigurationItem& item) const;
 
+	QList<StreamingLaunchEntry> CreateStreamingCatalog(const QString& interpreter) const;
 	bool EnsureGameDirectory();
 	void ScanGameDirectory();
 	void ViewTrophies();
@@ -48,6 +50,7 @@ public:
 signals:
 
 	void Run();
+	void CatalogChanged();
 	void Select();
 	void PreviewControllerColor(const QString& color);
 

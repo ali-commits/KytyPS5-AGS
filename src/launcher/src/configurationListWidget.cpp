@@ -6,6 +6,7 @@
 #include "configuration.h"
 #include "configurationEditDialog.h"
 #include "configurationItem.h"
+#include "emulatorCommand.h"
 #include "gameContent.h"
 #include "gameListTreeWidget.h"
 #include "inputMappingDialog.h"
@@ -19,6 +20,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
@@ -341,6 +343,7 @@ void ConfigurationListWidget::WriteSettings() {
 		it.value()->WriteSettings(s.get());
 	}
 	s->endArray();
+	emit CatalogChanged();
 }
 
 void ConfigurationListWidget::ReadSettings() {
@@ -434,6 +437,22 @@ ConfigurationListWidget::CreateConfiguration(const ConfigurationItem& item) cons
 	}
 	info->host_input_mapping = m_global_info.host_input_mapping;
 	return info;
+}
+
+QList<StreamingLaunchEntry>
+ConfigurationListWidget::CreateStreamingCatalog(const QString& interpreter) const {
+	QList<StreamingLaunchEntry> entries;
+	for (int index = 0; index < m_ui->cfgs_list->topLevelItemCount(); ++index) {
+		const auto* item = static_cast<ConfigurationItem*>(m_ui->cfgs_list->topLevelItem(index));
+		const auto  info = CreateConfiguration(*item);
+		auto        arguments = BuildEmulatorArgs(*info);
+		if (arguments.isEmpty()) continue;
+		const auto id = QString::fromLatin1(
+		    QCryptographicHash::hash(info->game_path.toUtf8(), QCryptographicHash::Sha256).toHex());
+		entries.append(
+		    {id, info->name, interpreter, arguments, QFileInfo(interpreter).absolutePath()});
+	}
+	return entries;
 }
 
 struct GameMetadata {
@@ -760,6 +779,7 @@ void ConfigurationListWidget::ScanGameDirectory() {
 	}
 	m_ui->cfgs_list->setCurrentItem(selected_item);
 	SelectItem(selected_item);
+	emit CatalogChanged();
 }
 
 void ConfigurationListWidget::edit_configuration() {

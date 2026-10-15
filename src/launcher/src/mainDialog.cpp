@@ -5,7 +5,10 @@
 #include "configurationItem.h"
 #include "configurationListWidget.h"
 #include "controllerLightbar.h"
+#include "emulatorCommand.h"
 #include "gameContent.h"
+#include "streamingBackend.h"
+#include "streamingWidget.h"
 #include "updateChecker.h"
 
 #include <QApplication>
@@ -25,6 +28,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStringList>
+#include <QTabWidget>
 #include <QTextStream>
 #include <QVariant>
 #include <QtCore>
@@ -97,6 +101,7 @@ private:
 	bool            m_started        = false;
 
 	QProcess m_process;
+	StreamingBackend* m_streaming = nullptr;
 
 	QPointer<ConfigurationItem> m_running_item;
 };
@@ -110,12 +115,27 @@ MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPriv
 
 MainDialogPrivate::~MainDialogPrivate() {
 	m_process.disconnect(this);
+	m_streaming->disconnect();
+	delete m_streaming;
 	delete m_ui;
 }
 
 void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui = new Ui::MainDialog;
 	m_ui->setupUi(main_dialog);
+	auto* tabs = new QTabWidget(main_dialog);
+	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
+	tabs->addTab(m_ui->widget, tr("Library"));
+	m_streaming = new StreamingBackend(StreamingSettings::ProfileDirectory(), this);
+	tabs->addTab(new StreamingWidget(m_streaming, tabs), tr("Streaming"));
+	m_ui->verticalLayout_3->addWidget(tabs);
+	main_dialog->setMinimumSize(700, 650);
+	main_dialog->resize(920, 860);
+	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
+		if (!m_interpreter.isEmpty())
+			m_streaming->SetCatalog(m_ui->widget->CreateStreamingCatalog(m_interpreter));
+	});
+	connect(m_streaming, &StreamingBackend::Changed, this, &MainDialogPrivate::Update);
 
 	m_main_dialog = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
@@ -208,6 +228,7 @@ void MainDialogPrivate::FindInterpreter() {
 
 	m_ui->label_settings_file->setText(tr("Settings file: ") + m_ui->widget->GetSettingsFile());
 
+	m_streaming->SetCatalog(m_ui->widget->CreateStreamingCatalog(m_interpreter));
 	m_started = true;
 	if (!m_preset_warning.isEmpty()) {
 		QMessageBox::warning(m_main_dialog, tr("Release settings not applied"), m_preset_warning);
@@ -237,107 +258,6 @@ void MainDialogPrivate::SetPresetWarning(const QString& text) {
 
 void MainDialog::SetPresetWarning(const QString& text) {
 	m_p->SetPresetWarning(text);
-}
-
-static QString BoolArg(bool value) {
-	return value ? QStringLiteral("true") : QStringLiteral("false");
-}
-
-static QStringList CreateEmulatorArgs(const Configuration& info) {
-	QStringList args;
-	auto        r = EnumToText(info.screen_resolution).split('x');
-
-	if (r.size() != 2) {
-		return {};
-	}
-
-	args << "--screen-width" << r.at(0);
-	args << "--screen-height" << r.at(1);
-	args << "--user-name" << info.user_name;
-	args << "--user-id" << QString::number(info.user_id);
-	if (!info.audio_input_device.isEmpty()) {
-		args << "--mic" << info.audio_input_device;
-	}
-	if (!info.controller.color.isEmpty()) {
-		args << "--controller-color" << info.controller.color;
-	}
-	args << "--controller-volume" << QString::number(info.controller.speaker_volume);
-	args << "--controller-vibration" << QString::number(info.controller.vibration_intensity);
-	args << "--audio-master-volume" << QString::number(info.audio_mix.master);
-	args << "--audio-main-volume" << QString::number(info.audio_mix.main);
-	args << "--audio-music-volume" << QString::number(info.audio_mix.music);
-	args << "--audio-pad-speaker-volume" << QString::number(info.audio_mix.pad_speaker);
-	args << "--audio-objects-volume" << QString::number(info.audio_mix.objects);
-	args << "--audio-objects" << (info.audio_mix.objects_enabled ? "on" : "off");
-	if (info.gpu_occlusion_accurate) {
-		// Overrides the bundled preset's KYTY_GPU_OCCLUSION (performance mode by default).
-		args << "--gpu-occlusion" << "on";
-	}
-	args << "--present-mode" << EnumToText(info.present_mode);
-	if (info.gpu_index >= 0) {
-		args << "--gpu" << QString::number(info.gpu_index);
-	}
-	if (info.fullscreen_enabled) {
-		args << "--fullscreen";
-	}
-	if (info.hide_cursor_enabled) {
-		args << "--hide-cursor";
-	}
-	args << "--readback-linear-images" << BoolArg(info.readback_linear_images);
-	args << "--sync-raw-image-buffers" << BoolArg(info.sync_raw_image_buffers);
-	args << "--trophy-notifications" << BoolArg(info.trophy_enabled);
-	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
-	if (info.tessellation_enabled) {
-		args << "--tessellation";
-	}
-	args << "--vblank-frequency" << QString::number(info.vblank_frequency);
-	args << "--console-language" << QString::number(info.console_language);
-	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
-	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
-	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
-	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
-	args << "--shader-log-folder" << info.shader_log_folder;
-	if (qEnvironmentVariable("KYTY_CAPTURE_SHADER_DETAILS") == QStringLiteral("1")) {
-		args << "--graphics-debug-dump" << "true";
-	}
-	args << "--command-buffer-dump" << BoolArg(info.command_buffer_dump_enabled);
-	args << "--command-buffer-dump-folder" << info.command_buffer_dump_folder;
-	args << "--printf-direction" << EnumToText(info.printf_direction);
-	args << "--printf-output-file" << info.printf_output_file;
-	if (info.profiler_enabled) {
-		args << "--profile";
-	}
-	args << "--spirv-debug-printf" << "false";
-	// Neither flag: the emulator decides from the CPU vendor.
-	if (info.amd_cpu_mode == QStringLiteral("on")) {
-		args << "--amd-cpu";
-	} else if (info.amd_cpu_mode == QStringLiteral("off")) {
-		args << "--no-amd-cpu";
-	}
-#if defined(_WIN32)
-	if (info.red_zone_protection_enabled) {
-		args << "--redzone";
-	}
-#endif
-	for (const auto& binding: info.host_input_mapping) {
-		args << "--keymap" << binding;
-	}
-	if (info.renderdoc_enabled) {
-		args << "--rd";
-	}
-
-	QString game = info.basedir;
-	if (!info.elf.isEmpty() && !GameContent::IsArchive(info.basedir)) {
-		game = QDir(info.basedir).filePath(info.elf);
-	}
-	args << "--game" << game;
-
-	const auto patch_plan = Cheats::PlanPath(info.title_id);
-	if (QFileInfo::exists(patch_plan)) {
-		args << "--game-patch" << patch_plan;
-	}
-
-	return args;
 }
 
 #ifdef __linux__
@@ -452,7 +372,7 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 	QFileInfo f(interpreter);
 	auto      dir = f.absoluteDir();
 
-	auto args = CreateEmulatorArgs(info);
+	auto args = BuildEmulatorArgs(info);
 	if (args.isEmpty()) {
 		QMessageBox::critical(this, tr("Error"), tr("Invalid emulator configuration"));
 		QApplication::quit();
@@ -553,6 +473,9 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 }
 
 void MainDialogPrivate::Run() {
+	if (m_streaming->GetState() != StreamingBackend::State::Stopped &&
+	    m_streaming->GetState() != StreamingBackend::State::Error)
+		return;
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
 		return;
@@ -570,7 +493,10 @@ void MainDialogPrivate::Run() {
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	bool run_enabled = (m_process.state() == QProcess::NotRunning && item != nullptr);
+	m_streaming->SetLocalGameRunning(m_process.state() != QProcess::NotRunning);
+	const bool hosting = m_streaming->GetState() != StreamingBackend::State::Stopped &&
+	                     m_streaming->GetState() != StreamingBackend::State::Error;
+	bool run_enabled   = (!hosting && m_process.state() == QProcess::NotRunning && item != nullptr);
 
 	if (run_enabled) {
 		const auto& info = item->GetInfo();
