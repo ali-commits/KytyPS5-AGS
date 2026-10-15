@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
+#include <latch>
 #include <poll.h>
 #include <set>
 #include <sys/socket.h>
@@ -13,6 +14,13 @@
 #include <sys/un.h>
 #include <thread>
 #include <unistd.h>
+namespace Streaming {
+struct LeaseRingTestAccess {
+  static std::unique_lock<std::mutex> Hold(LeaseRing &ring) {
+    return std::unique_lock(ring.m_mutex);
+  }
+};
+} // namespace Streaming
 using namespace Streaming;
 static void Check(bool ok, const char *what) {
   if (!ok) {
@@ -35,7 +43,30 @@ static Json Hello() {
           {"dedicated", true},
           {"transport", "vulkan-buffer-fd"}};
 }
+static void TestContendedReserveSkips() {
+  LeaseRing ring(99);
+  std::latch held(1), release(1);
+  std::thread ipc([&] {
+    auto lock = LeaseRingTestAccess::Hold(ring);
+    held.count_down();
+    release.wait();
+  });
+  held.wait();
+  // The IPC owner cannot unlock until reserve returns. A blocking
+  // implementation deadlocks deterministically; the test runner watchdog
+  // catches that regression.
+  const auto contended = ring.TryAcquire();
+  release.count_down();
+  ipc.join();
+  Check(!contended,
+        "contended reservation skips without waiting for IPC owner");
+  const auto available = ring.TryAcquire();
+  Check(available && available->sequence == 1 && available->slot == 0 &&
+            !available->recycled,
+        "skipped contention does not consume a slot or sequence");
+}
 int main() {
+  TestContendedReserveSkips();
   PoolDescriptor desc;
   auto hello = Hello();
   Check(ValidateHello(hello, 9, desc), "valid hello");

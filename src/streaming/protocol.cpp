@@ -96,7 +96,8 @@ bool ParseInput(const Json& p, Input& output) noexcept {
 	return true;
 }
 std::optional<Lease> LeaseRing::TryAcquire() {
-	std::lock_guard lock(m_mutex);
+	std::unique_lock lock(m_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return {};
 	if (!m_connected || m_sequence == UINT64_MAX) return {};
 	for (uint32_t i = 0; i < SlotCount; i++)
 		if (m_leased[i] == 0) {

@@ -39,6 +39,7 @@ public:
 	void                 Disconnect();
 
 private:
+	friend struct LeaseRingTestAccess;
 	std::mutex                      m_mutex;
 	uint64_t                        m_epoch, m_sequence = 0;
 	bool                            m_connected = true;
