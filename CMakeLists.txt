@@ -991,6 +991,15 @@ add_executable(clear_register_decode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/C
 target_link_libraries(clear_register_decode_tests common fmt::fmt Vulkan::Headers)
 target_include_directories(clear_register_decode_tests PRIVATE ${inc_headers})
 
+if(LINUX)
+	add_executable(streaming_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/StreamingTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/transport.cpp")
+	target_include_directories(streaming_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(streaming_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+endif()
+
 add_executable(host_input_pulse_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HostInputPulseTests.cpp")
 target_include_directories(host_input_pulse_tests PRIVATE "${KYTY_SOURCE_DIR}")
 
@@ -1152,6 +1161,10 @@ if(BUILD_TESTING)
 	add_test(NAME draw_prep COMMAND $<TARGET_FILE:draw_prep_tests>)
 	add_test(NAME eop_timestamp COMMAND $<TARGET_FILE:eop_timestamp_tests>)
 	add_test(NAME host_input_pulse COMMAND $<TARGET_FILE:host_input_pulse_tests>)
+	if(LINUX)
+		add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
+		set_tests_properties(streaming_protocol PROPERTIES TIMEOUT 30)
+	endif()
 	add_test(NAME repeat_trace COMMAND $<TARGET_FILE:repeat_trace_tests>)
 	add_test(NAME binding_path COMMAND $<TARGET_FILE:binding_path_tests>)
 	add_test(NAME cp_recorder COMMAND $<TARGET_FILE:cp_recorder_tests>)
