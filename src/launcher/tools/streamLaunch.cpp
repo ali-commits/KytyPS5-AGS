@@ -117,7 +117,8 @@ int main(int argc, char** argv) {
 		if (stop_requested && child.state() != QProcess::NotRunning) {
 			stop_requested = 0;
 			child.terminate();
-			QTimer::singleShot(3000, &child, [&] {
+			// Native teardown and the packaged guard's capture footer can take over three seconds.
+			QTimer::singleShot(6000, &child, [&] {
 				if (child.state() != QProcess::NotRunning) child.kill();
 			});
 		}

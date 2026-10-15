@@ -7,6 +7,7 @@
 
 #include <QComboBox>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -33,6 +34,7 @@ public:
 	QSslKey            key;
 	QJsonObject        response {{"status", true}};
 	QList<QJsonObject> requests;
+	int                response_delay_ms = 0;
 
 protected:
 	void incomingConnection(qintptr descriptor) override {
@@ -59,10 +61,16 @@ protected:
 			     {"body", QJsonDocument::fromJson(buffer.mid(separator + 4, length)).object()},
 			     {"headers", QString::fromUtf8(header)}});
 			const auto body = QJsonDocument(response).toJson(QJsonDocument::Compact);
-			socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: "
-			              "close\r\nContent-Length: " +
-			              QByteArray::number(body.size()) + "\r\n\r\n" + body);
-			socket->disconnectFromHost();
+			const auto send = [socket, body] {
+				socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: "
+				              "close\r\nContent-Length: " +
+				              QByteArray::number(body.size()) + "\r\n\r\n" + body);
+				socket->disconnectFromHost();
+			};
+			if (response_delay_ms > 0)
+				QTimer::singleShot(response_delay_ms, socket, send);
+			else
+				send();
 		});
 		socket->startServerEncryption();
 	}
@@ -160,6 +168,44 @@ private slots:
 		QTRY_VERIFY_WITH_TIMEOUT(finished, 5000);
 		QVERIFY(!error.isEmpty());
 		QCOMPARE(server.requests.size(), 2);
+	}
+	void closeApiWaitsForGracefulShutdownOnly_data() {
+		QTest::addColumn<QByteArray>("method");
+		QTest::addColumn<QString>("path");
+		QTest::addColumn<bool>("expect_timeout");
+		QTest::newRow("graceful-app-close")
+		    << QByteArray("POST") << QString("/api/apps/close") << false;
+		QTest::newRow("ordinary-poll-deadline") << QByteArray("GET") << QString("/api/pin") << true;
+	}
+	void closeApiWaitsForGracefulShutdownOnly() {
+		QFETCH(QByteArray, method);
+		QFETCH(QString, path);
+		QFETCH(bool, expect_timeout);
+		QTemporaryDir certs;
+		QVERIFY(GenerateCertificate(certs.path()));
+		LocalTlsServer server;
+		server.certificate       = QSslCertificate(Read(certs.filePath("cert.pem")));
+		server.key               = QSslKey(Read(certs.filePath("key.pem")), QSsl::Rsa);
+		server.response_delay_ms = 3100;
+		QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+		StreamingApi api;
+		api.Configure(server.serverPort(), server.certificate, "user", "password");
+		bool          finished = false;
+		QString       error;
+		QElapsedTimer elapsed;
+		elapsed.start();
+		api.Request(method, path, {}, [&](const QJsonObject&, const QString& result) {
+			error    = result;
+			finished = true;
+		});
+		QTRY_VERIFY_WITH_TIMEOUT(finished, 6000);
+		if (expect_timeout)
+			QVERIFY(!error.isEmpty());
+		else {
+			QVERIFY2(error.isEmpty(), qPrintable(error));
+			QVERIFY(elapsed.elapsed() >= 3000);
+		}
+		QCOMPARE(server.requests.size(), 1);
 	}
 	void audioOwnershipRejectsReusedIdsAndUnloadsOnlyItsModules() {
 		QVERIFY(
@@ -512,6 +558,46 @@ private slots:
 		QVERIFY(second.readAllStandardError().contains("already running"));
 		first.terminate();
 		QVERIFY(first.waitForFinished(5000));
+		QVERIFY(!QFile::exists(dir.filePath("session.json")));
+	}
+	void launchWrapperAllowsGuardToFinishCaptureMetadata() {
+		QTemporaryDir dir;
+		const auto    wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		QVERIFY(QFileInfo(wrapper).isExecutable());
+		const auto guard = dir.filePath("guard.py");
+		const auto ended = dir.filePath("ended");
+		const auto ready = dir.filePath("guard-ready");
+		QVERIFY(Put(guard, R"PY(import pathlib, signal, sys, time
+
+def stop(signum, frame):
+    time.sleep(3.5)
+    pathlib.Path(sys.argv[1]).write_text("capture complete")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+pathlib.Path(sys.argv[2]).write_text("ready")
+while True:
+    time.sleep(0.05)
+)PY"));
+		const StreamingLaunchEntry game {
+		    "guard", "Astro", "/usr/bin/python3", {guard, ended, ready}, dir.path()};
+		auto manifest =
+		    StreamingCatalog::Manifest({game}, dir.filePath("frames.sock"), "Kyty_Private_Audio",
+		                               dir.filePath("game.lock"), "Native", 60);
+		manifest.insert("session_file", dir.filePath("session.json"));
+		QString error;
+		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
+		                                       QJsonDocument(manifest).toJson(), &error));
+		QProcess launch;
+		launch.start(wrapper, {dir.filePath("launch.json"), "guard"});
+		QVERIFY(launch.waitForStarted(1000));
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(ready), 3000);
+		launch.terminate();
+		QVERIFY(launch.waitForFinished(7000));
+		QCOMPARE(Read(ended), QByteArray("capture complete"));
+		QCOMPARE(launch.exitCode(), 0);
 		QVERIFY(!QFile::exists(dir.filePath("session.json")));
 	}
 	void portPreflightDetectsConflict() {

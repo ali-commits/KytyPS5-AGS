@@ -54,7 +54,8 @@ void StreamingApi::Request(const QByteArray& method, const QString& path, const 
 	request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
 	                     QNetworkRequest::ManualRedirectPolicy);
-	request.setTransferTimeout(2500);
+	// Closing an app waits for Sunshine's five-second process shutdown grace.
+	request.setTransferTimeout(method == "POST" && path == "/api/apps/close" ? 8000 : 2500);
 	auto* reply = m_network.sendCustomRequest(
 	    request, method,
 	    method == "GET" ? QByteArray {} : QJsonDocument(body).toJson(QJsonDocument::Compact));
