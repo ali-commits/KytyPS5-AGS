@@ -998,6 +998,23 @@ if(LINUX)
 		"${KYTY_SOURCE_DIR}/streaming/transport.cpp")
 	target_include_directories(streaming_tests PRIVATE "${KYTY_SOURCE_DIR}")
 	target_link_libraries(streaming_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+
+	add_executable(audio_output_device_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AudioOutputDeviceTests.cpp")
+	target_include_directories(audio_output_device_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_link_libraries(audio_output_device_tests PRIVATE SDL3::SDL3-static)
+
+	add_executable(streaming_gpu_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/StreamingGpuTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/exporter.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/transport.cpp"
+		${gpu_blit_shader_headers})
+	target_include_directories(streaming_gpu_tests PRIVATE "${KYTY_SOURCE_DIR}" "${PROJECT_BINARY_DIR}")
+	find_path(KYTY_STREAM_TEST_CUDA_INCLUDE cuda.h HINTS /opt/cuda/include)
+	if(KYTY_STREAM_TEST_CUDA_INCLUDE)
+		target_include_directories(streaming_gpu_tests PRIVATE "${KYTY_STREAM_TEST_CUDA_INCLUDE}")
+	endif()
+	target_link_libraries(streaming_gpu_tests PRIVATE Vulkan::Headers fmt::fmt nlohmann_json::nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
 add_executable(host_input_pulse_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HostInputPulseTests.cpp")
@@ -1162,8 +1179,11 @@ if(BUILD_TESTING)
 	add_test(NAME eop_timestamp COMMAND $<TARGET_FILE:eop_timestamp_tests>)
 	add_test(NAME host_input_pulse COMMAND $<TARGET_FILE:host_input_pulse_tests>)
 	if(LINUX)
+		add_test(NAME audio_output_device COMMAND $<TARGET_FILE:audio_output_device_tests>)
 		add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
 		set_tests_properties(streaming_protocol PROPERTIES TIMEOUT 30)
+		add_test(NAME streaming_gpu COMMAND $<TARGET_FILE:streaming_gpu_tests>)
+		set_tests_properties(streaming_gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)
 	endif()
 	add_test(NAME repeat_trace COMMAND $<TARGET_FILE:repeat_trace_tests>)
 	add_test(NAME binding_path COMMAND $<TARGET_FILE:binding_path_tests>)

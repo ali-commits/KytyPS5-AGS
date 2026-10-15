@@ -81,7 +81,13 @@ def package(args):
         else:
             (prefix/name).mkdir()
     (prefix/'_CrashCapture').mkdir(exist_ok=True)
+    shutil.copy2(SOURCE/'LICENSE', prefix/'LICENSE')
     backend_source = args.backend_source.expanduser().resolve()
+    assets = backend_source/'src_assets'/'common'/'assets'/'box.png'
+    if assets.is_file():
+        destination = prefix/'share'/'kyty-stream-host'
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(assets, destination/'box.png')
     licenses = prefix/'licenses'/'kyty-stream-host'
     licenses.mkdir(parents=True, exist_ok=True)
     for name in ('LICENSE', 'NOTICE', 'THIRD-PARTY-LICENSES'):

@@ -326,7 +326,7 @@ bool StreamingBackend::WriteConfiguration() {
 	QString config = "capture = kyty\nencoder = nvenc\nkyty_private_audio = true\nkyty_input = "
 	                 "true\nmanagement_bind_address = 127.0.0.1\nupnp = disabled\nsystem_tray = "
 	                 "disabled\norigin_web_ui_allowed = pc\nsunshine_name = Kyty PS5 "
-	                 "Streaming\nstream_audio = enabled\n";
+	                 "Streaming\nstream_audio = enabled\nav1_mode = 1\n";
 	config += QStringLiteral("port = %1\nmax_bitrate = %2\nhevc_mode = %3\n")
 	              .arg(m_settings.port)
 	              .arg(m_settings.bitrate * 1000)
