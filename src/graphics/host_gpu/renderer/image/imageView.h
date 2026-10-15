@@ -31,18 +31,6 @@ namespace ImageViewOps {
 	       ImageViewOps::IsFormatDepthCompatible(view_format);
 }
 
-[[nodiscard]] inline bool IsValidImageSwizzle(uint32_t swizzle,
-                                             uint32_t component_count = 4) noexcept {
-	if ((swizzle & ~0xfffu) != 0) {
-		return false;
-	}
-	for (uint32_t channel = 0; channel < 4; channel++) {
-		const auto selector = GetDstSel(swizzle, channel);
-		if (selector > 1 && (selector < 4 || selector >= 4 + component_count)) return false;
-	}
-	return true;
-}
-
 [[noreturn]] inline void UnsupportedColorView(const char* usage, vk::Format image_format,
                                               vk::Format view_format, uint32_t swizzle) noexcept {
 	EXIT("unsupported %s color image view: image_format=%d view_format=%d swizzle=0x%03x\n", usage,
@@ -82,10 +70,10 @@ SelectSampledColorView(vk::Format image_format, vk::Format view_format, uint32_t
 // A shader samples a 32-bit colour format (e.g. R16G16_SFLOAT) of memory the cache holds as a plain
 // D32 depth image. A depth image can only be viewed as a depth-compatible format, so the colour
 // interpretation needs its own alias image, filled with the depth image's raw 32-bit texels.
-[[nodiscard]] inline bool NeedsColorAliasForSampledDepth(vk::Format cached_format,
-                                                         uint32_t   cached_bytes_per_block,
-                                                         vk::Format requested_format,
-                                                         uint32_t   requested_bytes_per_block) noexcept {
+[[nodiscard]] inline bool
+NeedsColorAliasForSampledDepth(vk::Format cached_format, uint32_t cached_bytes_per_block,
+                               vk::Format requested_format,
+                               uint32_t   requested_bytes_per_block) noexcept {
 	return cached_format == vk::Format::eD32Sfloat &&
 	       DepthAspectTransferFormat(requested_format) == vk::Format::eUndefined &&
 	       requested_format != vk::Format::eUndefined &&

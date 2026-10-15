@@ -1140,6 +1140,41 @@ void TestImageDescriptorFields() {
               snapshot.images[0].dwords == user_data,
           "valid texture descriptor was rejected");
     const auto valid_descriptor = user_data;
+    for (const auto mode : {ImageMipMode::None, ImageMipMode::Dynamic}) {
+      plan.info.images[0].mip_mode = mode;
+      for (const auto [base, last] : {std::pair{0u, 0u}, {1u, 1u}, {2u, 3u},
+                                      {15u, 15u}, {7u, 6u}}) {
+        user_data = valid_descriptor;
+        user_data[3] |= (base << 12u) | (last << 16u);
+        Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+                  (base <= last ? snapshot.images[0].dwords == user_data : is_null()),
+              "texture view mip-range validity depended on the image instruction");
+      }
+    }
+    plan.info.images[0].mip_mode = ImageMipMode::None;
+    for (uint32_t shift = 0u; shift < 12u; shift += 3u) {
+      for (uint32_t channel = 0u; channel < 8u; ++channel) {
+        user_data = valid_descriptor;
+        user_data[3] = (user_data[3] & ~(7u << shift)) | (channel << shift);
+        Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+                  (channel == 2u || channel == 3u ? is_null()
+                      : snapshot.images[0].dwords == user_data),
+              "texture view accepted an undefined channel selector or rejected a defined one");
+      }
+    }
+    for (uint32_t fragments = 0u; fragments <= 4u; ++fragments) {
+      user_data = valid_descriptor;
+      user_data[3] = (user_data[3] & 0xfffu) | (fragments << 16u) |
+          (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2DMsaa) << 28u);
+      user_data[5] = fragments << 4u;
+      Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+                (fragments >= 1u && fragments <= 3u
+                    ? snapshot.images[0].dwords == user_data : is_null()),
+            "MSAA fragment encoding was confused with a mip range");
+      user_data[3] |= 1u << 12u;
+      Check(MaterializeResources(plan, runtime, snapshot, specialization) && is_null(),
+            "MSAA view accepted a nonzero base mip");
+    }
     // Keep RESOURCE_LEVEL set in this valid texture descriptor.
     user_data = {0x0208a200u, 0xca900000u, 0x800fc00fu, 0x90960facu,
                  0u, 0x60u, 0u, 0u};
@@ -1915,9 +1950,14 @@ void TestDynamicStorageMipTracking() {
   changed_user_data[3] =
       (changed_user_data[3] & ~((0xfu << 12u) | (0xfu << 16u))) |
       (4u << 12u) | (3u << 16u);
-  Check(!MaterializeResources(resource_plan, {.user_data = changed_user_data},
-                              changed_snapshot, changed_specialization),
-        "an inverted dynamic storage mip range was accepted");
+  Check(MaterializeResources(resource_plan, {.user_data = changed_user_data},
+                             changed_snapshot, changed_specialization) &&
+            !changed_snapshot.images.empty() &&
+            std::ranges::all_of(changed_snapshot.images, [](const auto& image) {
+              return std::ranges::all_of(image.dwords, [](uint32_t word) { return word == 0u; });
+            }) && changed_specialization.images[0].mip_count == 1u &&
+            changed_specialization != specialization,
+        "inverted mip range was not normalized consistently to a null image");
 }
 
 void TestSrtFlatteningAndRuntimeMemoization() {

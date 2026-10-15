@@ -159,6 +159,7 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 	    type != Prospero::ImageType::kColor2DMsaa) {
 		return false;
 	}
+	if (!IsValidImageSwizzle(words[3] & 0xfffu)) return false;
 	const bool array =
 	    type == Prospero::ImageType::kColor1DArray || type == Prospero::ImageType::kColor2DArray ||
 	    type == Prospero::ImageType::kColor2DMsaaArray || type == Prospero::ImageType::kCube;
@@ -173,7 +174,7 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 		return base_level == 0 && fragments >= 1 && fragments <= 3 &&
 		       (r128 || max_mip == fragments);
 	}
-	return true;
+	return ((words[3] >> 12u) & 0xfu) <= ((words[3] >> 16u) & 0xfu);
 }
 
 // A null image keeps the draw alive, but the walk read something that is not a descriptor (all-zero
