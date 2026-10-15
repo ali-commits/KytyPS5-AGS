@@ -63,6 +63,10 @@
 #endif
 #endif
 
+namespace Libs::LibKernel::Memory {
+void TestSetBackingWriteCallback(callback_func_t callback);
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 namespace Libs::LibKernel::Memory {
 bool TestWindowsBackingViewModes();
@@ -950,6 +954,64 @@ void TestConcurrentBackingReads() {
 		      "concurrent backing reads returned different contents");
 	}
 	std::printf("[host]    %-48s ok\n", test);
+}
+
+std::binary_semaphore *g_backing_write_entered = nullptr;
+std::binary_semaphore *g_continue_backing_write = nullptr;
+
+void ParkBackingWrite(uintptr_t, size_t) {
+  g_backing_write_entered->release();
+  g_continue_backing_write->acquire();
+}
+
+// A warmed mapping must not bypass the writer exclusion that a cache miss
+// provides.
+void TestWarmedBackingReadsWaitForWrites() {
+  using namespace Libs::LibKernel::Memory;
+  const char *test = "WarmedBackingReadsWaitForWrites";
+  for (const auto read : {&TryReadBacking, &TryReadBackingDirect}) {
+    const auto base = MapNamedFlexible(
+        test, SceKernelPageSize, SceKernelProtCpuRw, "warmed_backing_write");
+    constexpr uint64_t original = 0x123456789abcdef0ull;
+    constexpr uint64_t replacement = 0xfedcba9876543210ull;
+    std::memcpy(reinterpret_cast<void *>(base), &original, sizeof(original));
+    std::binary_semaphore warmed{0}, run_read{0}, reading{0}, completed{0},
+        entered{0}, resume{0};
+    g_backing_write_entered = &entered;
+    g_continue_backing_write = &resume;
+    uint64_t before = 0, after = 0;
+    bool warm_ok = false, read_ok = false, write_ok = false;
+    std::thread reader([&] {
+      warm_ok = read(base, &before, sizeof(before));
+      warmed.release();
+      run_read.acquire();
+      reading.release();
+      read_ok = read(base, &after, sizeof(after));
+      completed.release();
+    });
+    warmed.acquire();
+    TestSetBackingWriteCallback(ParkBackingWrite);
+    std::thread writer([&] {
+      write_ok = TryWriteBacking(base, &replacement, sizeof(replacement));
+    });
+    const bool parked = entered.try_acquire_for(std::chrono::seconds(5));
+    run_read.release();
+    reading.acquire();
+    const bool excluded =
+        !completed.try_acquire_for(std::chrono::milliseconds(100));
+    resume.release();
+    writer.join();
+    reader.join();
+    TestSetBackingWriteCallback(nullptr);
+    CheckOk(test, KernelMunmap(base, SceKernelPageSize), "KernelMunmap");
+    Check(test, parked && excluded,
+          "warmed backing read bypassed an active backing writer");
+    Check(test,
+          warm_ok && before == original && write_ok && read_ok &&
+              after == replacement,
+          "warmed backing read did not observe the completed replacement");
+  }
+  std::printf("[host]    %-48s ok\n", test);
 }
 
 void TestBackingReadExcludesWritesAndUnmap() {
@@ -4949,10 +5011,18 @@ void TestSmallFiberStacksAndMigration() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
-	if (argc == 2 && std::strcmp(argv[1], "--backing-transfers-only") == 0) {
+        if (argc == 2 && std::strcmp(argv[1], "--backing-cache-only") == 0) {
+          RunTest(TestWarmedBackingReadsWaitForWrites);
+          RunTest(TestBackingReadCacheFollowsRemap);
+          RunTest(TestBackingInPlaceInspection);
+          RunTest(TestFlexibleMemoryReuseIsZeroFilled);
+          return g_failed_tests == 0 ? 0 : 1;
+        }
+        if (argc == 2 && std::strcmp(argv[1], "--backing-transfers-only") == 0) {
 		RunTest(TestConcurrentBackingReads);
 		RunTest(TestBackingReadExcludesWritesAndUnmap);
-		RunTest(TestSparseBackingReadPreservesResidency);
+                RunTest(TestWarmedBackingReadsWaitForWrites);
+                RunTest(TestSparseBackingReadPreservesResidency);
 		RunTest(TestSparseReadDuringDirectCommit);
 		RunTest(TestDirectMapQueryOffsetAndPartialMunmap);
 		RunTest(TestFlexibleMemoryUsesSharedBacking);
@@ -5025,7 +5095,8 @@ int main(int argc, char** argv) {
 	RunTest(TestSparseReadDuringDirectCommit);
 	RunTest(TestConcurrentBackingReads);
 	RunTest(TestBackingReadExcludesWritesAndUnmap);
-	RunTest(TestGuestAddressSpaceHasNoFixedFallback);
+        RunTest(TestWarmedBackingReadsWaitForWrites);
+        RunTest(TestGuestAddressSpaceHasNoFixedFallback);
 	RunTest(TestGuestFreeRangeSearchDoesNotUnderflow);
 	RunTest(TestFlexibleMemoryCapacityIsBootFixed);
 	RunTest(TestFlexibleMemoryUsesSharedBacking);

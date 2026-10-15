@@ -1306,6 +1306,10 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --guest-stack-exit-only)
 	add_test(NAME virtual_memory_allocation
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)
+	add_test(NAME backing_cache_writes
+		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --backing-cache-only)
+	set_tests_properties(backing_cache_writes PROPERTIES
+		ENVIRONMENT "KYTY_RENDERER_BATCH=1;KYTY_CLEAN_VERDICT_CACHE=1;KYTY_FAST_BACKING_TRANSFERS=1")
 	if(WIN32)
 		add_test(NAME virtual_memory_allocation_lazy_backing
 			COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)

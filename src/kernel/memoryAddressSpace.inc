@@ -1,6 +1,14 @@
 // Internal memory address-space helpers included by memory.cpp.
 // Kept in the same translation unit because they depend on memory.cpp-local helpers.
 
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+static callback_func_t g_test_backing_write = nullptr;
+
+void TestSetBackingWriteCallback(callback_func_t callback) {
+	g_test_backing_write = callback;
+}
+#endif
+
 static constexpr uint64_t HOST_SYSTEM_MANAGED_MIN  = 0x0000040000ull;
 static constexpr uint64_t HOST_SYSTEM_MANAGED_MAX  = 0x07ffffbfffull;
 static constexpr uint64_t HOST_SYSTEM_RESERVED_MIN = HOST_SYSTEM_MANAGED_MAX + 1u;
@@ -205,6 +213,7 @@ public:
 			return false;
 		}
 		std::lock_guard lock(m_mutex);
+		InvalidateMapHints();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		if (m_lazy_zero) {
 			// Uncommitted section pages have never held guest data and Windows supplies zeros
@@ -799,6 +808,12 @@ private:
 		std::optional<MapReadLock>                        read_lock;
 		if (kind == TransferKind::Write) {
 			write_lock.emplace(m_mutex);
+			// Cached readers validate this generation without taking m_mutex. Retire their
+			// mappings before publishing bytes so they cannot bypass an active writer.
+			InvalidateMapHints();
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+			if (g_test_backing_write != nullptr) g_test_backing_write(vaddr, size);
+#endif
 		} else {
 			read_lock.emplace(m_mutex);
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
@@ -929,8 +944,8 @@ private:
 		return false;
 	}
 
-	// Called under m_mutex before every m_maps mutation. The generation bump also retires all
-	// per-thread GuestBackingMappingCache entries, which are read without m_mutex.
+	// Called under m_mutex before mapping mutations and backing writes. The generation bump
+	// retires per-thread mappings before their lock-free readers can observe changing bytes.
 	void InvalidateMapHints() {
 		m_map_hints = {};
 		s_map_generation.fetch_add(1, std::memory_order_seq_cst);
