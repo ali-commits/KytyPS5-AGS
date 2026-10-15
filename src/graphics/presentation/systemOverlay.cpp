@@ -1,20 +1,20 @@
 #include "graphics/presentation/systemOverlay.h"
 
-#include <SDL3/SDL.h>
-
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "imgui.h"
-#include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
+#include "imgui_internal.h"
+#include "libs/audioOutputDevice.h"
 #include "libs/controller.h"
 #include "libs/dialog.h"
 #include "libs/ime.h"
 #include "libs/imeDialog.h"
 #include "stb_image.h"
 
+#include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -724,8 +724,12 @@ struct SystemOverlay::Impl {
 				LOGF("[Trophy] sound is too large: %s\n", path.c_str());
 				return;
 			}
-			trophy_sound_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-			                                                &spec, nullptr, nullptr);
+			const auto output_device = Libs::Audio::OutputDevice();
+			if (output_device == 0) {
+				LOGF("[Trophy] %s\n", SDL_GetError());
+				return;
+			}
+			trophy_sound_stream = SDL_OpenAudioDeviceStream(output_device, &spec, nullptr, nullptr);
 			if (trophy_sound_stream == nullptr) {
 				LOGF("[Trophy] could not open audio stream: %s\n", SDL_GetError());
 				return;

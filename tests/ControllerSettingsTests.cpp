@@ -143,6 +143,25 @@ void SetRumble(uint8_t large, uint8_t small) {
 	Check(PadSetVibration(1, &param) == 0, "vibration request failed");
 }
 
+void TestRemoteSourceReset() {
+  Controller controller;
+  SetButton(1, PAD_BUTTON_CROSS, true);
+  SetAxis(1, Axis::LeftX, 200);
+  SetRemoteInput(true, PAD_BUTTON_CROSS | PAD_BUTTON_CIRCLE,
+                 {0, 128, 128, 128, 0, 255});
+  PadData state{};
+  Check(PadReadState(1, &state) == 0 && (state.buttons & PAD_BUTTON_CIRCLE),
+        "remote input missing");
+  SetAxis(1, Axis::TriggerRight, 0);
+  Check(PadReadState(1, &state) == 0 && state.analog_buttons_r2 == 0,
+        "remote trigger button overrode a newer local zero axis");
+  SetRemoteInput(false, 0, {128, 128, 128, 128, 0, 0});
+  Check(PadReadState(1, &state) == 0 && (state.buttons & PAD_BUTTON_CROSS) &&
+            !(state.buttons & PAD_BUTTON_CIRCLE) && state.left_stick_x == 200,
+        "remote disconnect released physical hold");
+  SetButton(1, PAD_BUTTON_CROSS, false);
+}
+
 void TestSettingCycles() {
 	Controller controller;
 	for (auto setting:
@@ -433,8 +452,9 @@ void TestTriggerEffectState() {
 
 int main() {
 	Config::Initialize();
-	TestSettingCycles();
-	TestGlobalControllerLevels();
+        TestRemoteSourceReset();
+        TestSettingCycles();
+        TestGlobalControllerLevels();
 	// Each following test initializes another controller and requires strong defaults.
 	TestVibrationLifetime();
 	TestMaskedTriggersAndValidation();

@@ -3,6 +3,8 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+
+#include <array>
 namespace Libs::Controller {
 
 void Initialize();
@@ -74,6 +76,8 @@ void SetRightStick(int id, int x, int y);
 void SetTouchPad(int id, int finger, bool down, float x, float y);
 void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ResetInputState();
+// Streaming source is independent of physical/keyboard holds. Neutralize only this source.
+void SetRemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
 int  GetActiveControllerId();
 
 enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity };

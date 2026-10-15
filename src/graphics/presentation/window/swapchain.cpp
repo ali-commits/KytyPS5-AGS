@@ -15,14 +15,19 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "libs/controller.h"
+#include "streaming/exporter.h"
+#include "streaming/transport.h"
 
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <optional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 #include <vulkan/vk_platform.h>
@@ -316,6 +321,150 @@ private:
 	uint32_t                       m_frame_index         = 0;
 };
 
+static bool PresentUnlocked();
+
+// Optional producer is independent of swapchain acquisition and its physical extent.
+class NativeStreamExport final {
+public:
+	NativeStreamExport(GraphicContext& graphics, CommandScheduler& scheduler, const char* socket)
+	    : m_graphics(graphics), m_scheduler(scheduler) {
+		const auto dimension = [](const char* name) -> uint32_t {
+			const char* value = std::getenv(name);
+			if (value == nullptr || *value == '\0') return 0;
+			uint32_t   n      = 0;
+			const auto parsed = std::from_chars(value, value + std::strlen(value), n);
+			return parsed.ec == std::errc() && *parsed.ptr == '\0' && n >= 1 && n <= 4096
+			           ? n
+			           : UINT32_MAX;
+		};
+		m_width        = dimension("KYTY_STREAM_WIDTH");
+		m_height       = dimension("KYTY_STREAM_HEIGHT");
+		const auto fps = dimension("KYTY_STREAM_FPS");
+		if (m_width == UINT32_MAX || m_height == UINT32_MAX || (m_width == 0) != (m_height == 0) ||
+		    (fps != 0 && fps != 30 && fps != 60)) {
+			LOGF("Streaming disabled: invalid capture dimensions/FPS\n");
+			return;
+		}
+		m_interval  = std::chrono::nanoseconds(1000000000 / (fps == 0 ? 60 : fps));
+		m_transport = std::make_unique<Streaming::Transport>(
+		    socket,
+		    [](const Streaming::Input* input) {
+			    Libs::Controller::SetRemoteInput(
+			        input != nullptr && input->connected, input != nullptr ? input->buttons : 0,
+			        input != nullptr ? input->axes : std::array<int, 6> {128, 128, 128, 128, 0, 0});
+		    },
+		    [&scheduler](uint64_t tick) { return scheduler.IsFree(tick); });
+	}
+	~NativeStreamExport() {
+		m_transport.reset();
+		m_scheduler.Wait(m_last_tick);
+	}
+	void Capture(const std::array<Presenter::Layer, 2>& layers) {
+		if (m_transport == nullptr || (layers[0].frame == nullptr && layers[1].frame == nullptr))
+			return;
+		const auto generation = m_transport->Generation();
+		if (generation == 0) return;
+		const auto*    source = layers[0].frame != nullptr ? layers[0].frame : layers[1].frame;
+		const uint32_t width  = m_width != 0 ? m_width : source->image.extent.width;
+		const uint32_t height = m_height != 0 ? m_height : source->image.extent.height;
+		if (m_pool != nullptr && m_generation == generation &&
+		    (m_pool->Descriptor().width != width || m_pool->Descriptor().height != height)) {
+			m_transport->Reconnect();
+			return;
+		}
+		if (m_generation != generation) {
+			// Retain at most two old pools plus the active pool across peer loss.
+			if (m_pool != nullptr && m_retired.size() >= 2) {
+				LOGF("Streaming disabled: retired GPU pool limit reached after peer loss/resize\n");
+				m_transport.reset();
+				return;
+			}
+			if (m_pool != nullptr) m_retired.push_back(std::move(m_pool));
+			std::string error;
+			m_pool = Streaming::GpuPool::Create(m_graphics.physical_device, m_graphics.device,
+			                                    m_graphics.queue_family, width, height, ++m_epoch,
+			                                    error);
+			if (m_pool == nullptr) {
+				LOGF("Streaming disabled: %s\n", error.c_str());
+				m_transport.reset();
+				return;
+			}
+			m_generation = generation;
+			m_ring       = std::make_shared<Streaming::LeaseRing>(m_epoch);
+			m_transport->SetPool(m_pool->Descriptor(), m_pool->Fds(), m_ring, generation);
+			LOGF("Streaming GPU pool: %ux%u pitch=%u epoch=%llu UUID=%s\n", width, height,
+			     m_pool->Descriptor().stride, static_cast<unsigned long long>(m_epoch),
+			     m_pool->Descriptor().gpu_uuid.c_str());
+		}
+		if (!m_transport->Attached()) return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - m_last_capture < m_interval) return;
+		const auto lease = m_ring->TryAcquire();
+		if (!lease) {
+			m_transport->Drop();
+			return;
+		}
+		m_last_capture = now;
+		std::optional<RenderLockGuard> render_lock;
+		if (!PresentUnlocked()) render_lock.emplace(m_scheduler.Context().GetMutex());
+		auto& wrapper = m_scheduler.BeginCommand();
+		wrapper.EndRendering();
+		const auto                             command = wrapper.Handle();
+		std::array<Streaming::CaptureLayer, 2> capture {};
+		for (size_t bus = 0; bus < layers.size(); bus++) {
+			if (auto* frame = layers[bus].frame; frame != nullptr) {
+				if (bus == 0)
+					frame->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
+					               vk::AccessFlagBits2::eTransferRead);
+				else {
+					frame->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+					               vk::AccessFlagBits2::eShaderRead);
+					if (frame->view == nullptr) {
+						vk::ImageViewCreateInfo view {};
+						view.image            = frame->image.image;
+						view.viewType         = vk::ImageViewType::e2D;
+						view.format           = frame->image.format;
+						view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+						RequireVulkanSuccess(
+						    m_graphics.device.createImageView(&view, nullptr, &frame->view),
+						    "create streaming source view");
+					}
+				}
+				capture[bus] = {frame->image.image,
+				                frame->view,
+				                {frame->image.extent.width, frame->image.extent.height},
+				                layers[bus].premultiplied_alpha};
+			}
+		}
+		m_pool->Record(command, *lease, capture[0], capture[1]);
+		SubmitInfo submit;
+		if (lease->recycled)
+			submit.AddWait(m_pool->Done(lease->slot), 0, vk::PipelineStageFlagBits::eTransfer);
+		submit.AddSignal(m_pool->Ready(lease->slot), 0);
+		const auto tick = m_scheduler.Submit(submit, true);
+		m_last_tick     = tick;
+		for (const auto& layer: layers)
+			if (layer.frame != nullptr) layer.frame->present_tick = tick;
+		m_transport->Publish(
+		    {*lease, tick,
+		     static_cast<uint64_t>(
+		         std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch())
+		             .count())});
+	}
+
+private:
+	GraphicContext&                                  m_graphics;
+	CommandScheduler&                                m_scheduler;
+	std::unique_ptr<Streaming::GpuPool>              m_pool;
+	std::vector<std::unique_ptr<Streaming::GpuPool>> m_retired;
+	std::shared_ptr<Streaming::LeaseRing>            m_ring;
+	std::unique_ptr<Streaming::Transport>            m_transport;
+	uint64_t                                         m_generation = 0, m_epoch = 0, m_last_tick = 0;
+	uint32_t                                         m_width = 0, m_height = 0;
+	std::chrono::nanoseconds                         m_interval {};
+	std::chrono::steady_clock::time_point            m_last_capture {};
+};
+
 struct Presenter::Impl {
 	explicit Impl(WindowContext& owner)
 	    : renderer(*owner.render_context), window(owner), swapchain(owner),
@@ -325,6 +474,13 @@ struct Presenter::Impl {
 		swapchain.Create();
 		const uint32_t image_count = swapchain.ImageCount() > 0 ? swapchain.ImageCount() : 3;
 		frames.Initialize(image_count, swapchain.Format());
+#if defined(__linux__)
+		if (const char* socket = std::getenv("KYTY_STREAM_SOCKET");
+		    socket != nullptr && *socket != '\0' && owner.graphic_ctx.streaming_external_enabled) {
+			stream_export =
+			    std::make_unique<NativeStreamExport>(owner.graphic_ctx, present_scheduler, socket);
+		}
+#endif
 	}
 
 	void RecoverSwapchain(Swapchain::Status status) {
@@ -363,6 +519,7 @@ struct Presenter::Impl {
 	Swapchain             swapchain;
 	CommandScheduler      present_scheduler;
 	FramePool             frames;
+	std::unique_ptr<NativeStreamExport> stream_export;
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
@@ -1305,6 +1462,7 @@ void Presenter::ClearLayer(int bus) {
 void Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 
+	if (stream_export != nullptr) stream_export->Capture(layers);
 	const auto overlay_visual = GetSystemOverlayVisualState();
 	// Some window systems keep presenting an old swapchain after a resize.
 	if (swapchain.NeedsResize()) {

@@ -60,6 +60,7 @@ struct GraphicContext {
 	vk::PhysicalDeviceMemoryProperties physical_device_memory_properties     = {};
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
+	bool                               streaming_external_enabled            = false;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               diagnostic_checkpoints_enabled        = false;
 	bool                               device_fault_enabled                  = false;

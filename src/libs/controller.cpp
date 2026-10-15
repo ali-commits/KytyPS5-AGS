@@ -1,6 +1,5 @@
 #include "libs/controller.h"
 
-#include <SDL3/SDL.h>
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -9,11 +8,14 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "kernel/pthread.h"
+#include "libs/controllerSourceState.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/padData.h"
+#include "streaming/feedback.h"
 
+#include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -120,6 +122,7 @@ public:
 	void SetMotionSensorState(bool enable);
 	void ResetOrientation();
 	void ResetInputState();
+	void  RemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
 	void ReleaseHostPads();
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
@@ -151,6 +154,7 @@ private:
 	// Accelerometer gravity direction in the reset frame.
 	std::array<float, 3> m_up_reference {0.0f, 1.0f, 0.0f};
 	bool                 m_up_reference_valid = false;
+	SourceState          m_input_sources;
 	ControllerState  m_state;
 	ControllerState  m_states[STATES_MAX];
 	bool             m_obtained[STATES_MAX] {};
@@ -503,6 +507,7 @@ void GameController::CheckActive() {
 	m_active_id     = new_active_id;
 	m_connected     = new_connected;
 	m_state         = {};
+	m_input_sources      = {};
 	m_gyro_time     = 0;
 	m_up_reference_valid = false;
 	m_states_num    = 0;
@@ -533,7 +538,7 @@ void GameController::Button(int id, uint32_t button, bool down) {
 	if (m_active_id == id || id == HOST_INPUT_CONTROLLER_ID) {
 		m_state.time = LibKernel::KernelGetProcessTime();
 
-		m_state.buttons = down ? m_state.buttons | button : m_state.buttons & ~button;
+		m_state.buttons = m_input_sources.LocalButton(button, down);
 
 		AddState();
 	}
@@ -549,18 +554,11 @@ void GameController::Axis(int id, Controller::Axis axis, int value) {
 
 		EXIT_IF(axis_id < 0 || axis_id >= static_cast<int>(Controller::Axis::AxisMax));
 
+		m_input_sources.LocalAxis(axis_id, value);
 		m_state.axes[axis_id] = value;
 		Common::HostInputTrace("axis", id, axis_id, value);
 
-		uint32_t trigger = 0;
-		if (axis == Controller::Axis::TriggerLeft) {
-			trigger = PAD_BUTTON_L2;
-		} else if (axis == Controller::Axis::TriggerRight) {
-			trigger = PAD_BUTTON_R2;
-		}
-		if (trigger != 0) {
-			m_state.buttons = value > 0 ? m_state.buttons | trigger : m_state.buttons & ~trigger;
-		}
+		m_state.buttons = m_input_sources.Buttons();
 
 		AddState();
 	}
@@ -571,6 +569,8 @@ void GameController::RightStick(int id, int x, int y) {
 
 	if (m_active_id == id || id == HOST_INPUT_CONTROLLER_ID) {
 		m_state.time                                 = LibKernel::KernelGetProcessTime();
+		m_input_sources.LocalAxis(static_cast<int>(Axis::RightX), x);
+		m_input_sources.LocalAxis(static_cast<int>(Axis::RightY), y);
 		m_state.axes[static_cast<int>(Axis::RightX)] = x;
 		m_state.axes[static_cast<int>(Axis::RightY)] = y;
 		AddState();
@@ -594,8 +594,7 @@ void GameController::TouchPad(int id, int finger, bool down, float x, float y) {
 		touch.x    = static_cast<uint16_t>(std::clamp(x, 0.0f, 1.0f) * 1920.0f);
 		touch.y    = static_cast<uint16_t>(std::clamp(y, 0.0f, 1.0f) * 943.0f);
 		if (id == HOST_INPUT_CONTROLLER_ID) {
-			m_state.buttons = down ? m_state.buttons | PAD_BUTTON_TOUCH_PAD
-			                       : m_state.buttons & ~PAD_BUTTON_TOUCH_PAD;
+			m_state.buttons = m_input_sources.LocalButton(PAD_BUTTON_TOUCH_PAD, down);
 		}
 		AddState();
 	}
@@ -713,9 +712,12 @@ void GameController::ResetOrientation() {
 
 void GameController::ResetInputState() {
 	Common::LockGuard lock(m_mutex);
-	m_state.buttons = 0;
+	m_input_sources.ResetLocal();
+	m_state.buttons = m_input_sources.Buttons();
 	std::fill_n(m_state.axes, 4, 128);
 	std::fill_n(m_state.axes + 4, 2, 0);
+	for (size_t i = 0; i < 6; i++)
+		m_state.axes[i] = m_input_sources.Axis(i);
 	for (auto& touch: m_state.touch) {
 		touch = {};
 	}
@@ -724,6 +726,24 @@ void GameController::ResetInputState() {
 	m_first_state   = 0;
 	m_next_touch_id = 1;
 	AddState();
+}
+
+void GameController::RemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes) {
+	Common::LockGuard lock(m_mutex);
+	if (connected) {
+		m_input_sources.Remote(buttons, axes);
+	} else {
+		m_input_sources.ResetRemote();
+	}
+	m_state.buttons = m_input_sources.Buttons();
+	for (size_t i = 0; i < 6; i++)
+		m_state.axes[i] = m_input_sources.Axis(i);
+	m_state.time = LibKernel::KernelGetProcessTime();
+	AddState();
+}
+
+void SetRemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes) {
+	if (g_controller != nullptr) g_controller->RemoteInput(connected, buttons, axes);
 }
 
 void GameController::ReleaseHostPads() {
@@ -775,6 +795,8 @@ void GameController::ApplyVibration() {
 	const auto scale       = duration != 0 ? GetSettingScale(Setting::VibrationIntensity) : 0.0f;
 	const auto large_motor = Scale(m_vibration[0], scale);
 	const auto small_motor = Scale(m_vibration[1], scale);
+	Streaming::PublishRumble(static_cast<uint16_t>(large_motor * 257U),
+	                         static_cast<uint16_t>(small_motor * 257U), duration);
 	if (DualSenseHaptics::SetVibration(m_active_id, large_motor, small_motor, duration)) {
 		return;
 	}

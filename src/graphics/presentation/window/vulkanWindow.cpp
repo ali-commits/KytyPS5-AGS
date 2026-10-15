@@ -1894,6 +1894,22 @@ void WindowContext::CreateVulkan() {
 			        nullptr, count, values);
 		    });
 
+#if defined(__linux__)
+		if (const char* socket = std::getenv("KYTY_STREAM_SOCKET");
+		    socket != nullptr && *socket != '\0') {
+			const bool supported =
+			    HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+			if (supported) {
+				device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+				device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+				graphic_ctx.streaming_external_enabled = true;
+			} else {
+				LOGF("Streaming disabled: Vulkan memory/semaphore FD extensions unavailable\n");
+			}
+		}
+#endif
+
 		if (HasExtension(available_extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 			graphic_ctx.memory_budget_ext_enabled = true;

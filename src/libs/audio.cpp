@@ -7,11 +7,13 @@
 #include "kernel/pthread.h"
 #include "libs/audioDiag.h"
 #include "libs/audioMix.h"
+#include "libs/audioOutputDevice.h"
 #include "libs/audio_internal.h"
 #include "libs/controller.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
+#include "streaming/feedback.h"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -562,14 +564,19 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 		Diag::Print("SDL audio init failed: %s", SDL_GetError());
 		return false;
 	}
+	const auto output_device = OutputDevice();
+	if (output_device == 0) {
+		LOGF("AudioOut: %s\n", SDL_GetError());
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+		return false;
+	}
 	report_default_playback_device();
 
 	port->downmix_stereo = false;
 	if (port->channels_num >= 8 && StereoDownmixEnabled()) {
 		SDL_AudioSpec device {};
 		port->downmix_stereo =
-		    SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &device, nullptr) &&
-		    device.channels == 2;
+		    SDL_GetAudioDeviceFormat(output_device, &device, nullptr) && device.channels == 2;
 		if (port->downmix_stereo) {
 			Diag::Print("%d-channel output on a stereo device: downmixed by Kyty (front 1, centre/"
 			            "surrounds 0.707, no LFE)",
@@ -582,8 +589,7 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 	desired.format   = SdlFormat(port->format);
 	desired.channels = static_cast<int>(OutputChannels(*port));
 
-	port->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, nullptr,
-	                                         nullptr);
+	port->stream = SDL_OpenAudioDeviceStream(output_device, &desired, nullptr, nullptr);
 	if (port->stream == nullptr) {
 		LOGF("AudioOut: SDL_OpenAudioDeviceStream failed: %s\n", SDL_GetError());
 		Diag::Print("cannot open the default playback device (%d Hz, %d ch): %s", desired.freq,
@@ -1218,6 +1224,28 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		    : port.type == AUDIO_OUT_PORT_TYPE_VIBRATION
 		        ? Controller::GetSettingScale(Controller::Setting::VibrationIntensity)
 		        : 1.0f;
+
+		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION && params[i].data != nullptr &&
+		    Streaming::feedback_enabled.load(std::memory_order_relaxed)) {
+			float peak[2] {};
+			for (uint32_t frame = 0; frame < std::min(port.samples_num, 8192U); frame++) {
+				for (uint32_t channel = 0; channel < 2; channel++) {
+					const auto   source = port.channels_num == 1 ? 0U : channel;
+					const size_t index  = size_t(frame) * port.channels_num + source;
+					float        value =
+					    FormatIsFloat(port.format)
+					        ? static_cast<const float*>(params[i].data)[index]
+					        : static_cast<const int16_t*>(params[i].data)[index] / 32768.0f;
+					value *= gain * port.volume[source] / 32768.0f *
+					         (params[i].gains != nullptr ? params[i].gains[source] : 1.0f);
+					if (std::isfinite(value))
+						peak[channel] = std::max(peak[channel], std::fabs(value));
+				}
+			}
+			Streaming::PublishRumble(
+			    static_cast<uint16_t>(std::clamp(peak[0] * 2, 0.0f, 1.0f) * 65535),
+			    static_cast<uint16_t>(std::clamp(peak[1] * 2, 0.0f, 1.0f) * 65535), 100);
+		}
 
 		uint64_t controller_queued_us = 0;
 		bool controller_uses_bluetooth = false;
