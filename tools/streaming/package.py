@@ -82,6 +82,7 @@ def package(args):
             (prefix/name).mkdir()
     (prefix/'_CrashCapture').mkdir(exist_ok=True)
     shutil.copy2(SOURCE/'LICENSE', prefix/'LICENSE')
+    shutil.copy2(SOURCE/'docs'/'streaming'/'README.md', prefix/'STREAMING-README.md')
     backend_source = args.backend_source.expanduser().resolve()
     assets = backend_source/'src_assets'/'common'/'assets'/'box.png'
     if assets.is_file():

@@ -26,7 +26,7 @@ cmake -S "$host_source" -B "$host_build" -G Ninja \
     -DSUNSHINE_ENABLE_WEB_UI=OFF -DBUILD_DOCS=OFF -DBUILD_TESTS=ON
 cmake --build "$host_build" --target sunshine test_sunshine -j "$kyty_jobs"
 ctest --test-dir "$kyty_build" -R '^(streaming_protocol|streaming_gpu|audio_output_device|launcher_streaming)$' --output-on-failure
-"$host_build/tests/test_sunshine" --gtest_filter='Kyty*'
+cmake -E chdir "$host_build" "$host_build/tests/test_sunshine" --gtest_filter='Kyty*'
 
 if [ -e "$kyty_stage" ]; then
     printf '%s\n' 'Build passed. Choose a fresh KYTY_STREAM_STAGE before staging.' >&2
