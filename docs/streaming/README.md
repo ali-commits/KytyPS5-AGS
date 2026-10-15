@@ -1,6 +1,6 @@
 # Kyty native streaming experiment
 
-This Linux/RTX3090 edition sends Kyty's composed guest game image to a separate
+This Linux/RTX 3090 edition sends Kyty's composed guest game image to a separate
 Sunshine-derived Moonlight host. Capture happens before local window scaling.
 Your Intel-connected monitors can continue to show the normal desktop. No display
 capture, dummy display connector, or desktop input injection is used by this mode.
@@ -14,10 +14,10 @@ repositories. This is a private experiment, not a supported upstream release.
 Run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
 tabs. The library and game settings start from a copy of the working installation.
 
-1. Open **Streaming** and use **1080p**, **60 FPS**, **HEVC**, and the default30Mbps
-   maximum for the first TV test. Leave the NVIDIA adapter field empty for RTX3090.
+1. Open **Streaming** and use **1080p**, **60 FPS**, **HEVC**, and the default 30 Mbps
+   maximum for the first TV test. Leave the NVIDIA adapter field empty for RTX 3090.
 2. Select **Start hosting** and wait for **Ready**. Copy the displayed LAN address,
-   including its port. The default base port is48189, separate from system Sunshine.
+   including its port. The default base port is 48189, separate from system Sunshine.
 3. In Moonlight, manually add that address, for example `192.168.1.3:48189`.
    Start pairing. Select that pending device in the launcher, enter Moonlight's
    four-digit PIN and select **Pair**.
@@ -28,11 +28,11 @@ tabs. The library and game settings start from a copy of the working installatio
 The TV and PC need to be on the same LAN for this first test. Moonlight must support
 a custom host port; if a particular TV client does not, the launcher also exposes
 the base port setting. Start with SDR and HDR disabled. H.264 is available if that
-TV has trouble with HEVC. AV1 is disabled for this RTX3090 edition.
+TV has trouble with HEVC. AV1 is disabled for this RTX 3090 edition.
 
 Match Moonlight's resolution/FPS settings to the capture preference. The preference
 sets the exported image size; it does not change the game's internal rendering.
-Scaling a1080p source to1440p does not create additional native detail. Moonlight
+Scaling a 1080p source to 1440p does not create additional native detail. Moonlight
 chooses the final encoded output, and the launcher labels requested session values.
 
 While hosting, local Library launch is disabled so Moonlight owns the one game
@@ -71,24 +71,29 @@ settings, process mappings and the native executable hash under `_CrashCapture`.
 
 ## Automated verification and limits
 
-- Real RTX3090 Vulkan memory/semaphore exports imported into matching CUDA UUID;
- 1080p and1440p, aligned pitch, asymmetric colors/orientation, guest HUD alpha,
+- Real RTX 3090 Vulkan memory/semaphore exports imported into matching CUDA UUID;
+ 1080p and 1440p, aligned pitch, asymmetric colors/orientation, guest HUD alpha,
  three-slot exhaustion/reuse and dropped-frame semaphore consumption checked.
-- Backend snapshot ownership tested after30 producer-slot overwrites. Its H.264
+- Backend snapshot ownership tested after 30 producer-slot overwrites. Its H.264
  NVENC output independently decoded by FFmpeg to the expected blue image.
 - Unmodified Moonlight Embedded paired, listed apps and received H.264 video/audio.
- HEVC with a1440p output request also streamed and reconnected; actual GPU snapshot
- counters increased across both sessions. That network fixture used a1080p source;
- native1440p GPU export was tested separately.
+ HEVC with a 1440p output request also streamed and reconnected; actual GPU snapshot
+ counters increased across both sessions. That network fixture used a 1080p source;
+ native 1440p GPU export was tested separately.
 - Real private-audio tone capture checked the system default before/during/after.
  Native Qt tests cover pinned TLS, incorrect certificates, pairing/client API
  payloads, settings, arguments/quoting, process guards, host errors/restart, audio
  ownership, delayed setup failures and cleanup during shutdown.
 - A real packaged launcher→Moonlight catalog→Astro boot was also decoded by the
- stock client's SDL/software-FFmpeg platform. Export counters reached744 frames;
- decoded frame600 shows Astro's starfield, and normal stop completed the capture
- manifest with exit0. Normal saves and the system audio default stayed unchanged.
-- Existing18 memory/pipeline regression checks pass. Full launcher Library and
+ stock client's SDL/software-FFmpeg platform. The final 1920×1080 check exported
+ 797 frames with no dropped exports; decoded frame 600 shows the Team Asobi logo
+ and starfield, game audio was nonzero, and normal shutdown completed both the
+ capture manifest and launcher with exit 0. Normal saves and the system audio
+ default stayed unchanged.
+- A real packaged host SIGKILL test retained audio/session/profile ownership until
+ the complete game group exited, then restarted the same profile/socket and launched
+ a second catalog entry. No owned descendants or zombies remained.
+- Existing 18 memory/pipeline regression checks pass. Full launcher Library and
  Streaming windows were rendered offscreen and inspected.
 
 The synthetic network tests use Moonlight's fake platform; the real Astro boot
@@ -114,15 +119,39 @@ The app catalog is a snapshot taken when hosting starts. After changing the Libr
 stop and restart hosting to publish the updated catalog. There is no automatic
 software update or installation over the working edition.
 
+A per-host guardian tracks the exact host identity. If the host or launch wrapper
+crashes, it terminates the complete owned game group, including descendants that
+ignore normal shutdown. The launcher holds audio and profile ownership until that
+group has exited, then allows a same-profile restart. Recovery may take about six
+seconds while a stubborn process is killed. Stale private frame sockets from a
+killed host are recovered without removing another live listener.
+
+## Morning TV test
+
+1. Start at 1080p/60 and play a short Astro section. Check movement, jumping, menu
+   buttons, audio timing and basic rumble using the controller connected to the TV.
+2. Resize or maximize the local game window, then minimize it. Confirm the TV keeps
+   receiving the game while the Intel monitors remain usable.
+3. Disconnect and reconnect Moonlight to the running game. Confirm picture, sound
+   and controller release/reconnect without restarting the emulator.
+4. Stop the game and hosting, select 1440p, restart hosting and match Moonlight's
+   resolution. Compare detail, frame pacing and latency on the TV.
+5. Stop the game normally and confirm the last crash-capture manifest records an
+   exit. Keep any failing session's `_CrashCapture` directory for diagnosis.
+
+Changes to experimental game progress stay in the experimental save copy. If an
+emulated system prompt appears only on the PC, complete it locally for this edition.
+
 ## Build and inspect
 
 Kyty branch: `experiment/kyty-native-streaming` in the attached managed worktree.
 Host branch: `experiment/kyty-frame-input` in
-`/home/ali/projects/kyty-streaming-sunshine`, based on Sunshine019b1ba661d829e334706557a3e2bdc3d2374591.
+`/home/ali/projects/kyty-streaming-sunshine`, based on Sunshine 019b1ba661d829e334706557a3e2bdc3d2374591.
 
 `tools/streaming/build.sh` builds the two programs independently and stages Kyty.
 It requires the existing Clang/CMake/Ninja/Qt6, Vulkan, CUDA/NVENC, PipeWire/Pulse
-and upstream Sunshine dependencies. It builds CUDA architecture86 and omits the
+and upstream Sunshine dependencies. It verifies the exact backend commit in `host-source.rev`, checks clean recursive
+submodule revisions, builds CUDA architecture 86 and omits the
 Sunshine browser frontend/tray. No JavaScript package installation is required.
 Set `KYTY_STREAM_BUILD_DIR`, `KYTY_STREAM_HOST_SOURCE`, `KYTY_STREAM_HOST_BUILD`,
 `KYTY_STREAM_PREFIX` and a fresh `KYTY_STREAM_STAGE` to override local paths.
@@ -138,5 +167,6 @@ packet delivery and actual GPU capture counters, and can exercise reconnects.
 The Vulkan test producer supports `streaming_gpu_tests --serve <private-socket> 60`.
 
 The binding wire contract is [PROTOCOL.md](PROTOCOL.md); the implementation spec and
-plan are under `docs/superpowers/`. Test evidence and the final verification record
-are retained with this worktree and the package provenance.
+plan are under `docs/superpowers/`. [VERIFICATION.md](VERIFICATION.md) records the
+final checks, source revisions and remaining device tests. Detailed local evidence
+and the package provenance are retained with this worktree and installation.
