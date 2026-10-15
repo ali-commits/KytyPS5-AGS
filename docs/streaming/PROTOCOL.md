@@ -82,3 +82,18 @@ Producer -> backend:
 Rumble magnitudes0..65535, duration0..1000ms. Bound/throttle messages; feedback never
 blocks audio/guest threads. Close/reset neutralizes feedback and remote inputs.
 Audio uses the independently configured private PulseAudio sink, not this socket.
+
+## Managed host control contract
+
+The independent backend reports capabilities with `--kyty-capabilities` and accepts
+`<config-path> --creds-stdin` with one bounded JSON username/password line on stdin.
+No credential values appear in output or process arguments. Capture options are
+`capture=kyty`, `encoder=nvenc`, `kyty_socket`, `kyty_private_audio=true`,
+`kyty_input=true`, and `management_bind_address=127.0.0.1`. The backend retains its
+authenticated management API at configured base port+1; stream control stays LAN.
+`SUNSHINE_ENABLE_WEB_UI=OFF` disables browser pages/build assets, not Moonlight or
+management JSON APIs. The launcher must not invent an API launch endpoint.
+
+Capabilities object: `{"protocol_version":1,"capture":"kyty",
+"gpu_transport":"vulkan-buffer-fd","private_audio":true,"private_input":true,
+"credentials_stdin":true}`. Parse a final JSON line if startup diagnostics precede it.
