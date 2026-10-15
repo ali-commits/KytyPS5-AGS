@@ -38,7 +38,8 @@ or {"type":"error","message":"bounded diagnostic"}. No unbounded retries/log spa
 
 sequence is positive monotonic uint64; epoch positive uint64; slot0..2. Producer
 sends frame only after its submission signals READY and completion is observable.
-Backend waitsREADY, converts GPU data, signalsDONE, synchronizes CUDA completion,
+Backend waitsREADY, copies GPU data into its owned snapshot (or converts directly
+when all readers are accounted for), signalsDONE, synchronizes CUDA completion,
 then release. Dropped frames undergo the same acquire/release without conversion.
 Producer never marks a slot free merely because another frame is newer. Stale or
 duplicate release is ignored/logged and cannot recycle a live slot. Producer polls
