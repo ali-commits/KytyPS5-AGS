@@ -84,14 +84,24 @@ settings, process mappings and the native executable hash under `_CrashCapture`.
  Native Qt tests cover pinned TLS, incorrect certificates, pairing/client API
  payloads, settings, arguments/quoting, process guards, host errors/restart, audio
  ownership, delayed setup failures and cleanup during shutdown.
+- A real packaged launcher→Moonlight catalog→Astro boot was also decoded by the
+ stock client's SDL/software-FFmpeg platform. Export counters reached744 frames;
+ decoded frame600 shows Astro's starfield, and normal stop completed the capture
+ manifest with exit0. Normal saves and the system audio default stayed unchanged.
 - Existing18 memory/pipeline regression checks pass. Full launcher Library and
  Streaming windows were rendered offscreen and inspected.
 
-Automated Moonlight used its fake output platform: network delivery is proven;
-it does not substitute for viewing/decoding on the real TV. The GPU/codec fixture
-separately verifies decoded pixels. Actual Astro gameplay, subjective latency,
-physical speaker playback, controller compatibility and minimized-window gameplay
-must still be checked on the devices.
+The synthetic network tests use Moonlight's fake platform; the real Astro boot
+check additionally verifies offscreen decoded pictures. Neither substitutes for
+viewing on the actual TV. Gameplay, subjective latency, physical speaker playback,
+controller compatibility and minimized-window behavior still need device testing.
+
+The capture contains guest VideoOut layers. Kyty's separately rendered system
+panels—IME keyboards, sign-in/error prompts and trophy toasts—remain local-only
+in this first edition, and remote input does not operate those panels. A game
+waiting on one of these needs interaction at the PC. Existing login, save-data
+and message dialogs auto-complete in the emulator; they are not additional hidden
+interactive panels. This limitation does not claim full PS5 system-UI parity.
 
 A slow/disconnected consumer cannot make the producer wait for a free capture slot.
 For safety, the first edition retains at most two old GPU pools plus one active
