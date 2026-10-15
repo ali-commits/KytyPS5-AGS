@@ -1252,6 +1252,27 @@ if(BUILD_TESTING)
 	set_tests_properties(pipeline_prefetch_rendering PROPERTIES
 		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_THREADS=2;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=127"
 		TIMEOUT 180)
+	add_test(NAME pipeline_prefetch_fast_first COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(pipeline_prefetch_fast_first PROPERTIES
+		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_FAST_FIRST=1;KYTY_PIPELINE_FAST_FIRST=1;KYTY_PIPELINE_PREFETCH_PROGRAMS=1;KYTY_PIPELINE_PREFETCH_THREADS=2;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=134"
+		TIMEOUT 180)
+	add_test(NAME pipeline_prefetch_fast_first_draw_run COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-run-only)
+	set_tests_properties(pipeline_prefetch_fast_first_draw_run PROPERTIES
+		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_FAST_FIRST=1;KYTY_PIPELINE_FAST_FIRST=1;KYTY_DRAW_RUN=exit;KYTY_PIPELINE_COLD_SALT=136"
+		TIMEOUT 180)
+	add_test(NAME pipeline_prefetch_journal_clean COMMAND ${CMAKE_COMMAND} -E rm -f
+		pipeline-prefetch-test.pipelines pipeline-prefetch-test.shaders)
+	set_tests_properties(pipeline_prefetch_journal_clean PROPERTIES FIXTURES_SETUP pipeline_prefetch_journal_files)
+	set(kyty_prefetch_journal_env "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_PROGRAMS=1;KYTY_PIPELINE_FAST_FIRST=0;KYTY_PIPELINE_JOURNAL=1;KYTY_PIPELINE_JOURNAL_PATH=pipeline-prefetch-test.pipelines;KYTY_SHADER_PRECOMPILE=1;KYTY_SHADER_PRECOMPILE_PATH=pipeline-prefetch-test.shaders;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=135")
+	add_test(NAME pipeline_prefetch_journal_record COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(pipeline_prefetch_journal_record PROPERTIES
+		FIXTURES_REQUIRED pipeline_prefetch_journal_files FIXTURES_SETUP pipeline_prefetch_journal_recorded
+		ENVIRONMENT "${kyty_prefetch_journal_env}" TIMEOUT 180)
+	add_test(NAME pipeline_prefetch_journal_replay COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
+	set_tests_properties(pipeline_prefetch_journal_replay PROPERTIES
+		FIXTURES_REQUIRED "pipeline_prefetch_journal_files;pipeline_prefetch_journal_recorded"
+		ENVIRONMENT "${kyty_prefetch_journal_env};KYTY_PIPELINE_KNOWN=1;KYTY_PIPELINE_JOURNAL_FORCE=1;KYTY_PIPELINE_JOURNAL_WAIT=1;KYTY_SHADER_PRECOMPILE_WAIT=1;KYTY_PIPELINE_JOURNAL_VERIFY=2"
+		TIMEOUT 180)
 	add_test(NAME pipeline_prefetch_programs COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
 	set_tests_properties(pipeline_prefetch_programs PROPERTIES
 		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_PROGRAMS=1;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=129"

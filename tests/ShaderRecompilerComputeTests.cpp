@@ -17778,7 +17778,11 @@ public:
                     ", expected " + Hex(expected[bad % 4]));
       };
 
-      // Serial reference: RenderExecutor directly, the register load through the processor.
+      // Serial reference: no look-ahead request precedes these cold draws.
+      const auto serial_prefetch_before =
+          context.GetPipelineCache().GetPrefetchTotals();
+      const auto serial_fast_before =
+          context.GetPipelineCache().GetFastFirstTotals();
       clear();
       shaders.SetPsShaderBase(pixel_addresses[0]);
       RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
@@ -17794,6 +17798,19 @@ public:
                                          {.vertex_count = 3, .instance_count = 1});
       const auto serial = read();
       check("serial draws", serial);
+      const auto *combined = std::getenv("KYTY_PIPELINE_PREFETCH_FAST_FIRST");
+      const auto *journal = std::getenv("KYTY_PIPELINE_JOURNAL");
+      if (combined != nullptr && std::strcmp(combined, "1") == 0 &&
+          (journal == nullptr || std::strcmp(journal, "1") != 0)) {
+        Require(
+            name, "cold serial draw keeps fast-first fallback",
+            context.GetPipelineCache().GetPrefetchTotals().submitted ==
+                    serial_prefetch_before.submitted &&
+                context.GetPipelineCache().GetFastFirstTotals().graphics_fast >
+                    serial_fast_before.graphics_fast,
+            "a draw without a look-ahead job submitted an optimized build "
+            "instead of fast-first");
+      }
 
       // KYTY_DRAW_PREP_BINDINGS (bindingPlan.h): with plans on, verify mode compared every item
       // the draws used without a difference, and in inline mode each committed draw had a plan
@@ -18207,13 +18224,31 @@ public:
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
     });
+    if (const auto *combined = std::getenv("KYTY_PIPELINE_PREFETCH_FAST_FIRST");
+        combined != nullptr && std::strcmp(combined, "1") == 0) {
+      Require(name, "pipeline look-ahead with fast-first fallback",
+              context.GetPipelineCache().PipelinePrefetchEnabled(),
+              "requested combined prefetch mode never enabled worker pipeline "
+              "builds");
+    }
     if (context.GetPipelineCache().PipelinePrefetchEnabled()) {
       const auto stats = context.GetPipelineCache().GetPrefetchTotals();
       Require(name, "prefetched pipelines consumed", stats.submitted > 0 && stats.used > 0,
               "prefetch enabled but no worker pipeline was consumed by the GPU readback checks");
+      if (const auto *journal = std::getenv("KYTY_PIPELINE_JOURNAL");
+          journal != nullptr && std::strcmp(journal, "1") == 0) {
+        Require(name, "consumed prefetched pipelines retained in journal",
+                stats.journaled == stats.used,
+                "a consumed pipeline was not recorded for future prewarming");
+      }
       if (const auto* value = std::getenv("KYTY_PIPELINE_PREFETCH_PROGRAMS"); value != nullptr && std::strcmp(value, "0") != 0) {
-        Require(name, "speculative programs published", stats.programs > 0,
-                "program prefetch enabled but no program was compiled from a clean snapshot");
+        // A completed shader replay already owns the input combinations in this fixture.
+        // The separate cold-start case still requires actual speculative compilation.
+        const auto* replay = std::getenv("KYTY_SHADER_PRECOMPILE_WAIT");
+        if (replay == nullptr || std::strcmp(replay, "1") != 0) {
+          Require(name, "speculative programs published", stats.programs > 0,
+                  "program prefetch enabled but no program was compiled from a clean snapshot");
+        }
       }
     }
     if (const auto* fast = std::getenv("KYTY_PIPELINE_FAST_FIRST"); fast != nullptr && std::strcmp(fast, "0") != 0) {

@@ -4331,6 +4331,7 @@ struct PipelineCache::PrefetchState {
 	struct Result {
 		std::unique_ptr<Pipeline> pipeline;
 		uint64_t compile_ns = 0;
+		GraphicsContent           content;
 	};
 	struct Pending {
 		std::future<Result> future;
@@ -4348,9 +4349,11 @@ struct PipelineCache::PrefetchState {
 			ReleasePipelineLayout(cache.m_graphics, result.pipeline->pipeline_layout,
 			                      result.pipeline->descriptor_set_layout);
 		}
-		PipelineCacheLog("Pipeline prefetch: submitted {}, used {}, unused {}; worker compile {} ms, "
-		                 "CP wait {} ms (worst {} ms)", submitted.load(), used.load(), pending.size(),
-		                 compile_ns.load() / 1000000, wait_ns.load() / 1000000, max_wait_ns.load() / 1000000);
+		PipelineCacheLog(
+		    "Pipeline prefetch: submitted {}, used {}, unused {}; worker compile {} ms, "
+		    "CP wait {} ms (worst {} ms), {} consumed pipelines journaled",
+		    submitted.load(), used.load(), pending.size(), compile_ns.load() / 1000000,
+		    wait_ns.load() / 1000000, max_wait_ns.load() / 1000000, journaled.load());
 	}
 	void Stop() {
 		{
@@ -4370,11 +4373,23 @@ struct PipelineCache::PrefetchState {
 		     programs] {
 			    Profiler::SetThreadName("PipelineCompiler");
 			    Result result {std::make_unique<Pipeline>()};
+			    GraphicsPipelineCreateHook hook;
+			    if (cache.m_known != nullptr || cache.m_journal != nullptr) {
+				    hook = [&](const vk::GraphicsPipelineCreateInfo& info,
+				               std::span<const uint32_t> signature, vk::Pipeline* pipeline) {
+					    result.content    = DescribeGraphicsPipeline(info, signature);
+					    const auto status = cache.m_graphics.device.createGraphicsPipelines(
+					        cache.m_driver_cache, 1, &info, nullptr, pipeline);
+					    if (status == vk::Result::eSuccess)
+						    cache.NoteKnownPipeline(result.content.key);
+					    return status;
+				    };
+			    }
 			    const auto begin = CompileClockNs();
-			    CreatePipelineInternal(cache.m_graphics, *result.pipeline, key.rendering,
-			                           key.vertex_input, {&vertex, 1},
-			                           pixel_copy ? &*pixel_copy : nullptr, programs,
-			                           key.static_params, cache.m_driver_cache);
+			    CreatePipelineInternal(
+			        cache.m_graphics, *result.pipeline, key.rendering, key.vertex_input,
+			        {&vertex, 1}, pixel_copy ? &*pixel_copy : nullptr, programs, key.static_params,
+			        cache.m_driver_cache, hook ? &hook : nullptr);
 			    result.compile_ns = CompileClockNs() - begin;
 			    compile_ns.fetch_add(result.compile_ns, std::memory_order_relaxed);
 			    g_compile_totals.gfx_pipelines.fetch_add(1, std::memory_order_relaxed);
@@ -4426,7 +4441,8 @@ struct PipelineCache::PrefetchState {
 	bool stopped = false;
 	uint64_t next_ticket = 0;
 	std::unordered_map<GraphicsPipelineKey, Pending, GraphicsPipelineKeyHash> pending;
-	std::atomic<uint64_t> submitted {0}, used {0}, compile_ns {0}, wait_ns {0}, max_wait_ns {0};
+	std::atomic<uint64_t> submitted {0}, used {0}, compile_ns {0}, wait_ns {0}, max_wait_ns {0},
+	    journaled {0};
 	PipelineCompileQueue queue;
 };
 
@@ -5613,19 +5629,24 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		} else {
 			m_fast_first = std::make_unique<FastFirstState>(*this);
 			PipelineCacheLog("Pipeline fast-first: new pipelines are built unoptimized and "
-			                 "optimized in the background (driver-cache probe: {}); pipeline "
-			                 "prefetch (KYTY_PIPELINE_PREFETCH) is off with it",
+			                 "optimized in the background (driver-cache probe: {})",
 			                 !m_fast_first->probe_supported ? "unsupported"
 			                 : m_fast_first->probe_all      ? "every pipeline"
 			                 : m_known != nullptr           ? "pipelines known to be cached"
 			                                                : "off");
 		}
 	}
-	if ((g_pipeline_prefetch.On() || EnvU64("KYTY_PIPELINE_PREFETCH_POOL", 0) != 0) && m_library == nullptr &&
-	    m_fast_first == nullptr) {
+	// Opt-in: optimized exact-key look-ahead on workers, with fast-first retained for misses.
+	// No draw is omitted: GetGraphicsPipeline still waits for its actual pipeline.
+	const bool combined_prefetch = EnvU64("KYTY_PIPELINE_PREFETCH_FAST_FIRST", 0) == 1;
+	if ((g_pipeline_prefetch.On() || EnvU64("KYTY_PIPELINE_PREFETCH_POOL", 0) != 0) &&
+	    m_library == nullptr && (m_fast_first == nullptr || combined_prefetch)) {
 		const auto threads = std::clamp<uint64_t>(EnvU64("KYTY_PIPELINE_PREFETCH_THREADS", 2), 1, 4);
 		m_prefetch = std::make_unique<PrefetchState>(*this, threads);
-		PipelineCacheLog("Pipeline prefetch: {} compile workers; draws always wait for their exact pipeline", threads);
+		PipelineCacheLog(
+		    "Pipeline prefetch: {} compile workers; draws always wait for their exact pipeline{}",
+		    threads,
+		    m_fast_first != nullptr ? "; optimized look-ahead with fast-first fallback" : "");
 	}
 	if (EnvU64("KYTY_PIPELINE_STATS", 0) != 0) m_stats_reporter = std::make_unique<StatsReporter>(*this);
 	if (EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0 && !PipelineCacheTitleId().empty()) RunListPrepare();
@@ -7035,9 +7056,10 @@ void PipelineCache::NotePlannedPipeline(const RenderDepthInfo&      depth,
 
 PipelineCache::PrefetchTotals PipelineCache::GetPrefetchTotals() const {
 	if (m_prefetch == nullptr) return {};
-	return {m_prefetch->submitted.load(), m_prefetch->used.load(), m_prefetch->compile_ns.load(),
-	        m_prefetch->wait_ns.load(), m_prefetch->max_wait_ns.load(),
-	        m_program_cache->speculative_programs.load()};
+	return {m_prefetch->submitted.load(),   m_prefetch->used.load(),
+	        m_prefetch->compile_ns.load(),  m_prefetch->wait_ns.load(),
+	        m_prefetch->max_wait_ns.load(), m_program_cache->speculative_programs.load(),
+	        m_prefetch->journaled.load()};
 }
 
 FastFirstSnapshot PipelineCache::GetFastFirstTotals() const {
@@ -7075,7 +7097,9 @@ void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> co
     const RenderDepthInfo& depth, std::span<const ShaderVertexInputInfo> vertex_info,
     CommandBuffer& command, const ShaderPixelInputInfo* pixel_info,
     vk::PrimitiveTopology topology, bool primitive_restart_enable, const GraphicsPrograms& programs) {
-	if (!PipelinePrefetchEnabled() || vertex_info.size() != 1) return;
+	// This overload is a late hint from draw execution, not earlier preparation. In
+	// combined mode it must leave an unrequested cold pipeline to fast-first.
+	if (m_fast_first != nullptr || !PipelinePrefetchEnabled() || vertex_info.size() != 1) return;
 	PipelineTargets targets;
 	targets.color_count = static_cast<uint32_t>(colors.size());
 	for (uint32_t i = 0; i < targets.color_count; i++) {
@@ -7189,7 +7213,11 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 			}
 			// Reserve the key before releasing the map. Other preparation threads may submit
 			// independent keys while this draw waits, allowing compiles to overlap each other.
-			if (PipelinePrefetchEnabled()) m_prefetch->Request(key, vs_input_info, ps_input_info, programs);
+			// Combined mode only consumes work requested ahead of the draw. A cold miss
+			// without such a job keeps the synchronous fast-first policy below.
+			if (PipelinePrefetchEnabled() && m_fast_first == nullptr) {
+				m_prefetch->Request(key, vs_input_info, ps_input_info, programs);
+			}
 		}
 		wait_begin = CompileClockNs();
 		ready = m_prefetch->Take(key);
@@ -7228,7 +7256,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	GraphicsPipelineLibrary::Result library_result;
 	GraphicsPipelineCreateHook      library_hook;
 	FastFirstState::GraphicsFast    fast_result;
-	GraphicsContent                 content;
+	GraphicsContent content = prefetched ? std::move(ready.content) : GraphicsContent {};
 	const bool                      keyed = m_known != nullptr || m_journal != nullptr;
 	if (m_fast_first != nullptr && !prefetched && !m_fast_first->scheduler.Stopped()) {
 		library_hook = [&](const vk::GraphicsPipelineCreateInfo& info,
@@ -7339,6 +7367,9 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	if (!prefetched && !built_fast && !fast_result.cache_hit) NotePipelineCreated(create_ns);
 	if (content.key != 0 && (m_journal != nullptr || m_journal_replay != nullptr)) {
 		NoteJournalPipeline(content.key, content.words, content.snapshot_words, content.identities, guest);
+		if (prefetched && m_journal != nullptr && m_journal->Contains(content.key)) {
+			m_prefetch->journaled.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 	return remember(*iter->second);
 }

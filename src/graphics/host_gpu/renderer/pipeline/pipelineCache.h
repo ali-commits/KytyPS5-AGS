@@ -244,7 +244,7 @@ public:
 	[[nodiscard]] bool PipelinePrefetchEnabled() const noexcept;
 	struct PrefetchTotals {
 		uint64_t submitted = 0, used = 0, compile_ns = 0, wait_ns = 0, max_wait_ns = 0;
-		uint64_t programs = 0;
+		uint64_t programs = 0, journaled = 0;
 	};
 	[[nodiscard]] PrefetchTotals GetPrefetchTotals() const;
 	// KYTY_PIPELINE_FAST_FIRST counters (all zero when it is off); tests and diagnostics.
