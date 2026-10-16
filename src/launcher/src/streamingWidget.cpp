@@ -147,6 +147,22 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_monitor->setObjectName("streamLocalAudio");
 	m_monitor->setChecked(settings.local_audio);
 	quality_form->addRow(m_monitor);
+	m_controller_audio =
+	    new QCheckBox(tr("Native DualSense haptics and controller speaker (USB)"), m_quality);
+	m_controller_audio->setObjectName("streamControllerAudio");
+	m_controller_audio->setChecked(settings.controller_audio);
+	quality_form->addRow(m_controller_audio);
+	auto* controller_hint = new QLabel(tr("Requires the companion receiver. Main game audio stays "
+	                                      "on the client’s normal speakers."),
+	                                   m_quality);
+	controller_hint->setWordWrap(true);
+	quality_form->addRow(controller_hint);
+	m_controller_audio_port = new QSpinBox(m_quality);
+	m_controller_audio_port->setObjectName("streamControllerAudioPort");
+	m_controller_audio_port->setRange(0, 65535);
+	m_controller_audio_port->setSpecialValueText(tr("Automatic"));
+	m_controller_audio_port->setValue(settings.controller_audio_port);
+	quality_form->addRow(tr("Controller audio port"), m_controller_audio_port);
 	m_save = new QPushButton(tr("Save preferences"), m_quality);
 	quality_form->addRow(m_save);
 	layout->addWidget(m_quality);
@@ -198,6 +214,44 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	clients_layout->addWidget(m_forget);
 	devices->addWidget(clients, 1);
 	layout->addLayout(devices);
+	auto* receiver_group      = new QGroupBox(tr("Controller audio companion"), content);
+	auto* receiver_layout     = new QVBoxLayout(receiver_group);
+	m_controller_audio_status = new QLabel(receiver_group);
+	m_controller_audio_status->setObjectName("streamControllerAudioStatus");
+	m_controller_audio_status->setWordWrap(true);
+	m_controller_audio_status->setTextFormat(Qt::PlainText);
+	receiver_layout->addWidget(m_controller_audio_status);
+	m_receivers = new QListWidget(receiver_group);
+	m_receivers->setObjectName("streamControllerAudioReceivers");
+	m_receivers->setMaximumHeight(100);
+	receiver_layout->addWidget(m_receivers);
+	auto* receiver_buttons = new QHBoxLayout;
+	m_receiver_toggle      = new QPushButton(tr("Disable selected companion"), receiver_group);
+	m_receiver_toggle->setObjectName("streamControllerAudioToggle");
+	m_receiver_remove = new QPushButton(tr("Remove selected companion"), receiver_group);
+	m_receiver_remove->setObjectName("streamControllerAudioRemove");
+	receiver_buttons->addWidget(m_receiver_toggle);
+	receiver_buttons->addWidget(m_receiver_remove);
+	receiver_layout->addLayout(receiver_buttons);
+	layout->addWidget(receiver_group);
+	connect(m_receiver_toggle, &QPushButton::clicked, this, [this] {
+		if (auto* item = m_receivers->currentItem())
+			m_backend->SetControllerAudioReceiverEnabled(item->data(Qt::UserRole).toString(),
+			                                             !item->data(Qt::UserRole + 1).toBool());
+	});
+	connect(m_receiver_remove, &QPushButton::clicked, this, [this] {
+		if (auto* item = m_receivers->currentItem())
+			m_backend->RemoveControllerAudioReceiver(item->data(Qt::UserRole).toString());
+	});
+	connect(m_receivers, &QListWidget::currentRowChanged, this, [this] {
+		const bool  ready = m_backend->GetState() == StreamingBackend::State::Ready;
+		const auto* item  = m_receivers->currentItem();
+		m_receiver_toggle->setEnabled(ready && item);
+		m_receiver_remove->setEnabled(ready && item);
+		m_receiver_toggle->setText(item && !item->data(Qt::UserRole + 1).toBool()
+		                               ? tr("Enable selected companion")
+		                               : tr("Disable selected companion"));
+	});
 	auto* logs        = new QGroupBox(tr("Diagnostics"), content);
 	auto* logs_layout = new QVBoxLayout(logs);
 	m_logs            = new QPlainTextEdit(logs);
@@ -252,15 +306,17 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 }
 StreamingSettings StreamingWidget::Settings() const {
 	StreamingSettings s;
-	s.backend     = m_path->text();
-	s.port        = m_port->value();
-	s.resolution  = m_resolution->currentText();
-	s.fps         = m_fps->currentData().toInt();
-	s.bitrate     = m_bitrate->value();
-	s.codec       = m_codec->currentText();
-	s.adapter     = m_adapter->text();
-	s.local_audio = m_monitor->isChecked();
-	s.show_local  = m_show_local->isChecked();
+	s.backend               = m_path->text();
+	s.port                  = m_port->value();
+	s.resolution            = m_resolution->currentText();
+	s.fps                   = m_fps->currentData().toInt();
+	s.bitrate               = m_bitrate->value();
+	s.codec                 = m_codec->currentText();
+	s.adapter               = m_adapter->text();
+	s.local_audio           = m_monitor->isChecked();
+	s.show_local            = m_show_local->isChecked();
+	s.controller_audio      = m_controller_audio->isChecked();
+	s.controller_audio_port = m_controller_audio_port->value();
 	return s;
 }
 bool StreamingWidget::Save() {
@@ -362,6 +418,38 @@ void StreamingWidget::Update() {
 	refresh_list(m_clients, m_backend->Clients(), true);
 	m_pair->setEnabled(ready && m_pending->currentItem());
 	m_forget->setEnabled(ready && m_clients->currentItem());
+	const auto audio = m_backend->ControllerAudioStatus();
+	m_controller_audio_status->setText(
+	    audio.isEmpty()
+	        ? tr("Enable controller audio above and start hosting to see companion status.")
+	        : tr("%1 · %2 · %3 bytes · %4 ms queued%5")
+	              .arg(audio.value("state").toString(), audio.value("receiver_name").toString())
+	              .arg(audio.value("bytes").toVariant().toULongLong())
+	              .arg(audio.value("queue_us").toDouble() / 1000.0, 0, 'f', 1)
+	              .arg(audio.value("last_error").toString().isEmpty()
+	                       ? QString()
+	                       : " · " + audio.value("last_error").toString()));
+	const auto selected_receiver = m_receivers->currentItem()
+	                                   ? m_receivers->currentItem()->data(Qt::UserRole).toString()
+	                                   : QString();
+	const QSignalBlocker receiver_blocker(m_receivers);
+	m_receivers->clear();
+	for (const auto& value: m_backend->ControllerAudioReceivers()) {
+		const auto entry = value.toObject();
+		auto*      item  = new QListWidgetItem(
+		    entry.value("name").toString() + " · " +
+		        (entry.value("enabled").toBool() ? tr("enabled") : tr("disabled")),
+		    m_receivers);
+		item->setData(Qt::UserRole, entry.value("id").toString());
+		item->setData(Qt::UserRole + 1, entry.value("enabled").toBool());
+		if (entry.value("id").toString() == selected_receiver) m_receivers->setCurrentItem(item);
+	}
+	const auto* receiver = m_receivers->currentItem();
+	m_receiver_toggle->setEnabled(ready && receiver);
+	m_receiver_remove->setEnabled(ready && receiver);
+	m_receiver_toggle->setText(receiver && !receiver->data(Qt::UserRole + 1).toBool()
+	                               ? tr("Enable selected companion")
+	                               : tr("Disable selected companion"));
 	m_pin->setEnabled(ready);
 	m_name->setEnabled(ready);
 	if (m_logs->toPlainText() != m_backend->Logs()) {

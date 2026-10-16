@@ -6,8 +6,8 @@
 #include "streamingSettings.h"
 #include "streamingWidget.h"
 
-#include <QComboBox>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSpinBox>
 #include <QSslKey>
 #include <QSslSocket>
 #include <QStandardPaths>
@@ -169,6 +170,199 @@ class LauncherStreamingTests: public QObject {
 		return 0;
 	}
 private slots:
+	void controllerAudioLifecycleAndReceiverControls() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		const QString id(64, 'b');
+		QVERIFY(Put(dir.filePath("controller-audio.json"),
+		            QJsonDocument(QJsonObject {{"receivers", QJsonArray {QJsonObject {
+		                                                         {"id", id},
+		                                                         {"certificate_sha256", id},
+		                                                         {"name", "Thinker"},
+		                                                         {"parent_client_id", "client-1"},
+		                                                         {"enabled", true}}}}})
+		                .toJson()));
+		FixtureEnvironment environment(dir.path());
+		StreamingBackend   backend(dir.filePath("profile"));
+		StreamingWidget    widget(&backend);
+		auto* receivers = widget.findChild<QListWidget*>("streamControllerAudioReceivers");
+		auto* status    = widget.findChild<QLabel*>("streamControllerAudioStatus");
+		auto* toggle    = widget.findChild<QPushButton*>("streamControllerAudioToggle");
+		auto* remove    = widget.findChild<QPushButton*>("streamControllerAudioRemove");
+		QVERIFY(receivers && status && toggle && remove);
+		StreamingSettings settings;
+		settings.backend          = dir.filePath("host");
+		settings.port             = FreeBasePort();
+		settings.controller_audio = true;
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(dir.filePath("profile/host.conf"));
+		QVERIFY(config.contains("kyty_controller_audio = true\n"));
+		QVERIFY(config.contains("kyty_controller_audio_port = " +
+		                        QByteArray::number(settings.ControllerAudioPort())));
+		QVERIFY(config.contains(
+		    "kyty_controller_audio_clients = " +
+		    QFile::encodeName(dir.filePath("profile/controller-audio-clients.json"))));
+		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 1, 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("waiting", Qt::CaseInsensitive), 5000);
+		receivers->setCurrentRow(0);
+		QVERIFY(toggle->isEnabled());
+		toggle->click();
+		QTRY_VERIFY_WITH_TIMEOUT(
+		    Read(dir.filePath("api-requests.jsonl")).contains("\"enabled\": false"), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(receivers->item(0)->text().contains("disabled"), 5000);
+		remove->click();
+		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 0, 5000);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+	}
+	void controllerAudioPortConflictIsCaught() {
+		const int  base = FreeBasePort();
+		QTcpServer busy;
+		QVERIFY(busy.listen(QHostAddress::Any, base + 30));
+		QVERIFY(StreamingBackend::PreflightPorts(base).isEmpty());
+		QVERIFY(!StreamingBackend::PreflightPorts(base, base + 30).isEmpty());
+	}
+	void controllerAudioReceiverApiUsesPinnedRoutes() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		LocalTlsServer server;
+		server.certificate = QSslCertificate(Read(dir.filePath("cert.pem")));
+		server.key         = QSslKey(Read(dir.filePath("key.pem")), QSsl::Rsa);
+		QVERIFY(server.listen(QHostAddress::LocalHost));
+		StreamingApi api;
+		api.Configure(server.serverPort(), server.certificate, "fixture", "private");
+		int        completed = 0;
+		QString    error;
+		const auto done = [&](const QJsonObject&, const QString& e) {
+			error = e;
+			++completed;
+		};
+		api.ListControllerAudioReceivers(done);
+		QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 3000);
+		QVERIFY2(error.isEmpty(), qPrintable(error));
+		const auto pem = QString::fromUtf8(server.certificate.toPem());
+		api.RegisterControllerAudioReceiver("paired-client", "Thinker", pem, done);
+		QTRY_COMPARE_WITH_TIMEOUT(completed, 2, 3000);
+		QVERIFY2(error.isEmpty(), qPrintable(error));
+		const QString id(64, 'a');
+		api.SetControllerAudioReceiverEnabled(id, false, done);
+		QTRY_COMPARE_WITH_TIMEOUT(completed, 3, 3000);
+		QVERIFY2(error.isEmpty(), qPrintable(error));
+		api.RemoveControllerAudioReceiver(id, done);
+		QTRY_COMPARE_WITH_TIMEOUT(completed, 4, 3000);
+		QVERIFY2(error.isEmpty(), qPrintable(error));
+		QCOMPARE(server.requests.size(), 4);
+		QCOMPARE(server.requests[0].value("line").toString(),
+		         QString("GET /api/kyty/controller-audio/receivers HTTP/1.1"));
+		QCOMPARE(server.requests[1].value("line").toString(),
+		         QString("POST /api/kyty/controller-audio/receivers HTTP/1.1"));
+		QCOMPARE(server.requests[1].value("body").toObject(),
+		         (QJsonObject {{"parent_client_id", "paired-client"},
+		                       {"name", "Thinker"},
+		                       {"certificate_pem", pem}}));
+		QCOMPARE(server.requests[2].value("line").toString(),
+		         "PUT /api/kyty/controller-audio/receivers/" + id + " HTTP/1.1");
+		QCOMPARE(server.requests[2].value("body").toObject(), (QJsonObject {{"enabled", false}}));
+		QCOMPARE(server.requests[3].value("line").toString(),
+		         "DELETE /api/kyty/controller-audio/receivers/" + id + " HTTP/1.1");
+		api.RemoveControllerAudioReceiver("../clients/unpair", done);
+		QCOMPARE(completed, 5);
+		QVERIFY(!error.isEmpty());
+		api.RegisterControllerAudioReceiver("paired-client", "Thinker", "not a certificate", done);
+		QCOMPARE(completed, 6);
+		QVERIFY(!error.isEmpty());
+		api.RegisterControllerAudioReceiver("paired-client", QString(23, QChar(0x65e5)), pem, done);
+		QCOMPARE(completed, 7);
+		QVERIFY(!error.isEmpty());
+		QCOMPARE(server.requests.size(), 4);
+	}
+	void controllerAudioMissingCapabilityFailsBeforeAudioSetup() {
+		QTemporaryDir dir;
+		for (const auto& tool: {"pactl", "pipewire", "pipewire-pulse", "wireplumber"}) {
+			const auto path = dir.filePath(tool);
+			QVERIFY(Put(path, "#!/bin/sh\nexit 1\n"));
+			QVERIFY(QFile::setPermissions(path,
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		FixtureEnvironment environment(dir.path());
+		const auto         program = dir.filePath("host");
+		QVERIFY(Put(
+		    program,
+		    "#!/bin/sh\nprintf '%s\\n' "
+		    "'{\"protocol_version\":1,\"capture\":\"kyty\",\"gpu_transport\":\"vulkan-buffer-fd\","
+		    "\"private_audio\":true,\"private_input\":true,\"credentials_stdin\":true}'\n"));
+		QVERIFY(
+		    QFile::setPermissions(program, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		StreamingBackend  backend(dir.filePath("profile"));
+		StreamingSettings settings;
+		settings.backend = program;
+		settings.port    = FreeBasePort();
+		QVERIFY(settings.port > 0);
+		settings.controller_audio = true;
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Error, 5000);
+		QVERIFY2(backend.Error().contains("controller audio", Qt::CaseInsensitive),
+		         qPrintable(backend.Error()));
+		QVERIFY(!QFile::exists(dir.filePath("profile/host.conf")));
+	}
+	void controllerAudioSettingsMigrateAndPersist() {
+		QTemporaryDir    dir;
+		StreamingBackend backend(dir.path());
+		StreamingWidget  widget(&backend);
+		auto*            enabled = widget.findChild<QCheckBox*>("streamControllerAudio");
+		auto*            port    = widget.findChild<QSpinBox*>("streamControllerAudioPort");
+		QVERIFY2(enabled, "Controller audio needs an explicit opt-in control.");
+		QVERIFY(port);
+		QVERIFY(!enabled->isChecked());
+		QCOMPARE(port->value(), 0);
+		enabled->setChecked(true);
+		port->setValue(48219);
+		QSettings saved(dir.filePath("streaming.ini"), QSettings::IniFormat);
+		widget.Settings().Write(saved);
+		saved.sync();
+		QVERIFY(saved.value("controller_audio/enabled").toBool());
+		QCOMPARE(saved.value("controller_audio/port").toInt(), 48219);
+		StreamingWidget restored(&backend);
+		QVERIFY(restored.findChild<QCheckBox*>("streamControllerAudio")->isChecked());
+		QCOMPARE(restored.findChild<QSpinBox*>("streamControllerAudioPort")->value(), 48219);
+		QVERIFY(restored.Settings().Validate().isEmpty());
+		enabled->setChecked(false);
+		widget.Settings().Write(saved);
+		saved.sync();
+		QVERIFY(!saved.value("controller_audio/enabled").toBool());
+	}
+	void controllerAudioPortValidationPreservesLegacy() {
+		QTemporaryDir    dir;
+		StreamingBackend backend(dir.path());
+		StreamingWidget  widget(&backend);
+		auto*            enabled    = widget.findChild<QCheckBox*>("streamControllerAudio");
+		auto*            audio_port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
+		auto*            base       = widget.findChild<QSpinBox*>("streamPort");
+		QVERIFY(enabled);
+		QVERIFY(audio_port);
+		QVERIFY(base);
+		base->setValue(65514);
+		QVERIFY(widget.Settings().Validate().isEmpty());
+		enabled->setChecked(true);
+		QVERIFY(!widget.Settings().Validate().isEmpty());
+		audio_port->setValue(65000);
+		QVERIFY(widget.Settings().Validate().isEmpty());
+		base->setValue(48189);
+		audio_port->setValue(48190);
+		QVERIFY(!widget.Settings().Validate().isEmpty());
+		audio_port->setValue(500);
+		QVERIFY(!widget.Settings().Validate().isEmpty());
+		enabled->setChecked(false);
+		QVERIFY(widget.Settings().Validate().isEmpty());
+	}
 	void streamingOnlyDisplayMigratesAndPersists() {
 		QTemporaryDir    dir;
 		StreamingBackend backend(dir.path());
@@ -235,8 +429,9 @@ private slots:
 				QCOMPARE(launch.exitCode(), 1);
 				QVERIFY(launch.readAllStandardError().contains("Invalid launch environment"));
 			} else {
-				QVERIFY2(launch.exitCode() == 0,
-				         qPrintable(value + ": " + QString::fromUtf8(launch.readAllStandardError())));
+				QVERIFY2(
+				    launch.exitCode() == 0,
+				    qPrintable(value + ": " + QString::fromUtf8(launch.readAllStandardError())));
 				QCOMPARE(launch.exitCode(), 0);
 				QCOMPARE(launch.readAllStandardOutput().trimmed(),
 				         value.isEmpty() ? QByteArray("unset") : QByteArray("1"));

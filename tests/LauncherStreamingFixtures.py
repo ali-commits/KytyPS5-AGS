@@ -52,7 +52,10 @@ if "--kyty-capabilities" in sys.argv:
     if (root / "capability-delay").exists():
         (root / "capability-active").write_text(str(os.getpid()))
         time.sleep(float((root / "capability-delay").read_text()))
-    print(json.dumps({"protocol_version": 1, "capture": "kyty", "gpu_transport": "vulkan-buffer-fd", "private_audio": True, "private_input": True, "credentials_stdin": True, "version": "Test host 1"}))
+    capabilities = {"protocol_version": 1, "capture": "kyty", "gpu_transport": "vulkan-buffer-fd", "private_audio": True, "private_input": True, "credentials_stdin": True, "version": "Test host 1"}
+    if (root / "controller-audio.json").exists():
+        capabilities["controller_audio"] = {"protocol_version": 1, "transport": "tls-tcp"}
+    print(json.dumps(capabilities))
     sys.exit(0)
 config = {}
 for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
@@ -103,8 +106,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"pairings": [{"id": "a" * 32, "name": "TV", "address": "192.0.2.10"}]})
         elif self.path == "/api/clients/list":
             self.send_json({"status": True, "named_certs": [{"name": "TV", "uuid": "client-1", "enabled": True}]})
+        elif self.path == "/api/kyty/controller-audio/receivers":
+            self.send_json(dict(status=True, **json.loads((root / "controller-audio.json").read_text())))
+        elif self.path == "/api/kyty/status":
+            self.send_json({"status": True, "controller_audio": {
+                "configured": True, "state": "waiting", "receiver_name": "", "port": int(config["port"]) + 30,
+                "bytes": 0, "queue_us": 0, "discontinuities": 0, "last_error": ""}})
         else:
             self.send_error(404)
+
+    def do_PUT(self):
+        self.update_receiver(False)
+
+    def do_DELETE(self):
+        self.update_receiver(True)
+
+    def update_receiver(self, remove):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+        with (root / "api-requests.jsonl").open("a") as file:
+            file.write(json.dumps({"path": self.path, "body": body}) + "\n")
+        path = root / "controller-audio.json"
+        data = json.loads(path.read_text())
+        receiver_id = self.path.rsplit("/", 1)[-1]
+        if remove:
+            data["receivers"] = [r for r in data["receivers"] if r["id"] != receiver_id]
+        else:
+            for receiver in data["receivers"]:
+                if receiver["id"] == receiver_id:
+                    receiver["enabled"] = body["enabled"]
+        path.write_text(json.dumps(data))
+        self.send_json({"status": True})
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")

@@ -20,6 +20,8 @@ class PackageTests(unittest.TestCase):
             for name in ('launcher', 'kyty_emulator'):
                 (stage/name).write_text('#!/bin/sh\nexit 0\n')
                 (stage/name).chmod(0o755)
+            (stage/'bin').mkdir()
+            (stage/'bin'/'controller-audio-receiver').write_bytes(b'companion')
             (base/'Kyty.ini').write_text('[Launcher]\ngame_dirs=/example/game\n')
             (base/'u59-preset.json').write_text('{"KYTY_PIPELINE_PREFETCH_FAST_FIRST":"1"}\n')
             (base/'_Patches').mkdir()
@@ -45,6 +47,8 @@ class PackageTests(unittest.TestCase):
             self.assertTrue((prefix/'kyty_emulator').stat().st_mode & 0o100)
             self.assertEqual((prefix/'kyty_emulator_clang_lld.map').read_bytes(), b'exact matching map')
             provenance = json.loads((prefix/'installation-provenance.json').read_text())
+            self.assertEqual((prefix/'bin'/'controller-audio-receiver').read_bytes(), b'companion')
+            self.assertEqual(provenance['companion_sha256'], 'c989edf18246e9c8cdd647369a4835f7dd9a0f47b8e755d37b16431fc5035981')
             self.assertEqual(provenance['runtime_policy'], 'independent copy; no writeback')
             again = subprocess.run(args, capture_output=True, text=True)
             self.assertNotEqual(again.returncode, 0)

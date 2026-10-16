@@ -30,6 +30,8 @@ public:
 	QString        Socket() const { return m_socket; }
 	QJsonArray     Pairings() const { return m_pairings; }
 	QJsonArray     Clients() const { return m_clients; }
+	QJsonArray     ControllerAudioReceivers() const { return m_receivers; }
+	QJsonObject    ControllerAudioStatus() const { return m_controller_audio_status; }
 	void           SetCatalog(const QList<StreamingLaunchEntry>& catalog);
 	void           SetLocalGameRunning(bool running) { m_local_game = running; }
 	void           Start(const StreamingSettings& settings);
@@ -38,7 +40,9 @@ public:
 	void           Pair(const QString& id, const QString& pin, const QString& name);
 	void           Unpair(const QString& uuid);
 	void           CloseSession();
-	static QString PreflightPorts(int base);
+	void           SetControllerAudioReceiverEnabled(const QString& id, bool enabled);
+	void           RemoveControllerAudioReceiver(const QString& id);
+	static QString PreflightPorts(int base, int controller_audio_port = 0);
 signals:
 	void Changed();
 	void LogAdded(const QString& text);
@@ -58,14 +62,17 @@ private:
 	void    CancelTools();
 	void    TryFinishStop();
 	void    PublishCatalog();
+	void    RefreshControllerAudio();
 	void    ApiError(const QString& error);
 	void    SetState(State state);
 	QString m_profile, m_runtime, m_socket, m_username, m_password, m_version, m_error, m_logs,
 	    m_session;
 	StreamingSettings           m_settings;
 	QList<StreamingLaunchEntry> m_catalog;
-	QJsonArray                  m_pairings, m_clients;
-	State                       m_state = State::Stopped;
+	QJsonArray                  m_pairings, m_clients, m_receivers;
+	QJsonObject                 m_controller_audio_status;
+	bool                        m_controller_audio_refreshing = false;
+	State                       m_state                       = State::Stopped;
 	QProcess                    m_host;
 	StreamingAudio              m_audio;
 	StreamingApi                m_api;

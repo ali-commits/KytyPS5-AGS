@@ -190,6 +190,7 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
 endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
+option(KYTY_BUILD_CONTROLLER_AUDIO_RECEIVER "Build the independent Linux controller audio companion" OFF)
 
 config_compiler_and_linker()
 
@@ -1014,6 +1015,10 @@ if(LINUX)
 	target_include_directories(streaming_tests PRIVATE "${KYTY_SOURCE_DIR}")
 	target_link_libraries(streaming_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 
+    add_executable(controller_audio_pipeline_producer EXCLUDE_FROM_ALL
+        "${KYTY_TESTS_DIR}/ControllerAudioPipelineProducer.cpp" ${controller_audio_producer_sources})
+    target_include_directories(controller_audio_pipeline_producer PRIVATE "${KYTY_SOURCE_DIR}")
+    target_link_libraries(controller_audio_pipeline_producer PRIVATE Threads::Threads)
 	add_executable(controller_audio_tests EXCLUDE_FROM_ALL
         "${KYTY_TESTS_DIR}/ControllerAudioTests.cpp" ${controller_audio_core_sources})
     add_executable(controller_audio_producer_tests EXCLUDE_FROM_ALL
@@ -2605,4 +2610,14 @@ if(KYTY_BUILD_LAUNCHER)
 endif()
 if(KYTY_CLANG_CL)
 	install(FILES "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" DESTINATION .)
+endif()
+
+if(LINUX AND KYTY_BUILD_CONTROLLER_AUDIO_RECEIVER)
+	add_subdirectory(tools/controller-audio)
+    # Companion is independent of the emulator's no-exceptions policy.
+    foreach(target controller_audio_receiver_core controller-audio-receiver controller_audio_receiver_tests)
+        if(TARGET ${target} AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${target} PRIVATE -fexceptions)
+        endif()
+    endforeach()
 endif()

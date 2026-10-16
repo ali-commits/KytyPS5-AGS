@@ -101,6 +101,10 @@ def package(args):
         'map_sha256': sha256(prefix/'kyty_emulator_clang_lld.map'),
         'launcher_sha256': sha256(prefix/'launcher'), 'host_sha256': sha256(prefix/'libexec'/'kyty_stream_host'),
         'base_config_sha256': base_hash, 'crash_capture': True}
+    companion = prefix/'bin'/'controller-audio-receiver'
+    if companion.is_file():
+        result['companion_sha256'] = sha256(companion)
+        shutil.copy2(SOURCE/'tools'/'controller-audio'/'README.md', prefix/'CONTROLLER-AUDIO-README.md')
     (prefix/'installation-provenance.json').write_text(json.dumps(result, indent=2)+'\n')
     if sha256(base/'Kyty.ini') != base_hash:
         raise SystemExit('Working configuration changed during package creation; inspect before testing')

@@ -42,6 +42,41 @@ void StreamingApi::SubmitPin(const QString& id, const QString& pin, const QStrin
 	Request("POST", "/api/pin", {{"pairing_id", id}, {"pin", pin}, {"name", name}},
 	        std::move(done));
 }
+void StreamingApi::ListControllerAudioReceivers(Result done) {
+	Request("GET", "/api/kyty/controller-audio/receivers", {}, std::move(done));
+}
+void StreamingApi::RegisterControllerAudioReceiver(const QString& parent, const QString& name,
+                                                   const QString& pem, Result done) {
+	const auto certificates = QSslCertificate::fromData(pem.toUtf8());
+	if (parent.isEmpty() || parent.toUtf8().size() > 128 || parent.contains(QChar::Null) ||
+	    parent.contains('\n') || parent.contains('\r') || name.trimmed().isEmpty() ||
+	    name.toUtf8().size() > 64 || name.contains(QChar::Null) || name.contains('\n') ||
+	    name.contains('\r') || pem.toUtf8().size() > 16384 || pem.contains("PRIVATE KEY") ||
+	    certificates.size() != 1 || certificates.first().isNull()) {
+		done({}, "Choose a paired client, a 1–64 byte receiver name and one public certificate.");
+		return;
+	}
+	Request("POST", "/api/kyty/controller-audio/receivers",
+	        {{"parent_client_id", parent},
+	         {"name", name},
+	         {"certificate_pem", QString::fromUtf8(certificates.first().toPem())}},
+	        std::move(done));
+}
+void StreamingApi::SetControllerAudioReceiverEnabled(const QString& id, bool enabled, Result done) {
+	if (!QRegularExpression("^[0-9a-f]{64}$").match(id).hasMatch()) {
+		done({}, "Choose a registered controller receiver.");
+		return;
+	}
+	Request("PUT", "/api/kyty/controller-audio/receivers/" + id, {{"enabled", enabled}},
+	        std::move(done));
+}
+void StreamingApi::RemoveControllerAudioReceiver(const QString& id, Result done) {
+	if (!QRegularExpression("^[0-9a-f]{64}$").match(id).hasMatch()) {
+		done({}, "Choose a registered controller receiver.");
+		return;
+	}
+	Request("DELETE", "/api/kyty/controller-audio/receivers/" + id, {}, std::move(done));
+}
 void StreamingApi::Request(const QByteArray& method, const QString& path, const QJsonObject& body,
                            Result done) {
 	if (m_port < 1024 || m_port > 65535 || m_certificate.isNull() || !path.startsWith("/api/") ||

@@ -16,6 +16,11 @@ public:
 	void Request(const QByteArray& method, const QString& path, const QJsonObject& body,
 	             Result done);
 	void SubmitPin(const QString& pairing_id, const QString& pin, const QString& name, Result done);
+	void ListControllerAudioReceivers(Result done);
+	void RegisterControllerAudioReceiver(const QString& parent_client_id, const QString& name,
+	                                     const QString& certificate_pem, Result done);
+	void SetControllerAudioReceiverEnabled(const QString& id, bool enabled, Result done);
+	void RemoveControllerAudioReceiver(const QString& id, Result done);
 	static QString ValidatePin(const QString& pairing_id, const QString& pin, const QString& name);
 	void           Abort();
 

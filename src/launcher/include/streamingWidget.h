@@ -32,10 +32,16 @@ private:
 	QLineEdit*        m_adapter;
 	QCheckBox*        m_monitor;
 	QCheckBox*        m_show_local;
+	QCheckBox*        m_controller_audio;
+	QSpinBox*         m_controller_audio_port;
 	QLabel*           m_status;
 	QLabel*           m_error;
 	QLabel*           m_version;
 	QLabel*           m_session;
+	QLabel*           m_controller_audio_status;
+	QListWidget*      m_receivers;
+	QPushButton*      m_receiver_toggle;
+	QPushButton*      m_receiver_remove;
 	QComboBox*        m_address;
 	QPushButton*      m_start;
 	QPushButton*      m_stop;

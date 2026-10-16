@@ -200,3 +200,10 @@ The binding wire contract is [PROTOCOL.md](PROTOCOL.md); the implementation spec
 plan are under `docs/superpowers/`. [VERIFICATION.md](VERIFICATION.md) records the
 final checks, source revisions and remaining device tests. Detailed local evidence
 and the package provenance are retained with this worktree and installation.
+
+The new controller-audio companion candidate is described in
+[CONTROLLER_AUDIO.md](CONTROLLER_AUDIO.md). It keeps stock Moonlight for video/input
+and provides an authenticated lossless controller PCM path. The protocol remains
+independent so a later custom Moonlight and TV client can reuse it. Candidate
+implementation and silent tests do not establish physical parity; v2 remains the
+working default until the candidate passes USB and game acceptance.

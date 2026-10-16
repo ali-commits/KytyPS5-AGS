@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QLockFile>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QUdpSocket>
@@ -158,16 +159,24 @@ void StreamingBackend::Tool(const QString& program, const QStringList& arguments
 	process->start(program, arguments);
 	timeout->start(6000);
 }
-QString StreamingBackend::PreflightPorts(int base) {
+QString StreamingBackend::PreflightPorts(int base, int controller_audio_port) {
 	if (base < 1024 || base > 65514) return "Invalid base port.";
 	QList<std::shared_ptr<QTcpServer>> tcp;
 	QList<std::shared_ptr<QUdpSocket>> udp;
-	for (int offset: {-5, 0, 1, 21}) {
+	QList<int>                         tcp_ports {base - 5, base, base + 1, base + 21};
+	if (controller_audio_port != 0) {
+		if (controller_audio_port < 1024 || controller_audio_port > 65535 ||
+		    tcp_ports.contains(controller_audio_port) ||
+		    QList<int> {base + 9, base + 10, base + 11}.contains(controller_audio_port))
+			return "Invalid controller audio port.";
+		tcp_ports.append(controller_audio_port);
+	}
+	for (int port: tcp_ports) {
 		auto server = std::make_shared<QTcpServer>();
-		if (!server->listen(QHostAddress::Any, quint16(base + offset)))
+		if (!server->listen(QHostAddress::Any, quint16(port)))
 			return QStringLiteral("TCP port %1 is busy. Stop the conflicting service or choose "
 			                      "another base port.")
-			    .arg(base + offset);
+			    .arg(port);
 		tcp.append(server);
 	}
 	for (int offset: {9, 10, 11}) {
@@ -259,7 +268,7 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 	m_failed = false;
 	m_error.clear();
 	m_version.clear();
-	m_settings = settings;
+	m_settings   = settings;
 	m_host_nonce = QUuid::createUuid().toString(QUuid::Id128);
 	m_host_executable.clear();
 	++m_generation;
@@ -272,7 +281,9 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 	    (!QFileInfo(settings.backend).isAbsolute() || !QFileInfo(settings.backend).isExecutable()))
 		error = "Streaming helper is unavailable. Choose the packaged libexec/kyty_stream_host "
 		        "executable.";
-	if (error.isEmpty()) error = PreflightPorts(settings.port);
+	if (error.isEmpty())
+		error = PreflightPorts(settings.port,
+		                       settings.controller_audio ? settings.ControllerAudioPort() : 0);
 	if (!error.isEmpty()) {
 		Fail(error);
 		return;
@@ -299,6 +310,14 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 		    !capabilities.value("credentials_stdin").toBool()) {
 			Fail("This executable does not support the Kyty private GPU/audio/input host protocol. "
 			     "Choose the experimental streaming helper.");
+			return;
+		}
+		const auto controller_audio = capabilities.value("controller_audio").toObject();
+		if (m_settings.controller_audio &&
+		    (controller_audio.value("protocol_version").toInt() != 1 ||
+		     controller_audio.value("transport").toString() != "tls-tcp")) {
+			Fail("This helper does not support controller audio. Choose the companion-enabled "
+			     "streaming helper.");
 			return;
 		}
 		m_version = capabilities.value("version").toString(
@@ -341,6 +360,15 @@ bool StreamingBackend::WriteConfiguration() {
 	              .arg(m_settings.port)
 	              .arg(m_settings.bitrate * 1000)
 	              .arg(m_settings.codec == "H264" ? 1 : 2);
+	config += QStringLiteral("kyty_controller_audio = %1\n")
+	              .arg(m_settings.controller_audio ? "true" : "false");
+	if (m_settings.controller_audio) {
+		config += QStringLiteral("kyty_controller_audio_port = %1\n")
+		              .arg(m_settings.ControllerAudioPort());
+		config +=
+		    "kyty_controller_audio_clients = " + profile.filePath("controller-audio-clients.json") +
+		    '\n';
+	}
 	config += "kyty_socket = " + m_socket + '\n';
 	config += "audio_sink = " + m_audio.Sink() + '\n';
 	if (!m_settings.adapter.isEmpty()) config += "adapter_name = " + m_settings.adapter + '\n';
@@ -387,7 +415,8 @@ void StreamingBackend::Stop() {
 	m_poll.stop();
 	m_start_timeout.stop();
 	m_api.Abort();
-	m_refreshing = false;
+	m_refreshing                  = false;
+	m_controller_audio_refreshing = false;
 	SetState(State::Stopping);
 	CancelTools();
 	if (m_host.state() == QProcess::NotRunning) {
@@ -517,8 +546,11 @@ void StreamingBackend::TryFinishStop() {
 		return;
 	m_lock.reset();
 	m_session.clear();
-	m_pairings = {};
-	m_clients  = {};
+	m_pairings                    = {};
+	m_clients                     = {};
+	m_receivers                   = {};
+	m_controller_audio_status     = {};
+	m_controller_audio_refreshing = false;
 	SetState(m_failed ? State::Error : State::Stopped);
 }
 void StreamingBackend::Refresh() {
@@ -570,6 +602,7 @@ void StreamingBackend::Refresh() {
 				                  emit Changed();
 			                  }
 		                  });
+		    RefreshControllerAudio();
 		    m_session = "No game running · choose a game in Moonlight";
 		    QFile session(QDir(m_runtime).filePath("session.json"));
 		    if (session.open(QIODevice::ReadOnly)) {
@@ -590,6 +623,84 @@ void StreamingBackend::Refresh() {
 		    }
 		    if (m_catalog_dirty && m_session.startsWith("No game")) PublishCatalog();
 		    emit Changed();
+	    });
+}
+void StreamingBackend::RefreshControllerAudio() {
+	if (!m_settings.controller_audio || m_state != State::Ready || m_controller_audio_refreshing)
+		return;
+	m_controller_audio_refreshing = true;
+	const int generation          = m_generation;
+	m_api.ListControllerAudioReceivers([this, generation](const QJsonObject& data,
+	                                                      const QString&     error) {
+		if (generation != m_generation) return;
+		if (!error.isEmpty()) {
+			m_controller_audio_refreshing = false;
+			ApiError(error);
+			return;
+		}
+		const auto                      entries = data.value("receivers").toArray();
+		static const QRegularExpression fingerprint("^[0-9a-f]{64}$");
+		QSet<QString>                   ids;
+		bool valid = data.value("receivers").isArray() && entries.size() <= 16;
+		for (const auto& value: entries) {
+			const auto entry = value.toObject();
+			const auto id    = entry.value("id").toString();
+			valid = valid && value.isObject() && fingerprint.match(id).hasMatch() &&
+			        !ids.contains(id) && entry.value("certificate_sha256").toString() == id &&
+			        entry.value("name").isString() &&
+			        entry.value("name").toString().toUtf8().size() <= 64 &&
+			        entry.value("parent_client_id").isString() &&
+			        entry.value("parent_client_id").toString().size() <= 128 &&
+			        entry.value("enabled").isBool();
+			ids.insert(id);
+		}
+		if (!valid) {
+			m_controller_audio_refreshing = false;
+			ApiError("Host returned an invalid controller audio receiver list.");
+			return;
+		}
+		m_receivers = entries;
+		emit Changed();
+		m_api.Request("GET", "/api/kyty/status", {},
+		              [this, generation](const QJsonObject& status, const QString& error) {
+			              if (generation != m_generation) return;
+			              m_controller_audio_refreshing = false;
+			              const auto audio = status.value("controller_audio").toObject();
+			              if (!error.isEmpty())
+				              ApiError(error);
+			              else if (audio.isEmpty() || audio.value("state").toString().size() > 16 ||
+			                       audio.value("receiver_name").toString().toUtf8().size() > 64 ||
+			                       audio.value("last_error").toString().toUtf8().size() > 128)
+				              ApiError("Host returned invalid controller audio status.");
+			              else {
+				              m_controller_audio_status = audio;
+				              emit Changed();
+			              }
+		              });
+	});
+}
+void StreamingBackend::SetControllerAudioReceiverEnabled(const QString& id, bool enabled) {
+	if (m_state != State::Ready || !m_settings.controller_audio) return;
+	const int generation = m_generation;
+	m_api.SetControllerAudioReceiverEnabled(
+	    id, enabled, [this, generation](const QJsonObject&, const QString& error) {
+		    if (generation != m_generation) return;
+		    if (!error.isEmpty())
+			    ApiError(error);
+		    else
+			    RefreshControllerAudio();
+	    });
+}
+void StreamingBackend::RemoveControllerAudioReceiver(const QString& id) {
+	if (m_state != State::Ready || !m_settings.controller_audio) return;
+	const int generation = m_generation;
+	m_api.RemoveControllerAudioReceiver(
+	    id, [this, generation](const QJsonObject&, const QString& error) {
+		    if (generation != m_generation) return;
+		    if (!error.isEmpty())
+			    ApiError(error);
+		    else
+			    RefreshControllerAudio();
 	    });
 }
 void StreamingBackend::ApiError(const QString& error) {
