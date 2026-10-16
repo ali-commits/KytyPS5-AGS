@@ -125,7 +125,8 @@ bool Session::Fail(const char* text) {
 }
 void Session::Disconnect() {
 	sink_.Reset();
-	ports_ = {};
+	ports_          = {};
+	delivery_count_ = 0;
 	ready_ = active_ = false;
 	generation_ = epoch_ = control_sequence_ = 0;
 }
@@ -189,13 +190,15 @@ bool Session::Handle(const Frame& frame, uint64_t now) {
 		if (port.open || h.port_generation <= port.h.port_generation || h.first_frame != 0)
 			return Fail("recycled port");
 		if (!sink_.Open(h)) return Fail("port output failed");
-		port = {true, h, 0};
+		port = {true, h, 0, {}};
 		return true;
 	}
 	if (!port.open || h.kind != port.h.kind || h.rate != port.h.rate ||
 	    h.port_generation != port.h.port_generation || h.sequence <= port.h.sequence)
 		return Fail("port metadata or sequence");
 	if (h.type == Type::Close) {
+		delivery_count_ -= port.pending.size();
+		port.pending.clear();
 		if (!sink_.Close(h.port)) return Fail("port close failed");
 		port.open = false;
 		port.h    = h;
@@ -212,9 +215,12 @@ bool Session::Handle(const Frame& frame, uint64_t now) {
 	if (age < -static_cast<long double>(clock.uncertainty) || queue > 60000 ||
 	    age + clock.uncertainty + queue + duration > 80000)
 		return Fail("delivery deadline or queue exceeded");
+	if (delivery_count_ >= 4096) return Fail("delivery record limit");
 	if (!sink_.Pcm(h, frame.payload, now)) return Fail("output failed");
 	bytes_ += frame.payload.size();
 	port.next += frame.payload.size() / 8;
+	port.pending.push_back({port.next, h.source_time_us});
+	delivery_count_++;
 	port.h = h;
 	return true;
 }
@@ -227,7 +233,37 @@ uint64_t Session::QueuedUs() {
 bool Session::Tick(uint64_t now) {
 	if (!ready_) return true;
 	if (!clock.Fresh(now)) return Fail("clock expired");
-	return sink_.Tick(now) || Fail("device lost");
+	if (!sink_.Tick(now)) return Fail("device lost");
+	auto played = sink_.PlayedUs(), latency = sink_.PlaybackLatencyUs();
+	if (played > UINT64_MAX - latency) return Fail("playback progress overflow");
+	const auto host_now = static_cast<long double>(now) + clock.offset;
+	for (uint32_t id = 0; id < ports_.size(); id++) {
+		auto& port = ports_[id];
+		if (!port.open || port.pending.empty()) continue;
+		auto pending = sink_.PendingFrames(id, port.h.rate);
+		if (pending == UINT64_MAX) return Fail("playback queue unavailable");
+		auto consumed = port.next - std::min(port.next, pending);
+		for (auto& delivery: port.pending) {
+			if (delivery.end_frame > consumed) break;
+			if (!delivery.transferred) {
+				delivery.transferred      = true;
+				delivery.retire_played_us = played + latency;
+			}
+		}
+		while (!port.pending.empty() && port.pending.front().transferred &&
+		       played >= port.pending.front().retire_played_us) {
+			port.pending.pop_front();
+			delivery_count_--;
+		}
+		for (const auto& delivery: port.pending) {
+			auto remaining =
+			    delivery.transferred ? delivery.retire_played_us - played : sink_.QueuedUs(id);
+			if (remaining > 60000 ||
+			    host_now - delivery.source_time_us + clock.uncertainty + remaining > 80000)
+				return Fail("queued sample delivery deadline");
+		}
+	}
+	return true;
 }
 bool Framer::Feed(std::span<const uint8_t>                 bytes,
                   const std::function<bool(const Frame&)>& consume) {

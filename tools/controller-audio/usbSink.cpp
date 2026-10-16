@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cmath>
+#include <sstream>
 namespace ControllerAudio::Receiver {
 std::optional<UsbDevice> ResolveUsbBinding(const std::vector<std::string>& controllers,
                                            const std::vector<UsbNode>&     hids,
@@ -31,6 +33,52 @@ std::optional<UsbDevice> ResolveUsbBinding(const std::vector<std::string>& contr
 	    (!audio_selector.empty() && audio_selector != result.audio_name))
 		return {};
 	return result;
+}
+std::optional<AlsaPlayback> ParseAlsaPlayback(const std::string& parameters,
+                                              const std::string& status, uint32_t owner_pid,
+                                              uint32_t sdl_period) {
+	if (parameters.size() > 4096 || status.size() > 4096) return {};
+	auto trim = [](std::string v) {
+		auto first = v.find_first_not_of(" \t\r");
+		if (first == std::string::npos) return std::string {};
+		auto last = v.find_last_not_of(" \t\r");
+		return v.substr(first, last - first + 1);
+	};
+	auto fields = [&](const std::string& text) {
+		std::map<std::string, std::string> result;
+		std::istringstream                 in(text);
+		std::string                        line;
+		while (std::getline(in, line)) {
+			auto colon = line.find(':');
+			if (colon == std::string::npos) continue;
+			auto key = trim(line.substr(0, colon));
+			if (!result.emplace(key, trim(line.substr(colon + 1))).second)
+				return std::map<std::string, std::string> {};
+		}
+		return result;
+	};
+	auto p = fields(parameters), s = fields(status);
+	auto number = [](const std::map<std::string, std::string>& data,
+	                 const char*                               key) -> std::optional<uint64_t> {
+		auto it = data.find(key);
+		if (it == data.end()) return {};
+		uint64_t n  = 0;
+		auto parsed = std::from_chars(it->second.data(), it->second.data() + it->second.size(), n);
+		if (parsed.ec != std::errc {} || parsed.ptr != it->second.data() + it->second.size())
+			return {};
+		return n;
+	};
+	auto channels = number(p, "channels"), period = number(p, "period_size"),
+	     buffer = number(p, "buffer_size"), pid = number(s, "owner_pid"),
+	     played = number(s, "hw_ptr");
+	if (!channels || *channels != 4 || !period || !*period || *period != sdl_period || !buffer ||
+	    *buffer < *period || *buffer > 1920 || *period > 1920 - *buffer || !pid ||
+	    *pid != owner_pid || !played || *played > UINT64_MAX / 1000000)
+		return {};
+	if (p["rate"] != "48000" && p["rate"] != "48000 (48000/1)") return {};
+	if (p["format"] != "S16_LE" || (s["state"] != "RUNNING" && s["state"] != "PREPARED")) return {};
+	return AlsaPlayback {*buffer, *period, *played,
+	                     ((*buffer + *period) * 1000000 + 47999) / 48000};
 }
 bool IsOwnedReport(const UsbReport& r) {
 	if (r == SpeakerReport(true) || r == SpeakerReport(false)) return true;
@@ -84,6 +132,7 @@ UsbSink::~UsbSink() {
 bool UsbSink::Prepare() {
 	if (prepared_) return true;
 	prepared_ = output_->Prepare();
+	if (!prepared_) output_->Shutdown();
 	return prepared_;
 }
 bool UsbSink::Open(const Header& h) {
@@ -166,6 +215,10 @@ bool UsbSink::Rumble(uint16_t large, uint16_t small, uint32_t duration, uint64_t
 }
 bool UsbSink::Tick(uint64_t now) {
 	return prepared_ && output_->Alive() && Apply(now);
+}
+uint64_t UsbSink::PendingFrames(uint32_t port, uint32_t rate) {
+	auto us = output_->QueuedUs(port);
+	return us > 20000 ? UINT64_MAX : (us * rate + 999999) / 1000000;
 }
 uint64_t UsbSink::QueuedUs(uint32_t port) {
 	auto queued = output_->QueuedUs(port), latency = output_->PlaybackLatencyUs();

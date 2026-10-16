@@ -24,13 +24,13 @@ std::vector<uint8_t> Samples(std::initializer_list<float> values) {
 }
 struct Fake final: UsbOutput {
 	int                    prepares = 0, opens = 0, shutdowns = 0, closes = 0;
-	bool                   alive = true, fail = false;
-	uint64_t               queued = 0, latency = 0;
+	bool                   alive = true, fail = false, prepare_ok = true;
+	uint64_t               queued = 0, latency = 0, played = 0;
 	std::vector<UsbReport> reports;
 	std::vector<float>     pcm;
 	bool                   Prepare() override {
 		prepares++;
-		return true;
+		return prepare_ok;
 	}
 	bool Open(uint32_t, uint32_t) override {
 		opens++;
@@ -43,6 +43,7 @@ struct Fake final: UsbOutput {
 	}
 	uint64_t QueuedUs(uint32_t) override { return queued; }
 	uint64_t PlaybackLatencyUs() override { return latency; }
+	uint64_t PlayedUs() override { return played; }
 	bool     Report(const UsbReport& r) override {
 		reports.push_back(r);
 		return !fail;
@@ -65,6 +66,25 @@ Frame Active(uint64_t gen = 7, uint64_t epoch = 9) {
 	return f;
 }
 int main() {
+	std::string params = "access: RW_INTERLEAVED\nformat: S16_LE\nchannels: 4\nrate: 48000 "
+	                     "(48000/1)\nperiod_size: 240\nbuffer_size: 960\n";
+	std::string status = "state: RUNNING\nowner_pid: 1234\nhw_ptr : 48000\n";
+	auto        bounds = ParseAlsaPlayback(params, status, 1234, 240);
+	Check(bounds && bounds->buffer_frames == 960 && bounds->latency_us == 25000 &&
+	          bounds->played_frames == 48000,
+	      "four-period ALSA buffer plus SDL mix period verified");
+	Check(!ParseAlsaPlayback("closed\n", status, 1234, 240),
+	      "missing negotiated ALSA parameters refused");
+	Check(!ParseAlsaPlayback(params, "state: RUNNING\nowner_pid: 1234\n", 1234, 240),
+	      "missing hardware progress refused");
+	Check(!ParseAlsaPlayback(params, status, 999, 240), "unowned ALSA substream refused");
+	Check(!ParseAlsaPlayback(params, status, 1234, 256), "SDL period mismatch refused");
+	Check(!ParseAlsaPlayback(params + "buffer_size: 960\n", status, 1234, 240),
+	      "duplicate ALSA bounds refused");
+	auto oversized = params;
+	oversized.replace(oversized.find("buffer_size: 960"), 16, "buffer_size: 9600");
+	Check(!ParseAlsaPlayback(oversized, status, 1234, 240),
+	      "oversized actual hardware buffer refused");
 	auto bound = ResolveUsbBinding({"/usb/3-1"}, {{"/usb/3-1", "/dev/hidraw7"}},
 	                               {{"/usb/3-1", "Wireless Controller:USB Audio"}});
 	Check(bound && bound->hid_path == "/dev/hidraw7", "dynamic same-parent USB binding");
@@ -161,6 +181,72 @@ int main() {
 		}
 		Check(queued < 10000, "servo reaches stable queue");
 	}
+	// Production Session must age queued data without a subsequent arrival.
+	for (int kind = 0; kind < 3; kind++) {
+		auto    stalled = std::make_unique<Fake>();
+		auto*   output  = stalled.get();
+		UsbSink sink(std::move(stalled));
+		Session session(sink);
+		session.clock.Sample(999000, 1000000, 999500, 999500);
+		Check(session.Handle(State(), 1000000) && session.Handle(Active(), 1000000),
+		      "stalled playback ready");
+		auto open           = Port(Type::Open);
+		open.source_time_us = 0;
+		Check(session.Handle({open, {}}, 1000000), "stalled playback open");
+		std::vector<uint8_t> block(480 * 8, 0);
+		auto                 pcm = Port(Type::Pcm);
+		pcm.sequence             = 2;
+		Check(session.Handle({pcm, block}, 1000000), "ten milliseconds accepted");
+		if (kind == 0)
+			output->queued = 10000;
+		else
+			output->latency = 20000;
+		Check(session.Tick(1010000), "within source deadline");
+		if (kind == 2) output->played = 30000;
+		if (kind == 2) {
+			Check(session.Tick(1040000) && session.Tick(1100000) && session.Ready(),
+			      "played data retires without future arrivals");
+		} else {
+			auto resets = output->shutdowns;
+			Check(!session.Tick(1100000) && !session.Ready() && output->shutdowns > resets,
+			      "stalled queued data expires on Tick and flushes");
+		}
+	}
+	// Continuous arrivals must retire all transferred blocks together as hardware advances.
+	{
+		auto  device    = std::make_unique<Fake>();
+		auto* output    = device.get();
+		output->latency = 25000;
+		UsbSink sink(std::move(device));
+		Session session(sink);
+		session.clock.Sample(999000, 1000000, 999500, 999500);
+		Check(session.Handle(State(), 1000000) && session.Handle(Active(), 1000000),
+		      "continuous progress setup");
+		auto open           = Port(Type::Open);
+		open.source_time_us = 0;
+		Check(session.Handle({open, {}}, 1000000), "continuous port");
+		std::vector<uint8_t> samples(480 * 8, 0);
+		auto                 pcm = Port(Type::Pcm);
+		for (uint64_t block = 0; block < 100; block++) {
+			auto now       = 1000000 + block * 10000;
+			output->played = block * 10000;
+			Check(session.Tick(now), "continuous queued deadlines service");
+			pcm.sequence       = block + 2;
+			pcm.first_frame    = block * 480;
+			pcm.source_time_us = now;
+			Check(session.Handle({pcm, samples}, now) && session.Tick(now),
+			      "continuous PCM consumption");
+		}
+		output->played = 1100000;
+		Check(session.Tick(2100000) && session.Ready(),
+		      "final drained playback retires all records");
+	}
+	auto  unavailable  = std::make_unique<Fake>();
+	auto* failed       = unavailable.get();
+	failed->prepare_ok = false;
+	UsbSink failed_sink(std::move(unavailable));
+	Check(!failed_sink.Prepare() && failed->shutdowns == 1,
+	      "Prepare failure closes boundary immediately");
 	ClockMap refreshed;
 	Check(refreshed.Sample(1000000, 1000100, 1000000, 1000000), "initial minimum RTT");
 	for (uint64_t t = 2000000; t <= 14000000; t += 1000000)

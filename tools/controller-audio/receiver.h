@@ -2,6 +2,7 @@
 #include "controller_audio/protocol.h"
 
 #include <array>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -25,6 +26,12 @@ public:
 	virtual bool     Rumble(uint16_t, uint16_t, uint32_t, uint64_t)             = 0;
 	virtual bool     Tick(uint64_t)                                             = 0;
 	virtual uint64_t QueuedUs(uint32_t)                                         = 0;
+	virtual uint64_t PendingFrames(uint32_t port, uint32_t rate) {
+		auto us = QueuedUs(port);
+		return us > 60000 ? UINT64_MAX : (us * rate + 999999) / 1000000;
+	}
+	virtual uint64_t PlaybackLatencyUs() { return 0; }
+	virtual uint64_t PlayedUs() { return 0; }
 };
 class NullSink final: public Sink {
 public:
@@ -60,15 +67,21 @@ public:
 	ClockMap           clock;
 
 private:
+	struct Delivery {
+		uint64_t end_frame, source_time_us, retire_played_us = 0;
+		bool     transferred = false;
+	};
 	struct Port {
-		bool     open = false;
-		Header   h {};
-		uint64_t next = 0;
+		bool                 open = false;
+		Header               h {};
+		uint64_t             next = 0;
+		std::deque<Delivery> pending;
 	};
 	bool                 Fail(const char*);
 	Sink&                sink_;
 	std::array<Port, 32> ports_ {};
-	uint64_t             bytes_      = 0;
+	size_t               delivery_count_ = 0;
+	uint64_t             bytes_          = 0;
 	uint64_t             generation_ = 0, epoch_ = 0, control_sequence_ = 0, last_generation_ = 0,
 	                     last_epoch_ = 0;
 	bool                 ready_ = false, active_ = false;

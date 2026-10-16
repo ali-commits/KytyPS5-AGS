@@ -368,7 +368,7 @@ Config ReadConfig(const std::string& path) {
 	c.cert               = get("cert", true);
 	c.key                = get("key", true);
 	c.receiver_id        = get("receiver_id");
-	if (c.receiver_id.empty()) {
+	{
 		FILE* file = fopen(c.cert.c_str(), "r");
 		Require(file, "receiver certificate unavailable");
 		auto* certificate = PEM_read_X509(file, nullptr, nullptr, nullptr);
@@ -379,6 +379,8 @@ Config ReadConfig(const std::string& path) {
 		bool ok = X509_digest(certificate, EVP_sha256(), digest.data(), &count) == 1 && count == 32;
 		X509_free(certificate);
 		Require(ok, "receiver fingerprint failed");
+		Require(c.receiver_id.empty() || c.receiver_id == Hex(digest),
+		        "receiver_id must equal certificate fingerprint");
 		c.receiver_id = Hex(digest);
 	}
 	if (j.contains("sink")) c.sink = get("sink");
@@ -390,7 +392,7 @@ Config ReadConfig(const std::string& path) {
 		        "invalid port");
 		c.port = j["port"].get<uint16_t>();
 	}
-	Require(c.receiver_id.size() <= 64 && (c.sink == "null" || c.sink == "usb") &&
+	Require(c.receiver_id.size() == 64 && (c.sink == "null" || c.sink == "usb") &&
 	            c.pinned_host_sha256.size() == 64 &&
 	            std::all_of(
 	                c.pinned_host_sha256.begin(), c.pinned_host_sha256.end(),

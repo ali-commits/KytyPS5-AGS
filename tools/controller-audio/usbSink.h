@@ -18,7 +18,13 @@ std::optional<UsbDevice> ResolveUsbBinding(const std::vector<std::string>& contr
                                            const std::vector<UsbNode>&     audio,
                                            const std::string&              usb_selector   = "",
                                            const std::string&              audio_selector = "");
-bool                     IsOwnedReport(const UsbReport&);
+struct AlsaPlayback {
+	uint64_t buffer_frames = 0, period_frames = 0, played_frames = 0, latency_us = 0;
+};
+std::optional<AlsaPlayback> ParseAlsaPlayback(const std::string& parameters,
+                                              const std::string& status, uint32_t owner_pid,
+                                              uint32_t sdl_period);
+bool                        IsOwnedReport(const UsbReport&);
 // Physical boundary is injected in tests; null output never constructs it.
 class UsbOutput {
 public:
@@ -28,6 +34,7 @@ public:
 	virtual bool     Write(uint32_t, std::span<const float>, float) = 0;
 	virtual uint64_t QueuedUs(uint32_t)                             = 0;
 	virtual uint64_t PlaybackLatencyUs() { return 0; }
+	virtual uint64_t PlayedUs() { return 0; }
 	virtual bool     Report(const UsbReport&) = 0;
 	virtual void     Close(uint32_t)          = 0;
 	virtual void     Shutdown()               = 0;
@@ -45,6 +52,9 @@ public:
 	bool         Rumble(uint16_t, uint16_t, uint32_t, uint64_t) override;
 	bool         Tick(uint64_t) override;
 	uint64_t     QueuedUs(uint32_t) override;
+	uint64_t     PendingFrames(uint32_t port, uint32_t rate) override;
+	uint64_t     PlaybackLatencyUs() override { return output_->PlaybackLatencyUs(); }
+	uint64_t     PlayedUs() override { return output_->PlayedUs(); }
 	static float FrequencyRatio(uint64_t queued_us);
 
 private:

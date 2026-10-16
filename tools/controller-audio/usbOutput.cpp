@@ -16,6 +16,13 @@
 namespace ControllerAudio::Receiver {
 namespace {
 namespace fs = std::filesystem;
+std::string ReadText(const fs::path& path) {
+	std::ifstream in(path, std::ios::binary);
+	std::string   text(4097, '\0');
+	in.read(text.data(), text.size());
+	text.resize(in.gcount());
+	return text.size() > 4096 ? std::string {} : text;
+}
 std::string Read(const fs::path& path) {
 	std::ifstream in(path);
 	std::string   text;
@@ -33,7 +40,7 @@ fs::path UsbParent(fs::path path) {
 	return {};
 }
 struct Selection {
-	fs::path    usb, hid;
+	fs::path    usb, hid, proc;
 	std::string name, identity;
 };
 Selection Discover(const Config& config) {
@@ -81,6 +88,8 @@ Selection Discover(const Config& config) {
 		            ioctl(fd, SNDRV_CTL_IOCTL_PCM_INFO, &pi) == 0;
 		::close(fd);
 		if (!ok) throw std::runtime_error("cannot identify controller ALSA playback endpoint");
+		selected.proc = fs::path("/proc/asound") / ("card" + std::to_string(card)) /
+		                ("pcm" + std::to_string(device) + "p");
 		endpoints.emplace_back(std::string(reinterpret_cast<char*>(ci.name)) + ":" +
 		                       reinterpret_cast<char*>(pi.name));
 	}
@@ -98,7 +107,10 @@ Selection Discover(const Config& config) {
 	return selected;
 }
 class SdlOutput final: public UsbOutput {
-	uint64_t          hardware_latency_us_ = 0;
+	uint64_t          hardware_latency_us_ = 0, played_frames_ = 0;
+	uint32_t          period_frames_ = 0;
+	fs::path          status_path_;
+	std::string       parameters_;
 	Config            config_;
 	Selection         selected_;
 	int               hid_         = -1;
@@ -155,7 +167,25 @@ public:
 				Shutdown();
 				return false;
 			}
-			hardware_latency_us_ = uint64_t(sample_frames) * 2000000 / 48000;
+			period_frames_ = sample_frames;
+			size_t owned   = 0;
+			for (const auto& sub: fs::directory_iterator(selected_.proc)) {
+				if (!sub.is_directory() || !sub.path().filename().string().starts_with("sub"))
+					continue;
+				auto params = ReadText(sub.path() / "hw_params"),
+				     status = ReadText(sub.path() / "status");
+				auto bounds = ParseAlsaPlayback(params, status, getpid(), period_frames_);
+				if (!bounds) continue;
+				owned++;
+				parameters_          = std::move(params);
+				status_path_         = sub.path() / "status";
+				hardware_latency_us_ = bounds->latency_us;
+				played_frames_       = bounds->played_frames;
+			}
+			if (owned != 1) {
+				Shutdown();
+				return false;
+			}
 			hid_ = ::open(selected_.hid.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 			hidraw_devinfo info {};
 			struct stat    st {};
@@ -165,7 +195,11 @@ public:
 				Shutdown();
 				return false;
 			}
-			return Alive();
+			if (!Alive()) {
+				Shutdown();
+				return false;
+			}
+			return true;
 		} catch (const std::exception&) {
 			Shutdown();
 			return false;
@@ -191,6 +225,7 @@ public:
 		                              static_cast<int>(data.size_bytes()));
 	}
 	uint64_t PlaybackLatencyUs() override { return hardware_latency_us_; }
+	uint64_t PlayedUs() override { return played_frames_ * 1000000 / 48000; }
 	uint64_t QueuedUs(uint32_t port) override {
 		auto it = streams_.find(port);
 		if (it == streams_.end()) return 0;
@@ -222,13 +257,21 @@ public:
 			::close(hid_);
 			hid_ = -1;
 		}
-		hardware_latency_us_ = 0;
+		hardware_latency_us_ = played_frames_ = period_frames_ = 0;
+		status_path_.clear();
+		parameters_.clear();
 		if (initialized_) {
 			SDL_QuitSubSystem(SDL_INIT_AUDIO);
 			initialized_ = false;
 		}
 	}
 	bool Alive() override {
+		auto bounds =
+		    ParseAlsaPlayback(parameters_, ReadText(status_path_), getpid(), period_frames_);
+		if (!bounds || bounds->played_frames < played_frames_ ||
+		    bounds->latency_us != hardware_latency_us_)
+			return false;
+		played_frames_ = bounds->played_frames;
 		std::error_code ec;
 		if (hid_ < 0 || !fs::exists(selected_.usb, ec) ||
 		    Read(selected_.usb / "busnum") + ":" + Read(selected_.usb / "devnum") !=

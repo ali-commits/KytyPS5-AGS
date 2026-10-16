@@ -46,6 +46,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version=ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(root/'host.pem',root/'host.key')
+    receiver_fp=hashlib.sha256(ssl.PEM_cert_to_DER_cert((root/'receiver/cert.pem').read_text())).hexdigest()
     ctx.load_verify_locations(root/'receiver/cert.pem')
     ctx.verify_mode=ssl.CERT_REQUIRED
     listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen();listener.settimeout(6)
@@ -58,6 +59,7 @@ with tempfile.TemporaryDirectory() as tmp:
             with ctx.wrap_socket(sock,server_side=True) as conn:
                 conn.settimeout(4)
                 h,p=take(conn);assert h[2]==1 and json.loads(p)['controller']==0
+                assert json.loads(p)['receiver_id']==receiver_fp
                 conn.sendall(frame(7,7,9,payload=b'{"state":"preparing"}'))
                 while True:
                     h,p=take(conn)
@@ -77,8 +79,14 @@ with tempfile.TemporaryDirectory() as tmp:
         except Exception as error:
             failures.append(repr(error))
     server=threading.Thread(target=serve);server.start()
-    config=dict(host='127.0.0.1',port=listener.getsockname()[1],pinned_host_sha256=pin,cert=str(root/'receiver/cert.pem'),key=str(root/'receiver/key.pem'),receiver_id='test',sink='null')
+    config=dict(host='127.0.0.1',port=listener.getsockname()[1],pinned_host_sha256=pin,cert=str(root/'receiver/cert.pem'),key=str(root/'receiver/key.pem'),receiver_id=receiver_fp,sink='null')
     path=root/'config.json';path.write_text(json.dumps(config));path.chmod(0o600)
+    # Local config must reject every override that differs from the real certificate.
+    for bad_id in ('test','0'*64,receiver_fp.upper(),'x'*64):
+        config['receiver_id']=bad_id;path.write_text(json.dumps(config))
+        rejected=subprocess.run([binary,'--config',str(path),'--status'],capture_output=True,text=True,env=receiver_env,timeout=2)
+        assert rejected.returncode==1 and 'certificate fingerprint' in rejected.stderr,(bad_id,rejected.returncode,rejected.stderr)
+    config.pop('receiver_id');path.write_text(json.dumps(config))
     result=subprocess.run([binary,'--config',str(path),'--run-seconds','2','--diagnostics','--raw',str(root/'capture.kcpa')],capture_output=True,text=True,env=receiver_env,timeout=6)
     server.join(6);listener.close()
     assert not server.is_alive() and not failures,(failures,result.stdout,result.stderr)
