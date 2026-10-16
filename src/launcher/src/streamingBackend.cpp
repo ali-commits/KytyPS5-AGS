@@ -665,15 +665,36 @@ void StreamingBackend::RefreshControllerAudio() {
 		              [this, generation](const QJsonObject& status, const QString& error) {
 			              if (generation != m_generation) return;
 			              m_controller_audio_refreshing = false;
-			              const auto audio = status.value("controller_audio").toObject();
+			              const auto audio            = status.value("controller_audio").toObject();
+			              const auto unsigned_integer = [](const QJsonValue& value) {
+				              const auto number = value.toDouble(-1);
+				              return value.isDouble() && number >= 0 &&
+				                     number < 18446744073709551616.0 &&
+				                     number == double(quint64(number));
+			              };
+			              const auto state = audio.value("state").toString();
+			              bool       valid =
+			                  audio.value("configured").isBool() &&
+			                  audio.value("state").isString() &&
+			                  (state == "waiting" || state == "preparing" || state == "active" ||
+			                   state == "error") &&
+			                  audio.value("receiver_name").isString() &&
+			                  audio.value("receiver_name").toString().toUtf8().size() <= 64 &&
+			                  audio.value("last_error").isString() &&
+			                  audio.value("last_error").toString().toUtf8().size() <= 128;
+			              for (const auto& field: {"port", "bytes", "queue_us", "discontinuities"})
+				              valid = valid && unsigned_integer(audio.value(field));
+			              valid = valid && audio.value("port").toDouble() >= 1 &&
+			                      audio.value("port").toDouble() <= 65535;
 			              if (!error.isEmpty())
 				              ApiError(error);
-			              else if (audio.isEmpty() || audio.value("state").toString().size() > 16 ||
-			                       audio.value("receiver_name").toString().toUtf8().size() > 64 ||
-			                       audio.value("last_error").toString().toUtf8().size() > 128)
+			              else if (!valid)
 				              ApiError("Host returned invalid controller audio status.");
 			              else {
-				              m_controller_audio_status = audio;
+				              m_controller_audio_status = {};
+				              for (const auto& field:
+				                   {"state", "receiver_name", "bytes", "queue_us", "last_error"})
+					              m_controller_audio_status.insert(field, audio.value(field));
 				              emit Changed();
 			              }
 		              });

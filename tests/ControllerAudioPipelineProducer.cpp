@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
 	Producer::OpenPort(0, 1, Kind::Actuator, 48000);
 	Producer::OpenPort(1, 1, Kind::Speaker, 48000);
 	std::array<float, 960> actuator, speaker;
+	const int              volume[2] {32768, 32768};
 	for (size_t i = 0; i < 480; i++) {
 		actuator[i * 2]     = 0.125f;
 		actuator[i * 2 + 1] = -0.25f;
@@ -40,9 +41,9 @@ int main(int argc, char** argv) {
 	auto tick = std::chrono::steady_clock::now();
 	for (int i = 0; i < 20; i++) {
 		if (!Producer::Publish(0, 1, Kind::Actuator,
-		                       {actuator.data(), 480, 2, 48000, true, nullptr, 1.0f, nullptr}) ||
+		                       {actuator.data(), 480, 2, 48000, true, volume, 1.0f, nullptr}) ||
 		    !Producer::Publish(1, 1, Kind::Speaker,
-		                       {speaker.data(), 480, 2, 48000, true, nullptr, 1.0f, nullptr})) {
+		                       {speaker.data(), 480, 2, 48000, true, volume, 1.0f, nullptr})) {
 			std::fprintf(stderr, "producer publish failed at chunk %d\n", i);
 			return 4;
 		}

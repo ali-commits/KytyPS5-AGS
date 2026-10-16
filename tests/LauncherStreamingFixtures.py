@@ -109,9 +109,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/kyty/controller-audio/receivers":
             self.send_json(dict(status=True, **json.loads((root / "controller-audio.json").read_text())))
         elif self.path == "/api/kyty/status":
-            self.send_json({"status": True, "controller_audio": {
+            override = root / "controller-audio-status.json"
+            audio = json.loads(override.read_text()) if override.exists() else {
                 "configured": True, "state": "waiting", "receiver_name": "", "port": int(config["port"]) + 30,
-                "bytes": 0, "queue_us": 0, "discontinuities": 0, "last_error": ""}})
+                "bytes": 0, "queue_us": 0, "discontinuities": 0, "last_error": ""}
+            self.send_json({"status": True, "controller_audio": audio})
         else:
             self.send_error(404)
 

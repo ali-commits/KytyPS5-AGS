@@ -223,6 +223,109 @@ private slots:
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
 	}
+	void controllerAudioStatusRejectsMalformedPinnedHostResponses() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}"));
+		QJsonObject valid {
+		    {"configured", true},   {"state", "waiting"}, {"receiver_name", "Thinker"},
+		    {"port", 65535},        {"bytes", 17},        {"queue_us", 250},
+		    {"discontinuities", 0}, {"last_error", ""}};
+		const auto status_file = dir.filePath("controller-audio-status.json");
+		QVERIFY(Put(status_file, QJsonDocument(valid).toJson()));
+		FixtureEnvironment environment(dir.path());
+		StreamingBackend   backend(dir.filePath("profile"));
+		StreamingSettings  settings;
+		settings.backend          = dir.filePath("host");
+		settings.port             = FreeBasePort();
+		settings.controller_audio = true;
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.ControllerAudioStatus().value("state").toString(),
+		                          QString("waiting"), 5000);
+		const auto         cached = backend.ControllerAudioStatus();
+		QList<QJsonObject> malformed {{{"configured", true}}};
+		for (const auto& field: {"configured", "state", "receiver_name", "port", "bytes",
+		                         "queue_us", "discontinuities", "last_error"}) {
+			auto missing = valid;
+			missing.remove(field);
+			malformed.append(missing);
+			for (const auto& bad:
+			     {QJsonValue(), QJsonValue(QJsonObject {}), QJsonValue(QJsonArray {})}) {
+				auto wrong_type = valid;
+				wrong_type.insert(field, bad);
+				malformed.append(wrong_type);
+			}
+		}
+		const auto add_bad = [&](const QString& field, const QJsonValue& value) {
+			auto status = valid;
+			status.insert(field, value);
+			malformed.append(status);
+		};
+		add_bad("configured", "true");
+		add_bad("configured", 1);
+		for (const auto& field: {"state", "receiver_name", "last_error"}) {
+			add_bad(field, true);
+			add_bad(field, 12);
+		}
+		add_bad("state", "");
+		add_bad("state", "unknown");
+		add_bad("state", QString(17, 'a'));
+		add_bad("receiver_name", QString(22, QChar(0x65e5)));
+		add_bad("last_error", QString(43, QChar(0x65e5)));
+		for (const auto& field: {"bytes", "queue_us", "discontinuities"}) {
+			add_bad(field, "17");
+			add_bad(field, true);
+			add_bad(field, -1);
+			add_bad(field, 0.5);
+			add_bad(field, 18446744073709551616.0);
+		}
+		for (const auto& bad: {QJsonValue("65535"), QJsonValue(true), QJsonValue(0), QJsonValue(-1),
+		                       QJsonValue(65536), QJsonValue(1.5)})
+			add_bad("port", bad);
+		QSignalSpy logs(&backend, &StreamingBackend::LogAdded);
+		for (int index = 0; index < malformed.size(); ++index) {
+			QVERIFY(Put(status_file, QJsonDocument(malformed[index]).toJson()));
+			const auto previous = logs.size();
+			backend.Refresh();
+			QTRY_VERIFY_WITH_TIMEOUT(logs.size() > previous, 5000);
+			QVERIFY2(backend.Error().contains("invalid controller audio status"),
+			         qPrintable(
+			             QString("malformed status case %1: %2").arg(index).arg(backend.Error())));
+			QCOMPARE(backend.ControllerAudioStatus(), cached);
+		}
+		for (const auto& state: {"preparing", "active", "error", "waiting"}) {
+			valid.insert("state", state);
+			valid.insert("configured", false);
+			valid.insert("port", 1);
+			valid.insert("receiver_name", QString(21, QChar(0x65e5)) + 'a');
+			valid.insert("last_error", QString(42, QChar(0x65e5)) + "ab");
+			valid.insert("bytes", 18446744073709549568.0);
+			valid.insert("queue_us", 0);
+			valid.insert("discontinuities", 18446744073709549568.0);
+			valid.insert("unrelated", "never cache host extras");
+			QVERIFY(Put(status_file, QJsonDocument(valid).toJson()));
+			backend.Refresh();
+			QTRY_COMPARE_WITH_TIMEOUT(backend.ControllerAudioStatus().value("state").toString(),
+			                          QString(state), 5000);
+			QCOMPARE(backend.ControllerAudioStatus(),
+			         (QJsonObject {{"state", state},
+			                       {"receiver_name", valid.value("receiver_name")},
+			                       {"bytes", 18446744073709549568.0},
+			                       {"queue_us", 0},
+			                       {"last_error", valid.value("last_error")}}));
+		}
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+		QVERIFY(backend.ControllerAudioStatus().isEmpty());
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+	}
 	void controllerAudioPortConflictIsCaught() {
 		const int  base = FreeBasePort();
 		QTcpServer busy;
