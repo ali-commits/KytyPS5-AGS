@@ -7,6 +7,27 @@ The user reports that the game itself works. Full controller-audio acceptance
 remains incomplete, and the companion service is disabled/stopped. Interactive
 game launches remain user-led.
 
+## Xiaomi TV controller checkpoint
+
+The user confirmed working face buttons and L2/R2 in the separately installed
+**Kyty TV (Test)** client, package `io.kyty.streaming.tv.debug`, functional source
+`c41957a` in `/home/ali/projects/kyty-moonlight-android`. Android11's accessibility
+input filter had stripped device identity and selected Moonlight's default mapping.
+The client recovers the unique controller context; Button Mapper and Projectivy
+remain enabled. The controlled filter-off comparison and then the candidate
+filter-on test both passed physically. Policy checks107 and actual Android menu
+adapter checks850 pass; APK and scoped source review passed. Stock Moonlight and
+its pairing remain available. Gyro and vibration are separate work, with USB data
+connection not yet enumerated at the first checkpoint.
+
+The user played the full first stage and reported a game crash at its end, asking
+that investigation be deferred. Preserve v3 capture
+`_CrashCapture/20261016T083414.641855Z`, whose manifest records native exit65 and
+SHA256 `f93b52dd9a892fad3d22acf5972786e4ad7d10c62cf051798f3a1dd5f24a15bb`.
+No cause was investigated. Host currentgame0 was verified afterward; this was a
+crash exit, not normal Quit. Keep the candidate's independent saves and capture
+for follow-up. No game was started by an agent for these TV checks.
+
 ## Controller-audio candidate v3
 
 The active experimental host is
