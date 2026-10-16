@@ -27,6 +27,20 @@ bitrate selectors for this managed flow.
 
 ## Initial installation
 
+The built candidate is installed at
+`/home/ali/.local/opt/kytyps5-streaming/20261016-native-v4`. In the morning, turn on
+the TV and reconnect/unlock the phone with USB debugging, then run on the PC:
+
+```sh
+/home/ali/.local/opt/kytyps5-streaming/20261016-native-v4/setup-devices.sh
+```
+
+This starts the host if needed. It does not launch a game. Phone USB is only for
+this development installation; the DualSense stays on Bluetooth and gameplay
+traffic uses Wi-Fi/LAN. Open **Kyty TV (Candidate)** and **Kyty Controller** after
+installation. Pick a game and press **Play** on the phone yourself.
+
+
 The TV is deliberately left off during the overnight build. The phone's USB
 connection disconnected, so device installation/provisioning waits until it is
 connected again. The signed candidate APKs are prepared alongside the PC package.
@@ -72,3 +86,19 @@ ordinary vibration. Native haptic waveforms, adaptive trigger fidelity and
 controller-speaker audio remain separate work; this candidate does not claim
 those features or measured latency/HDR/4K performance. The laptop companion stays
 paused, and the preserved v2/v3 installations remain available for rollback.
+
+## Verification record
+
+The host passed52 focused C++ tests, native launcher46 Qt checks plus capture
+configuration tests, phone109 core checks and40 preference coverage checks, TV
+startup/input/profile/PiP policies plus107 legacy input assertions, and five
+real-TLS setup trust tests. Both APKs build, lint and signing checks pass.
+Independent scoped reviews passed after fixes. Actual packaged-host idle RPC
+checks passed without calling Play or starting an emulator.
+
+Phone/TV hardware installation and whole-system video/controller acceptance are
+pending because the phone USB connection disconnected and the TV remained off.
+See `verification/three-apps` and `three-apps-provenance.json` inside the package for
+exact source revisions, APK/binary hashes, test evidence and physical limits.
+The earlier stage-one game crash remains deferred; its original v3 crash capture
+is preserved. No emulator crash fix is claimed by this build.
