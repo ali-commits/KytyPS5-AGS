@@ -9,6 +9,18 @@ The native launcher owns hosting, quality settings, pairing, clients, game launc
 and private audio. Kyty and the host remain independently built programs in separate
 repositories. This is a private experiment, not a supported upstream release.
 
+## Current phone and TV direction (2026-10-16)
+
+The user selected a three-app setup: PC headless host, TV video/audio client,
+and OPPO Reno11 Bluetooth controller/game-picker app. Public Android input,
+gyro/accel and short vibration passed on the real Android16 phone. Foreground dim
+controller mode is accepted. The first LAN check is isolated from v3; full
+phone-to-game input and TV launch/stop orchestration remain integration work.
+See the [phone direction](../superpowers/specs/2026-10-16-phone-controller-design.md).
+The TV is intentionally off during phone checks, the laptop companion remains
+paused, and gameplay tests remain user-launched. Earlier laptop/USB instructions
+below describe previous experiments rather than the selected playback setup.
+
 ## Start and pair
 
 The dedicated `kytyps5-streaming` command now selects the tested v2 build.
