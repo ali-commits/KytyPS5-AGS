@@ -98,8 +98,7 @@ private:
 	std::array<Port, 32> ports_ {};
 	size_t               delivery_count_ = 0;
 	uint64_t             bytes_          = 0;
-	uint64_t             generation_ = 0, epoch_ = 0, control_sequence_ = 0, last_generation_ = 0,
-	                     last_epoch_ = 0;
+	uint64_t             generation_ = 0, epoch_ = 0, control_sequence_ = 0, last_generation_ = 0;
 	bool                 ready_ = false, active_ = false;
 	std::string          error_;
 };

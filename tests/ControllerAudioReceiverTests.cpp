@@ -71,6 +71,31 @@ Frame Active(uint64_t gen = 7, uint64_t epoch = 9) {
 	return f;
 }
 int main() {
+	{
+		NullSink sink;
+		Session  lifecycle(sink);
+		lifecycle.clock.Sample(1000000, 1000000, 1000000, 1000000);
+		Check(lifecycle.Handle(State(100, 2), 1000000), "prior game lease G100 E2");
+		lifecycle.Disconnect();
+		Check(lifecycle.Handle(State(200, 1), 1000000),
+		      "fresh durable generation accepts restarted producer epoch1");
+		Check(lifecycle.Handle(Active(200, 1), 1000000), "restarted producer active binding");
+		Check(!lifecycle.Handle(Active(200, 2), 1000000),
+		      "wrong epoch within the same lease remains rejected");
+		Check(!lifecycle.Handle(State(200, 99), 1000000),
+		      "same generation cannot replay with a different epoch");
+		Check(!lifecycle.Handle(State(199, 999), 1000000),
+		      "older generation cannot replay with a higher epoch");
+		Check(lifecycle.Handle(State(201, 1), 1000000) && lifecycle.Handle(Active(201, 1), 1000000),
+		      "next fresh generation retains current epoch binding");
+		auto stale           = Port(Type::Open);
+		stale.generation     = 200;
+		stale.producer_epoch = 1;
+		stale.source_time_us = 0;
+		Check(!lifecycle.Handle({stale, {}}, 1000000),
+		      "old generation port cannot enter replacement lease");
+	}
+
 	PlaybackClockGate delayed(1000000);
 	Check(delayed.Observe(1000000, PlaybackClockProgress {false, 0, 0}) ==
 	          PlaybackClockState::Waiting,

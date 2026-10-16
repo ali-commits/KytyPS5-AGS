@@ -172,14 +172,15 @@ bool Session::Handle(const Frame& frame, uint64_t now) {
 			active_ = true;
 			return true;
 		}
+		// Durable generations order leases; a new producer process may restart its local epoch.
 		if (state != "preparing" || !h.generation || !h.producer_epoch ||
-		    h.generation <= last_generation_ || h.producer_epoch < last_epoch_)
+		    h.generation <= last_generation_)
 			return Fail("replayed lease");
 		// Readiness commits the fresh lease only after both clock and output validate.
 		if (!clock.Fresh(now)) return Fail("clock uncertainty or expiry");
 		Disconnect();
 		last_generation_ = generation_ = h.generation;
-		last_epoch_ = epoch_ = h.producer_epoch;
+		epoch_                         = h.producer_epoch;
 		if (!sink_.Prepare()) return Fail("output unavailable");
 		ready_ = true;
 		error_.clear();
