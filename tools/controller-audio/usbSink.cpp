@@ -187,7 +187,7 @@ bool UsbSink::Pcm(const Header& h, std::span<const uint8_t> p, uint64_t now) {
 	auto duration = (p.size() / 8 * 1000000ULL + h.rate - 1) / h.rate;
 	if (queue > 20000 || duration > 20000 - queue)
 		return Fail("PCM queue", "queued_us=" + std::to_string(queue) + " duration_us=" +
-		                             std::to_string(duration) + " " + output_->Error());
+		                             std::to_string(duration) + " " + output_->QueueState(h.port));
 	auto quad = MapQuad(h.kind, p);
 	if (h.kind == Kind::Actuator && std::any_of(quad.begin(), quad.end(), [](float sample) {
 		    return std::fabs(sample) > 1.f / 1024.f;

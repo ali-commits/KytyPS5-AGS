@@ -53,6 +53,9 @@ struct Fake final: UsbOutput {
 	bool        Alive() override { return alive; }
 	std::string error_text = "fake output reason";
 	std::string Error() const override { return error_text; }
+	std::string QueueState(uint32_t) override {
+		return "state=PREPARED hw=0 appl=0 b=15360 src=48000/4/F32 r=1.005";
+	}
 };
 Header Port(Type t, Kind k = Kind::Actuator) {
 	return {t, k, 2, 7, 9, 0, 48000, 1, 1, 0, 1000000};
@@ -199,7 +202,8 @@ int main() {
 	f->latency = 0;
 	f->queued  = 21000;
 	Check(!usb.Pcm(h, stereo, 1110000), "queue overflow explicit failure");
-	Check(usb.Error().find("PCM queue") != std::string::npos,
+	Check(usb.Error().find("PCM queue") != std::string::npos &&
+	          usb.Error().find("state=PREPARED hw=0") != std::string::npos,
 	      "queue failure identifies PCM branch");
 	f->queued = 0;
 	Check(UsbSink::FrequencyRatio(0) >= .995f && UsbSink::FrequencyRatio(1000000) <= 1.005f,

@@ -38,6 +38,7 @@ public:
 	virtual uint64_t    PlaybackLatencyUs() { return 0; }
 	virtual uint64_t    PlayedUs() { return 0; }
 	virtual std::string Error() const { return {}; }
+	virtual std::string QueueState(uint32_t) { return Error(); }
 	virtual bool        Report(const UsbReport&) = 0;
 	virtual void        Close(uint32_t)          = 0;
 	virtual void        Shutdown()               = 0;

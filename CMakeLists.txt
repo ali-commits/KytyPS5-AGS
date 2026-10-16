@@ -2615,7 +2615,7 @@ endif()
 if(LINUX AND KYTY_BUILD_CONTROLLER_AUDIO_RECEIVER)
 	add_subdirectory(tools/controller-audio)
     # Companion is independent of the emulator's no-exceptions policy.
-    foreach(target controller_audio_receiver_core controller-audio-receiver controller_audio_receiver_tests)
+    foreach(target controller_audio_receiver_core controller-audio-receiver controller_audio_receiver_tests controller_audio_receiver_sdl_tests)
         if(TARGET ${target} AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             target_compile_options(${target} PRIVATE -fexceptions)
         endif()

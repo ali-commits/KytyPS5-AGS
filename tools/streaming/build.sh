@@ -54,7 +54,7 @@ fi
 cmake -S "$kyty_source" -B "$kyty_build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
     -DKYTY_BUILD_LAUNCHER=ON -DKYTY_BUILD_CONTROLLER_AUDIO_RECEIVER=ON -DBUILD_TESTING=ON -DKYTY_EMULATOR_IPO=ON
-cmake --build "$kyty_build" --target kyty_emulator launcher streaming_tests streaming_gpu_tests audio_output_device_tests launcher_streaming_tests controller_audio_tests controller_audio_producer_tests controller_audio_negotiation_tests controller_audio_native_routing_tests controller_audio_pipeline_producer controller-audio-receiver controller_audio_receiver_tests controller_audio_no_hardware -j "$kyty_jobs"
+cmake --build "$kyty_build" --target kyty_emulator launcher streaming_tests streaming_gpu_tests audio_output_device_tests launcher_streaming_tests controller_audio_tests controller_audio_producer_tests controller_audio_negotiation_tests controller_audio_native_routing_tests controller_audio_pipeline_producer controller-audio-receiver controller_audio_receiver_tests controller_audio_receiver_sdl_tests controller_audio_no_hardware -j "$kyty_jobs"
 
 cmake -S "$host_source" -B "$host_build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc \

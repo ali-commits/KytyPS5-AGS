@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <set>
 #include <sound/asound.h>
+#include <sstream>
 #include <stdexcept>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -25,6 +26,23 @@ std::string ReadText(const fs::path& path) {
 	in.read(text.data(), text.size());
 	text.resize(in.gcount());
 	return text.size() > 4096 ? std::string {} : text;
+}
+std::string ProcValue(const std::string& text, const std::string& field) {
+	std::istringstream in(text);
+	std::string        line;
+	while (std::getline(in, line)) {
+		auto colon = line.find(':');
+		if (colon == std::string::npos) continue;
+		auto key = line.substr(0, colon);
+		key.erase(
+		    std::remove_if(key.begin(), key.end(), [](char c) { return c == ' ' || c == '\t'; }),
+		    key.end());
+		if (key != field) continue;
+		auto value = line.substr(colon + 1);
+		auto first = value.find_first_not_of(" \t");
+		return first == std::string::npos ? "?" : value.substr(first, 32);
+	}
+	return "?";
 }
 std::string Read(const fs::path& path) {
 	std::ifstream in(path);
@@ -268,6 +286,24 @@ public:
 		                            static_cast<int>(data.size_bytes())))
 			return RuntimeFailure("SDL PCM write", SDL_GetError());
 		return true;
+	}
+	std::string QueueState(uint32_t port) override {
+		auto found = streams_.find(port);
+		if (found == streams_.end()) return "stream missing";
+		auto          status = ReadText(status_path_);
+		SDL_AudioSpec source {};
+		SDL_GetAudioStreamFormat(found->second.stream, &source, nullptr);
+		std::string_view format = SDL_GetAudioFormatName(source.format);
+		if (format.starts_with("SDL_AUDIO_")) format.remove_prefix(10);
+		auto summary =
+		    "state=" + ProcValue(status, "state") + " hw=" + ProcValue(status, "hw_ptr") +
+		    " appl=" + ProcValue(status, "appl_ptr") +
+		    " b=" + std::to_string(SDL_GetAudioStreamQueued(found->second.stream)) +
+		    " src=" + std::to_string(source.freq) + "/" + std::to_string(source.channels) + "/" +
+		    std::string(format) +
+		    " r=" + std::to_string(SDL_GetAudioStreamFrequencyRatio(found->second.stream));
+		RuntimeFailure("queue snapshot", summary);
+		return summary;
 	}
 	uint64_t PlaybackLatencyUs() override { return hardware_latency_us_; }
 	uint64_t PlayedUs() override { return played_frames_ * 1000000 / 48000; }
