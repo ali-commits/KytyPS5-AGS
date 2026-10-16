@@ -18,6 +18,7 @@ std::optional<UsbDevice> ResolveUsbBinding(const std::vector<std::string>& contr
                                            const std::vector<UsbNode>&     audio,
                                            const std::string&              usb_selector   = "",
                                            const std::string&              audio_selector = "");
+std::optional<std::pair<uint32_t, uint32_t>> ParseAlsaPlaybackNode(const std::string&);
 struct AlsaPlayback {
 	uint64_t buffer_frames = 0, period_frames = 0, played_frames = 0, latency_us = 0;
 };

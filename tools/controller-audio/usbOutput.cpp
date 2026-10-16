@@ -2,6 +2,9 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -71,11 +74,9 @@ Selection Discover(const Config& config) {
 	std::vector<std::string> endpoints;
 	for (const auto& entry: fs::directory_iterator("/sys/class/sound")) {
 		std::string node = entry.path().filename();
-		int         card = -1, device = -1;
-		char        tail = 0;
-		if (std::sscanf(node.c_str(), "pcmC%dD%dp%c", &card, &device, &tail) != 2 ||
-		    UsbParent(entry.path() / "device") != selected.usb)
-			continue;
+		auto        pcm  = ParseAlsaPlaybackNode(node);
+		if (!pcm || UsbParent(entry.path() / "device") != selected.usb) continue;
+		auto [card, device] = *pcm;
 		// Control ioctls only identify the exact ALSA name SDL enumerates; no mixer/profile writes.
 		auto ctl = "/dev/snd/controlC" + std::to_string(card);
 		int  fd  = ::open(ctl.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -113,9 +114,19 @@ class SdlOutput final: public UsbOutput {
 	std::string       parameters_;
 	Config            config_;
 	Selection         selected_;
-	int               hid_         = -1;
-	SDL_AudioDeviceID device_      = 0;
-	bool              initialized_ = false;
+	int               hid_             = -1;
+	SDL_AudioDeviceID device_          = 0;
+	bool              initialized_     = false;
+	uint64_t          next_diagnostic_ = 0;
+	bool              PrepareFailure(const char* stage, const char* detail) {
+		auto now = NowUs();
+		if (now >= next_diagnostic_) {
+			std::fprintf(stderr, "controller audio USB prepare %.40s: %.128s\n", stage, detail);
+			next_diagnostic_ = now + 2000000;
+		}
+		Shutdown();
+		return false;
+	}
 	struct Stream {
 		SDL_AudioStream* stream;
 		uint32_t         rate;
@@ -126,18 +137,19 @@ public:
 	explicit SdlOutput(Config c): config_(std::move(c)) {}
 	~SdlOutput() override { Shutdown(); }
 	bool Prepare() override {
+		const char* stage = "discovery";
 		try {
 			selected_ = Discover(config_);
 			// SDL ALSA enumerates card:name:PCM names. This process-specific driver selection
 			// avoids any Pulse/PipeWire default/profile changes and gives an auditable mapping.
 			if (!SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "alsa", SDL_HINT_OVERRIDE) ||
 			    !SDL_InitSubSystem(SDL_INIT_AUDIO))
-				return false;
+				return PrepareFailure("SDL audio initialization", SDL_GetError());
 			initialized_ = true;
-			if (std::string(SDL_GetCurrentAudioDriver()) != "alsa") {
-				Shutdown();
-				return false;
-			}
+			auto* driver = SDL_GetCurrentAudioDriver();
+			if (!driver || std::string(driver) != "alsa")
+				return PrepareFailure("SDL driver", "required explicit ALSA backend unavailable");
+			stage                       = "SDL endpoint selection";
 			int               count     = 0;
 			auto*             devices   = SDL_GetAudioPlaybackDevices(&count);
 			SDL_AudioDeviceID candidate = 0;
@@ -152,21 +164,28 @@ public:
 			SDL_free(devices);
 			SDL_AudioSpec actual {};
 			if (matches != 1) {
-				Shutdown();
-				return false;
+				auto detail = "expected one exact ancestry-bound SDL name; matches=" +
+				              std::to_string(matches) + " name=" + selected_.name;
+				return PrepareFailure(stage, detail.c_str());
 			}
 			// ALSA's unopened SDL device uses a stereo placeholder; validate the negotiated
 			// format after opening the explicit ancestry-bound device.
 			SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "240");
 			const SDL_AudioSpec desired {SDL_AUDIO_F32, 4, 48000};
-			device_           = SDL_OpenAudioDevice(candidate, &desired);
+			stage   = "SDL explicit output open";
+			device_ = SDL_OpenAudioDevice(candidate, &desired);
+			if (!device_) return PrepareFailure(stage, SDL_GetError());
 			int sample_frames = 0;
-			if (!device_ || !SDL_GetAudioDeviceFormat(device_, &actual, &sample_frames) ||
+			if (!SDL_GetAudioDeviceFormat(device_, &actual, &sample_frames) ||
 			    actual.channels != 4 || actual.freq != 48000 || sample_frames <= 0 ||
 			    sample_frames > 960) {
-				Shutdown();
-				return false;
+				auto detail =
+				    "expected quad48000/period1..960; channels=" + std::to_string(actual.channels) +
+				    " rate=" + std::to_string(actual.freq) +
+				    " period=" + std::to_string(sample_frames);
+				return PrepareFailure("SDL negotiated format", detail.c_str());
 			}
+			stage          = "owned ALSA parameter/progress verification";
 			period_frames_ = sample_frames;
 			size_t owned   = 0;
 			for (const auto& sub: fs::directory_iterator(selected_.proc)) {
@@ -183,26 +202,26 @@ public:
 				played_frames_       = bounds->played_frames;
 			}
 			if (owned != 1) {
-				Shutdown();
-				return false;
+				auto detail = "require one PID-owned quadS16LE48k substream with verified "
+				              "ring/progress; matches=" +
+				              std::to_string(owned);
+				return PrepareFailure(stage, detail.c_str());
 			}
-			hid_ = ::open(selected_.hid.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+			stage = "hidraw open/USB identity";
+			hid_  = ::open(selected_.hid.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 			hidraw_devinfo info {};
 			struct stat    st {};
-			if (hid_ < 0 || fstat(hid_, &st) || !S_ISCHR(st.st_mode) ||
-			    ioctl(hid_, HIDIOCGRAWINFO, &info) || info.bustype != 3 || info.vendor != 0x054c ||
-			    info.product != 0x0ce6) {
-				Shutdown();
-				return false;
-			}
-			if (!Alive()) {
-				Shutdown();
-				return false;
-			}
+			if (hid_ < 0 || fstat(hid_, &st) || ioctl(hid_, HIDIOCGRAWINFO, &info))
+				return PrepareFailure(stage, std::strerror(errno));
+			if (!S_ISCHR(st.st_mode) || info.bustype != 3 || info.vendor != 0x054c ||
+			    info.product != 0x0ce6)
+				return PrepareFailure(stage, "expected USB character node for054c:0ce6");
+			if (!Alive())
+				return PrepareFailure("final USB liveness",
+				                      "USB identity or owned ALSA progress unavailable/regressed");
 			return true;
-		} catch (const std::exception&) {
-			Shutdown();
-			return false;
+		} catch (const std::exception& error) {
+			return PrepareFailure(stage, error.what());
 		}
 	}
 	bool Open(uint32_t port, uint32_t rate) override {

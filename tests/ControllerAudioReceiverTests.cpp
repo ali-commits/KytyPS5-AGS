@@ -66,6 +66,19 @@ Frame Active(uint64_t gen = 7, uint64_t epoch = 9) {
 	return f;
 }
 int main() {
+	auto playback = ParseAlsaPlaybackNode("pcmC1D0p");
+	Check(playback && playback->first == 1 && playback->second == 0, "exact dynamic playback node");
+	Check(!ParseAlsaPlaybackNode("pcmC1D0c"), "capture node must not become duplicate playback");
+	for (auto invalid: {"card1", "controlC1", "pcmC1D0", "pcmC1D0p-extra", "pcmC-1D0p", "pcmC1D-1p",
+	                    "pcmC99999999999999999999999D0p"})
+		Check(!ParseAlsaPlaybackNode(invalid), "malformed ALSA node refused");
+	std::vector<UsbNode> discovered_audio;
+	for (auto node: {"card1", "controlC1", "pcmC1D0c", "pcmC1D0p"})
+		if (ParseAlsaPlaybackNode(node))
+			discovered_audio.push_back({"/usb/3-1", "Wireless Controller:USB Audio"});
+	Check(ResolveUsbBinding({"/usb/3-1"}, {{"/usb/3-1", "/dev/hidraw1"}}, discovered_audio)
+	          .has_value(),
+	      "Fedora capture+playback topology binds one output");
 	std::string params = "access: RW_INTERLEAVED\nformat: S16_LE\nchannels: 4\nrate: 48000 "
 	                     "(48000/1)\nperiod_size: 240\nbuffer_size: 960\n";
 	std::string status = "state: RUNNING\nowner_pid: 1234\nhw_ptr : 48000\n";

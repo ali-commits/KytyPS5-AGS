@@ -34,6 +34,16 @@ std::optional<UsbDevice> ResolveUsbBinding(const std::vector<std::string>& contr
 		return {};
 	return result;
 }
+std::optional<std::pair<uint32_t, uint32_t>> ParseAlsaPlaybackNode(const std::string& node) {
+	if (!node.starts_with("pcmC") || !node.ends_with('p')) return {};
+	uint32_t card = 0, device = 0;
+	auto     begin = node.data() + 4, end = node.data() + node.size() - 1;
+	auto     c = std::from_chars(begin, end, card);
+	if (c.ec != std::errc {} || c.ptr == end || *c.ptr != 'D' || card > INT32_MAX) return {};
+	auto d = std::from_chars(c.ptr + 1, end, device);
+	if (d.ec != std::errc {} || d.ptr != end || device > INT32_MAX) return {};
+	return std::pair {card, device};
+}
 std::optional<AlsaPlayback> ParseAlsaPlayback(const std::string& parameters,
                                               const std::string& status, uint32_t owner_pid,
                                               uint32_t sdl_period) {
