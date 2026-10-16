@@ -64,7 +64,7 @@ constexpr DWORD CMD_Y_CHARS = 1000;
 #endif
 constexpr char SETTINGS_MAIN_DIALOG[]        = "MainDialog";
 constexpr char SETTINGS_MAIN_LAST_GEOMETRY[] = "geometry";
-constexpr char SETTINGS_CHECK_UPDATES[]       = "check_updates_on_startup";
+constexpr char SETTINGS_CHECK_UPDATES[]      = "check_updates_on_startup";
 
 class MainDialogPrivate: public QObject {
 	Q_OBJECT
@@ -91,17 +91,19 @@ private:
 	static QByteArray g_last_geometry;
 	static bool       g_check_updates_on_startup;
 
-	Ui::MainDialog* m_ui             = {nullptr};
-	MainDialog*     m_main_dialog    = nullptr;
-	UpdateChecker*  m_update_checker = nullptr;
+	Ui::MainDialog*    m_ui             = {nullptr};
+	MainDialog*        m_main_dialog    = nullptr;
+	UpdateChecker*     m_update_checker = nullptr;
 	ControllerLightbar m_lightbar;
-	QString         m_interpreter;
-	QString         m_preset_warning;
-	QLabel*         m_preset_label   = nullptr;
-	bool            m_started        = false;
+	QString            m_interpreter;
+	QString            m_preset_warning;
+	QLabel*            m_preset_label = nullptr;
+	bool               m_started      = false;
 
-	QProcess m_process;
-	StreamingBackend* m_streaming = nullptr;
+	QProcess          m_process;
+	StreamingBackend* m_streaming        = nullptr;
+	StreamingWidget*  m_streaming_widget = nullptr;
+	QTabWidget*       m_tabs             = nullptr;
 
 	QPointer<ConfigurationItem> m_running_item;
 };
@@ -123,12 +125,13 @@ MainDialogPrivate::~MainDialogPrivate() {
 void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui = new Ui::MainDialog;
 	m_ui->setupUi(main_dialog);
-	auto* tabs = new QTabWidget(main_dialog);
+	m_tabs = new QTabWidget(main_dialog);
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
-	tabs->addTab(m_ui->widget, tr("Library"));
-	m_streaming = new StreamingBackend(StreamingSettings::ProfileDirectory(), this);
-	tabs->addTab(new StreamingWidget(m_streaming, tabs), tr("Streaming"));
-	m_ui->verticalLayout_3->addWidget(tabs);
+	m_tabs->addTab(m_ui->widget, tr("Library"));
+	m_streaming        = new StreamingBackend(StreamingSettings::ProfileDirectory(), this);
+	m_streaming_widget = new StreamingWidget(m_streaming, m_tabs);
+	m_tabs->addTab(m_streaming_widget, tr("Streaming"));
+	m_ui->verticalLayout_3->addWidget(m_tabs);
 	main_dialog->setMinimumSize(700, 650);
 	main_dialog->resize(920, 860);
 	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
@@ -137,7 +140,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	});
 	connect(m_streaming, &StreamingBackend::Changed, this, &MainDialogPrivate::Update);
 
-	m_main_dialog = main_dialog;
+	m_main_dialog    = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
 	m_ui->check_updates_on_startup->setChecked(g_check_updates_on_startup);
 	m_ui->check_updates_link->setVisible(UpdateChecker::IsSupported());
@@ -229,6 +232,8 @@ void MainDialogPrivate::FindInterpreter() {
 	m_ui->label_settings_file->setText(tr("Settings file: ") + m_ui->widget->GetSettingsFile());
 
 	m_streaming->SetCatalog(m_ui->widget->CreateStreamingCatalog(m_interpreter));
+	const bool start_streaming_host =
+	    !m_started && QApplication::arguments().contains("--start-streaming-host");
 	m_started = true;
 	if (!m_preset_warning.isEmpty()) {
 		QMessageBox::warning(m_main_dialog, tr("Release settings not applied"), m_preset_warning);
@@ -238,6 +243,10 @@ void MainDialogPrivate::FindInterpreter() {
 	if (m_ui->check_updates_on_startup->isChecked()) {
 		m_update_checker->Check(false);
 	}
+	if (start_streaming_host) {
+		m_tabs->setCurrentWidget(m_streaming_widget);
+		QTimer::singleShot(0, m_streaming_widget, &StreamingWidget::StartHosting);
+	}
 }
 
 void MainDialogPrivate::SetPresetWarning(const QString& text) {
@@ -246,7 +255,8 @@ void MainDialogPrivate::SetPresetWarning(const QString& text) {
 		m_preset_label = new QLabel(m_main_dialog);
 		m_preset_label->setWordWrap(true);
 		m_preset_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-		m_preset_label->setStyleSheet(QStringLiteral("QLabel { color: #d03030; font-weight: bold; }"));
+		m_preset_label->setStyleSheet(
+		    QStringLiteral("QLabel { color: #d03030; font-weight: bold; }"));
 		m_ui->verticalLayout_4->insertWidget(0, m_preset_label);
 	}
 	m_preset_label->setText(text);

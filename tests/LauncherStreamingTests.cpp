@@ -1151,6 +1151,74 @@ while True: time.sleep(0.05)
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 		qputenv("PATH", previous_path);
 	}
+	void explicitWidgetStartHostsSavedSettingsWithoutLaunchingGame() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		const auto profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend     = dir.filePath("host");
+		settings.port        = FreeBasePort();
+		settings.local_audio = false;
+		{
+			QSettings file(QDir(profile).filePath("streaming.ini"), QSettings::IniFormat);
+			settings.Write(file);
+			file.sync();
+			QCOMPARE(file.status(), QSettings::NoError);
+		}
+		FixtureEnvironment environment(dir.path());
+		StreamingBackend   backend(profile);
+		backend.SetCatalog(
+		    {{"idle",
+		      "Idle fixture",
+		      "/usr/bin/python3",
+		      {"-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('unexpected')",
+		       dir.filePath("game-started")},
+		      dir.path()}});
+		StreamingWidget widget(&backend);
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
+		QVERIFY(!QFile::exists(dir.filePath("host-pid")));
+		widget.StartHosting();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.Clients().size(), 1, 5000);
+		QVERIFY(backend.Session().startsWith("No game running"));
+		QVERIFY(QFile::exists(dir.filePath("stdin-credentials-used")));
+		const auto manifest =
+		    QJsonDocument::fromJson(Read(QDir(profile).filePath("launch.json"))).object();
+		QVERIFY(manifest.value("games").toObject().contains("idle"));
+		QVERIFY(!QFile::exists(dir.filePath("game-started")));
+		QVERIFY(!QFile::exists(dir.filePath("wrapper-pid")));
+		QVERIFY(!QFile::exists(dir.filePath("api-requests.jsonl")));
+		QVERIFY(Read(QDir(profile).filePath("host.conf"))
+		            .contains("port = " + QByteArray::number(settings.port) + "\n"));
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+		QVERIFY(!QFile::exists(dir.filePath("game-started")));
+		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+	}
+	void explicitWidgetStartRejectsInvalidSettings() {
+		QTemporaryDir     dir;
+		QSettings         file(dir.filePath("streaming.ini"), QSettings::IniFormat);
+		StreamingSettings settings;
+		settings.controller_audio      = true;
+		settings.controller_audio_port = settings.port;
+		settings.Write(file);
+		file.sync();
+		StreamingBackend backend(dir.path());
+		StreamingWidget  widget(&backend);
+		widget.StartHosting();
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
+		QVERIFY(backend.Logs().isEmpty());
+		QVERIFY(
+		    widget.findChild<QLabel*>("streamError")->text().contains("separate from GameStream"));
+		QVERIFY(!QFile::exists(dir.filePath("host.conf")));
+	}
 	void nativeWidgetDoesNotStartHostAndShowsActionableError() {
 		QTemporaryDir    dir;
 		StreamingBackend backend(dir.path());

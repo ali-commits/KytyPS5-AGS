@@ -277,9 +277,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	connect(copy, &QPushButton::clicked, this,
 	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
 	connect(m_save, &QPushButton::clicked, this, [this] { Save(); });
-	connect(m_start, &QPushButton::clicked, this, [this] {
-		if (Save()) m_backend->Start(Settings());
-	});
+	connect(m_start, &QPushButton::clicked, this, &StreamingWidget::StartHosting);
 	connect(m_stop, &QPushButton::clicked, backend, &StreamingBackend::Stop);
 	connect(m_close, &QPushButton::clicked, backend, &StreamingBackend::CloseSession);
 	connect(m_pair, &QPushButton::clicked, this, [this] {
@@ -318,6 +316,9 @@ StreamingSettings StreamingWidget::Settings() const {
 	s.controller_audio      = m_controller_audio->isChecked();
 	s.controller_audio_port = m_controller_audio_port->value();
 	return s;
+}
+void StreamingWidget::StartHosting() {
+	if (Save()) m_backend->Start(Settings());
 }
 bool StreamingWidget::Save() {
 	const auto settings = Settings();

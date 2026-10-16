@@ -19,6 +19,9 @@ public:
 	explicit StreamingWidget(StreamingBackend* backend, QWidget* parent = nullptr);
 	StreamingSettings Settings() const;
 
+public slots:
+	void StartHosting();
+
 private:
 	void              Update();
 	bool              Save();

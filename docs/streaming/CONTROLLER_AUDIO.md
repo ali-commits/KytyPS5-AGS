@@ -87,6 +87,18 @@ receivers through the launcher's receiver controls or authenticated loopback API
 - `PUT /api/kyty/controller-audio/receivers/ID` with `{"enabled":false}`
 - `DELETE /api/kyty/controller-audio/receivers/ID`
 
+To open the candidate launcher on its Streaming tab and start hosting with its saved
+preferences, run the candidate's executable with the explicit flag:
+
+```sh
+/absolute/candidate/kyty_launcher --start-streaming-host
+```
+
+The launcher validates the emulator and prepares its library catalog before requesting
+hosting. Invalid streaming preferences remain visible in the Streaming tab. This flag
+starts only the host; choose a game manually in Moonlight when ready. Without the flag,
+the launcher waits for the Start hosting button.
+
 The optional `controller_audio` object on `GET /api/kyty/status` reports configuration,
 state, receiver, counters, queue time and bounded error. A registered certificate alone
 never grants another client's session; the mapped parent and running session must match.
