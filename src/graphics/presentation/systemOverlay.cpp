@@ -1,6 +1,9 @@
 #include "graphics/presentation/systemOverlay.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
+#include "common/file.h"
+#include "common/localization.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -24,6 +27,8 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <fmt/format.h>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -153,11 +158,11 @@ enum class InputKind : uint8_t {
 };
 
 struct InputEvent {
-	InputKind      kind;
-	OverlaySession session;
-	int            id;
-	float          x;
-	float          y;
+	InputKind        kind;
+	OverlaySession   session;
+	int              id;
+	float            x;
+	float            y;
 	ModalInputSource source = ModalInputSource::Local;
 };
 
@@ -180,14 +185,14 @@ bool                         g_input_reset_requested      = false;
 uint16_t                     g_last_external_keycode      = 0;
 uint32_t                     g_last_external_status       = 0;
 OverlaySession               g_input_session;
-bool                         g_input_active               = false;
-bool                         g_input_controller           = false;
-bool                         g_input_keyboard             = false;
-bool                         g_input_multiline            = false;
-bool                         g_input_lifecycle_active     = false;
-bool                         g_controller_captured        = false;
+bool                         g_input_active           = false;
+bool                         g_input_controller       = false;
+bool                         g_input_keyboard         = false;
+bool                         g_input_multiline        = false;
+bool                         g_input_lifecycle_active = false;
+bool                         g_controller_captured    = false;
 OverlaySession               g_session;
-SDL_Window*                  g_input_window               = nullptr;
+SDL_Window*                  g_input_window = nullptr;
 RemoteOverlayInputRouter     g_remote_router;
 bool                         g_remote_enabled   = false;
 bool                         g_remote_connected = false;
@@ -205,7 +210,7 @@ std::atomic<bool>              g_trophy_notification_active {false};
 
 std::vector<std::string_view> WrapTrophyTitle(std::string_view text, float font_size, float width) {
 	std::vector<std::string_view> lines;
-	auto* const                  font = ImGui::GetFont();
+	auto* const                   font = ImGui::GetFont();
 	for (;;) {
 		const auto newline   = text.find('\n');
 		const auto paragraph = text.substr(0, newline);
@@ -216,9 +221,10 @@ std::vector<std::string_view> WrapTrophyTitle(std::string_view text, float font_
 			const std::string_view candidate(line.empty() ? word.begin() : line.begin(),
 			                                 word.end());
 			// Keep an oversized word intact; the toast's clip rectangle handles overflow.
-			if (!line.empty() && font->CalcTextSizeA(font_size, std::numeric_limits<float>::max(),
-			                                       0.0f, candidate.data(),
-			                                       candidate.data() + candidate.size()).x > width) {
+			if (!line.empty() &&
+			    font->CalcTextSizeA(font_size, std::numeric_limits<float>::max(), 0.0f,
+			                        candidate.data(), candidate.data() + candidate.size())
+			            .x > width) {
 				lines.push_back(line);
 				line = word;
 			} else {
@@ -231,6 +237,61 @@ std::vector<std::string_view> WrapTrophyTitle(std::string_view text, float font_
 			return lines;
 		}
 		text.remove_prefix(newline + 1);
+	}
+}
+
+// ImGui's built-in font covers Latin only. Merge installed fonts for the selected console language.
+void AddSystemFontFallbacks(ImGuiIO& io) {
+	io.Fonts->AddFontDefault();
+	const auto add = [&](std::initializer_list<const char*> paths) {
+		for (const char* path: paths) {
+			std::error_code error;
+			if (std::filesystem::is_regular_file(path, error)) {
+				ImFontConfig config;
+				config.MergeMode = true;
+				config.Flags     = ImFontFlags_NoLoadError;
+				if (io.Fonts->AddFontFromFileTTF(path, 0.0f, &config) != nullptr) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	bool found =
+	    add({"C:/Windows/Fonts/segoeui.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	         "/Library/Fonts/Arial Unicode.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+	         "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf"});
+	const auto  locale     = Common::Localization::LocaleName(Config::GetConsoleLanguage());
+	const char* noto_cjk[] = {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+	                          "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+	                          "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"};
+	if (locale == "ja-JP") {
+		found = add({"C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/YuGothM.ttc",
+		             "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", noto_cjk[0], noto_cjk[1],
+		             noto_cjk[2]});
+	} else if (locale == "ko-KR") {
+		found = add({"C:/Windows/Fonts/malgun.ttf", "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+		             noto_cjk[0], noto_cjk[1], noto_cjk[2]});
+	} else if (locale == "zh-Hans" || locale == "zh-Hant") {
+		found =
+		    add({locale == "zh-Hans" ? "C:/Windows/Fonts/msyh.ttc" : "C:/Windows/Fonts/msjh.ttc",
+		         "/System/Library/Fonts/PingFang.ttc", noto_cjk[0], noto_cjk[1], noto_cjk[2]});
+	} else if (locale == "th-TH") {
+		found = add({"C:/Windows/Fonts/leelawui.ttf", "C:/Windows/Fonts/tahoma.ttf",
+		             "/System/Library/Fonts/Supplemental/Ayuthaya.ttf",
+		             "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
+		             "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+		             "/usr/share/fonts/noto/NotoSansThai-Regular.ttf"});
+	} else if (locale == "ar-AE") {
+		found = add({"C:/Windows/Fonts/tahoma.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf",
+		             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		             "/usr/share/fonts/TTF/DejaVuSans.ttf",
+		             "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+		             "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf"});
+	}
+	if (!found) {
+		LOGF("[Trophy] no installed fallback font for %.*s\n", static_cast<int>(locale.size()),
+		     locale.data());
 	}
 }
 
@@ -318,7 +379,7 @@ void RefreshVisibility() {
 	if (snapshot.session == g_session) {
 		return;
 	}
-	g_session               = snapshot.session;
+	g_session = snapshot.session;
 	g_remote_session_revision++;
 	bool capture_controller = false;
 	bool capture_keyboard   = false;
@@ -429,6 +490,63 @@ std::u16string Utf8ToUtf16(std::string_view text) {
 		}
 	}
 	return result;
+}
+
+// The Arabic notification is a single RTL run. Use presentation forms because ImGui does not
+// shape Arabic. This intentionally applies only to the catalog subtitle, never game-provided names.
+std::string PrepareTrophySubtitle(int language) {
+	const auto text = Common::Localization::Get(language, "trophy.toast.earned");
+	if (Common::Localization::LocaleName(language) != "ar-AE") {
+		return std::string(text);
+	}
+	struct ArabicForm {
+		char16_t letter;
+		char16_t isolated;
+		bool     joins_next;
+	};
+	static constexpr ArabicForm FORMS[] = {
+	    {0x0621, 0xfe80, false}, {0x0622, 0xfe81, false}, {0x0623, 0xfe83, false},
+	    {0x0624, 0xfe85, false}, {0x0625, 0xfe87, false}, {0x0626, 0xfe89, true},
+	    {0x0627, 0xfe8d, false}, {0x0628, 0xfe8f, true},  {0x0629, 0xfe93, false},
+	    {0x062a, 0xfe95, true},  {0x062b, 0xfe99, true},  {0x062c, 0xfe9d, true},
+	    {0x062d, 0xfea1, true},  {0x062e, 0xfea5, true},  {0x062f, 0xfea9, false},
+	    {0x0630, 0xfeab, false}, {0x0631, 0xfead, false}, {0x0632, 0xfeaf, false},
+	    {0x0633, 0xfeb1, true},  {0x0634, 0xfeb5, true},  {0x0635, 0xfeb9, true},
+	    {0x0636, 0xfebd, true},  {0x0637, 0xfec1, true},  {0x0638, 0xfec5, true},
+	    {0x0639, 0xfec9, true},  {0x063a, 0xfecd, true},  {0x0641, 0xfed1, true},
+	    {0x0642, 0xfed5, true},  {0x0643, 0xfed9, true},  {0x0644, 0xfedd, true},
+	    {0x0645, 0xfee1, true},  {0x0646, 0xfee5, true},  {0x0647, 0xfee9, true},
+	    {0x0648, 0xfeed, false}, {0x0649, 0xfeef, false}, {0x064a, 0xfef1, true},
+	};
+	const auto form = [](char16_t c) -> const ArabicForm* {
+		for (const auto& value: FORMS) {
+			if (value.letter == c) {
+				return &value;
+			}
+		}
+		return nullptr;
+	};
+	const auto logical = Utf8ToUtf16(text);
+	if (std::none_of(logical.begin(), logical.end(),
+	                 [](char16_t c) { return c >= 0x0600 && c <= 0x06ff; })) {
+		return std::string(text);
+	}
+	auto visual = logical;
+	for (size_t i = 0; i < logical.size(); ++i) {
+		const auto* current = form(logical[i]);
+		if (current == nullptr) {
+			continue;
+		}
+		const auto* previous = i > 0 ? form(logical[i - 1]) : nullptr;
+		const auto* next     = i + 1 < logical.size() ? form(logical[i + 1]) : nullptr;
+		const bool  joins_previous =
+		    previous != nullptr && previous->joins_next && current->letter != 0x0621;
+		const bool joins_next = current->joins_next && next != nullptr && next->letter != 0x0621;
+		visual[i]             = static_cast<char16_t>(current->isolated + (joins_next ? 2 : 0) +
+		                                              (joins_previous ? 1 : 0));
+	}
+	std::reverse(visual.begin(), visual.end());
+	return Common::Utf16ToUtf8(visual);
 }
 
 std::string VisibleText(const Ime::HostSnapshot& snapshot, size_t max_units) {
@@ -574,9 +692,9 @@ void ShutdownSystemOverlayInput() {
 }
 
 SystemOverlayVisualState GetSystemOverlayVisualState() noexcept {
-	const auto core   = CoreIme::GetVisualState();
-	const auto dialog = DialogIme::GetVisualState();
-	const auto system = SystemDialog::GetVisualState();
+	const auto core          = CoreIme::GetVisualState();
+	const auto dialog        = DialogIme::GetVisualState();
+	const auto system        = SystemDialog::GetVisualState();
 	const bool trophy_active = g_trophy_notification_active.load(std::memory_order_acquire);
 	return {core.active || dialog.active || system.active || trophy_active,
 	        core.revision + dialog.revision + system.revision + (trophy_active ? 1u : 0u)};
@@ -627,7 +745,8 @@ bool ProcessSystemOverlayInput(const SDL_Event& event) {
 	if (controller_event && !g_input_controller) {
 		return false;
 	}
-	const bool keyboard_event = event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_TEXT_EDITING ||
+	const bool keyboard_event = event.type == SDL_EVENT_TEXT_INPUT ||
+	                            event.type == SDL_EVENT_TEXT_EDITING ||
 	                            event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
 	if (keyboard_event && !g_input_keyboard) {
 		return false;
@@ -656,8 +775,8 @@ bool ProcessSystemOverlayInput(const SDL_Event& event) {
 		case SDL_EVENT_KEY_DOWN: {
 			g_last_external_keycode = static_cast<uint16_t>(event.key.scancode);
 			g_last_external_status  = ExternalKeyStatus(event.key.mod, false);
-			auto action = Ime::ExternalAction::Text;
-			bool queue  = true;
+			auto action             = Ime::ExternalAction::Text;
+			bool queue              = true;
 			if (event.key.key == SDLK_BACKSPACE) {
 				action = Ime::ExternalAction::Backspace;
 			} else if (event.key.key == SDLK_LEFT) {
@@ -757,6 +876,7 @@ struct SystemOverlay::Impl {
 		io.ConfigNavCursorVisibleAlways = true;
 		io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 		io.BackendPlatformName = "Kyty system overlay input";
+		AddSystemFontFallbacks(io);
 		ImGui::StyleColorsDark();
 		auto& style          = ImGui::GetStyle();
 		style.WindowRounding = 10.0f;
@@ -899,7 +1019,7 @@ struct SystemOverlay::Impl {
 			io.ClearInputKeys();
 			io.ClearInputMouse();
 			controller_input = {};
-			right_stick = {};
+			right_stick      = {};
 		}
 		for (const auto& event: events) {
 			if (event.session != session) {
@@ -1191,8 +1311,9 @@ struct SystemOverlay::Impl {
 				trophy_notification = std::move(g_trophy_notifications.front());
 				g_trophy_notifications.pop_front();
 			}
-			trophy_notification_born  = now;
-			trophy_notification_image = LoadTrophyIcon(trophy_notification->icon_png);
+			trophy_notification_subtitle = PrepareTrophySubtitle(Config::GetConsoleLanguage());
+			trophy_notification_born     = now;
+			trophy_notification_image    = LoadTrophyIcon(trophy_notification->icon_png);
 			PlayTrophySound();
 		}
 		const float age = std::chrono::duration<float>(now - trophy_notification_born).count();
@@ -1232,7 +1353,7 @@ struct SystemOverlay::Impl {
 		const ImVec2 bottom_right {top_left.x + width, top_left.y + height};
 		auto*        draw = ImGui::GetForegroundDrawList();
 		const auto   fade = [alpha](int r, int g, int b, int a) {
-            return IM_COL32(r, g, b, static_cast<int>(static_cast<float>(a) * alpha));
+			return IM_COL32(r, g, b, static_cast<int>(static_cast<float>(a) * alpha));
 		};
 		draw->AddRectFilled({top_left.x + 3.0f, top_left.y + 5.0f},
 		                    {bottom_right.x + 3.0f, bottom_right.y + 5.0f}, fade(0, 0, 0, 90),
@@ -1265,41 +1386,51 @@ struct SystemOverlay::Impl {
 			              2.0f * u, ImDrawFlags_RoundCornersLeft, 1.8f * u);
 			draw->AddRect({cx + 6.0f * u, cy - 9.0f * u}, {cx + 11.0f * u, cy - 3.0f * u}, cup,
 			              2.0f * u, ImDrawFlags_RoundCornersRight, 1.8f * u);
-			draw->AddRectFilled({cx - 1.5f * u, cy + 2.0f * u}, {cx + 1.5f * u, cy + 7.0f * u}, cup);
-			draw->AddRectFilled({cx - 5.0f * u, cy + 7.0f * u}, {cx + 5.0f * u, cy + 10.0f * u}, cup,
-			                    1.5f * u);
+			draw->AddRectFilled({cx - 1.5f * u, cy + 2.0f * u}, {cx + 1.5f * u, cy + 7.0f * u},
+			                    cup);
+			draw->AddRectFilled({cx - 5.0f * u, cy + 7.0f * u}, {cx + 5.0f * u, cy + 10.0f * u},
+			                    cup, 1.5f * u);
 		}
 		draw->PushClipRect(top_left, {bottom_right.x - text_padding, bottom_right.y}, true);
 		float line_y = title_y;
-		for (const auto line : title_lines) {
+		for (const auto line: title_lines) {
 			draw->AddText(nullptr, title_size, {title_x, line_y}, fade(255, 255, 255, 255),
 			              line.data(), line.data() + line.size());
 			line_y += line_height;
 		}
-		draw->AddText(nullptr, 20.0f * screen_scale, {text_left, line_y + 8.0f * screen_scale},
-		              fade(176, 180, 192, 255), "Trophy earned!");
+		const float subtitle_size = 20.0f * screen_scale;
+		const float subtitle_width =
+		    ImGui::GetFont()
+		        ->CalcTextSizeA(subtitle_size, std::numeric_limits<float>::max(), 0.0f,
+		                        trophy_notification_subtitle.c_str())
+		        .x;
+		const float available_width = std::max(1.0f, width - text_offset - text_padding);
+		const float fitted_size     = std::max(
+		    1.0f, subtitle_size * std::min(1.0f, available_width / std::max(1.0f, subtitle_width)));
+		draw->AddText(nullptr, fitted_size, {text_left, line_y + 8.0f * screen_scale},
+		              fade(176, 180, 192, 255), trophy_notification_subtitle.c_str());
 		draw->PopClipRect();
 	}
 
 	bool PrepareFrame(vk::Extent2D frame_extent, vk::Format format, uint32_t image_count) {
 		OverlaySnapshot snapshot;
 		const bool      has_overlay = GetOverlaySnapshot(&snapshot);
-		const auto now = Clock::now();
+		const auto      now         = Clock::now();
 		if (!has_overlay && !g_trophy_notification_active.load(std::memory_order_acquire)) {
 			return false;
 		}
 		const auto prepared_session = snapshot.session;
 		EnsureVulkan(format, image_count);
 		if (session != snapshot.session) {
-			session       = snapshot.session;
-			focus_pending = true;
-			shift         = session.kind == OverlayKind::Ime &&
-			                (snapshot.ime.option & Ime::OPTION_NO_AUTO_CAPITALIZE) == 0;
-			symbol_mode   = false;
-			panel_offset  = {};
-			right_stick   = {};
+			session          = snapshot.session;
+			focus_pending    = true;
+			shift            = session.kind == OverlayKind::Ime &&
+			                   (snapshot.ime.option & Ime::OPTION_NO_AUTO_CAPITALIZE) == 0;
+			symbol_mode      = false;
+			panel_offset     = {};
+			right_stick      = {};
 			controller_input = {};
-			auto& io      = ImGui::GetIO();
+			auto& io         = ImGui::GetIO();
 			io.ClearEventsQueue();
 			io.ClearInputKeys();
 			io.ClearInputMouse();
@@ -1366,20 +1497,21 @@ struct SystemOverlay::Impl {
 		vulkan_initialized = false;
 	}
 
-	GraphicContext&                       graphics;
-	ImGuiContext*                         imgui_context      = nullptr;
-	bool                                  vulkan_initialized = false;
-	bool                                  shift              = false;
-	bool                                  symbol_mode        = false;
-	bool                                  focus_pending      = true;
-	float                                 ui_scale           = 1.0f;
-	float                                 button_height      = 42.0f;
-	ImVec2                                panel_offset {};
-	ImVec2                                right_stick {};
+	GraphicContext&                             graphics;
+	ImGuiContext*                               imgui_context      = nullptr;
+	bool                                        vulkan_initialized = false;
+	bool                                        shift              = false;
+	bool                                        symbol_mode        = false;
+	bool                                        focus_pending      = true;
+	float                                       ui_scale           = 1.0f;
+	float                                       button_height      = 42.0f;
+	ImVec2                                      panel_offset {};
+	ImVec2                                      right_stick {};
 	ModalControllerInput                        controller_input;
 	OverlaySession                              session;
 	std::unique_ptr<ImTextureData>              trophy_notification_image;
 	std::optional<TrophyNotification>           trophy_notification;
+	std::string                                 trophy_notification_subtitle;
 	Clock::time_point                           trophy_notification_born;
 	std::vector<std::unique_ptr<ImTextureData>> retired_trophy_images;
 	SDL_AudioStream*                            trophy_sound_stream      = nullptr;

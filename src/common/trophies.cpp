@@ -1,9 +1,9 @@
 #include "common/trophies.h"
 
 #include "common/file.h"
+#include "common/localization.h"
 
 #include <algorithm>
-#include <array>
 #include <charconv>
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
@@ -105,14 +105,8 @@ Package ParsePackage(std::span<const std::byte> data, int console_language) {
 	    !conf["defaultLanguage"].is_string()) {
 		return {};
 	}
-	static constexpr std::array<std::string_view, 30> locales = {
-	    "ja-JP", "en-US", "fr-FR",   "es-ES",   "de-DE",  "it-IT", "nl-NL", "pt-PT",
-	    "ru-RU", "ko-KR", "zh-Hant", "zh-Hans", "fi-FI",  "sv-SE", "da-DK", "no-NO",
-	    "pl-PL", "pt-BR", "en-GB",   "tr-TR",   "es-419", "ar-AE", "fr-CA", "cs-CZ",
-	    "hu-HU", "el-GR", "ro-RO",   "th-TH",   "vi-VN",  "id-ID"};
-	const auto locale =
-	    locales[console_language >= 0 && console_language < locales.size() ? console_language : 1];
-	auto meta = ReadJson(files, fmt::format("tropmeta_{}.json", locale));
+	const auto locale = Localization::LocaleName(console_language);
+	auto       meta   = ReadJson(files, fmt::format("tropmeta_{}.json", locale));
 	if (meta.is_null()) {
 		meta = ReadJson(files, fmt::format("tropmeta_{}.json",
 		                                   conf["defaultLanguage"].get_ref<const std::string&>()));
@@ -251,8 +245,9 @@ std::filesystem::path UnlocksPath(const std::filesystem::path& root, std::string
 	       fmt::format("trophies_{}_{}.json", user_id, service_label);
 }
 
-std::filesystem::path LegacyUnlocksPath(const std::filesystem::path& root, std::string_view title_id,
-                                        int user_id, uint32_t service_label) {
+std::filesystem::path LegacyUnlocksPath(const std::filesystem::path& root,
+                                        std::string_view title_id, int user_id,
+                                        uint32_t service_label) {
 	const auto current = UnlocksPath(root, title_id, user_id, service_label);
 	if (current.empty()) {
 		return {};
