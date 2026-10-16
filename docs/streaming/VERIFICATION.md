@@ -302,3 +302,21 @@ including `final-ctest.log`, `final-backend-tests.log`, `final-package-tests.log
 `final-astro-postcheck.json` and the crash-recovery postcheck. V1's prior local-only
 system-panel and controller-extension limitations are superseded in v2 as described
 above; physical TV compatibility still requires testing on that client.
+
+### TV Bluetooth target clarified (2026-10-16)
+
+The user requires Bluetooth for normal TV play. USB was a diagnostic comparison
+only and is not an accepted final requirement. Do not continue a USB DualSense
+driver or USB/ADB coexistence implementation as the product direction. The
+accepted TV face-button/L2/R2 client stays in place; Bluetooth gyro/vibration
+feasibility remains open. Laptop companion work stays paused and the reported
+end-of-stage-1 crash remains deferred.
+
+The USB comparison established that the TV's external data port works: the user
+confirmed Xbox and DualSense input with USB debugging off, and DualSense input
+stopped when debugging was enabled again. Local firmware explicitly switches
+host/device roles according to USB configuration. Manual recovery restored ADB
+and the original accessibility settings; host currentgame0 was verified. Two
+detached shell guards did not survive the adbd shutdown, so they must not be
+reused to guard a future adbd-stop test. No agent launched a game, claimed a USB
+interface, or sent a rumble command during this comparison.
