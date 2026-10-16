@@ -24,8 +24,38 @@ struct Input {
 	uint32_t           buttons  = 0;
 	std::array<int, 6> axes {128, 128, 128, 128, 0, 0};
 	bool               connected = false;
+	uint8_t            controller_type         = 0;
+	uint16_t           controller_capabilities = 0;
+	uint32_t           supported_buttons       = 0;
 };
 bool ParseInput(const Json& packet, Input& output) noexcept;
+// Optional v1 controller extensions. All motion values at this boundary are SI.
+struct Motion {
+	enum class Sensor { Accel, Gyro };
+	Sensor               sensor   = Sensor::Accel;
+	uint64_t             sequence = 0, timestamp_us = 0;
+	std::array<float, 3> value {};
+};
+bool ParseMotion(const Json& packet, Motion& output) noexcept;
+bool HasCapability(const Json& packet, std::string_view name) noexcept;
+class MotionOrder {
+public:
+	bool Accept(const Motion& motion) noexcept {
+		const auto index = motion.sensor == Motion::Sensor::Gyro ? 1U : 0U;
+		if (motion.sequence <= m_sequence[index] || motion.timestamp_us <= m_time[index])
+			return false;
+		m_sequence[index] = motion.sequence;
+		m_time[index]     = motion.timestamp_us;
+		return true;
+	}
+	void Reset() noexcept {
+		m_sequence = {};
+		m_time     = {};
+	}
+
+private:
+	std::array<uint64_t, 2> m_sequence {}, m_time {};
+};
 struct Lease {
 	uint64_t epoch, sequence;
 	uint32_t slot;

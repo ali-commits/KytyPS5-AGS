@@ -1,12 +1,16 @@
 #include "libs/controllerSourceState.h"
+#include "streaming/feedback.h"
 #include "streaming/protocol.h"
 #include "streaming/transport.h"
+
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <latch>
+#include <limits>
 #include <poll.h>
 #include <set>
 #include <sys/socket.h>
@@ -65,14 +69,74 @@ static void TestContendedReserveSkips() {
             !available->recycled,
         "skipped contention does not consume a slot or sequence");
 }
+static Json MotionPacket() {
+	return {{"type", "motion"},      {"controller", 0}, {"sensor", "gyro"}, {"sequence", 1},
+	        {"timestamp_us", 10000}, {"x", 3.14159265}, {"y", 0},           {"z", -1}};
+}
+static void TestMotionAndEffects() {
+	Motion motion;
+	auto   packet = MotionPacket();
+	Check(ParseMotion(packet, motion) && motion.sensor == Motion::Sensor::Gyro &&
+	          std::abs(motion.value[0] - 3.14159265f) < 0.00001f,
+	      "motion preserves SI radians without a second conversion");
+	for (auto invalid: {Json(nullptr), Json(true), Json("1"), Json(40.01),
+	                    Json(std::numeric_limits<double>::infinity()),
+	                    Json(std::numeric_limits<double>::quiet_NaN())}) {
+		auto bad = packet;
+		bad["x"] = invalid;
+		Check(!ParseMotion(bad, motion), "reject nonfinite/out-of-range gyro");
+	}
+	for (auto key: {"controller", "sequence", "timestamp_us"}) {
+		auto bad = packet;
+		bad[key] = key == std::string("controller") ? Json(1) : Json(0);
+		Check(!ParseMotion(bad, motion), "validate controller/order identity");
+		bad[key] = 1.5;
+		Check(!ParseMotion(bad, motion), "reject float identity");
+	}
+	packet["sensor"] = "accel";
+	packet["x"]      = 160.0;
+	Check(ParseMotion(packet, motion), "allow bounded acceleration");
+	packet["x"] = 160.01;
+	Check(!ParseMotion(packet, motion), "reject acceleration outside sensor range");
+	MotionOrder order;
+	Check(ParseMotion(MotionPacket(), motion) && order.Accept(motion), "first motion accepted");
+	Check(!order.Accept(motion), "duplicate motion ignored");
+	motion.sequence++;
+	Check(!order.Accept(motion), "nonincreasing timestamp ignored");
+	motion.timestamp_us++;
+	Check(order.Accept(motion), "fresh sample accepted");
+	order.Reset();
+	Check(ParseMotion(MotionPacket(), motion) && order.Accept(motion),
+	      "disconnect resets motion ordering");
+	Check(!HasCapability(Json::object(), "motion-v1") &&
+	          HasCapability({{"capabilities", {"motion-v1", "future"}}}, "motion-v1") &&
+	          !HasCapability({{"capabilities", "motion-v1"}}, "motion-v1"),
+	      "capability opt-in only");
+	adaptive_enabled = true;
+	ClearAdaptiveTriggers();
+	std::array<uint8_t, 11> left {0x21, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+	std::array<uint8_t, 11> right {0x25, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+	PublishAdaptiveTriggers(0x08, left.data(), right.data());
+	PublishAdaptiveTriggers(0x04, right.data(), right.data());
+	auto effect = ReadAdaptiveTriggers();
+	Check(effect.enable_bits == 0x0c && effect.left == left && effect.right == right,
+	      "latest mailbox merges masked updates with all eleven effect bytes");
+	ClearAdaptiveTriggers();
+	effect = ReadAdaptiveTriggers();
+	Check(effect.enable_bits == 0x0c && effect.left[0] == 5 && effect.right[0] == 5 &&
+	          effect.left[10] == 0 && effect.right[10] == 0,
+	      "reset disables and zeros both effects");
+	adaptive_enabled = false;
+}
 int main() {
+	TestMotionAndEffects();
   TestContendedReserveSkips();
   PoolDescriptor desc;
-  auto hello = Hello();
+	auto           hello = Hello();
   Check(ValidateHello(hello, 9, desc), "valid hello");
   Check(!ValidateHello(hello, 8, desc), "reject missing fd");
-  for (auto bad : {Json(-1), Json(0), Json(4097), Json("1920"), Json(1920.0)}) {
-    auto p = hello;
+	for (auto bad: {Json(-1), Json(0), Json(4097), Json("1920"), Json(1920.0)}) {
+		auto p     = hello;
     p["width"] = bad;
     Check(!ValidateHello(p, 9, desc), "reject dimension type/range");
   }
@@ -129,6 +193,17 @@ int main() {
                 {"rt", 255}};
   Input state;
   Check(ParseInput(input, state), "valid input");
+  input["controller_type"]         = 2;
+  input["controller_capabilities"] = 0x32;
+  input["supported_buttons"]       = 0xffff;
+  Check(ParseInput(input, state) && state.controller_type == 2 &&
+	        state.controller_capabilities == 0x32 && state.supported_buttons == 0xffff,
+	    "preserve controller arrival metadata");
+  for (auto key: {"controller_type", "controller_capabilities", "supported_buttons"}) {
+	  auto bad = input;
+	  bad[key] = -1;
+	  Check(!ParseInput(bad, state), "reject invalid arrival metadata");
+  }
   Check(state.axes[0] == 0 && state.axes[1] == 255 && state.axes[2] == 128 &&
             state.axes[5] == 255,
         "normalized axes");
@@ -259,58 +334,62 @@ int main() {
     }
     close(sockets[1]);
   }
-  {
+  for (bool extended: {false, true}) {
     char directory[] = "/tmp/kyty-stream-XXXXXX";
     Check(mkdtemp(directory) != nullptr, "private socket directory");
     const std::string path = std::string(directory) + "/feed.sock";
-    int listener =
-        socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+	  int listener           = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     Check(listener >= 0, "listener");
-    sockaddr_un addr{};
+	  sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
-    Check(bind(listener, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) ==
-                  0 &&
+	  Check(bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
               chmod(path.c_str(), 0600) == 0 && listen(listener, 1) == 0,
           "protected listener");
-    std::atomic<int> inputs{0}, resets{0};
-    std::atomic<bool> completed{false};
-    auto producer = std::make_unique<Transport>(
+	  std::atomic<int>  inputs {0}, resets {0}, motions {0}, motion_resets {0};
+	  std::atomic<bool> completed {false};
+	  auto              producer = std::make_unique<Transport>(
         path,
-        [&](const Input *i) {
+		  [&](const Input* i) {
           if (i)
             inputs++;
           else
             resets++;
         },
-        [&](uint64_t tick) { return tick == 123 && completed.load(); });
+		  [&](uint64_t tick) { return tick == 123 && completed.load(); },
+		  [&](const Motion* m) {
+			  if (m)
+				  motions++;
+			  else
+				  motion_resets++;
+		  });
     auto wait = [&](auto condition) {
       for (int i = 0; i < 1000; i++) {
-        if (condition())
-          return true;
+			  if (condition()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
       }
       return false;
     };
     int peer = -1;
     Check(wait([&] {
-            peer = accept4(listener, nullptr, nullptr,
-                           SOCK_NONBLOCK | SOCK_CLOEXEC);
+			    peer = accept4(listener, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
             return peer >= 0;
           }),
           "worker connects");
-    Check(SendPacket(peer, {{"type", "welcome"}, {"version", 1}}), "welcome");
+	  auto welcome = Json {{"type", "welcome"}, {"version", 1}};
+	  if (extended) welcome["capabilities"] = {"motion-v1", "adaptive-triggers-v1"};
+	  Check(SendPacket(peer, welcome), "welcome");
     Check(wait([&] { return producer->Generation() > 0; }), "welcome observed");
-    auto ring = std::make_shared<LeaseRing>(9);
+	  auto           ring = std::make_shared<LeaseRing>(9);
     PoolDescriptor descriptor;
     Check(ValidateHello(Hello(), 9, descriptor), "fixture descriptor");
     descriptor.epoch = 9;
     std::array<int, 9> fds;
-    for (auto &fd : fds)
+	  for (auto& fd: fds)
       fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     producer->SetPool(descriptor, fds, ring, producer->Generation());
     {
-      Packet packet;
+		  Packet        packet;
       ReceiveResult result = ReceiveResult::Again;
       Check(wait([&] {
               result = ReceivePacket(peer, packet, 9);
@@ -319,12 +398,14 @@ int main() {
                 result == ReceiveResult::Packet && packet.fds.size() == 9 &&
                 packet.json["epoch"] == 9,
             "nine FD handshake");
+		  Check(HasCapability(packet.json, "motion-v1") == extended &&
+			        HasCapability(packet.json, "adaptive-triggers-v1") == extended,
+			    "hello only opts in to advertised extensions");
     }
-    Check(SendPacket(peer, {{"type", "accepted"},
-                            {"version", 1},
-                            {"epoch", 9},
-                            {"transport", "vulkan-buffer-fd"}}),
-          "accept");
+	  auto accepted = Json {
+		  {"type", "accepted"}, {"version", 1}, {"epoch", 9}, {"transport", "vulkan-buffer-fd"}};
+	  if (extended) accepted["capabilities"] = welcome["capabilities"];
+	  Check(SendPacket(peer, accepted), "accept");
     Check(wait([&] { return producer->Attached(); }), "attached");
     auto lease = ring->TryAcquire();
     Check(lease.has_value(), "lease for async publish");
@@ -337,14 +418,13 @@ int main() {
     }
     completed = true;
     {
-      Packet packet;
+		  Packet        packet;
       ReceiveResult result = ReceiveResult::Again;
       Check(wait([&] {
               result = ReceivePacket(peer, packet);
               return result != ReceiveResult::Again;
             }) &&
-                result == ReceiveResult::Packet &&
-                packet.json["type"] == "frame" &&
+			        result == ReceiveResult::Packet && packet.json["type"] == "frame" &&
                 packet.json["sequence"] == lease->sequence,
             "completed frame published");
     }
@@ -355,13 +435,53 @@ int main() {
     Check(SendPacket(peer, input), "stale input send");
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     Check(inputs == 1, "stale input ignored");
-    const int before = resets;
+	  if (extended) {
+		  Check(SendPacket(peer, MotionPacket()), "motion send");
+		  Check(wait([&] { return motions == 1; }), "motion delivered");
+		  Check(SendPacket(peer, MotionPacket()), "duplicate motion send");
+		  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		  Check(motions == 1, "stale motion ignored");
+		  std::array<uint8_t, 11> left {0x21, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+		  std::array<uint8_t, 11> right {0x25, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+		  PublishAdaptiveTriggers(0x0c, left.data(), right.data());
+		  Packet effect;
+		  Check(wait([&] {
+				    return ReceivePacket(peer, effect) == ReceiveResult::Packet &&
+				           effect.json["type"] == "adaptive-triggers" &&
+				           effect.json["left"] == left;
+			    }),
+			    "translated feedback delivered");
+		  Check(effect.json["enable_bits"] == 12 && effect.json["right"] == right,
+			    "feedback retains enable mask and full right payload");
+		  const int previous = motion_resets;
+		  Check(SendPacket(peer, {{"type", "reset"}, {"controller", 0}}), "reset send");
+		  Check(wait([&] { return motion_resets > previous; }), "reset clears remote motion");
+		  Packet clear;
+		  Check(wait([&] {
+				    return ReceivePacket(peer, clear) == ReceiveResult::Packet &&
+				           clear.json["type"] == "adaptive-triggers";
+			    }),
+			    "reset feedback sent");
+		  Check(clear.json["left"][0] == 5 && clear.json["right"][0] == 5 &&
+			        clear.json["left"][10] == 0,
+			    "reset disables and zeros effects");
+	  } else {
+		  std::array<uint8_t, 11> off {};
+		  PublishAdaptiveTriggers(12, off.data(), off.data());
+		  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		  Packet packet;
+		  Check(ReceivePacket(peer, packet) == ReceiveResult::Again,
+			    "legacy peer receives no extension messages");
+	  }
+	  const int before        = resets;
+	  const int motion_before = motion_resets;
     close(peer);
     Check(wait([&] { return !producer->Attached() && resets > before; }),
           "disconnect resets remote input");
+	  Check(motion_resets > motion_before, "disconnect resets remote motion sink");
     Check(!ring->TryAcquire(), "disconnected lease pool disabled");
     producer.reset();
-    for (int fd : fds)
+	  for (int fd: fds)
       close(fd);
     close(listener);
     unlink(path.c_str());

@@ -5,6 +5,9 @@
 #include "common/common.h"
 
 #include <array>
+namespace Streaming {
+struct Motion;
+}
 namespace Libs::Controller {
 
 void Initialize();
@@ -78,6 +81,7 @@ void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ResetInputState();
 // Streaming source is independent of physical/keyboard holds. Neutralize only this source.
 void SetRemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
+void SetRemoteMotion(const Streaming::Motion* motion);
 int  GetActiveControllerId();
 
 enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity };

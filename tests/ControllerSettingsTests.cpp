@@ -1,9 +1,13 @@
 // Exercise the production controller with deterministic host output and time.
+#include "streaming/protocol.h"
+
 #include <SDL3/SDL.h>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -162,6 +166,69 @@ void TestRemoteSourceReset() {
   SetButton(1, PAD_BUTTON_CROSS, false);
 }
 
+void TestRemoteMotionAndEffects() {
+	Controller controller;
+	Disconnect(1);
+	Disconnect(HOST_INPUT_CONTROLLER_ID);
+	PadData data {};
+	Check(PadReadState(1, &data) == 0 && !data.connected, "fixture starts disconnected");
+	SetRemoteInput(true, 0, {128, 128, 128, 128, 0, 0});
+	Check(PadReadState(1, &data) == 0 && data.connected,
+	      "remote controller arrival connects guest pad");
+	const auto count = data.connected_count;
+	SetRemoteInput(true, PAD_BUTTON_CROSS, {128, 128, 128, 128, 0, 0});
+	Check(PadReadState(1, &data) == 0 && data.connected_count == count,
+	      "motion/input updates do not reconnect guest pad");
+	Streaming::Motion sample {Streaming::Motion::Sensor::Accel, 1, 10000, {0, 9.80665f, 0}};
+	SetRemoteMotion(&sample);
+	sample = {Streaming::Motion::Sensor::Gyro, 1, 10000, {0, 0, 1}};
+	SetRemoteMotion(&sample);
+	sample.sequence     = 2;
+	sample.timestamp_us = 20000;
+	SetRemoteMotion(&sample);
+	Check(PadReadState(1, &data) == 0 && std::abs(data.angular_velocity_z - 1.0f) < 0.0001f &&
+	          std::abs(data.acceleration_y - 1.0f) < 0.0001f && data.orientation_z > 0.004f,
+	      "remote SI sensors feed existing fusion and guest units");
+	sample.sequence = 3;
+	sample.value[2] = 10;
+	SetRemoteMotion(&sample);
+	Check(PadReadState(1, &data) == 0 && data.angular_velocity_z == 1.0f,
+	      "stale timestamp cannot overwrite guest sensor");
+	sample.timestamp_us++;
+	sample.value[2] = std::numeric_limits<float>::quiet_NaN();
+	SetRemoteMotion(&sample);
+	Check(PadReadState(1, &data) == 0 && data.angular_velocity_z == 1.0f,
+	      "public motion seam rejects nonfinite sensor values");
+	SetRemoteMotion(nullptr);
+	Check(PadReadState(1, &data) == 0 && data.angular_velocity_z == 0 && data.orientation_z == 0 &&
+	          data.orientation_w == 1 && data.connected,
+	      "remote reset clears IMU without disconnecting input");
+	SetRemoteInput(false, 0, {128, 128, 128, 128, 0, 0});
+	Connect(1);
+	const float local[3] {0, 0, 2};
+	SetSensor(1, Sensor::Gyro, local, 100000);
+	SetRemoteMotion(nullptr);
+	SetRemoteInput(false, 0, {128, 128, 128, 128, 0, 0});
+	Check(PadReadState(1, &data) == 0 && data.angular_velocity_z == 2,
+	      "absent remote reset preserves local IMU");
+	Streaming::adaptive_enabled = true;
+	Streaming::ClearAdaptiveTriggers();
+	PadTriggerEffectParam param {};
+	param.trigger_mask       = 1;
+	param.command[0].mode    = 1;
+	param.command[0].data[0] = 2;
+	param.command[0].data[1] = 8;
+	Check(PadSetTriggerEffect(1, &param) == 0, "remote effect translation request");
+	const auto translated = LastEffect();
+	const auto remote     = Streaming::ReadAdaptiveTriggers();
+	Check(std::equal(remote.left.begin(), remote.left.end(), translated.left_trigger),
+	      "remote mailbox receives exactly the existing eleven translated effect bytes");
+	EmergencyShutdown();
+	const auto stopped = Streaming::ReadAdaptiveTriggers();
+	Check(stopped.enable_bits == 12 && stopped.left[0] == 5 && stopped.right[0] == 5,
+	      "shutdown publishes both trigger stop effects");
+	Streaming::adaptive_enabled = false;
+}
 void TestSettingCycles() {
 	Controller controller;
 	for (auto setting:
@@ -453,7 +520,8 @@ void TestTriggerEffectState() {
 int main() {
 	Config::Initialize();
         TestRemoteSourceReset();
-        TestSettingCycles();
+	    TestRemoteMotionAndEffects();
+	    TestSettingCycles();
         TestGlobalControllerLevels();
 	// Each following test initializes another controller and requires strong defaults.
 	TestVibrationLifetime();

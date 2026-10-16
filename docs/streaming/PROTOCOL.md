@@ -97,3 +97,85 @@ management JSON APIs. The launcher must not invent an API launch endpoint.
 Capabilities object: `{"protocol_version":1,"capture":"kyty",
 "gpu_transport":"vulkan-buffer-fd","private_audio":true,"private_input":true,
 "credentials_stdin":true}`. Parse a final JSON line if startup diagnostics precede it.
+
+## Optional controller extensions (2026-10-16)
+
+The video version, nine descriptors, GPU allocation/semaphore rules, frame leases and
+8192-byte datagram limit remain version 1. Each handshake may have a `capabilities`
+array with up to 16 strings. Recognized names are `motion-v1` and
+`adaptive-triggers-v1`. Missing or malformed arrays enable neither extension;
+unknown string names are ignored. The backend advertises supported names in
+`welcome`; the producer includes only supported, advertised names in `hello`; the
+backend echoes the agreed subset in `accepted`. An extension is active only after
+all three messages agree. Legacy peers receive no new message types; their old
+`hello` and `accepted` objects do not acquire a capabilities field.
+
+An `input` object may additionally contain all three arrival fields:
+`controller_type` (0..255), `controller_capabilities` (0..65535), and
+`supported_buttons` (0..4294967295). Values retain the standard Moonlight controller
+arrival identity and bitmasks, including PS family 2, accel bit 0x10 and gyro bit
+0x20. The backend retains them across ordinary travel/button updates and clears
+them when the controller/session detaches. Old producers may ignore these fields.
+
+When `motion-v1` is agreed, the backend requests standard Moonlight acceleration
+and gyro reports at 100 Hz, only for sensors the attached controller advertised.
+The shared standard controller-extension feature bit 0x02 is advertised so stock
+Moonlight permits motion reports; this adds no touchpad handling. On source or
+session loss it requests rate zero for those sensors.
+
+Backend to producer (no descriptors):
+
+```json
+{"type":"motion","controller":0,"sensor":"gyro","sequence":1,
+ "timestamp_us":123456789,"x":3.141592653589793,"y":0.0,"z":-1.0}
+```
+
+`sensor` is `accel` or `gyro`. The three numeric values must be finite; acceleration
+is m/s² within ±160 per axis, inclusive of gravity, and angular velocity is rad/s
+within ±40 per axis. Standard Moonlight angular velocity arrives in degrees/s;
+the independently implemented backend converts it to rad/s exactly once before
+this boundary. Axes follow the standard SDL sensor convention without remapping.
+The standard client packet has no sample timestamp, so `timestamp_us` is the host's
+monotonic receive time (1..INT64_MAX microseconds), increasing per sensor.
+`sequence` is a positive uint64 increasing per sensor. A duplicate or older sequence
+or timestamp is ignored. A reset, controller removal, or socket disconnect resets
+ordering and remote-owned IMU/fusion state without clearing local held inputs or
+an IMU owned only by a local controller. The motion callback receives SI values;
+Kyty's existing fusion converts acceleration to guest G and retains raw rad/s gyro.
+Remote controller connection state is independent of sensor report frequency.
+
+There are exactly two latest sensor mailboxes, one per type; newer events replace
+unsent events. These are not queues. Socket I/O belongs to the source worker.
+
+When `adaptive-triggers-v1` is agreed, producer to backend (no descriptors):
+
+```json
+{"type":"adaptive-triggers","controller":0,"sequence":7,"enable_bits":12,
+ "left":[33,1,2,3,4,5,6,7,8,9,10],
+ "right":[37,10,9,8,7,6,5,4,3,2,1]}
+```
+
+`sequence` is a positive monotonic feedback revision. `enable_bits` is exactly 4
+(right), 8 (left), or 12 (both). Each report contains exactly 11 integer bytes
+0..255: the translated DualSense mode plus all ten parameter bytes. Disabled sides
+are preserved in the producer's bounded latest-state mailbox; successive masked
+updates cannot lose the other side. The worker sends changed snapshots at most
+once per 16 ms. The backend splits each report into its mode and ten parameters
+and uses standard Moonlight adaptive-trigger feedback with the unchanged enable
+mask. Only an authenticated, connected controller advertising PS family receives
+these effects. Old feedback revisions are ignored. Trigger travel remains input;
+ordinary rumble retains its existing independent packet and expiry.
+
+Reset/stop/disconnect disables both sides with mask 12, mode 5 for both reports,
+and ten zero parameters per side. Rumble expiry alone does not stop sensors or
+adaptive effects. Controller callbacks do no socket I/O. Standard session feedback
+uses the existing bounded 32-message queue; there is no added control endpoint.
+
+Periodic producer `status` may add uint64 counters `motion_received`,
+`motion_applied` (motion callback deliveries), and `adaptive_sent`. Existing local
+backend status adds aggregate received/forwarded/invalid motion and adaptive
+counts, negotiated extension flags, retained arrival identity, and the two latest
+SI sample vectors (`last_motion_si`, accel then gyro). These are bounded snapshots,
+not per-sample logs or a remote input/effect injection API. The executable's
+`--kyty-capabilities` object also adds
+`"controller_extensions":["motion-v1","adaptive-triggers-v1"]`.

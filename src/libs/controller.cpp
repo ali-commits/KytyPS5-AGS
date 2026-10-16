@@ -14,6 +14,7 @@
 #include "libs/libs.h"
 #include "libs/padData.h"
 #include "streaming/feedback.h"
+#include "streaming/protocol.h"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -120,6 +121,7 @@ public:
 	void TouchPad(int id, int finger, bool down, float x, float y);
 	void Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
 	void SetMotionSensorState(bool enable);
+	void  RemoteMotion(const Streaming::Motion* motion);
 	void ResetOrientation();
 	void ResetInputState();
 	void  RemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
@@ -140,6 +142,8 @@ private:
 
 	void CheckActive();
 	void AddState();
+	void ApplyMotion(Sensor sensor, const float* data, uint64_t time_us);
+	void ResetRemoteMotion();
 	// Apply cached output without changing its game-requested lifetime; caller holds m_mutex.
 	void ApplyVibration();
 	bool SendTriggerEffect(const PadTriggerEffectParam& param);
@@ -155,6 +159,8 @@ private:
 	std::array<float, 3> m_up_reference {0.0f, 1.0f, 0.0f};
 	bool                 m_up_reference_valid = false;
 	SourceState          m_input_sources;
+	bool                   m_remote_connected = false, m_remote_motion = false;
+	Streaming::MotionOrder m_remote_motion_order;
 	ControllerState  m_state;
 	ControllerState  m_states[STATES_MAX];
 	bool             m_obtained[STATES_MAX] {};
@@ -485,7 +491,7 @@ void GameController::Disconnect(int id) {
 
 void GameController::CheckActive() {
 	int  new_active_id = -1;
-	bool new_connected = false;
+	bool new_connected = m_remote_connected;
 
 	if (!m_connected_ids.empty()) {
 		new_active_id = m_connected_ids[0];
@@ -507,7 +513,13 @@ void GameController::CheckActive() {
 	m_active_id     = new_active_id;
 	m_connected     = new_connected;
 	m_state         = {};
-	m_input_sources      = {};
+	if (m_remote_connected)
+		m_input_sources.ResetLocal();
+	else
+		m_input_sources = {};
+	m_state.buttons = m_input_sources.Buttons();
+	for (size_t i = 0; i < 6; i++)
+		m_state.axes[i] = m_input_sources.Axis(i);
 	m_gyro_time     = 0;
 	m_up_reference_valid = false;
 	m_states_num    = 0;
@@ -625,10 +637,15 @@ float Length(const Vec3& v) {
 
 void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t time_us) {
 	Common::LockGuard lock(m_mutex);
-	if (id != m_active_id || !m_motion_enabled) {
+	if (id != m_active_id || m_remote_motion) {
 		return;
 	}
 
+	ApplyMotion(sensor, data, time_us);
+}
+
+void GameController::ApplyMotion(Sensor sensor, const float* data, uint64_t time_us) {
+	if (!m_motion_enabled) return;
 	// Convert acceleration to G; angular velocity is already in rad/s.
 	if (sensor == Sensor::Accel) {
 		for (int i = 0; i < 3; i++) {
@@ -688,6 +705,50 @@ void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t t
 	AddState();
 }
 
+void GameController::ResetRemoteMotion() {
+	m_remote_motion_order.Reset();
+	if (!m_remote_motion) return;
+	m_remote_motion      = false;
+	m_state.accel        = {0.0f, 1.0f, 0.0f};
+	m_state.gyro         = {};
+	m_state.orientation  = {0.0f, 0.0f, 0.0f, 1.0f};
+	m_gyro_time          = 0;
+	m_up_reference_valid = false;
+	m_state.time         = LibKernel::KernelGetProcessTime();
+	AddState();
+}
+
+void GameController::RemoteMotion(const Streaming::Motion* motion) {
+	Common::LockGuard lock(m_mutex);
+	if (motion == nullptr) {
+		ResetRemoteMotion();
+		return;
+	}
+	if (!m_remote_connected || !motion->sequence || !motion->timestamp_us ||
+	    motion->timestamp_us > INT64_MAX ||
+	    (motion->sensor != Streaming::Motion::Sensor::Accel &&
+	     motion->sensor != Streaming::Motion::Sensor::Gyro))
+		return;
+	const float limit = motion->sensor == Streaming::Motion::Sensor::Gyro ? 40.0f : 160.0f;
+	for (float value: motion->value)
+		if (!std::isfinite(value) || std::abs(value) > limit) return;
+	if (!m_remote_motion_order.Accept(*motion)) return;
+	if (!m_remote_motion) {
+		m_state.accel        = {0.0f, 1.0f, 0.0f};
+		m_state.gyro         = {};
+		m_state.orientation  = {0.0f, 0.0f, 0.0f, 1.0f};
+		m_gyro_time          = 0;
+		m_up_reference_valid = false;
+		m_remote_motion      = true;
+	}
+	ApplyMotion(motion->sensor == Streaming::Motion::Sensor::Gyro ? Sensor::Gyro : Sensor::Accel,
+	            motion->value.data(), motion->timestamp_us);
+}
+
+void SetRemoteMotion(const Streaming::Motion* motion) {
+	if (g_controller != nullptr) g_controller->RemoteMotion(motion);
+}
+
 void GameController::SetMotionSensorState(bool enable) {
 	Common::LockGuard lock(m_mutex);
 	if (m_motion_enabled != enable) {
@@ -730,10 +791,19 @@ void GameController::ResetInputState() {
 
 void GameController::RemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes) {
 	Common::LockGuard lock(m_mutex);
+	const bool        was_remote = m_remote_connected;
+	m_remote_connected           = connected;
+	const bool now_connected     = connected || !m_connected_ids.empty();
+	if (!m_connected && now_connected) ++m_connected_count;
+	m_connected = now_connected;
 	if (connected) {
 		m_input_sources.Remote(buttons, axes);
 	} else {
 		m_input_sources.ResetRemote();
+		if (was_remote) {
+			ResetRemoteMotion();
+			Streaming::ClearAdaptiveTriggers();
+		}
 	}
 	m_state.buttons = m_input_sources.Buttons();
 	for (size_t i = 0; i < 6; i++)
@@ -778,6 +848,9 @@ void GameController::ReleaseHostPads() {
 	}
 
 	m_connected_ids.clear();
+	m_remote_connected = false;
+	ResetRemoteMotion();
+	Streaming::ClearAdaptiveTriggers();
 	CheckActive();
 }
 
@@ -916,6 +989,8 @@ bool GameController::SendTriggerEffect(const PadTriggerEffectParam& param) {
 		return true;
 	}
 
+	Streaming::PublishAdaptiveTriggers(effect.enable_bits, effect.left_trigger,
+	                                   effect.right_trigger);
 	auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
 	if (pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5) {
 		(void)SDL_SendGamepadEffect(pad, &effect, sizeof(effect));

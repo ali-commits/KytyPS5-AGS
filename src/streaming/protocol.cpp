@@ -1,6 +1,7 @@
 #include "streaming/protocol.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace Streaming {
@@ -63,6 +64,17 @@ bool ParseInput(const Json& p, Input& output) noexcept {
 	Input i;
 	i.sequence  = p.at("sequence");
 	i.connected = p.at("connected");
+	if (p.contains("controller_type") || p.contains("controller_capabilities") ||
+	    p.contains("supported_buttons")) {
+		if (!p.contains("controller_type") || !p.contains("controller_capabilities") ||
+		    !p.contains("supported_buttons") || !Unsigned(p.at("controller_type"), 0, 255) ||
+		    !Unsigned(p.at("controller_capabilities"), 0, 65535) ||
+		    !Unsigned(p.at("supported_buttons"), 0, UINT32_MAX))
+			return false;
+		i.controller_type         = p.at("controller_type");
+		i.controller_capabilities = p.at("controller_capabilities");
+		i.supported_buttons       = p.at("supported_buttons");
+	}
 	constexpr std::array names {"a",     "b",    "x",  "y",  "up", "down", "left", "right",
 	                            "start", "back", "lb", "rb", "ls", "rs",   "guide"};
 	constexpr std::array<uint32_t, 15> bits {0x4000, 0x2000, 0x8000, 0x1000, 0x10,
@@ -93,6 +105,39 @@ bool ParseInput(const Json& p, Input& output) noexcept {
 		i.axes    = {128, 128, 128, 128, 0, 0};
 	}
 	output = i;
+	return true;
+}
+bool HasCapability(const Json& p, std::string_view name) noexcept {
+	if (!p.is_object() || !p.contains("capabilities")) return false;
+	const auto& caps = p.at("capabilities");
+	if (!caps.is_array() || caps.size() > 16) return false;
+	for (const auto& cap: caps)
+		if (!cap.is_string()) return false;
+	return std::find(caps.begin(), caps.end(), name) != caps.end();
+}
+bool ParseMotion(const Json& p, Motion& output) noexcept {
+	for (const auto* key:
+	     {"type", "controller", "sensor", "sequence", "timestamp_us", "x", "y", "z"})
+		if (!p.is_object() || !p.contains(key)) return false;
+	if (p.at("type") != "motion" || !Unsigned(p.at("controller"), 0, 0) ||
+	    !Unsigned(p.at("sequence"), 1, UINT64_MAX) ||
+	    !Unsigned(p.at("timestamp_us"), 1, INT64_MAX) ||
+	    (p.at("sensor") != "accel" && p.at("sensor") != "gyro"))
+		return false;
+	Motion candidate;
+	candidate.sensor   = p.at("sensor") == "gyro" ? Motion::Sensor::Gyro : Motion::Sensor::Accel;
+	candidate.sequence = p.at("sequence");
+	candidate.timestamp_us     = p.at("timestamp_us");
+	const double         limit = candidate.sensor == Motion::Sensor::Gyro ? 40.0 : 160.0;
+	constexpr std::array names {"x", "y", "z"};
+	for (size_t i = 0; i < names.size(); i++) {
+		const auto& value = p.at(names[i]);
+		if (!value.is_number()) return false;
+		const double n = value.get<double>();
+		if (!std::isfinite(n) || std::abs(n) > limit) return false;
+		candidate.value[i] = static_cast<float>(n);
+	}
+	output = candidate;
 	return true;
 }
 std::optional<Lease> LeaseRing::TryAcquire() {

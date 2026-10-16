@@ -26,8 +26,9 @@ struct PendingFrame {
 class Transport {
 public:
 	using InputSink  = std::function<void(const Input*)>;
+	using MotionSink = std::function<void(const Motion*)>;
 	using Completion = std::function<bool(uint64_t)>;
-	Transport(std::string path, InputSink input, Completion complete);
+	Transport(std::string path, InputSink input, Completion complete, MotionSink motion = {});
 	~Transport();
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	bool     Attached() const { return m_attached.load(std::memory_order_acquire); }
@@ -42,6 +43,7 @@ private:
 	void                       Run(std::stop_token stop);
 	std::string                m_path;
 	InputSink                  m_input;
+	MotionSink                 m_motion;
 	Completion                 m_complete;
 	std::mutex                 m_mutex;
 	PoolDescriptor             m_descriptor;

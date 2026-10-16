@@ -112,8 +112,9 @@ bool SendPacket(int, const Json&, const std::array<int, 9>*) {
 	return false;
 }
 #endif
-Transport::Transport(std::string path, InputSink input, Completion complete)
-    : m_path(std::move(path)), m_input(std::move(input)), m_complete(std::move(complete)) {
+Transport::Transport(std::string path, InputSink input, Completion complete, MotionSink motion)
+    : m_path(std::move(path)), m_input(std::move(input)), m_motion(std::move(motion)),
+      m_complete(std::move(complete)) {
 	m_worker = std::jthread([this](std::stop_token stop) { Run(stop); });
 }
 Transport::~Transport() {
@@ -148,13 +149,20 @@ void Transport::Run(std::stop_token stop) {
 #if defined(__linux__)
 	int        socket     = -1;
 	uint64_t   generation = 0, input_sequence = 0, rumble_revision = 0;
-	bool       welcomed = false, hello_sent = false;
+	bool        welcomed = false, hello_sent = false, motion_cap = false, adaptive_cap = false;
+	MotionOrder motion_order;
+	uint64_t    trigger_revision = 0, motion_received = 0, motion_applied = 0, trigger_sent = 0;
 	auto       retry         = std::chrono::steady_clock::now();
 	auto       last_feedback = retry;
+	auto        last_trigger  = retry;
 	auto       last_status   = retry;
 	uint64_t   last_sequence = 0;
 	const auto disconnect    = [&] {
 		feedback_enabled = false;
+		adaptive_enabled = false;
+		ClearAdaptiveTriggers();
+		motion_order.Reset();
+		motion_cap = adaptive_cap = false;
 		feedback_value   = 0;
 		feedback_revision.fetch_add(1, std::memory_order_release);
 		m_active_epoch = 0;
@@ -174,6 +182,7 @@ void Transport::Run(std::stop_token stop) {
 			m_pool_generation = 0;
 		}
 		m_input(nullptr);
+		if (m_motion) m_motion(nullptr);
 		retry = std::chrono::steady_clock::now() + std::chrono::seconds(1);
 	};
 	while (!stop.stop_requested()) {
@@ -219,6 +228,8 @@ void Transport::Run(std::stop_token stop) {
 					invalid = true;
 					break;
 				}
+				motion_cap   = HasCapability(p, "motion-v1");
+				adaptive_cap = HasCapability(p, "adaptive-triggers-v1");
 				welcomed     = true;
 				m_generation = ++generation;
 				continue;
@@ -232,8 +243,13 @@ void Transport::Run(std::stop_token stop) {
 					invalid = true;
 					break;
 				}
+				motion_cap       = motion_cap && HasCapability(p, "motion-v1");
+				adaptive_cap     = adaptive_cap && HasCapability(p, "adaptive-triggers-v1");
 				m_attached       = true;
 				feedback_enabled = true;
+				rumble_revision  = feedback_revision.load(std::memory_order_acquire);
+				trigger_revision = ReadAdaptiveTriggers().revision;
+				adaptive_enabled = adaptive_cap;
 				continue;
 			}
 			if (type == "error") {
@@ -262,6 +278,22 @@ void Transport::Run(std::stop_token stop) {
 				if (input.sequence > input_sequence) {
 					input_sequence = input.sequence;
 					m_input(&input);
+					if (!input.connected) {
+						motion_order.Reset();
+						if (m_motion) m_motion(nullptr);
+						ClearAdaptiveTriggers();
+					}
+				}
+			} else if (type == "motion" && motion_cap) {
+				Motion motion;
+				if (!ParseMotion(p, motion)) {
+					invalid = true;
+					break;
+				}
+				++motion_received;
+				if (motion_order.Accept(motion) && m_motion) {
+					m_motion(&motion);
+					++motion_applied;
 				}
 			} else if (type == "reset") {
 				if (!p.contains("controller") || !p["controller"].is_number_integer() ||
@@ -272,6 +304,9 @@ void Transport::Run(std::stop_token stop) {
 				feedback_value = 0;
 				feedback_revision.fetch_add(1, std::memory_order_release);
 				m_input(nullptr);
+				motion_order.Reset();
+				if (m_motion) m_motion(nullptr);
+				ClearAdaptiveTriggers();
 			} else {
 				invalid = true;
 				break;
@@ -298,6 +333,11 @@ void Transport::Run(std::stop_token stop) {
 				                     {"offset", 0},
 				                     {"dedicated", true},
 				                     {"transport", "vulkan-buffer-fd"}};
+				if (motion_cap || adaptive_cap) {
+					hello["capabilities"] = Json::array();
+					if (motion_cap) hello["capabilities"].push_back("motion-v1");
+					if (adaptive_cap) hello["capabilities"].push_back("adaptive-triggers-v1");
+				}
 				if (SendPacket(socket, hello, &m_fds)) hello_sent = true;
 			}
 		}
@@ -326,8 +366,25 @@ void Transport::Run(std::stop_token stop) {
 				if (SendPacket(socket, {{"type", "status"},
 				                        {"state", "attached"},
 				                        {"sequence", last_sequence},
-				                        {"dropped", Dropped()}}))
+				                        {"dropped", Dropped()},
+				                        {"motion_received", motion_received},
+				                        {"motion_applied", motion_applied},
+				                        {"adaptive_sent", trigger_sent}}))
 					last_status = now;
+			}
+			if (adaptive_cap && now - last_trigger >= std::chrono::milliseconds(16)) {
+				const auto effect = ReadAdaptiveTriggers();
+				if (effect.revision != trigger_revision &&
+				    SendPacket(socket, {{"type", "adaptive-triggers"},
+				                        {"controller", 0},
+				                        {"sequence", effect.revision},
+				                        {"enable_bits", effect.enable_bits},
+				                        {"left", effect.left},
+				                        {"right", effect.right}})) {
+					trigger_revision = effect.revision;
+					last_trigger     = now;
+					++trigger_sent;
+				}
 			}
 			const auto revision = feedback_revision.load(std::memory_order_acquire);
 			if (revision != rumble_revision &&
