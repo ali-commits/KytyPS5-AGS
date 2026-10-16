@@ -325,6 +325,8 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/graphics/presentation/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/presentation/window/*.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/presentation/window/*.h"
+	"${KYTY_SOURCE_DIR}/controller_audio/*.cpp"
+	"${KYTY_SOURCE_DIR}/controller_audio/*.h"
 	"${KYTY_SOURCE_DIR}/streaming/*.cpp"
 	"${KYTY_SOURCE_DIR}/streaming/*.h"
 	"${KYTY_SOURCE_DIR}/kernel/*.cpp"
@@ -861,8 +863,18 @@ target_include_directories(audio_diag_tests PRIVATE ${inc_headers})
 add_executable(audio_mix_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AudioMixTests.cpp")
 target_include_directories(audio_mix_tests PRIVATE ${inc_headers})
 
-add_executable(audio_out_timing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AudioOutTimingTests.cpp")
+set(controller_audio_core_sources
+    "${KYTY_SOURCE_DIR}/controller_audio/protocol.cpp"
+    "${KYTY_SOURCE_DIR}/controller_audio/pcm.cpp")
+set(controller_audio_producer_sources
+    ${controller_audio_core_sources}
+    "${KYTY_SOURCE_DIR}/streaming/controllerAudio.cpp")
+
+add_executable(audio_out_timing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AudioOutTimingTests.cpp" ${controller_audio_producer_sources})
 target_link_libraries(audio_out_timing_tests common fmt::fmt SDL3::SDL3-static)
+if(LINUX)
+	target_link_libraries(audio_out_timing_tests Threads::Threads)
+endif()
 target_include_directories(audio_out_timing_tests PRIVATE ${inc_headers})
 
 add_executable(ngs2_sampler_tests EXCLUDE_FROM_ALL
@@ -998,9 +1010,27 @@ if(LINUX)
 	add_executable(streaming_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/StreamingTests.cpp"
 		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
-		"${KYTY_SOURCE_DIR}/streaming/transport.cpp")
+		"${KYTY_SOURCE_DIR}/streaming/transport.cpp" ${controller_audio_producer_sources})
 	target_include_directories(streaming_tests PRIVATE "${KYTY_SOURCE_DIR}")
 	target_link_libraries(streaming_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+
+	add_executable(controller_audio_tests EXCLUDE_FROM_ALL
+        "${KYTY_TESTS_DIR}/ControllerAudioTests.cpp" ${controller_audio_core_sources})
+    add_executable(controller_audio_producer_tests EXCLUDE_FROM_ALL
+        "${KYTY_TESTS_DIR}/ControllerAudioProducerTests.cpp" ${controller_audio_producer_sources})
+    add_executable(controller_audio_negotiation_tests EXCLUDE_FROM_ALL
+        "${KYTY_TESTS_DIR}/ControllerAudioNegotiationTests.cpp"
+        "${KYTY_SOURCE_DIR}/streaming/protocol.cpp")
+    add_executable(controller_audio_native_routing_tests EXCLUDE_FROM_ALL
+        "${KYTY_TESTS_DIR}/ControllerAudioNativeRoutingTests.cpp"
+        "${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
+        "${KYTY_SOURCE_DIR}/streaming/transport.cpp" ${controller_audio_producer_sources})
+    foreach(test controller_audio_tests controller_audio_producer_tests
+                 controller_audio_negotiation_tests controller_audio_native_routing_tests)
+        target_include_directories(${test} PRIVATE ${inc_headers})
+        target_link_libraries(${test} PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
+    endforeach()
+    target_link_libraries(controller_audio_native_routing_tests PRIVATE common fmt::fmt SDL3::SDL3-static)
 
 	add_executable(audio_output_device_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AudioOutputDeviceTests.cpp")
 	target_include_directories(audio_output_device_tests PRIVATE "${KYTY_SOURCE_DIR}")
@@ -1011,7 +1041,7 @@ if(LINUX)
 		"${KYTY_SOURCE_DIR}/streaming/exporter.cpp"
 		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
 		"${KYTY_SOURCE_DIR}/streaming/transport.cpp"
-		${gpu_blit_shader_headers})
+		${gpu_blit_shader_headers} ${controller_audio_producer_sources})
 	target_include_directories(streaming_gpu_tests PRIVATE "${KYTY_SOURCE_DIR}" "${PROJECT_BINARY_DIR}")
 	find_path(KYTY_STREAM_TEST_CUDA_INCLUDE cuda.h HINTS /opt/cuda/include)
 	if(KYTY_STREAM_TEST_CUDA_INCLUDE)
@@ -1183,7 +1213,12 @@ if(BUILD_TESTING)
 	add_test(NAME host_input_pulse COMMAND $<TARGET_FILE:host_input_pulse_tests>)
 	if(LINUX)
 		add_test(NAME audio_output_device COMMAND $<TARGET_FILE:audio_output_device_tests>)
-		add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
+		foreach(test controller_audio_tests controller_audio_producer_tests
+                     controller_audio_negotiation_tests controller_audio_native_routing_tests)
+            add_test(NAME ${test} COMMAND $<TARGET_FILE:${test}>)
+            set_tests_properties(${test} PROPERTIES TIMEOUT 30)
+        endforeach()
+        add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
 		add_test(NAME streaming_presentation COMMAND $<TARGET_FILE:streaming_presentation_tests>)
 		set_tests_properties(streaming_protocol PROPERTIES TIMEOUT 30)
 		add_test(NAME streaming_gpu COMMAND $<TARGET_FILE:streaming_gpu_tests>)

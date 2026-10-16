@@ -13,6 +13,7 @@
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
+#include "streaming/controllerAudio.h"
 #include "streaming/feedback.h"
 
 #include <SDL3/SDL.h>
@@ -40,8 +41,9 @@ constexpr int AUDIO_OUT_PORT_TYPE_VIBRATION = 10;
 constexpr int AUDIO_OUT_PORT_TYPE_AUDIO3D   = 126;
 constexpr int AUDIO_OUT_PORT_TYPE_AUX       = 127;
 
-constexpr uint32_t AUDIO_OUT_PARAM_FORMAT_MASK = 0x000000ffu;
-constexpr uint64_t AUDIO_OUT_TARGET_LATENCY_US = 40000;
+constexpr uint32_t    AUDIO_OUT_PARAM_FORMAT_MASK = 0x000000ffu;
+constexpr uint64_t    AUDIO_OUT_TARGET_LATENCY_US = 40000;
+std::atomic<uint64_t> g_controller_port_generation {0};
 
 constexpr int      AUDIO_IN_SILENT_STATE_DEVICE_NONE = 0x1;
 constexpr uint32_t AUDIO_IN_GRAIN_MAX_ASYNC          = 384;
@@ -70,7 +72,9 @@ struct OutputClock {
 static int64_t audio_out_clock_skew_ppm() {
 	static const int64_t ppm = [] {
 		const char* value = std::getenv("KYTY_AUDIO_CLOCK_SKEW_PPM");
-		return value != nullptr ? std::clamp<int64_t>(std::strtoll(value, nullptr, 10), -20000, 20000) : 0;
+		return value != nullptr
+		           ? std::clamp<int64_t>(std::strtoll(value, nullptr, 10), -20000, 20000)
+		           : 0;
 	}();
 	return ppm;
 }
@@ -78,7 +82,8 @@ static int64_t audio_out_clock_skew_ppm() {
 static uint32_t audio_out_clock_rate(uint32_t freq) {
 	const auto ppm = audio_out_clock_skew_ppm();
 	return ppm == 0 ? freq
-	                : static_cast<uint32_t>(static_cast<int64_t>(freq) - static_cast<int64_t>(freq) * ppm / 1000000);
+	                : static_cast<uint32_t>(static_cast<int64_t>(freq) -
+	                                        static_cast<int64_t>(freq) * ppm / 1000000);
 }
 
 // KYTY_AUDIO_PAD_PRIME: a port that joins a batch another port already paces never gets an unpaced
@@ -102,7 +107,8 @@ static uint64_t audio_out_target_latency_us() {
 	static const uint64_t latency = [] {
 		const char* value = std::getenv("KYTY_AUDIO_LATENCY_MS");
 		const long  ms    = value != nullptr ? std::strtol(value, nullptr, 10) : 0;
-		return ms > 0 ? static_cast<uint64_t>(std::clamp(ms, 10L, 500L)) * 1000 : AUDIO_OUT_TARGET_LATENCY_US;
+		return ms > 0 ? static_cast<uint64_t>(std::clamp(ms, 10L, 500L)) * 1000
+		              : AUDIO_OUT_TARGET_LATENCY_US;
 	}();
 	return latency;
 }
@@ -156,13 +162,13 @@ struct OutTrace {
 	// What the guest handed over (as sent to SDL): all-zero blocks, zero blocks right after sound
 	// (dropouts), sample jumps at block boundaries far above the block's own sample-to-sample
 	// steps (clicks), and the mean power.
-	uint32_t zero_blocks  = 0;
-	uint32_t dropouts     = 0;
-	uint32_t jumps        = 0;
-	double   power_sum    = 0.0;
-	uint64_t power_n      = 0;
-	bool     have_prev    = false;
-	bool     prev_sound   = false;
+	uint32_t zero_blocks = 0;
+	uint32_t dropouts    = 0;
+	uint32_t jumps       = 0;
+	double   power_sum   = 0.0;
+	uint64_t power_n     = 0;
+	bool     have_prev   = false;
+	bool     prev_sound  = false;
 	float    prev_last[8] {};
 
 	std::array<uint32_t, WAIT_BUCKETS> wait {};
@@ -221,10 +227,12 @@ static void SDLCALL trace_device_request(void* userdata, SDL_AudioStream* /*stre
 		device->late30.fetch_add(interval > 30000000 ? 1 : 0, std::memory_order_relaxed);
 	}
 	device->requests.fetch_add(1, std::memory_order_relaxed);
-	device->bytes.fetch_add(static_cast<uint64_t>(std::max(total_amount, 0)), std::memory_order_relaxed);
+	device->bytes.fetch_add(static_cast<uint64_t>(std::max(total_amount, 0)),
+	                        std::memory_order_relaxed);
 	if (additional_amount > 0) {
 		device->short_requests.fetch_add(1, std::memory_order_relaxed);
-		device->short_bytes.fetch_add(static_cast<uint64_t>(additional_amount), std::memory_order_relaxed);
+		device->short_bytes.fetch_add(static_cast<uint64_t>(additional_amount),
+		                              std::memory_order_relaxed);
 	}
 }
 
@@ -263,8 +271,8 @@ static void report_default_playback_device() {
 		            name != nullptr ? name : "?", spec.freq, spec.channels,
 		            static_cast<unsigned>(spec.format), frames);
 	} else {
-		Diag::Print("default playback device '%s': format unknown (%s)", name != nullptr ? name : "?",
-		            SDL_GetError());
+		Diag::Print("default playback device '%s': format unknown (%s)",
+		            name != nullptr ? name : "?", SDL_GetError());
 	}
 	int   count   = 0;
 	auto* devices = SDL_GetAudioPlaybackDevices(&count);
@@ -328,31 +336,34 @@ public:
 
 	void SetMixSettings(const Mix::Settings& settings) { m_mix = settings; }
 	[[nodiscard]] const Mix::Settings& GetMixSettings() const { return m_mix; }
-	// Every LEVEL_LOG_INTERVAL_US, print each active output port's RMS and peak (KYTY_AUDIO_LEVELS).
-	void SetLevelLogging(bool enabled) { m_level_logging = enabled; }
+	// Every LEVEL_LOG_INTERVAL_US, print each active output port's RMS and peak
+	// (KYTY_AUDIO_LEVELS).
+	void                      SetLevelLogging(bool enabled) { m_level_logging = enabled; }
 	static constexpr uint64_t LEVEL_LOG_INTERVAL_US = 5000000;
 
-	Id       AudioInOpen(uint32_t samples_num, uint32_t freq, Format format, bool asynchronous);
-	int      AudioInClose(Id handle);
-	int      AudioInGetSilentState(Id handle);
-	int      AudioInInput(Id handle, void* dest);
+	Id  AudioInOpen(uint32_t samples_num, uint32_t freq, Format format, bool asynchronous);
+	int AudioInClose(Id handle);
+	int AudioInGetSilentState(Id handle);
+	int AudioInInput(Id handle, void* dest);
 
 	static constexpr int OUT_PORTS_MAX = 32;
 	static constexpr int IN_PORTS_MAX  = 8;
 
 private:
 	struct PortOut {
-		bool        used        = false;
-		int         type        = 0;
-		uint32_t    samples_num = 0;
-		uint32_t    freq        = 0;
-		Format      format      = Format::Unknown;
+		bool        used                  = false;
+		uint64_t    controller_generation = 0;
+		bool        remote_routed         = false;
+		int         type                  = 0;
+		uint32_t    samples_num           = 0;
+		uint32_t    freq                  = 0;
+		Format      format                = Format::Unknown;
 		OutputClock clock;
 		bool        queue_primed = false;
 		int         channels_num = 0;
 		int         volume[12]   = {};
 		// A 7.1 (or 7.1.4) port on a stereo device: downmixed here instead of by SDL.
-		bool        downmix_stereo = false;
+		bool downmix_stereo = false;
 
 		SDL_AudioStream*                      stream  = nullptr;
 		Controller::DualSenseHaptics::Stream* haptics = nullptr;
@@ -364,11 +375,11 @@ private:
 		float           meter_gain    = 1.0f;
 		// What SDL is given (after volume, host gain and a stereo downmix), and samples beyond
 		// full scale in it.
-		bool            meter_device   = false;
+		bool            meter_device = false;
 		Mix::LevelMeter device_meter;
 		uint32_t        device_clipped = 0;
 
-		int      trace_id = 0; // 1-based port number in trace lines.
+		int      trace_id = 0;     // 1-based port number in trace lines.
 		bool     catch_up = false; // The last write found the queue below target (no clock wait).
 		OutTrace trace;
 	};
@@ -407,10 +418,10 @@ private:
 	static const void*     PrepareOutputBuffer(const PortOut& port, const void* data,
 	                                           std::vector<uint8_t>* buffer, float gain,
 	                                           const float* gains);
-	static bool QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain,
-	                          const float* gains, bool batch_paced = false);
-	static void TraceSummary(PortOut* port, uint64_t now);
-	static void TraceContent(PortOut* port, const void* data);
+	static bool            QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain,
+	                                     const float* gains, bool batch_paced = false);
+	static void            TraceSummary(PortOut* port, uint64_t now);
+	static void            TraceContent(PortOut* port, const void* data);
 
 	static DeviceTrace s_device_trace[OUT_PORTS_MAX];
 };
@@ -476,7 +487,8 @@ void Initialize() {
 	EXIT_IF(g_audio != nullptr);
 
 	// Audio diagnostics reach the printf file too: players send _kyty.txt, not the console.
-	Diag::ConsoleLogWriter().store(+[](const std::string& text) { Log::WriteToConsoleAndLog(text); });
+	Diag::ConsoleLogWriter().store(
+	    +[](const std::string& text) { Log::WriteToConsoleAndLog(text); });
 
 	g_audio = new Audio;
 	if (Diag::TraceEnabled()) {
@@ -486,20 +498,21 @@ void Initialize() {
 	}
 
 	Mix::Settings mix;
-	mix.master      = Config::GetAudioMasterVolume();
-	mix.main        = Config::GetAudioMainVolume();
-	mix.music       = Config::GetAudioMusicVolume();
-	mix.pad_on_main = Config::GetAudioPadSpeakerOnMainVolume();
-	mix.objects     = Config::GetAudioObjectsVolume();
+	mix.master          = Config::GetAudioMasterVolume();
+	mix.main            = Config::GetAudioMainVolume();
+	mix.music           = Config::GetAudioMusicVolume();
+	mix.pad_on_main     = Config::GetAudioPadSpeakerOnMainVolume();
+	mix.objects         = Config::GetAudioObjectsVolume();
 	mix.objects_enabled = Config::AudioObjectsEnabled();
-	mix             = Mix::ApplyEnvironment(mix, [](const char* name) { return std::getenv(name); });
+	mix = Mix::ApplyEnvironment(mix, [](const char* name) { return std::getenv(name); });
 	g_audio->SetMixSettings(mix);
 	const char* levels = std::getenv("KYTY_AUDIO_LEVELS");
 	g_audio->SetLevelLogging(levels != nullptr && levels[0] != '\0' && levels[0] != '0');
-	std::printf("Kyty audio mix: master %u%%, main %u%%, music (BGM ports) %u%%, pad speaker on main "
-	            "output %u%%, 3D objects %s %u%%\n",
-	            mix.master, mix.main, mix.music, mix.pad_on_main, mix.objects_enabled ? "on" : "off",
-	            mix.objects);
+	std::printf(
+	    "Kyty audio mix: master %u%%, main %u%%, music (BGM ports) %u%%, pad speaker on main "
+	    "output %u%%, 3D objects %s %u%%\n",
+	    mix.master, mix.main, mix.music, mix.pad_on_main, mix.objects_enabled ? "on" : "off",
+	    mix.objects);
 }
 
 void Shutdown() {
@@ -508,7 +521,11 @@ void Shutdown() {
 }
 
 Audio::~Audio() {
+	Streaming::ControllerAudio::Disable();
 	for (auto& port: m_out_ports) {
+		if (port.controller_generation)
+			Streaming::ControllerAudio::ClosePort(static_cast<uint32_t>(&port - m_out_ports),
+			                                      port.controller_generation);
 		CloseSdlDevice(&port);
 	}
 	for (auto& port: m_in_ports) {
@@ -634,8 +651,8 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 	const bool reorder          = channels >= 8 && !FormatIsStd(port.format);
 
 	if (port.downmix_stereo) {
-		// Both 8-channel orders have the left surrounds at 4 and 6 and the right ones at 5 and 7; the
-		// 12-channel one adds its left heights at 8 and 10 and the right ones at 9 and 11.
+		// Both 8-channel orders have the left surrounds at 4 and 6 and the right ones at 5 and 7;
+		// the 12-channel one adds its left heights at 8 and 10 and the right ones at 9 and 11.
 		const bool is_float = FormatIsFloat(port.format);
 		float      scale[12] {};
 		for (uint32_t ch = 0; ch < channels && ch < 12; ch++) {
@@ -644,8 +661,9 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 		}
 		const auto sample = [&](uint32_t frame, uint32_t ch) {
 			const auto  index = static_cast<size_t>(frame) * channels + ch;
-			const float value = is_float ? static_cast<const float*>(data)[index]
-			                             : static_cast<float>(static_cast<const int16_t*>(data)[index]) / 32768.0f;
+			const float value =
+			    is_float ? static_cast<const float*>(data)[index]
+			             : static_cast<float>(static_cast<const int16_t*>(data)[index]) / 32768.0f;
 			return value * scale[ch];
 		};
 		constexpr float SIDE = 0.70710677f;
@@ -714,10 +732,10 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 
 		for (uint32_t frame = 0; frame < frames; frame++) {
 			for (uint32_t ch = 0; ch < output_channels; ch++) {
-				const auto src_ch = reorder ? SDL_8CH_MAP[ch] : ch;
+				const auto   src_ch = reorder ? SDL_8CH_MAP[ch] : ch;
 				const double sample = src[frame * channels + src_ch] * scales[src_ch];
-				dst[frame * output_channels + ch] = static_cast<int16_t>(
-				    std::clamp(sample, -32768.0, 32767.0));
+				dst[frame * output_channels + ch] =
+				    static_cast<int16_t>(std::clamp(sample, -32768.0, 32767.0));
 			}
 		}
 	}
@@ -734,12 +752,12 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 	}
 
 	std::vector<uint8_t> prepared_buffer;
-	const void*          prepared_data = PrepareOutputBuffer(*port, data, &prepared_buffer, gain, gains);
-	const auto           output_channels = OutputChannels(*port);
-	const auto           prepared_size =
-	    BytesPerSample(port->format) * output_channels * port->samples_num;
+	const void* prepared_data   = PrepareOutputBuffer(*port, data, &prepared_buffer, gain, gains);
+	const auto  output_channels = OutputChannels(*port);
+	const auto  prepared_size = BytesPerSample(port->format) * output_channels * port->samples_num;
 	if (port->meter_device) {
-		port->device_meter.Add(prepared_data, port->samples_num, output_channels, FormatIsFloat(port->format));
+		port->device_meter.Add(prepared_data, port->samples_num, output_channels,
+		                       FormatIsFloat(port->format));
 		if (FormatIsFloat(port->format)) {
 			const auto* samples = static_cast<const float*>(prepared_data);
 			for (uint32_t i = 0; i < port->samples_num * output_channels; i++) {
@@ -765,7 +783,7 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		    buffer_us != 0
 		        ? static_cast<uint32_t>((audio_out_target_latency_us() + buffer_us - 1) / buffer_us)
 		        : 2u;
-		min_queued_size           = prepared_size * std::clamp(buffers, 2u, 96u);
+		min_queued_size            = prepared_size * std::clamp(buffers, 2u, 96u);
 		const auto wait_start      = LibKernel::KernelGetProcessTime();
 		auto       queued          = SDL_GetAudioStreamQueued(port->stream);
 		const int  queued_on_entry = queued;
@@ -785,8 +803,9 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		}
 		// Below target by more than a block: the device is consuming faster than the sample clock
 		// paces this port. Write the next block without the clock wait.
-		port->catch_up = audio_out_queue_catchup() && port->queue_primed &&
-		                 queued + static_cast<int>(prepared_size) < static_cast<int>(min_queued_size);
+		port->catch_up =
+		    audio_out_queue_catchup() && port->queue_primed &&
+		    queued + static_cast<int>(prepared_size) < static_cast<int>(min_queued_size);
 		queued_before = queued;
 		if (trace) {
 			const auto now    = LibKernel::KernelGetProcessTime();
@@ -799,11 +818,13 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 				t.clears++;
 				t.total_clears++;
 				if (t.events++ < 8) {
-					Diag::Trace("t=%.3f s port %d CLEAR: queue did not drain for %.1f ms, %d bytes "
-					            "(%.1f ms) queued on entry, %d (%.1f ms) at the clear; target %.1f ms",
-					            static_cast<double>(now) / 1e6, port->trace_id,
-					            static_cast<double>(waited) / 1000.0, queued_on_entry,
-					            to_ms(queued_on_entry), queued, to_ms(queued), to_ms(static_cast<int>(min_queued_size)));
+					Diag::Trace(
+					    "t=%.3f s port %d CLEAR: queue did not drain for %.1f ms, %d bytes "
+					    "(%.1f ms) queued on entry, %d (%.1f ms) at the clear; target %.1f ms",
+					    static_cast<double>(now) / 1e6, port->trace_id,
+					    static_cast<double>(waited) / 1000.0, queued_on_entry,
+					    to_ms(queued_on_entry), queued, to_ms(queued),
+					    to_ms(static_cast<int>(min_queued_size)));
 				}
 			}
 			if (queued < static_cast<int>(prepared_size)) {
@@ -812,8 +833,8 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 				if (t.events++ < 8) {
 					Diag::Trace("t=%.3f s port %d LOW: %d bytes (%.2f ms) queued before the write, "
 					            "under one block (%.2f ms)%s",
-					            static_cast<double>(now) / 1e6, port->trace_id, queued, to_ms(queued),
-					            to_ms(static_cast<int>(prepared_size)),
+					            static_cast<double>(now) / 1e6, port->trace_id, queued,
+					            to_ms(queued), to_ms(static_cast<int>(prepared_size)),
 					            was_primed ? "; was primed: re-priming" : "");
 				}
 			}
@@ -849,10 +870,11 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 			if (SDL_PutAudioStreamData(port->stream, silence.data(), pad) && trace) {
 				port->trace.pads++;
 				if (port->trace.events++ < 8) {
-					Diag::Trace("t=%.3f s port %d PAD: %.2f ms queued in a paced batch; %.2f ms of silence "
-					            "added to reach the target",
-					            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6, port->trace_id,
-					            to_ms(queued_before), to_ms(pad));
+					Diag::Trace(
+					    "t=%.3f s port %d PAD: %.2f ms queued in a paced batch; %.2f ms of silence "
+					    "added to reach the target",
+					    static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6,
+					    port->trace_id, to_ms(queued_before), to_ms(pad));
 				}
 			}
 		}
@@ -864,7 +886,8 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 	if (!SDL_PutAudioStreamData(port->stream, prepared_data, static_cast<int>(prepared_size))) {
 		LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
 		if (trace) {
-			Diag::Trace("port %d: SDL_PutAudioStreamData failed: %s", port->trace_id, SDL_GetError());
+			Diag::Trace("port %d: SDL_PutAudioStreamData failed: %s", port->trace_id,
+			            SDL_GetError());
 		}
 		port->queue_primed = false;
 		return false;
@@ -937,47 +960,55 @@ void Audio::TraceSummary(PortOut* port, uint64_t now) {
 	if (now - t.start < Diag::TRACE_INTERVAL_US) {
 		return;
 	}
-	const double elapsed     = static_cast<double>(now - t.start) / 1e6;
-	const auto   frame_bytes = static_cast<double>(BytesPerSample(port->format) * OutputChannels(*port));
-	const auto   to_ms       = [&](double bytes) { return bytes / frame_bytes * 1000.0 / port->freq; };
-	auto&        device      = s_device_trace[port->trace_id - 1];
-	const auto   dev_bytes   = device.bytes.exchange(0, std::memory_order_relaxed);
-	const auto   dev_req     = device.requests.exchange(0, std::memory_order_relaxed);
-	const auto   dev_short   = device.short_requests.exchange(0, std::memory_order_relaxed);
-	const auto   short_bytes = device.short_bytes.exchange(0, std::memory_order_relaxed);
+	const double elapsed = static_cast<double>(now - t.start) / 1e6;
+	const auto   frame_bytes =
+	    static_cast<double>(BytesPerSample(port->format) * OutputChannels(*port));
+	const auto to_ms     = [&](double bytes) { return bytes / frame_bytes * 1000.0 / port->freq; };
+	auto&      device    = s_device_trace[port->trace_id - 1];
+	const auto dev_bytes = device.bytes.exchange(0, std::memory_order_relaxed);
+	const auto dev_req   = device.requests.exchange(0, std::memory_order_relaxed);
+	const auto dev_short = device.short_requests.exchange(0, std::memory_order_relaxed);
+	const auto short_bytes = device.short_bytes.exchange(0, std::memory_order_relaxed);
 	t.total_short += dev_short;
 	const int queued_now = SDL_GetAudioStreamQueued(port->stream);
 	// The device's consumption over the window: what was put minus the change in queue level.
-	const double consumed = static_cast<double>(t.bytes) -
-	                        (t.queued_first >= 0 ? static_cast<double>(queued_now - t.queued_first) : 0.0);
-	Diag::Trace("t=%.1f s port %d %s %u Hz: %u writes (%u blocking) put %.1f Hz, device took %.1f Hz "
-	            "(requests %.1f Hz, %llu requests); queue ms min/avg/max %.1f/%.1f/%.1f first %.1f last %.1f; "
-	            "low %u, clears %u, re-primes %u, catch-ups %u; device short %llu (%.1f ms silence); wait "
-	            "hist 0/<1/<2/<5/<10/<20/<50ms/clear %u/%u/%u/%u/%u/%u/%u/%u; clock sleep %.1f ms in %u; "
-	            "guest gap avg %.2f max %.2f ms, %u over a block; totals clears %llu low %llu short %llu",
-	            static_cast<double>(now) / 1e6, port->trace_id, audio_out_port_type_name(port->type), port->freq,
-	            t.writes, t.blocking, static_cast<double>(t.bytes) / frame_bytes / elapsed,
-	            consumed / frame_bytes / elapsed, static_cast<double>(dev_bytes) / frame_bytes / elapsed,
-	            static_cast<unsigned long long>(dev_req), t.queued_min == INT_MAX ? 0.0 : to_ms(t.queued_min),
-	            t.writes != 0 ? to_ms(static_cast<double>(t.queued_sum) / t.writes) : 0.0, to_ms(t.queued_max),
-	            to_ms(std::max(t.queued_first, 0)), to_ms(t.queued_last), t.low, t.clears, t.reprimes, t.catch_ups,
-	            static_cast<unsigned long long>(dev_short), to_ms(static_cast<double>(short_bytes)), t.wait[0],
-	            t.wait[1], t.wait[2], t.wait[3], t.wait[4], t.wait[5], t.wait[6], t.wait[7],
-	            static_cast<double>(t.sleep_us) / 1000.0, t.sleeps,
-	            t.gaps != 0 ? static_cast<double>(t.gap_sum) / t.gaps / 1000.0 : 0.0,
-	            static_cast<double>(t.gap_max) / 1000.0, t.late_gaps,
-	            static_cast<unsigned long long>(t.total_clears), static_cast<unsigned long long>(t.total_low),
-	            static_cast<unsigned long long>(t.total_short));
+	const double consumed =
+	    static_cast<double>(t.bytes) -
+	    (t.queued_first >= 0 ? static_cast<double>(queued_now - t.queued_first) : 0.0);
+	Diag::Trace(
+	    "t=%.1f s port %d %s %u Hz: %u writes (%u blocking) put %.1f Hz, device took %.1f Hz "
+	    "(requests %.1f Hz, %llu requests); queue ms min/avg/max %.1f/%.1f/%.1f first %.1f last "
+	    "%.1f; "
+	    "low %u, clears %u, re-primes %u, catch-ups %u; device short %llu (%.1f ms silence); wait "
+	    "hist 0/<1/<2/<5/<10/<20/<50ms/clear %u/%u/%u/%u/%u/%u/%u/%u; clock sleep %.1f ms in %u; "
+	    "guest gap avg %.2f max %.2f ms, %u over a block; totals clears %llu low %llu short %llu",
+	    static_cast<double>(now) / 1e6, port->trace_id, audio_out_port_type_name(port->type),
+	    port->freq, t.writes, t.blocking, static_cast<double>(t.bytes) / frame_bytes / elapsed,
+	    consumed / frame_bytes / elapsed, static_cast<double>(dev_bytes) / frame_bytes / elapsed,
+	    static_cast<unsigned long long>(dev_req),
+	    t.queued_min == INT_MAX ? 0.0 : to_ms(t.queued_min),
+	    t.writes != 0 ? to_ms(static_cast<double>(t.queued_sum) / t.writes) : 0.0,
+	    to_ms(t.queued_max), to_ms(std::max(t.queued_first, 0)), to_ms(t.queued_last), t.low,
+	    t.clears, t.reprimes, t.catch_ups, static_cast<unsigned long long>(dev_short),
+	    to_ms(static_cast<double>(short_bytes)), t.wait[0], t.wait[1], t.wait[2], t.wait[3],
+	    t.wait[4], t.wait[5], t.wait[6], t.wait[7], static_cast<double>(t.sleep_us) / 1000.0,
+	    t.sleeps, t.gaps != 0 ? static_cast<double>(t.gap_sum) / t.gaps / 1000.0 : 0.0,
+	    static_cast<double>(t.gap_max) / 1000.0, t.late_gaps,
+	    static_cast<unsigned long long>(t.total_clears),
+	    static_cast<unsigned long long>(t.total_low),
+	    static_cast<unsigned long long>(t.total_short));
 	const auto max_interval = device.max_interval_ns.exchange(0, std::memory_order_relaxed);
 	const auto late15       = device.late15.exchange(0, std::memory_order_relaxed);
 	const auto late30       = device.late30.exchange(0, std::memory_order_relaxed);
-	Diag::Trace("t=%.1f s port %d content: rms %.1f dBFS, %u zero blocks, %u dropouts (zero block after "
-	            "sound), %u boundary jumps, %u silence pads; device request gaps max %.1f ms, %u over 15 ms, "
-	            "%u over 30 ms",
-	            static_cast<double>(now) / 1e6, port->trace_id,
-	            t.power_n != 0 && t.power_sum > 0.0 ? 10.0 * std::log10(t.power_sum / t.power_n) : -200.0,
-	            t.zero_blocks, t.dropouts, t.jumps, t.pads, static_cast<double>(max_interval) / 1e6, late15,
-	            late30);
+	Diag::Trace(
+	    "t=%.1f s port %d content: rms %.1f dBFS, %u zero blocks, %u dropouts (zero block after "
+	    "sound), %u boundary jumps, %u silence pads; device request gaps max %.1f ms, %u over 15 "
+	    "ms, "
+	    "%u over 30 ms",
+	    static_cast<double>(now) / 1e6, port->trace_id,
+	    t.power_n != 0 && t.power_sum > 0.0 ? 10.0 * std::log10(t.power_sum / t.power_n) : -200.0,
+	    t.zero_blocks, t.dropouts, t.jumps, t.pads, static_cast<double>(max_interval) / 1e6, late15,
+	    late30);
 	OutTrace next;
 	next.start        = now;
 	next.last_return  = t.last_return;
@@ -1017,7 +1048,14 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				case Format::Signed16bit8ChStd:
 				case Format::Float8ChStd: port.channels_num = 8; break;
 				case Format::Float12Ch: port.channels_num = 12; break;
-				default: EXIT("unknown format");
+				default:
+					if (type == AUDIO_OUT_PORT_TYPE_VIBRATION ||
+					    type == AUDIO_OUT_PORT_TYPE_PADSPK) {
+						Diag::Print("controller audio open: unsupported format");
+						port = {};
+						return Id::Invalid();
+					}
+					EXIT("unknown format");
 			}
 
 			for (int i = 0; i < port.channels_num; i++) {
@@ -1032,7 +1070,8 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 			port.trace    = {};
 			s_device_trace[id].Reset();
 			if (Diag::TraceEnabled() && port.stream != nullptr) {
-				SDL_SetAudioStreamGetCallback(port.stream, trace_device_request, &s_device_trace[id]);
+				SDL_SetAudioStreamGetCallback(port.stream, trace_device_request,
+				                              &s_device_trace[id]);
 				Diag::Trace("t=%.3f s port %d open: %s, %u frames (%.2f ms), %u Hz, %d ch",
 				            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6, id + 1,
 				            audio_out_port_type_name(type), samples_num,
@@ -1041,6 +1080,12 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION || type == AUDIO_OUT_PORT_TYPE_PADSPK) {
 				port.haptics =
 				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
+				port.controller_generation = ++g_controller_port_generation;
+				Streaming::ControllerAudio::OpenPort(id, port.controller_generation,
+				                                     type == AUDIO_OUT_PORT_TYPE_PADSPK
+				                                         ? ::ControllerAudio::Kind::Speaker
+				                                         : ::ControllerAudio::Kind::Actuator,
+				                                     freq);
 			}
 
 			Diag::Print("output port %d open: %s, %u frames, %u Hz, %s (%d ch); main output %s, "
@@ -1065,15 +1110,18 @@ bool Audio::AudioOutClose(Id handle) {
 	if (AudioOutValid(handle)) {
 		auto& port = m_out_ports[handle.GetId()];
 
-		Diag::Print("output port %d close: %s", handle.ToInt(), audio_out_port_type_name(port.type));
+		Diag::Print("output port %d close: %s", handle.ToInt(),
+		            audio_out_port_type_name(port.type));
 		if (Diag::TraceEnabled()) {
 			Diag::Trace("t=%.3f s port %d close: %s; totals clears %llu low %llu short %llu",
-			            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6, handle.ToInt(),
-			            audio_out_port_type_name(port.type),
+			            static_cast<double>(LibKernel::KernelGetProcessTime()) / 1e6,
+			            handle.ToInt(), audio_out_port_type_name(port.type),
 			            static_cast<unsigned long long>(port.trace.total_clears),
 			            static_cast<unsigned long long>(port.trace.total_low),
 			            static_cast<unsigned long long>(port.trace.total_short));
 		}
+		if (port.controller_generation)
+			Streaming::ControllerAudio::ClosePort(handle.GetId(), port.controller_generation);
 		CloseSdlDevice(&port);
 		port = {};
 
@@ -1115,19 +1163,21 @@ void Audio::MeterOutput(int port_id, PortOut* port, const void* data, bool on_ma
 	const double volume = static_cast<double>(port->volume[0]) / 32768.0;
 	const double rms    = port->meter.Rms();
 	const double peak   = port->meter.Peak();
-	std::printf("AudioLevel: t=%.1f s port %d %s %dch %uHz: raw rms %.1f dBFS peak %.1f dBFS; guest vol "
-	            "%.2f host gain %.2f -> out rms %.1f dBFS; %u/%u blocks on main output (%.1f s)\n",
-	            static_cast<double>(now) / 1e6, port_id + 1, audio_out_port_type_name(port->type),
-	            port->channels_num, port->freq, Mix::LevelMeter::ToDb(rms), Mix::LevelMeter::ToDb(peak), volume,
-	            static_cast<double>(port->meter_gain),
-	            Mix::LevelMeter::ToDb(rms * volume * port->meter_gain), port->meter_on_main,
-	            port->meter_blocks, static_cast<double>(now - port->meter_start) / 1e6);
+	std::printf(
+	    "AudioLevel: t=%.1f s port %d %s %dch %uHz: raw rms %.1f dBFS peak %.1f dBFS; guest vol "
+	    "%.2f host gain %.2f -> out rms %.1f dBFS; %u/%u blocks on main output (%.1f s)\n",
+	    static_cast<double>(now) / 1e6, port_id + 1, audio_out_port_type_name(port->type),
+	    port->channels_num, port->freq, Mix::LevelMeter::ToDb(rms), Mix::LevelMeter::ToDb(peak),
+	    volume, static_cast<double>(port->meter_gain),
+	    Mix::LevelMeter::ToDb(rms * volume * port->meter_gain), port->meter_on_main,
+	    port->meter_blocks, static_cast<double>(now - port->meter_start) / 1e6);
 	if (port->device_meter.Samples() != 0) {
-		std::printf("AudioLevel: t=%.1f s port %d to SDL: %uch rms %.1f dBFS peak %.1f dBFS, %u samples "
-		            "clipped\n",
-		            static_cast<double>(now) / 1e6, port_id + 1, OutputChannels(*port),
-		            Mix::LevelMeter::ToDb(port->device_meter.Rms()),
-		            Mix::LevelMeter::ToDb(port->device_meter.Peak()), port->device_clipped);
+		std::printf(
+		    "AudioLevel: t=%.1f s port %d to SDL: %uch rms %.1f dBFS peak %.1f dBFS, %u samples "
+		    "clipped\n",
+		    static_cast<double>(now) / 1e6, port_id + 1, OutputChannels(*port),
+		    Mix::LevelMeter::ToDb(port->device_meter.Rms()),
+		    Mix::LevelMeter::ToDb(port->device_meter.Peak()), port->device_clipped);
 		port->device_meter.Reset();
 		port->device_clipped = 0;
 	}
@@ -1196,8 +1246,9 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		auto&      t     = first_port.trace;
 		const auto start = LibKernel::KernelGetProcessTime();
 		if (t.last_return != 0 && start > t.last_return) {
-			const auto gap    = start - t.last_return;
-			const auto period = first_port.freq != 0 ? 1000000ULL * first_port.samples_num / first_port.freq : 0;
+			const auto gap = start - t.last_return;
+			const auto period =
+			    first_port.freq != 0 ? 1000000ULL * first_port.samples_num / first_port.freq : 0;
 			t.gap_sum += gap;
 			t.gap_max = std::max(t.gap_max, gap);
 			t.gaps++;
@@ -1225,7 +1276,31 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		        ? Controller::GetSettingScale(Controller::Setting::VibrationIntensity)
 		        : 1.0f;
 
-		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION && params[i].data != nullptr &&
+		const bool controller_port =
+		    port.type == AUDIO_OUT_PORT_TYPE_VIBRATION || port.type == AUDIO_OUT_PORT_TYPE_PADSPK;
+		const bool remote =
+		    controller_port &&
+		    (params[i].data == nullptr
+		         ? Streaming::ControllerAudio::Ready()
+		         : Streaming::ControllerAudio::Publish(
+		               params[i].handle.GetId(), port.controller_generation,
+		               port.type == AUDIO_OUT_PORT_TYPE_PADSPK ? ::ControllerAudio::Kind::Speaker
+		                                                       : ::ControllerAudio::Kind::Actuator,
+		               {params[i].data, port.samples_num, static_cast<uint32_t>(port.channels_num),
+		                port.freq, FormatIsFloat(port.format), port.volume, gain,
+		                params[i].gains}));
+		if (remote && !port.remote_routed) {
+			Controller::DualSenseHaptics::Close(port.haptics);
+			port.haptics = nullptr;
+			if (port.stream != nullptr) SDL_ClearAudioStream(port.stream);
+		}
+		if (!remote && port.remote_routed) {
+			port.haptics = Controller::DualSenseHaptics::Open(
+			    port.freq, port.type == AUDIO_OUT_PORT_TYPE_PADSPK);
+		}
+		port.remote_routed = remote;
+
+		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION && !remote && params[i].data != nullptr &&
 		    Streaming::feedback_enabled.load(std::memory_order_relaxed)) {
 			float peak[2] {};
 			for (uint32_t frame = 0; frame < std::min(port.samples_num, 8192U); frame++) {
@@ -1247,29 +1322,30 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 			    static_cast<uint16_t>(std::clamp(peak[1] * 2, 0.0f, 1.0f) * 65535), 100);
 		}
 
-		uint64_t controller_queued_us = 0;
-		bool controller_uses_bluetooth = false;
-		if (port.haptics != nullptr) {
+		uint64_t controller_queued_us      = remote ? 1 : 0;
+		bool     controller_uses_bluetooth = remote;
+		if (remote) paced[i] = true;
+		if (!remote && port.haptics != nullptr) {
 			// Keep the stream alive against close and volume changes.
 			Common::LockGuard lock(m_mutex);
 			controller_queued_us = Controller::DualSenseHaptics::Queue(
 			    port.haptics, Controller::GetActiveControllerId(), params[i].data, port.samples_num,
 			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume,
 			    gain, params[i].gains);
-			controller_uses_bluetooth =
-			    Controller::DualSenseHaptics::UsesBluetooth(port.haptics);
+			controller_uses_bluetooth = Controller::DualSenseHaptics::UsesBluetooth(port.haptics);
 		}
 		if (controller_queued_us == 0) {
 			// No DualSense took it (e.g. it was unplugged); a pad speaker port plays on the main
 			// output instead, and a vibration port has none.
 			const float main_gain = gain * Mix::MainOutputGain(m_mix, port.type, true);
 			if (m_level_logging) {
-				MeterOutput(params[i].handle.GetId(), &port, params[i].data,
-				            port.stream != nullptr, main_gain);
+				MeterOutput(params[i].handle.GetId(), &port, params[i].data, port.stream != nullptr,
+				            main_gain);
 			}
-			port.meter_device = m_level_logging;
+			port.meter_device         = m_level_logging;
 			const bool paced_by_other = primed_count > (primed_before[i] ? 1u : 0u);
-			if (QueueSdlAudio(&port, params[i].data, blocking, main_gain, params[i].gains, paced_by_other)) {
+			if (QueueSdlAudio(&port, params[i].data, blocking, main_gain, params[i].gains,
+			                  paced_by_other)) {
 				any_device = true;
 				paced[i]   = port.queue_primed && !port.catch_up;
 			}
@@ -1286,9 +1362,10 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 				if (blocking && controller_queued_us > AUDIO_OUT_TARGET_LATENCY_US) {
 					// Limit a stalled USB endpoint to one audio block of waiting.
 					const uint64_t block_us = 1000000ULL * port.samples_num / port.freq;
-					deadline = std::max(deadline, LibKernel::KernelGetProcessTime() +
-					                                  std::min(controller_queued_us - AUDIO_OUT_TARGET_LATENCY_US,
-					                                           block_us));
+					deadline                = std::max(
+					    deadline,
+					    LibKernel::KernelGetProcessTime() +
+					        std::min(controller_queued_us - AUDIO_OUT_TARGET_LATENCY_US, block_us));
 				}
 			}
 		}
@@ -1311,7 +1388,8 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 			paced[i] = false;
 		}
 		if (blocking && (paced[i] || !any_device)) {
-			deadline = std::max(deadline, port.clock.Advance(now, port.samples_num, audio_out_clock_rate(port.freq)));
+			deadline = std::max(deadline, port.clock.Advance(now, port.samples_num,
+			                                                 audio_out_clock_rate(port.freq)));
 		} else {
 			port.clock = {};
 		}
@@ -1402,7 +1480,8 @@ void Audio::CloseSdlDevice(PortIn* port) {
 	}
 }
 
-Audio::Id Audio::AudioInOpen(uint32_t samples_num, uint32_t freq, Format format, bool asynchronous) {
+Audio::Id Audio::AudioInOpen(uint32_t samples_num, uint32_t freq, Format format,
+                             bool asynchronous) {
 	Common::LockGuard lock(m_mutex);
 
 	for (int id = 0; id < IN_PORTS_MAX; id++) {
@@ -1428,8 +1507,7 @@ Audio::Id Audio::AudioInOpen(uint32_t samples_num, uint32_t freq, Format format,
 }
 
 Audio::PortIn* Audio::GetAudioInPort(Id handle) {
-	if (handle.GetId() < 0 || handle.GetId() >= IN_PORTS_MAX ||
-	    !m_in_ports[handle.GetId()].used) {
+	if (handle.GetId() < 0 || handle.GetId() >= IN_PORTS_MAX || !m_in_ports[handle.GetId()].used) {
 		return nullptr;
 	}
 	return &m_in_ports[handle.GetId()];
@@ -1437,7 +1515,7 @@ Audio::PortIn* Audio::GetAudioInPort(Id handle) {
 
 int Audio::AudioInClose(Id handle) {
 	Common::LockGuard lock(m_mutex);
-	auto* port = GetAudioInPort(handle);
+	auto*             port = GetAudioInPort(handle);
 	if (port == nullptr) {
 		return AUDIO_IN_ERROR_INVALID_HANDLE;
 	}
@@ -1475,9 +1553,9 @@ int Audio::AudioInInput(Id handle, void* dest) {
 		port->busy = true;
 		snapshot   = *port;
 	}
-	bool failed = snapshot.stream != nullptr && dest != nullptr &&
-	              (!RecordingDevicePresent(snapshot.device) ||
-	               !SDL_ResumeAudioStreamDevice(snapshot.stream));
+	bool failed =
+	    snapshot.stream != nullptr && dest != nullptr &&
+	    (!RecordingDevicePresent(snapshot.device) || !SDL_ResumeAudioStreamDevice(snapshot.stream));
 
 	const uint64_t block_time = (1000000ULL * snapshot.samples_num) / snapshot.freq;
 	uint64_t       wait_time  = 0;
@@ -1493,23 +1571,22 @@ int Audio::AudioInInput(Id handle, void* dest) {
 		}
 	}
 	Common::Thread::SleepMicro(wait_time);
-	uint32_t frames = snapshot.samples_num;
+	uint32_t frames    = snapshot.samples_num;
 	bool     timed_out = false;
 	if (dest != nullptr) {
 		if (snapshot.stream != nullptr && !failed) {
-			const int requested = static_cast<int>(frames * snapshot.bytes_per_frame);
-			const auto deadline = LibKernel::KernelGetProcessTime() +
-			                      std::max<uint64_t>(20000, block_time * 4);
-			const auto device = SDL_GetAudioStreamDevice(snapshot.stream);
+			const int  requested = static_cast<int>(frames * snapshot.bytes_per_frame);
+			const auto deadline =
+			    LibKernel::KernelGetProcessTime() + std::max<uint64_t>(20000, block_time * 4);
+			const auto device    = SDL_GetAudioStreamDevice(snapshot.stream);
 			int        available = SDL_GetAudioStreamAvailable(snapshot.stream);
-			while (!snapshot.asynchronous && available >= 0 &&
-			       available < requested &&
+			while (!snapshot.asynchronous && available >= 0 && available < requested &&
 			       device != 0 && !SDL_AudioDevicePaused(device) &&
 			       LibKernel::KernelGetProcessTime() < deadline) {
 				Common::Thread::SleepMicro(1000);
 				available = SDL_GetAudioStreamAvailable(snapshot.stream);
 			}
-			failed = available < 0 || device == 0 || SDL_AudioDevicePaused(device);
+			failed    = available < 0 || device == 0 || SDL_AudioDevicePaused(device);
 			timed_out = !snapshot.asynchronous && available < requested;
 			if (!failed && !timed_out) {
 				if (snapshot.asynchronous) {
@@ -1741,8 +1818,8 @@ namespace AudioIn {
 
 LIB_NAME("AudioIn", "AudioIn");
 
-static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t freq,
-                    uint32_t param, bool asynchronous) {
+static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t freq, uint32_t param,
+                    bool asynchronous) {
 	LOGF("\t user_id = %d\n"
 	     "\t type    = %d\n"
 	     "\t index   = %d\n"
@@ -1792,14 +1869,14 @@ static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t fre
 	return id.ToInt();
 }
 
-int KYTY_SYSV_ABI AudioInOpen(int user_id, int type, int index, uint32_t len,
-                              uint32_t freq, uint32_t param) {
+int KYTY_SYSV_ABI AudioInOpen(int user_id, int type, int index, uint32_t len, uint32_t freq,
+                              uint32_t param) {
 	PRINT_NAME();
 	return OpenPort(user_id, type, index, len, freq, param, false);
 }
 
-int KYTY_SYSV_ABI AudioInHqOpen(int user_id, int type, int index, uint32_t len,
-                                uint32_t freq, uint32_t param) {
+int KYTY_SYSV_ABI AudioInHqOpen(int user_id, int type, int index, uint32_t len, uint32_t freq,
+                                uint32_t param) {
 	PRINT_NAME();
 	return OpenPort(user_id, type, index, len, freq, param, true);
 }

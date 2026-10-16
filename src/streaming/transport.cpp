@@ -1,5 +1,6 @@
 #include "streaming/transport.h"
 
+#include "streaming/controllerAudio.h"
 #include "streaming/feedback.h"
 
 #include <chrono>
@@ -147,23 +148,30 @@ void Transport::Reconnect() {
 }
 void Transport::Run(std::stop_token stop) {
 #if defined(__linux__)
-	int        socket     = -1;
-	uint64_t   generation = 0, input_sequence = 0, rumble_revision = 0;
-	bool        welcomed = false, hello_sent = false, motion_cap = false, adaptive_cap = false;
+	int         socket     = -1;
+	uint64_t    generation = 0, input_sequence = 0, rumble_revision = 0;
+	bool        welcomed = false, hello_sent = false, motion_cap = false, adaptive_cap = false,
+	            audio_cap            = false;
+	uint64_t    audio_generation     = 0;
+	bool        audio_ready_proposed = false;
 	MotionOrder motion_order;
 	uint64_t    trigger_revision = 0, motion_received = 0, motion_applied = 0, trigger_sent = 0;
-	auto       retry         = std::chrono::steady_clock::now();
-	auto       last_feedback = retry;
+	auto        retry         = std::chrono::steady_clock::now();
+	auto        last_feedback = retry;
 	auto        last_trigger  = retry;
-	auto       last_status   = retry;
-	uint64_t   last_sequence = 0;
-	const auto disconnect    = [&] {
-		feedback_enabled = false;
-		adaptive_enabled = false;
+	auto        last_status   = retry;
+	uint64_t    last_sequence = 0;
+	const auto  disconnect    = [&] {
+		ControllerAudio::Disable();
+		audio_generation     = 0;
+		audio_ready_proposed = false;
+		audio_cap            = false;
+		feedback_enabled     = false;
+		adaptive_enabled     = false;
 		ClearAdaptiveTriggers();
 		motion_order.Reset();
 		motion_cap = adaptive_cap = false;
-		feedback_value   = 0;
+		feedback_value            = 0;
 		feedback_revision.fetch_add(1, std::memory_order_release);
 		m_active_epoch = 0;
 		m_attached     = false;
@@ -228,6 +236,7 @@ void Transport::Run(std::stop_token stop) {
 					invalid = true;
 					break;
 				}
+				audio_cap    = HasCapability(p, "controller-audio-v1");
 				motion_cap   = HasCapability(p, "motion-v1");
 				adaptive_cap = HasCapability(p, "adaptive-triggers-v1");
 				welcomed     = true;
@@ -243,6 +252,7 @@ void Transport::Run(std::stop_token stop) {
 					invalid = true;
 					break;
 				}
+				audio_cap        = audio_cap && HasCapability(p, "controller-audio-v1");
 				motion_cap       = motion_cap && HasCapability(p, "motion-v1");
 				adaptive_cap     = adaptive_cap && HasCapability(p, "adaptive-triggers-v1");
 				m_attached       = true;
@@ -260,7 +270,23 @@ void Transport::Run(std::stop_token stop) {
 				invalid = true;
 				break;
 			}
-			if (type == "release") {
+			if (type == "controller-audio-state" && audio_cap) {
+				ControllerAudioState state;
+				if (!ParseControllerAudioState(p, state)) {
+					invalid = true;
+					break;
+				}
+				// Preparing and active share a binding generation. Accept its readiness
+				// transition once while ignoring duplicate state and older bindings.
+				if (state.generation > audio_generation ||
+				    (state.generation == audio_generation && state.ready != audio_ready_proposed)) {
+					audio_generation     = state.generation;
+					audio_ready_proposed = state.ready;
+					ControllerAudio::Configure(
+					    {state.path, state.nonce_hex, state.generation, state.producer_epoch},
+					    state.ready);
+				}
+			} else if (type == "release") {
 				if (!p.contains("epoch") || !p.contains("slot") || !p.contains("sequence") ||
 				    !p["epoch"].is_number_unsigned() || !p["slot"].is_number_unsigned() ||
 				    !p["sequence"].is_number_unsigned() || p["slot"].get<uint64_t>() >= SlotCount) {
@@ -333,8 +359,9 @@ void Transport::Run(std::stop_token stop) {
 				                     {"offset", 0},
 				                     {"dedicated", true},
 				                     {"transport", "vulkan-buffer-fd"}};
-				if (motion_cap || adaptive_cap) {
+				if (motion_cap || adaptive_cap || audio_cap) {
 					hello["capabilities"] = Json::array();
+					if (audio_cap) hello["capabilities"].push_back("controller-audio-v1");
 					if (motion_cap) hello["capabilities"].push_back("motion-v1");
 					if (adaptive_cap) hello["capabilities"].push_back("adaptive-triggers-v1");
 				}
@@ -363,14 +390,20 @@ void Transport::Run(std::stop_token stop) {
 				next->published.store(false, std::memory_order_release);
 			}
 			if (now - last_status >= std::chrono::seconds(1)) {
-				if (SendPacket(socket, {{"type", "status"},
-				                        {"state", "attached"},
-				                        {"sequence", last_sequence},
-				                        {"dropped", Dropped()},
-				                        {"motion_received", motion_received},
-				                        {"motion_applied", motion_applied},
-				                        {"adaptive_sent", trigger_sent}}))
-					last_status = now;
+				Json status = {{"type", "status"},
+				               {"state", "attached"},
+				               {"sequence", last_sequence},
+				               {"dropped", Dropped()},
+				               {"motion_received", motion_received},
+				               {"motion_applied", motion_applied},
+				               {"adaptive_sent", trigger_sent}};
+				if (audio_cap) {
+					const auto audio           = ControllerAudio::GetStatus();
+					status["controller_audio"] = {{"ready", audio.ready},
+					                              {"bytes", audio.bytes},
+					                              {"discontinuities", audio.discontinuities}};
+				}
+				if (SendPacket(socket, status)) last_status = now;
 			}
 			if (adaptive_cap && now - last_trigger >= std::chrono::milliseconds(16)) {
 				const auto effect = ReadAdaptiveTriggers();

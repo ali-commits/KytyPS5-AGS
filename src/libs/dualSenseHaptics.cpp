@@ -2,6 +2,7 @@
 
 #include "common/logging/log.h"
 #include "common/threads.h"
+#include "controller_audio/pcm.h"
 #include "libs/audioDiag.h"
 #include "libs/dualSenseBluetooth.h"
 
@@ -24,6 +25,7 @@ struct Stream {
 	SDL_AudioDeviceID           device     = 0;
 	uint64_t                    next_check = 0;
 	std::vector<float>          buffer;
+	std::vector<float>          stereo;
 };
 
 namespace {
@@ -210,12 +212,11 @@ SDL_AudioDeviceID FindDevice() {
 	for (int i = 0; i < count; i++) {
 		const char*   name = SDL_GetAudioDeviceName(devices[i]);
 		SDL_AudioSpec spec {};
-		const bool is_dualsense_name =
-		    name != nullptr &&
-		    (SDL_strcasestr(name, "DualSense") != nullptr ||
-		     SDL_strcasestr(name, "Wireless Controller") != nullptr);
-		if (is_dualsense_name &&
-		    SDL_GetAudioDeviceFormat(devices[i], &spec, nullptr) && spec.channels == 4) {
+		const bool    is_dualsense_name =
+		    name != nullptr && (SDL_strcasestr(name, "DualSense") != nullptr ||
+		                        SDL_strcasestr(name, "Wireless Controller") != nullptr);
+		if (is_dualsense_name && SDL_GetAudioDeviceFormat(devices[i], &spec, nullptr) &&
+		    spec.channels == 4) {
 			if (device != 0) {
 				device = 0; // Multiple matching endpoints cannot be associated reliably either.
 				break;
@@ -364,30 +365,36 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 		return 0;
 	}
 
+	stream->stereo.resize(static_cast<size_t>(frames) * 2);
+	const auto* first = static_cast<const uint8_t*>(data) +
+	                    static_cast<size_t>(first_frame) * channels * (is_float ? 4 : 2);
+	if (!::ControllerAudio::ConvertStereo(
+	        {first, frames, channels, stream->freq, is_float, volume, gain, gains},
+	        stream->stereo)) {
+		return 0;
+	}
+
 	if (!stream->speaker &&
-		SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(controller)) != SDL_GAMEPAD_TYPE_PS5) {
+	    SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(controller)) != SDL_GAMEPAD_TYPE_PS5) {
 		float peak[2] = {0.0f, 0.0f};
 		for (uint32_t frame = 0; frame < frames; frame++) {
 			for (uint32_t ch = 0; ch < 2; ch++) {
-				const auto src_ch = channels == 1 ? 0 : ch;
-				const auto index  = (static_cast<size_t>(first_frame) + frame) * channels + src_ch;
-				float      value  = is_float ? static_cast<const float*>(data)[index]
-											: static_cast<const int16_t*>(data)[index] / 32768.0f;
-				value *= volume[src_ch] / 32768.0f * gain * (gains != nullptr ? gains[src_ch] : 1.0f);
-				peak[ch] = std::max(peak[ch], std::fabs(value));
+				const float value = stream->stereo[static_cast<size_t>(frame) * 2 + ch];
+				peak[ch]          = std::max(peak[ch], std::fabs(value));
 			}
 		}
 		const auto to_motor = [](float v) {
 			return static_cast<uint16_t>(std::clamp(v * 2.0f, 0.0f, 1.0f) * 65535.0f);
 		};
 		SDL_LockJoysticks();
-		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller)); pad != nullptr) {
+		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(controller));
+		    pad != nullptr) {
 			(void)SDL_RumbleGamepad(pad, to_motor(peak[0]), to_motor(peak[1]), 100);
 		}
 		SDL_UnlockJoysticks();
 		return static_cast<uint64_t>(frames) * 1000000 / stream->freq;
 	}
-	
+
 	const bool wireless = IsWireless(controller);
 	if (!wireless && !CanUseDevice(controller)) {
 		CloseDevice(stream);
@@ -416,11 +423,7 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 	bool audible = false;
 	for (uint32_t frame = 0; frame < frames; frame++) {
 		for (uint32_t ch = 0; ch < 2; ch++) {
-			const auto src_ch = channels == 1 ? 0 : ch;
-			const auto index  = (static_cast<size_t>(first_frame) + frame) * channels + src_ch;
-			float      value  = is_float ? static_cast<const float*>(data)[index]
-			                             : static_cast<const int16_t*>(data)[index] / 32768.0f;
-			value *= volume[src_ch] / 32768.0f * gain * (gains != nullptr ? gains[src_ch] : 1.0f);
+			const float value = stream->stereo[static_cast<size_t>(frame) * 2 + ch];
 			// USB places the speaker in front and the actuators in back; Bluetooth takes stereo.
 			stream->buffer[static_cast<size_t>(frame) * output_channels + ch + channel_offset] =
 			    value;

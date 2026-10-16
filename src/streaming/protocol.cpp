@@ -140,6 +140,30 @@ bool ParseMotion(const Json& p, Motion& output) noexcept {
 	output = candidate;
 	return true;
 }
+bool ParseControllerAudioState(const Json& p, ControllerAudioState& output) noexcept {
+	if (!p.is_object() || p.value("type", Json()) != "controller-audio-state" ||
+	    !p.contains("ready") || !p["ready"].is_boolean() || !p.contains("generation") ||
+	    !Unsigned(p["generation"], 1, UINT64_MAX))
+		return false;
+	ControllerAudioState state;
+	state.ready      = p["ready"];
+	state.generation = p["generation"];
+	if (state.ready) {
+		if (!p.contains("producer_epoch") || !Unsigned(p["producer_epoch"], 1, UINT64_MAX) ||
+		    !p.contains("socket") || !p["socket"].is_string() || !p.contains("nonce") ||
+		    !p["nonce"].is_string())
+			return false;
+		state.producer_epoch = p["producer_epoch"];
+		state.path           = p["socket"].get<std::string>();
+		state.nonce_hex      = p["nonce"].get<std::string>();
+		if (state.path.empty() || state.path[0] != '/' || state.path.size() >= 108 ||
+		    state.path.find('\0') != std::string::npos || state.nonce_hex.size() != 64 ||
+		    state.nonce_hex.find_first_not_of("0123456789abcdef") != std::string::npos)
+			return false;
+	}
+	output = std::move(state);
+	return true;
+}
 std::optional<Lease> LeaseRing::TryAcquire() {
 	std::unique_lock lock(m_mutex, std::try_to_lock);
 	if (!lock.owns_lock()) return {};
