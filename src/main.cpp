@@ -15,10 +15,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <string_view>
-#include <vector>
 #include <fmt/format.h>
 #include <magic_enum.hpp>
+#include <string_view>
+#include <vector>
 
 #if defined(KYTY_PGO_GENERATE)
 #include <chrono>
@@ -48,7 +48,8 @@ static void StartPgoDumps() {
 		return;
 	}
 	const char* seconds_text = std::getenv("KYTY_PGO_DUMP_SECONDS");
-	const int   seconds      = (seconds_text != nullptr && std::atoi(seconds_text) > 0) ? std::atoi(seconds_text) : 20;
+	const int   seconds =
+	    (seconds_text != nullptr && std::atoi(seconds_text) > 0) ? std::atoi(seconds_text) : 20;
 	static const std::string target = file;
 	static const std::string temp   = target + ".tmp";
 	::printf("PGO: writing the profile to %s every %d s\n", target.c_str(), seconds);
@@ -61,7 +62,8 @@ static void StartPgoDumps() {
 			if (written == 0) {
 				std::filesystem::rename(temp, target, error);
 			}
-			::printf("PGO: dump %u %s\n", dump, written != 0 ? "failed to write" : (error ? "failed to rename" : "written"));
+			::printf("PGO: dump %u %s\n", dump,
+			         written != 0 ? "failed to write" : (error ? "failed to rename" : "written"));
 			::fflush(stdout);
 		}
 	}).detach();
@@ -94,25 +96,32 @@ static void PrintUsage() {
 	::printf("Options:\n");
 	::printf("  --game <dir|elf|zar>                 Game directory, ELF, or ZArchive to load.\n");
 	::printf("  --game-patch <json>                  ETAHen cheat file.\n");
+	::printf("  --addcont-dir <dir>                  Add-ons (DLC) folder (default: none).\n");
 	::printf("  --screen-width <num>                 Window width. Default: 1280.\n");
 	::printf("  --screen-height <num>                Window height. Default: 720.\n");
 	::printf(
 	    "  --user-name <name>                   Local user name (1-16 bytes). Default: Kyty.\n");
 	::printf("  --user-id <num>                      Local user ID. Default: %d.\n",
 	         Config::DEFAULT_USER_ID);
-	::printf("  --mic <name>                        Capture from this microphone; omit for silence.\n");
+	::printf(
+	    "  --mic <name>                        Capture from this microphone; omit for silence.\n");
 	::printf("  --controller-color <#RRGGBB>        Override the controller lightbar color.\n");
 	::printf("  --controller-volume <0-100>         DualSense speaker volume. Default: 50.\n");
-	::printf("  --controller-vibration <0-100>      DualSense vibration intensity. Default: 100.\n");
-	::printf("  --audio-master-volume <0-200>       Volume of everything on the main output. Default: 100.\n");
+	::printf(
+	    "  --controller-vibration <0-100>      DualSense vibration intensity. Default: 100.\n");
+	::printf("  --audio-master-volume <0-200>       Volume of everything on the main output. "
+	         "Default: 100.\n");
 	::printf("  --audio-main-volume <0-200>         Game sound (main ports). Default: 100.\n");
 	::printf("  --audio-music-volume <0-200>        Music on BGM ports. Default: 100.\n");
-	::printf("  --audio-pad-speaker-volume <0-200>  Controller-speaker sounds played on the main output\n"
+	::printf("  --audio-pad-speaker-volume <0-200>  Controller-speaker sounds played on the main "
+	         "output\n"
 	         "                                      when no DualSense takes them. Default: %u.\n",
 	         Config::DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME);
-	::printf("  --audio-objects-volume <0-200>      3D audio objects (AudioOut2 object ports), mixed into\n"
+	::printf("  --audio-objects-volume <0-200>      3D audio objects (AudioOut2 object ports), "
+	         "mixed into\n"
 	         "                                      the game sound. Default: 100.\n");
-	::printf("  --audio-objects <on|off>            Play 3D audio objects (off: dropped). Default: on.\n");
+	::printf("  --audio-objects <on|off>            Play 3D audio objects (off: dropped). Default: "
+	         "on.\n");
 	::printf(
 	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
 	::printf(
@@ -121,21 +130,28 @@ static void PrintUsage() {
 	::printf(
 	    "  --hide-cursor                        Hide the cursor after 2 s idle. Default: off.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
-	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's AMD-only\n"
-	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS results).\n"
-	         "                                       Default: on unless the CPU is an AMD (KYTY_AMD_CPU=\n"
+	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
+	         "AMD-only\n"
+	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS "
+	         "results).\n"
+	         "                                       Default: on unless the CPU is an AMD "
+	         "(KYTY_AMD_CPU=\n"
 	         "                                       1|0|auto overrides).\n");
-	::printf("  --no-amd-cpu                         Turn Intel CPU compatibility off on a non-AMD CPU.\n");
+	::printf("  --no-amd-cpu                         Turn Intel CPU compatibility off on a non-AMD "
+	         "CPU.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
 	::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation <true|false>     Enable shader validation.\n");
-	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
-	::printf("  --gpu-occlusion <on|off>             Accurate GPU occlusion queries (on) or always visible\n"
-	         "                                       (off, faster). Overrides KYTY_GPU_OCCLUSION (the\n"
-	         "                                       bundled preset: off).\n");
+	::printf(
+	    "  --tessellation                      Draw tessellation patches; skipped by default.\n");
+	::printf(
+	    "  --gpu-occlusion <on|off>             Accurate GPU occlusion queries (on) or always "
+	    "visible\n"
+	    "                                       (off, faster). Overrides KYTY_GPU_OCCLUSION (the\n"
+	    "                                       bundled preset: off).\n");
 	::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
 	::printf("  --shader-log-direction <value>       Silent, Console, or File.\n");
 	::printf("  --shader-log-folder <path>           Shader log output folder.\n");
@@ -148,14 +164,14 @@ static void PrintUsage() {
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
-	::printf(
-	    "  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. Default: false.\n");
-	::printf(
-	    "  --trophy-notifications <true|false>   Show trophy unlock toasts and play their sound.\n");
+	::printf("  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. "
+	         "Default: false.\n");
+	::printf("  --trophy-notifications <true|false>   Show trophy unlock toasts and play their "
+	         "sound.\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
-	::printf(
-	    "  --skip-notice-screen <true|false>    Skip startup logos and notices in supported games.\n"
-	    "                                      Default: false.\n");
+	::printf("  --skip-notice-screen <true|false>    Skip startup logos and notices in supported "
+	         "games.\n"
+	         "                                      Default: false.\n");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	::printf("  --redzone                            Protect the guest SysV red zone.\n");
 #endif
@@ -225,7 +241,7 @@ static bool ParseControllerColor(const std::string& value, Config::ControllerCol
 	if (value.size() != 7 || value[0] != '#') {
 		return false;
 	}
-	uint32_t rgb = 0;
+	uint32_t rgb      = 0;
 	auto [end, error] = std::from_chars(value.data() + 1, value.data() + value.size(), rgb, 16);
 	if (error != std::errc {} || end != value.data() + value.size()) {
 		return false;
@@ -262,10 +278,12 @@ static bool ParseUserId(const std::string& value, int32_t& out) {
 // guest's red zone (amd_cpu_emulation_tests), and VRSQRTPS would give the host's approximation.
 enum class AmdCpuChoice { Automatic, On, Off };
 
-static void ResolveAmdCpu(AmdCpuChoice choice, const std::string& source, Config::ConfigOptions& config) {
+static void ResolveAmdCpu(AmdCpuChoice choice, const std::string& source,
+                          Config::ConfigOptions& config) {
 	if (choice != AmdCpuChoice::Automatic) {
-		config.amd_cpu_enabled  = choice == AmdCpuChoice::On;
-		config.amd_cpu_decision = fmt::format("{} ({})", config.amd_cpu_enabled ? "on" : "off", source);
+		config.amd_cpu_enabled = choice == AmdCpuChoice::On;
+		config.amd_cpu_decision =
+		    fmt::format("{} ({})", config.amd_cpu_enabled ? "on" : "off", source);
 		return;
 	}
 	const auto vendor = Loader::X64InstructionEmulator::HostCpuVendor();
@@ -274,14 +292,15 @@ static void ResolveAmdCpu(AmdCpuChoice choice, const std::string& source, Config
 	config.amd_cpu_enabled  = false;
 	config.amd_cpu_decision = fmt::format("off (automatic on macOS, CPU vendor {})", vendor);
 #else
-	config.amd_cpu_enabled  = !Loader::X64InstructionEmulator::IsAmdCpuVendor(vendor);
-	config.amd_cpu_decision = fmt::format("{} (automatic: CPU vendor {}{})", config.amd_cpu_enabled ? "on" : "off",
-	                                      vendor, config.amd_cpu_enabled ? " is not AMD" : "");
+	config.amd_cpu_enabled = !Loader::X64InstructionEmulator::IsAmdCpuVendor(vendor);
+	config.amd_cpu_decision =
+	    fmt::format("{} (automatic: CPU vendor {}{})", config.amd_cpu_enabled ? "on" : "off",
+	                vendor, config.amd_cpu_enabled ? " is not AMD" : "");
 #endif
 }
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
-	show_help = false;
+	show_help                   = false;
 	AmdCpuChoice amd_cpu        = AmdCpuChoice::Automatic;
 	std::string  amd_cpu_source = "automatic";
 
@@ -390,7 +409,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("--game-patch can only be specified once\n");
 				return false;
 			}
-			value = Common::FixFilenameSlash(value);
+			value           = Common::FixFilenameSlash(value);
 			const auto path = Common::PathFromUtf8(value);
 
 			if (!Common::File::IsFileExisting(path)) {
@@ -398,6 +417,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.game_patch = path;
+		} else if (arg == "--addcont-dir") {
+			if (!options.addcont_dir.empty()) {
+				::printf("--addcont-dir can only be specified once\n");
+				return false;
+			}
+			options.addcont_dir = Common::PathFromUtf8(Common::FixFilenameSlash(value));
 		} else if (arg == "--screen-width") {
 			if (!ParseUint32(value, options.config.screen_width) ||
 			    options.config.screen_width == 0) {
@@ -446,10 +471,9 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--audio-master-volume" || arg == "--audio-main-volume" ||
 		           arg == "--audio-music-volume" || arg == "--audio-pad-speaker-volume" ||
 		           arg == "--audio-objects-volume") {
-			auto& target = arg == "--audio-master-volume" ? options.config.audio_master_volume
-			               : arg == "--audio-main-volume" ? options.config.audio_main_volume
-			               : arg == "--audio-music-volume"
-			                   ? options.config.audio_music_volume
+			auto& target = arg == "--audio-master-volume"  ? options.config.audio_master_volume
+			               : arg == "--audio-main-volume"  ? options.config.audio_main_volume
+			               : arg == "--audio-music-volume" ? options.config.audio_music_volume
 			               : arg == "--audio-objects-volume"
 			                   ? options.config.audio_objects_volume
 			                   : options.config.audio_pad_speaker_main_volume;
@@ -586,10 +610,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 	// KYTY_AMD_CPU=1|0|auto overrides --amd-cpu / --no-amd-cpu (the launcher's "Intel CPU
 	// compatibility"), for presets and test harnesses.
 	if (const char* env = std::getenv("KYTY_AMD_CPU"); env != nullptr && env[0] != '\0') {
-		amd_cpu        = std::strcmp(env, "auto") == 0 ? AmdCpuChoice::Automatic
-		                 : std::strcmp(env, "0") == 0  ? AmdCpuChoice::Off
-		                                               : AmdCpuChoice::On;
-		amd_cpu_source = amd_cpu == AmdCpuChoice::Automatic ? "automatic" : fmt::format("KYTY_AMD_CPU={}", env);
+		amd_cpu = std::strcmp(env, "auto") == 0 ? AmdCpuChoice::Automatic
+		          : std::strcmp(env, "0") == 0  ? AmdCpuChoice::Off
+		                                        : AmdCpuChoice::On;
+		amd_cpu_source =
+		    amd_cpu == AmdCpuChoice::Automatic ? "automatic" : fmt::format("KYTY_AMD_CPU={}", env);
 	}
 	ResolveAmdCpu(amd_cpu, amd_cpu_source, options.config);
 
@@ -630,30 +655,30 @@ static int Main(int argc, char* argv[]) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 
 int wmain(int argc, wchar_t* argv[]) {
-    std::vector<std::string> utf8_args;
-    utf8_args.reserve(static_cast<size_t>(argc));
+	std::vector<std::string> utf8_args;
+	utf8_args.reserve(static_cast<size_t>(argc));
 
-    for (int index = 0; index < argc; index++) {
-        const std::wstring_view wide(argv[index]);
-        const std::u16string utf16(wide.begin(), wide.end());
+	for (int index = 0; index < argc; index++) {
+		const std::wstring_view wide(argv[index]);
+		const std::u16string    utf16(wide.begin(), wide.end());
 
-        utf8_args.push_back(Common::Utf16ToUtf8(utf16));
-    }
+		utf8_args.push_back(Common::Utf16ToUtf8(utf16));
+	}
 
-    std::vector<char*> utf8_argv;
-    utf8_argv.reserve(utf8_args.size());
+	std::vector<char*> utf8_argv;
+	utf8_argv.reserve(utf8_args.size());
 
-    for (auto& argument: utf8_args) {
-        utf8_argv.push_back(argument.data());
-    }
+	for (auto& argument: utf8_args) {
+		utf8_argv.push_back(argument.data());
+	}
 
-    return Main(argc, utf8_argv.data());
+	return Main(argc, utf8_argv.data());
 }
 
 #else
 
 int main(int argc, char* argv[]) {
-    return Main(argc, argv);
+	return Main(argc, argv);
 }
 
 #endif

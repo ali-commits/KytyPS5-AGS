@@ -99,6 +99,9 @@ QStringList BuildEmulatorArgs(const Configuration& info) {
 		game = QDir(info.basedir).filePath(info.elf);
 	}
 	args << "--game" << game;
+	if (!info.addons_dir.isEmpty()) {
+		args << "--addcont-dir" << info.addons_dir;
+	}
 
 	const auto patch_plan = Cheats::PlanPath(info.title_id);
 	if (QFileInfo::exists(patch_plan)) {

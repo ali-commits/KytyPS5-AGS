@@ -42,10 +42,10 @@ public:
 	CreateConfiguration(const ConfigurationItem& item) const;
 
 	QList<StreamingLaunchEntry> CreateStreamingCatalog(const QString& interpreter) const;
-	bool EnsureGameDirectory();
-	void ScanGameDirectory();
-	void ViewTrophies();
-	void ViewTrophyOverview();
+	bool                        EnsureGameDirectory();
+	void                        ScanGameDirectory();
+	void                        ViewTrophies();
+	void                        ViewTrophyOverview();
 
 signals:
 
@@ -87,6 +87,7 @@ private:
 	QString                       m_settings_file;
 	QString                       m_runtime_directory;
 	QStringList                   m_game_dirs;
+	QString                       m_addons_dir;
 	Configuration                 m_global_info;
 	QMap<QString, Configuration*> m_custom_infos;
 	CompatibilityDatabase*        m_compatibility = nullptr;

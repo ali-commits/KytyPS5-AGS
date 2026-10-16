@@ -3,7 +3,6 @@
 #include "common/emulatorConfig.h"
 #include "configuration.h"
 #include "mandatoryLineEdit.h"
-#include <SDL3/SDL.h>
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -15,6 +14,7 @@
 #include <QFileInfo>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
 #include <QListView>
@@ -31,6 +31,8 @@
 #include <QTreeView>
 #include <QVBoxLayout>
 #include <QtAlgorithms>
+
+#include <SDL3/SDL.h>
 
 #if QT_CONFIG(vulkan)
 #include <QVulkanInstance>
@@ -120,12 +122,12 @@ static QString GameDirectoryKey(const QString& dir) {
 #endif
 }
 
-// The audio mix sliders and the 3D objects switch (rows 1-6 of the Audio group) are global settings like the controller
-// group: shown only in the global settings dialog.
+// The audio mix sliders and the 3D objects switch (rows 1-6 of the Audio group) are global settings
+// like the controller group: shown only in the global settings dialog.
 struct AudioMixSlider {
 	QSlider* slider;
 	QLabel*  value;
-	int AudioMixSettings::*field;
+	int AudioMixSettings::* field;
 };
 
 static std::array<AudioMixSlider, 5> AudioMixSliders(Ui::ConfigurationEditDialog& ui) {
@@ -152,8 +154,7 @@ ConfigurationEditDialog::ConfigurationEditDialog(Configuration& info, QWidget* p
 	SetAudioMixVisible(*m_ui, false);
 	for (const auto& mix: AudioMixSliders(*m_ui)) {
 		mix.slider->setMaximum(static_cast<int>(Config::MAX_AUDIO_VOLUME));
-		connect(mix.slider, &QSlider::valueChanged, this,
-		        [label = mix.value](int value) {
+		connect(mix.slider, &QSlider::valueChanged, this, [label = mix.value](int value) {
 			label->setText(ConfigurationEditDialog::tr("%1%").arg(value));
 		});
 	}
@@ -193,8 +194,8 @@ ConfigurationEditDialog::ConfigurationEditDialog(Configuration& info, QWidget* p
 	connect(m_ui->comboBox_shader_log_direction, &QComboBox::currentTextChanged, this,
 	        [this](const QString& text) {
 		        auto log = TextToEnum<Configuration::LogDirection>(text);
-		        m_ui->lineEdit_shader_log_folder->setEnabled(
-		            log == Configuration::LogDirection::File);
+		        m_ui->lineEdit_shader_log_folder->setEnabled(log ==
+		                                                     Configuration::LogDirection::File);
 	        });
 	connect(m_ui->checkBox_cmd_dump, &QCheckBox::toggled, this,
 	        [this](bool flag) { m_ui->lineEdit_cmd_dump_folder->setEnabled(flag); });
@@ -274,8 +275,8 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 		SDL_free(devices);
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 	} else {
-		microphone->setToolTip(tr("Microphones could not be listed: %1")
-		                           .arg(QString::fromUtf8(SDL_GetError())));
+		microphone->setToolTip(
+		    tr("Microphones could not be listed: %1").arg(QString::fromUtf8(SDL_GetError())));
 	}
 	if (microphone->findData(info.audio_input_device) < 0) {
 		microphone->addItem(tr("%1 (unavailable)").arg(info.audio_input_device),
@@ -335,9 +336,10 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_renderdoc_capture->setChecked(info.renderdoc_enabled);
 	// Partly checked: automatic (on unless the CPU is an AMD).
 	m_ui->checkBox_amd_cpu->setTristate(true);
-	m_ui->checkBox_amd_cpu->setCheckState(info.amd_cpu_mode == QStringLiteral("on")    ? Qt::Checked
-	                                      : info.amd_cpu_mode == QStringLiteral("off") ? Qt::Unchecked
-	                                                                                   : Qt::PartiallyChecked);
+	m_ui->checkBox_amd_cpu->setCheckState(info.amd_cpu_mode == QStringLiteral("on") ? Qt::Checked
+	                                      : info.amd_cpu_mode == QStringLiteral("off")
+	                                          ? Qt::Unchecked
+	                                          : Qt::PartiallyChecked);
 #if defined(__APPLE__)
 	m_ui->checkBox_amd_cpu->setVisible(false);
 #endif
@@ -392,6 +394,28 @@ void ConfigurationEditDialog::InitGameDirectories() {
 	button_layout->addStretch(1);
 	group_layout->addLayout(button_layout);
 
+	group_layout->addWidget(new QLabel(tr("Add-ons folder"), m_game_dirs_group));
+	auto* addons_layout = new QHBoxLayout;
+	addons_layout->setContentsMargins(0, 0, 0, 0);
+	addons_layout->setSpacing(4);
+	m_addons_dir_edit = new QLineEdit(m_game_dirs_group);
+	m_addons_dir_edit->setPlaceholderText(tr("Folder containing extracted add-on (DLC) packages"));
+	addons_layout->addWidget(m_addons_dir_edit, 1);
+	auto* addons_button = new QToolButton(m_game_dirs_group);
+	addons_button->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
+	addons_button->setToolTip(tr("Select add-ons folder"));
+	addons_button->setAutoRaise(true);
+	addons_layout->addWidget(addons_button);
+	group_layout->addLayout(addons_layout);
+	connect(addons_button, &QToolButton::clicked, this, [this]() {
+		const auto dir = QFileDialog::getExistingDirectory(
+		    this, tr("Select add-ons folder"),
+		    m_addons_dir_edit->text().isEmpty() ? QDir::homePath() : m_addons_dir_edit->text());
+		if (!dir.isEmpty()) {
+			m_addons_dir_edit->setText(QDir::toNativeSeparators(dir));
+		}
+	});
+
 	m_ui->gridLayout->addWidget(m_game_dirs_group, 1, 0, 1, 1);
 	m_game_dirs_group->setVisible(false);
 
@@ -404,9 +428,11 @@ void ConfigurationEditDialog::InitGameDirectories() {
 	update_game_directory_buttons();
 }
 
-void ConfigurationEditDialog::SetGlobalSettings(const QStringList& dirs) {
+void ConfigurationEditDialog::SetGlobalSettings(const QStringList& dirs,
+                                                const QString&     addons_dir) {
 	m_global_settings = true;
-	auto* menu        = new QMenu(m_ui->settings_button);
+	m_addons_dir_edit->setText(QDir::toNativeSeparators(addons_dir));
+	auto* menu = new QMenu(m_ui->settings_button);
 	menu->addAction(tr("Import..."), this, &ConfigurationEditDialog::ImportGameSettings);
 	menu->addAction(tr("Export..."), this, &ConfigurationEditDialog::ExportGameSettings);
 	m_ui->settings_button->setMenu(menu);
@@ -424,6 +450,10 @@ void ConfigurationEditDialog::SetGlobalSettings(const QStringList& dirs) {
 	update_game_directory_buttons();
 	layout()->activate();
 	resize(size().expandedTo(minimumSizeHint()));
+}
+
+QString ConfigurationEditDialog::GetAddonsDirectory() const {
+	return m_global_settings ? m_addons_dir_edit->text().trimmed() : QString();
 }
 
 QStringList ConfigurationEditDialog::GetGameDirectories() const {
@@ -469,8 +499,8 @@ void ConfigurationEditDialog::resizeEvent(QResizeEvent* event) {
 }
 
 static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, bool global_settings) {
-	info.user_name = ui.lineEdit_user_name->text().trimmed();
-	info.user_id   = ui.spinBox_user_id->value();
+	info.user_name          = ui.lineEdit_user_name->text().trimmed();
+	info.user_id            = ui.spinBox_user_id->value();
 	info.audio_input_device = ui.comboBox_audio_input_device->currentData().toString();
 	if (global_settings) {
 		info.controller.color = ui.button_controller_color->property("controllerColor").toString();
@@ -480,7 +510,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 			info.audio_mix.*mix.field = mix.slider->value();
 		}
 		info.audio_mix.objects_enabled = ui.checkBox_audio_objects->isChecked();
-		info.gpu_occlusion_accurate = ui.checkBox_gpu_occlusion->isChecked();
+		info.gpu_occlusion_accurate    = ui.checkBox_gpu_occlusion->isChecked();
 	}
 	info.screen_resolution =
 	    TextToEnum<Configuration::Resolution>(ui.comboBox_screen_resolution->currentText());
@@ -508,15 +538,15 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 #endif
 	info.shader_optimization_type = TextToEnum<Configuration::ShaderOptimizationType>(
 	    ui.comboBox_shader_optimization_type->currentText());
-	info.shader_log_direction = TextToEnum<Configuration::LogDirection>(
-	    ui.comboBox_shader_log_direction->currentText());
+	info.shader_log_direction =
+	    TextToEnum<Configuration::LogDirection>(ui.comboBox_shader_log_direction->currentText());
 	info.shader_log_folder           = ui.lineEdit_shader_log_folder->text();
 	info.command_buffer_dump_enabled = ui.checkBox_cmd_dump->isChecked();
 	info.command_buffer_dump_folder  = ui.lineEdit_cmd_dump_folder->text();
 	info.printf_direction =
 	    TextToEnum<Configuration::LogDirection>(ui.comboBox_printf_direction->currentText());
 	info.printf_output_file = ui.lineEdit_printf_file->text();
-	info.profiler_enabled = ui.checkBox_profiler->isChecked();
+	info.profiler_enabled   = ui.checkBox_profiler->isChecked();
 }
 
 void ConfigurationEditDialog::save() {

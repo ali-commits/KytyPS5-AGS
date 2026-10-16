@@ -70,11 +70,11 @@ struct ControllerSettings {
 
 // Host mix levels (percent, 0..Config::MAX_AUDIO_VOLUME), global like the controller settings.
 struct AudioMixSettings {
-	int master      = 100;
-	int main        = 100;
-	int music       = 100;
-	int pad_speaker = static_cast<int>(Config::DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME);
-	int objects     = 100;
+	int  master          = 100;
+	int  main            = 100;
+	int  music           = 100;
+	int  pad_speaker     = static_cast<int>(Config::DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME);
+	int  objects         = 100;
 	bool objects_enabled = true;
 
 	void WriteSettings(QSettings* s) const {
@@ -93,11 +93,11 @@ struct AudioMixSettings {
 			return ok ? qBound(0, value, static_cast<int>(Config::MAX_AUDIO_VOLUME)) : fallback;
 		};
 		const AudioMixSettings defaults;
-		master      = read_percent("audio_master_volume", defaults.master);
-		main        = read_percent("audio_main_volume", defaults.main);
-		music       = read_percent("audio_music_volume", defaults.music);
-		pad_speaker = read_percent("audio_pad_speaker_main_volume", defaults.pad_speaker);
-		objects     = read_percent("audio_objects_volume", defaults.objects);
+		master          = read_percent("audio_master_volume", defaults.master);
+		main            = read_percent("audio_main_volume", defaults.main);
+		music           = read_percent("audio_music_volume", defaults.music);
+		pad_speaker     = read_percent("audio_pad_speaker_main_volume", defaults.pad_speaker);
+		objects         = read_percent("audio_objects_volume", defaults.objects);
 		objects_enabled = s->value("audio_objects_enabled", defaults.objects_enabled).toBool();
 	}
 };
@@ -137,6 +137,7 @@ public:
 	QString    firmwareVer; /* requiredSystemSoftwareVersion from sce_sys/param.json */
 	QString    basedir;     /* Game base directory */
 	QString    game_path;   /* Launcher-unique game path */
+	QString    addons_dir;  /* Global setting; not saved per game. */
 	bool       custom_settings = false;
 	GameStatus game_status     = GameStatus::Unknown;
 	QString    game_comment;
@@ -163,9 +164,9 @@ public:
 		gpu_occlusion_accurate = other.gpu_occlusion_accurate;
 	}
 
-	Resolution             screen_resolution           = Resolution::R1280X720;
-	QString                user_name                   = "Kyty";
-	int                    user_id                     = Config::DEFAULT_USER_ID;
+	Resolution             screen_resolution = Resolution::R1280X720;
+	QString                user_name         = "Kyty";
+	int                    user_id           = Config::DEFAULT_USER_ID;
 	QString                audio_input_device;
 	PresentMode            present_mode                = PresentMode::Mailbox;
 	int                    gpu_index                   = -1;
