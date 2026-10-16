@@ -31,6 +31,7 @@ private:
 	QComboBox*        m_codec;
 	QLineEdit*        m_adapter;
 	QCheckBox*        m_monitor;
+	QCheckBox*        m_show_local;
 	QLabel*           m_status;
 	QLabel*           m_error;
 	QLabel*           m_version;

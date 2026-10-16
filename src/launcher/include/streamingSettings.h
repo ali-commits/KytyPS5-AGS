@@ -11,6 +11,7 @@ struct StreamingSettings {
 	QString                  codec      = "HEVC";
 	QString                  adapter;
 	bool                     local_audio = true;
+	bool                     show_local  = true;
 	QString                  Validate() const;
 	static StreamingSettings Read(QSettings& settings);
 	void                     Write(QSettings& settings) const;

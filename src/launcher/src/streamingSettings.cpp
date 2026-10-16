@@ -33,6 +33,7 @@ StreamingSettings StreamingSettings::Read(QSettings& file) {
 	s.codec       = file.value("quality/codec", s.codec).toString();
 	s.adapter     = file.value("quality/adapter").toString();
 	s.local_audio = file.value("audio/local_monitor", true).toBool();
+	s.show_local  = file.value("display/show_local", true).toBool();
 	return s;
 }
 void StreamingSettings::Write(QSettings& file) const {
@@ -44,6 +45,7 @@ void StreamingSettings::Write(QSettings& file) const {
 	file.setValue("quality/codec", codec);
 	file.setValue("quality/adapter", adapter);
 	file.setValue("audio/local_monitor", local_audio);
+	file.setValue("display/show_local", show_local);
 }
 QString StreamingSettings::ProfileDirectory() {
 	const auto override = qEnvironmentVariable("KYTY_STREAMING_CONFIG_DIR");

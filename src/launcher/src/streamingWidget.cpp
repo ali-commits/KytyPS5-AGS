@@ -124,6 +124,16 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	               m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
+	m_show_local = new QCheckBox(tr("Show game window on this PC"), m_quality);
+	m_show_local->setObjectName("streamShowLocal");
+	m_show_local->setChecked(settings.show_local);
+	quality_form->addRow(m_show_local);
+	auto* display_hint =
+	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
+	                  "The PC still runs and renders the game."),
+	               m_quality);
+	display_hint->setWordWrap(true);
+	quality_form->addRow(display_hint);
 	m_adapter = new QLineEdit(settings.adapter, m_quality);
 	m_adapter->setObjectName("streamAdapter");
 	m_adapter->setPlaceholderText(tr("Automatic NVIDIA device (RTX 3090)"));
@@ -250,6 +260,7 @@ StreamingSettings StreamingWidget::Settings() const {
 	s.codec       = m_codec->currentText();
 	s.adapter     = m_adapter->text();
 	s.local_audio = m_monitor->isChecked();
+	s.show_local  = m_show_local->isChecked();
 	return s;
 }
 bool StreamingWidget::Save() {

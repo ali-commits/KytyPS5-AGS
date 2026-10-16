@@ -894,7 +894,7 @@ target_include_directories(pad_haptics_tests PRIVATE ${inc_headers})
 add_executable(controller_settings_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ControllerSettingsTests.cpp"
 )
-target_link_libraries(controller_settings_tests common fmt::fmt SDL3::SDL3-static)
+target_link_libraries(controller_settings_tests common fmt::fmt SDL3::SDL3-static nlohmann_json::nlohmann_json)
 target_include_directories(controller_settings_tests PRIVATE ${inc_headers})
 
 add_executable(save_data_memory_tests EXCLUDE_FROM_ALL
@@ -992,6 +992,9 @@ target_link_libraries(clear_register_decode_tests common fmt::fmt Vulkan::Header
 target_include_directories(clear_register_decode_tests PRIVATE ${inc_headers})
 
 if(LINUX)
+	add_executable(streaming_presentation_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/StreamingPresentationTests.cpp")
+	target_include_directories(streaming_presentation_tests PRIVATE "${KYTY_SOURCE_DIR}")
+
 	add_executable(streaming_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/StreamingTests.cpp"
 		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
@@ -1014,7 +1017,7 @@ if(LINUX)
 	if(KYTY_STREAM_TEST_CUDA_INCLUDE)
 		target_include_directories(streaming_gpu_tests PRIVATE "${KYTY_STREAM_TEST_CUDA_INCLUDE}")
 	endif()
-	target_link_libraries(streaming_gpu_tests PRIVATE Vulkan::Headers fmt::fmt nlohmann_json::nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
+	target_link_libraries(streaming_gpu_tests PRIVATE Vulkan::Headers fmt::fmt nlohmann_json::nlohmann_json Threads::Threads imgui ${CMAKE_DL_LIBS})
 endif()
 
 add_executable(host_input_pulse_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HostInputPulseTests.cpp")
@@ -1181,6 +1184,7 @@ if(BUILD_TESTING)
 	if(LINUX)
 		add_test(NAME audio_output_device COMMAND $<TARGET_FILE:audio_output_device_tests>)
 		add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
+		add_test(NAME streaming_presentation COMMAND $<TARGET_FILE:streaming_presentation_tests>)
 		set_tests_properties(streaming_protocol PROPERTIES TIMEOUT 30)
 		add_test(NAME streaming_gpu COMMAND $<TARGET_FILE:streaming_gpu_tests>)
 		set_tests_properties(streaming_gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)

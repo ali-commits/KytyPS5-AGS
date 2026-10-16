@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
 	const auto        env = manifest.value("environment").toObject();
 	const QStringList allowed {
 	    "KYTY_STREAM_SOCKET", "PULSE_SERVER",       "SDL_AUDIO_DRIVER", "KYTY_AUDIO_OUTPUT_DEVICE",
-	    "KYTY_STREAM_WIDTH",  "KYTY_STREAM_HEIGHT", "KYTY_STREAM_FPS"};
+	    "KYTY_STREAM_WIDTH",  "KYTY_STREAM_HEIGHT", "KYTY_STREAM_FPS",  "KYTY_STREAM_ONLY"};
 	for (const auto& key: allowed)
 		qunsetenv(key.toLatin1().constData());
 	for (auto it = env.begin(); it != env.end(); ++it) {
@@ -149,6 +149,8 @@ int main(int argc, char** argv) {
 			return fail("Invalid launch environment.");
 		qputenv(it.key().toLatin1().constData(), it.value().toString().toUtf8());
 	}
+	if (env.contains("KYTY_STREAM_ONLY") && env.value("KYTY_STREAM_ONLY") != "1")
+		return fail("Invalid launch environment.");
 	if (env.value("KYTY_AUDIO_OUTPUT_DEVICE").toString().isEmpty() ||
 	    env.value("KYTY_STREAM_SOCKET").toString().isEmpty())
 		return fail("Private capture/audio route is missing.");

@@ -310,10 +310,10 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 bool StreamingBackend::WriteConfiguration() {
 	const QDir profile(m_profile);
 	QString    error;
-	const auto manifest = StreamingCatalog::Manifest(m_catalog, m_socket, m_audio.Device(),
-	                                                 QDir(m_runtime).filePath("emulator.lock"),
-	                                                 m_settings.resolution, m_settings.fps);
-	auto       actual_manifest = manifest;
+	const auto manifest = StreamingCatalog::Manifest(
+	    m_catalog, m_socket, m_audio.Device(), QDir(m_runtime).filePath("emulator.lock"),
+	    m_settings.resolution, m_settings.fps, m_settings.show_local);
+	auto actual_manifest = manifest;
 	actual_manifest.insert("host_nonce", m_host_nonce);
 	actual_manifest.insert("host_owner_file", QDir(m_runtime).filePath("host-owner.json"));
 	if (!m_audio.Server().isEmpty()) {

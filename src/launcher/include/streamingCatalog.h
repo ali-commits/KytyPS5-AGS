@@ -14,7 +14,7 @@ namespace StreamingCatalog {
 QString     QuoteBackendToken(QString value);
 QJsonObject Manifest(const QList<StreamingLaunchEntry>& entries, const QString& socket,
                      const QString& audio_device, const QString& lock_file,
-                     const QString& resolution, int fps);
+                     const QString& resolution, int fps, bool show_local = true);
 QJsonObject Apps(const QList<StreamingLaunchEntry>& entries, const QString& wrapper,
                  const QString& manifest);
 bool        WritePrivate(const QString& path, const QByteArray& bytes, QString* error);

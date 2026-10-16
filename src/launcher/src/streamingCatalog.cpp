@@ -13,8 +13,8 @@ QString StreamingCatalog::QuoteBackendToken(QString value) {
 }
 QJsonObject StreamingCatalog::Manifest(const QList<StreamingLaunchEntry>& entries,
                                        const QString& socket, const QString& audio_device,
-                                       const QString& lock_file, const QString& resolution,
-                                       int fps) {
+                                       const QString& lock_file, const QString& resolution, int fps,
+                                       bool show_local) {
 	QJsonObject games;
 	for (const auto& entry: entries) {
 		games.insert(entry.id,
@@ -26,6 +26,7 @@ QJsonObject StreamingCatalog::Manifest(const QList<StreamingLaunchEntry>& entrie
 	                 {"SDL_AUDIO_DRIVER", "pulseaudio"},
 	                 {"KYTY_AUDIO_OUTPUT_DEVICE", audio_device},
 	                 {"KYTY_STREAM_FPS", QString::number(fps)}};
+	if (!show_local) env.insert("KYTY_STREAM_ONLY", "1");
 	if (resolution != "Native") {
 		env.insert("KYTY_STREAM_WIDTH", resolution == "1080p" ? "1920" : "2560");
 		env.insert("KYTY_STREAM_HEIGHT", resolution == "1080p" ? "1080" : "1440");

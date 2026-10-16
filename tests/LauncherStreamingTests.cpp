@@ -7,6 +7,7 @@
 #include "streamingWidget.h"
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -168,6 +169,81 @@ class LauncherStreamingTests: public QObject {
 		return 0;
 	}
 private slots:
+	void streamingOnlyDisplayMigratesAndPersists() {
+		QTemporaryDir    dir;
+		StreamingBackend backend(dir.path());
+		StreamingWidget  widget(&backend);
+		auto*            local = widget.findChild<QCheckBox*>("streamShowLocal");
+		QVERIFY2(local, "Streaming-only needs an explicit local-display control.");
+		QVERIFY(local->isChecked());
+		QSettings saved(dir.filePath("streaming.ini"), QSettings::IniFormat);
+		local->setChecked(false);
+		widget.Settings().Write(saved);
+		saved.sync();
+		QVERIFY(saved.contains("display/show_local"));
+		QVERIFY(!saved.value("display/show_local").toBool());
+		StreamingWidget restored(&backend);
+		auto*           restored_local = restored.findChild<QCheckBox*>("streamShowLocal");
+		QVERIFY(restored_local);
+		QVERIFY(!restored_local->isChecked());
+		const auto stream_only =
+		    StreamingCatalog::Manifest({}, "/private/frames.sock", "private", "/private/game.lock",
+		                               "1080p", 60, restored.Settings().show_local);
+		QCOMPARE(stream_only.value("environment").toObject().value("KYTY_STREAM_ONLY").toString(),
+		         QString("1"));
+		local->setChecked(true);
+		widget.Settings().Write(saved);
+		saved.sync();
+		QVERIFY(saved.value("display/show_local").toBool());
+		const auto local_display =
+		    StreamingCatalog::Manifest({}, "/private/frames.sock", "private", "/private/game.lock",
+		                               "1080p", 60, widget.Settings().show_local);
+		QVERIFY(!local_display.value("environment").toObject().contains("KYTY_STREAM_ONLY"));
+	}
+	void launchWrapperValidatesAndClearsStreamingOnly() {
+		QTemporaryDir dir;
+		const auto    wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		const StreamingLaunchEntry game {
+		    "display",
+		    "Display probe",
+		    "/usr/bin/python3",
+		    {"-c", "import os; print(os.getenv('KYTY_STREAM_ONLY','unset'))"},
+		    dir.path()};
+		auto manifest = StreamingCatalog::Manifest({game}, dir.filePath("frames.sock"), "private",
+		                                           dir.filePath("game.lock"), "1080p", 60);
+		manifest.insert("session_file", dir.filePath("session.json"));
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
+		for (const auto& value: QList<QString> {"1", "yes", ""}) {
+			auto env = manifest.value("environment").toObject();
+			if (value.isEmpty())
+				env.remove("KYTY_STREAM_ONLY");
+			else
+				env.insert("KYTY_STREAM_ONLY", value);
+			manifest.insert("environment", env);
+			QString error;
+			QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
+			                                       QJsonDocument(manifest).toJson(), &error));
+			QProcess launch;
+			HostEnvironment(&launch, manifest);
+			auto inherited = launch.processEnvironment();
+			inherited.insert("KYTY_STREAM_ONLY", "1");
+			launch.setProcessEnvironment(inherited);
+			launch.start(wrapper, {dir.filePath("launch.json"), "display"});
+			QVERIFY(launch.waitForFinished(5000));
+			if (value == "yes") {
+				QCOMPARE(launch.exitCode(), 1);
+				QVERIFY(launch.readAllStandardError().contains("Invalid launch environment"));
+			} else {
+				QVERIFY2(launch.exitCode() == 0,
+				         qPrintable(value + ": " + QString::fromUtf8(launch.readAllStandardError())));
+				QCOMPARE(launch.exitCode(), 0);
+				QCOMPARE(launch.readAllStandardOutput().trimmed(),
+				         value.isEmpty() ? QByteArray("unset") : QByteArray("1"));
+				QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
+			}
+		}
+	}
 	void pinValidationRequiresCurrentIdAndUtf8Bounds() {
 		QVERIFY(!StreamingApi::ValidatePin("", "1234", "TV").isEmpty());
 		QVERIFY(!StreamingApi::ValidatePin(QString(32, 'a'), "12x4", "TV").isEmpty());
