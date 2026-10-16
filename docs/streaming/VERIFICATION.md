@@ -1,10 +1,11 @@
 # Streaming-only and DualSense verification
 
 Date: 2026-10-16, Asia/Kuala_Lumpur.
-Status: v3 controller-audio candidate installed and waiting for a user-led Astro
-test. The v2 user results and earlier crash timeline remain below. Interactive
-game tests are user-led; authorized unattended tests must close both game and
-client within a bounded deadline.
+Status: companion work paused at the user's request. TV playback is the current
+priority; a dedicated laptop client built from Moonlight is deferred until later.
+The user reports that the game itself works. Full controller-audio acceptance
+remains incomplete, and the companion service is disabled/stopped. Interactive
+game launches remain user-led.
 
 ## Controller-audio candidate v3
 
@@ -23,9 +24,9 @@ Thinker's installed companion is
 source `1af7464df18616824d815be7fbc563d6cdb48089`, SHA256
 `4c141d06805d172cbdbb00828563e09c8b9426905e5790e5eb5fd95416c587c1`.
 Its private settings are under
-`/home/ali/.config/kyty-controller-audio/20261016-v2`, and the enabled user unit is
-`kyty-controller-audio-v3b.service`. The earlier `kyty-controller-audio-v3.service`
-remains disabled/inactive. The receiver identity is linked to the existing Thinker
+`/home/ali/.config/kyty-controller-audio/20261016-v2`, and its user unit is
+`kyty-controller-audio-v3b.service`. Both `kyty-controller-audio-v3b.service` and the earlier
+`kyty-controller-audio-v3.service` are now disabled/inactive for this pause. The receiver identity is linked to the existing Thinker
 Moonlight parent; its key stayed on the laptop. Prefix/config/identity directories
 are mode0700 and key/cert/config/unit files mode0600. No system packages or audio
 profile/default changes were made; a private signed RPM SDK supplied build headers.
@@ -40,7 +41,17 @@ profile/default changes were made; a private signed RPM SDK supplied build heade
 | Final bounded USB references | Three speaker and three actuator runs all exit0 in 1.079–1.098s; PCM closed before and after each |
 | Producer restart lifecycle | `1af7464d` accepts a fresh durable lease when a new emulator's local epoch restarts; stale-generation/epoch regressions remain rejected |
 | Final broad review and scoped fix reviews | No remaining Important/Critical findings; safe reconnect on Reset remains a documented Minor |
-| Actual Astro speaker, texture, gyro/trigger coexistence, helper-loss fallback | Pending user-led acceptance; no physical-parity claim |
+| Actual Astro controller audio | PCM reached the USB helper, but repeated queue overflows interrupted output; acceptance is incomplete and work is paused |
+
+The user-led game attempt first used the preserved v2 host. After the user quit,
+v3 was started under the transient user unit
+`kyty-controller-audio-candidate-launcher.service`, and the user launched Astro.
+Video, motion and adaptive-trigger counters advanced, and controller PCM reached
+the companion, but RUNNING USB queue overflows caused repeated lease withdrawal
+and reconnects. This is a separate runtime issue from the corrected silent-clock
+startup failure. No queue limits were raised. Investigation and companion testing
+were paused when the user changed priority to TV playback. The companion was
+stopped and disabled; the working game/host was not killed for this pause.
 
 The ancestry-bound USB output negotiated S16_LE, four channels at48kHz, period240
 and buffer480. Readiness now proves hardware-clock progress before guest PCM is
