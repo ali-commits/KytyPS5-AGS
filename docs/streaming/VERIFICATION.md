@@ -1,9 +1,12 @@
 # Streaming-only and DualSense verification
 
 Date: 2026-10-16, Asia/Kuala_Lumpur.
-Status: implementation reviewed and candidate installed; laptop streaming-only video verified.
-Controller hardware acceptance and a later fatal native exit remain unresolved.
-No further game test will run without explicit user permission.
+Status: implementation reviewed; user confirms streaming-only video, ordinary
+controls, gyro and adaptive-trigger resistance. Both post-reboot manual runs stopped
+cleanly. The user reports small extra gyro/feedback latency and reduced haptic
+fidelity compared with direct USB play; native haptic/speaker PCM remains separate work.
+Interactive tests are user-led. Authorized unattended tests must automatically
+close both the game and client within a bounded deadline.
 
 ## Candidate and rollback
 
@@ -14,7 +17,7 @@ No further game test will run without explicit user permission.
 - Matching map SHA256: `0f0f26bf399a34b5c408b777c63daa87ff730f8774505961320721d608ea13ce`.
 - Host code: `f35169866ddf9824a6a580abf0524bec694baede`; pinned by Kyty commit `598670dc`.
 - Host SHA256: `d65260ae0b779b07565f3784c4bcd9b7dfe2edcc4a0bfd4273e15c30852a46e1`.
-- The `kytyps5-streaming` command still selects the working `20261016-native-v1` until the remaining acceptance checks finish.
+- The `kytyps5-streaming` command now selects v2; its previous v1 wrapper is backed up under v2 `verification/v1-command-before-v2-default/`.
 - Working v1 and normal Kyty/Sunshine installations remain separate; no public push or PR.
 
 The candidate copied the latest v1 experimental saves, cache and trophies into
@@ -36,7 +39,8 @@ Crash capture remains enabled with a matching native map.
 | Actual packaged streaming-only Astro boot | 776 GPU copies, zero dropped exports, 1080p decoded picture/audio, no local game window | `headless-loopback/` and strict postcheck |
 | Production SystemOverlay through Vulkan/CUDA export | 57 frames, 45 overlay recordings; dialog acceptance and numeric IME input pass | `dialog-proof-2/result.json` and PNGs |
 | Stock laptop Moonlight 6.2.0 video/audio | Actual Astro title decoded; 3,391 client presents; no local game window | `laptop-proof-v2-video-1-final/`, `laptop-v2-host/` |
-| Physical laptop DualSense sensors and trigger resistance | Access denied: 0 sensor samples/HID writes; 3,718 SDL effect attempts failed | Laptop observer/result and access proposal |
+| Initial laptop controller attempt before access rule | Access denied: 0 sensors/HID writes; 3,718 SDL effect attempts failed | Preserved first observer/result |
+| Post-rule laptop gyro and triggers | 20,803 motion samples applied; user confirms gyro and resistance function, with fidelity/latency qualifications | Manual controller result and user report |
 | Native stop boundary after laptop disconnect | Fatal guest error, native exit 65; cause relative to user Stop unknown | Preserved crash capture and timeline below |
 
 Detailed new evidence lives under
@@ -69,7 +73,9 @@ before the new producer received connected controller state; the focused fix and
 review passed. The bounded authenticated snapshot is replayed before motion;
 controller removal, session detach and replacement owners clear it. The final broad
 feature review reports SPEC PASS for implementation and QUALITY APPROVED, with no
-new code findings. Hardware acceptance and the runtime fault below remain open.
+new code findings. Functional device acceptance is recorded below; the earlier
+fatal guest error remains preserved and was not reproduced by two subsequent
+manual runs. Latency and full haptic fidelity remain improvement work.
 
 ## Actual laptop result and disconnect timeline
 
@@ -115,8 +121,9 @@ The outer host's app-wrapper exit0 does not override the native manifest.
 Capture: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2/_CrashCapture/20261016T032705.202338Z`.
 All candidate game/host/launcher processes exited; normal saves, system audio and
 ordinary Sunshine process state were preserved. No second game run was attempted.
-The user now requires being asked to perform any further game test; implementation
-and read-only diagnosis can continue, but no game/session launch is authorized.
+The user initially required being asked before further game launches. The latest
+authorization below permits bounded unattended drive tests only when they also
+automatically close the game; interactive gameplay checks remain user-led.
 
 ## Limits and remaining device checks
 
@@ -126,17 +133,79 @@ keep local display enabled by default. Local-window mode retains its existing sy
 UI path; remote system UI composition is enabled for streaming-only mode.
 
 Motion and adaptive triggers depend on Moonlight and its controller driver exposing
-the relevant capabilities. Fedora currently permits ordinary gamepad input but denies
-Moonlight raw DualSense HID access; a narrowly scoped access rule has been proposed
-and has not been installed. Sensor packet delivery and successful effect writes can
-be observed automatically, while gyro gameplay and perceived trigger resistance need
-physical confirmation. HD haptic PCM, controller-speaker audio, touchpad forwarding
+the relevant capabilities. Fedora originally permitted ordinary gamepad input but
+denied raw DualSense HID access. The approved, narrowly scoped rule is now installed,
+and a reopened stock Moonlight client opens the raw device and sends real sensors.
+The user has now confirmed gyro gameplay and trigger resistance function, while
+reporting a small noticeable delay and lower fidelity than direct USB play. HD haptic PCM, controller-speaker audio, touchpad forwarding
 and USB/IP are not part of this change. Laptop speaker routing is unchanged.
 
 SDR, H.264/HEVC, stereo, a single remote player, catalog refresh on host restart and
 the bounded two-retired-plus-one-active GPU-pool limit remain. Actual 1440p Astro
 playthrough and subjective latency remain device checks; 1440p GPU export and
 negotiated synthetic output were verified separately.
+
+## Post-reboot controller access and user-led testing
+
+After the Plasma update/reboot, all installed emulator/launcher/host/map hashes
+still matched the v2 provenance. The user launched Astro manually, confirmed
+working video, full ordinary controls and no local game window. Native PID14876
+ran from 03:48:35 until 03:51:38 UTC and recorded exit0 with a complete crash
+capture at `20261016T034835.234706Z`. The earlier fatal exit was not reproduced.
+The passive observer initially read the previous `last-run.txt`, which updates
+only on game exit; `user-led-20261016T034810Z/manual-run-result-corrected.json`
+uses the actual current-run manifest and explicitly records that QA selection error.
+
+The user approved necessary laptop access/installations without asking again. They
+clarified that unattended drive tests are allowed only with automatic full game
+closure, while interactive checks require their presence. The old standalone
+90-second client runner is insufficient on its own because `--no-quit-after`
+leaves the game alive. No automatic game was launched for this controller check.
+
+At 03:54:33 UTC, the approved rule was installed at
+`/etc/udev/rules.d/70-kyty-dualsense.rules` on the laptop, root:root0644:
+
+```udev
+ACTION=="add|change", SUBSYSTEM=="hidraw", SUBSYSTEMS=="usb", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", TAG+="uaccess"
+```
+
+Only the freshly verified `/dev/hidraw1` sysfs node was triggered. The active
+desktop user received an rw ACL; an actual O_RDWR open passed. A standalone SDL
+probe changed from no sensors to accel=true and gyro=true. The original Moonlight
+process and built-in Speaker51 audio default were unchanged by installation.
+Exact rule/device/ACL snapshots and rollback instructions are preserved in
+`dualsense-access-install-20261016T035433Z/`. The rule SHA256 is
+`53d8d22e1b88ef8db722baa0bcf2724a51332aeb2fb5c3b8a4f81afefd52707a`.
+
+The user quit and reopened stock Moonlight themselves, then started a new manual
+controller check. New PID254115 holds `/dev/hidraw1`. Host diagnostics show real
+accelerometer/gyro packets entering Kyty and being applied, with no invalid samples.
+The sampled gyro magnitude reached 4.586 rad/s while the controller moved.
+The dropped-export counter stayed constant while copied images increased during
+the observed live-viewer interval.
+Native PID26722 stopped cleanly with exit0 at 04:01:28.591068 UTC; capture
+`20261016T035915.308871Z` is complete. The passive collector observed 20,803 applied
+motion samples, zero invalid samples and real moving SI vectors. Host feedback
+was active, and the user confirmed gyro operation and adaptive-trigger resistance.
+The collector is observation-only and performed no game/client control.
+
+The user reported three remaining quality limits: no controller-speaker output;
+small noticeable gyro/haptic delay compared with buttons/sticks; muffled and missing
+haptic sensations and less faithful trigger feel compared with direct PC play.
+Read-only source tracing established that vibration PCM currently becomes two
+absolute channel peaks, doubled/clamped, held as 100 ms ordinary rumble. This
+necessarily loses waveform detail. PADSPK has no remote path and falls back to main
+audio; remote controller-speaker silence is expected. The 100 Hz sensor request
+versus native USB250 Hz, and the 16 ms remote adaptive send gate, are confirmed
+cadence differences; their share of perceived total delay is not measured.
+SDL's 10 ms HID output worker also exists in direct local playback and is not a
+remote-only penalty. No network fault or calibration fault has been established.
+
+The tested v2 command was promoted atomically at 04:17:02 UTC after verifying all
+installed executable/map hashes and checking wrapper syntax. No running executable,
+profile or save was overwritten. The old command and v1 installation remain as
+rollback. Full haptic waveforms and controller speaker are the user's selected next
+feature, requiring a separate audio path; they are not claimed by this build.
 
 ## Previous v1 baseline
 

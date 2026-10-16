@@ -11,12 +11,12 @@ repositories. This is a private experiment, not a supported upstream release.
 
 ## Start and pair
 
-This guide describes the v2 candidate. The dedicated `kytyps5-streaming` command
-still selects v1 while controller access and the recorded shutdown fault await
-a user-led check. No further game test will start without explicit permission.
-See [VERIFICATION.md](VERIFICATION.md) for current results.
+The dedicated `kytyps5-streaming` command now selects the tested v2 build.
+Interactive game tests are user-led. Unattended automated tests must have a bounded
+deadline that closes the game as well as the client; disconnecting Moonlight alone
+is insufficient. See [VERIFICATION.md](VERIFICATION.md) for current results.
 
-Once the candidate is activated, run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
+Run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
 tabs. The library and game settings start from a copy of the working installation.
 
 1. Open **Streaming** and use **1080p**, **60 FPS**, **HEVC**, and the default 30 Mbps
@@ -74,13 +74,20 @@ accelerometer/gyro samples into Kyty and sends adaptive-trigger effects back thr
 standard Moonlight feedback. It requires a client and controller driver that expose
 those capabilities. Linux Moonlight may need access to the DualSense raw HID device;
 ordinary gamepad buttons can work even when raw HID sensors/effects are unavailable.
-HD haptic audio, controller-speaker audio and touchpad forwarding are separate work.
+The approved laptop rule now grants active-user access only to USB DualSense
+054c:0ce6 hidraw devices. Quit and reopen Moonlight after changing this access so
+it discovers the HIDAPI controller driver.
+The user confirmed gyro and adaptive triggers function on the laptop, with a small
+noticeable delay and reduced haptic fidelity compared with direct USB play. Current
+rumble reduces vibration PCM to two peak strengths and cannot preserve native
+waveform texture. HD haptic audio, controller-speaker audio and touchpad forwarding
+are separate work; full haptics and controller speaker are the selected next stage.
 Keyboard and mouse forwarding are intentionally ignored by the native host.
 
-Candidate installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
-Candidate settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
-The working `20261016-native-v1` installation is retained for rollback. See
-[VERIFICATION.md](VERIFICATION.md) for the tested candidate and command status.
+Installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
+Private settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
+The working `20261016-native-v1` installation and profile are retained for rollback.
+The previous command is backed up under v2 `verification/v1-command-before-v2-default/`.
 The normal `kytyps5`, `astro-bot`, system Sunshine and their settings remain separate.
 
 `_SaveData`, `_PipelineCache`, trophies and other writable game state are independent
@@ -147,7 +154,7 @@ group has exited, then allows a same-profile restart. Recovery may take about si
 seconds while a stubborn process is killed. Stale private frame sockets from a
 killed host are recovered without removing another live listener.
 
-## Morning TV test
+## Manual device check
 
 1. Start at 1080p/60 and play a short Astro section. Check movement, jumping, menu
    buttons, audio timing and basic rumble using the controller connected to the TV.
