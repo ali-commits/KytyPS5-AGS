@@ -158,6 +158,7 @@ struct InputEvent {
 	int            id;
 	float          x;
 	float          y;
+	ModalInputSource source = ModalInputSource::Local;
 };
 
 struct VisibilityUpdate {
@@ -245,7 +246,7 @@ void QueueInput(InputEvent event) {
 	    event.kind == InputKind::Axis || event.kind == InputKind::MousePosition;
 	if (replaceable && !g_input_events.empty()) {
 		auto& last = g_input_events.back();
-		if (last.session == event.session && last.kind == event.kind && last.id == event.id) {
+		if (CanCoalesceOverlayInput(last, event)) {
 			last = event;
 			return;
 		}
@@ -276,15 +277,19 @@ void RouteRemoteInputLocked() {
 	for (const auto& [mask, button]: buttons) {
 		if ((routed.changed_buttons & mask) != 0) {
 			QueueInput({InputKind::Button, g_session, button,
-			            (routed.overlay_buttons & mask) != 0 ? 1.0f : 0.0f, 0.0f});
+			            (routed.overlay_buttons & mask) != 0 ? 1.0f : 0.0f, 0.0f,
+			            ModalInputSource::Remote});
 		}
 	}
 	for (int axis = 0; axis < 4; axis++) {
 		const int value = routed.overlay_axes[axis] - 128;
 		QueueInput({InputKind::Axis, g_session, axis,
-		            static_cast<float>(value < 0 ? value * 256 : value * 32767 / 127), 0.0f});
+		            static_cast<float>(value < 0 ? value * 256 : value * 32767 / 127), 0.0f,
+		            ModalInputSource::Remote});
 	}
-	if (!routed.connected) QueueInput({InputKind::ResetController, g_session, 0, 0.0f, 0.0f});
+	if (!routed.connected)
+		QueueInput(
+		    {InputKind::ResetController, g_session, 0, 0.0f, 0.0f, ModalInputSource::Remote});
 }
 
 void RetryVisibilityWakeup() {
@@ -582,17 +587,13 @@ bool ProcessSystemOverlayInput(const SDL_Event& event) {
 	if (event.type == g_visibility_event.load(std::memory_order_acquire)) {
 		VisibilityUpdate update {};
 		{
-			std::scoped_lock lock(g_input_mutex);
-			if (g_visibility_updates.empty()) {
+			// Match RefreshVisibility's lock order so its current session cannot change
+			// between choosing a visibility update and filtering queued controller input.
+			std::scoped_lock visibility_lock(g_visibility_mutex);
+			std::scoped_lock input_lock(g_input_mutex);
+			if (!ConsumeNewestOverlayVisibility(g_visibility_updates, g_input_events, update)) {
 				return true;
 			}
-			update = g_visibility_updates.front();
-			g_visibility_updates.pop_front();
-		}
-		{
-			std::scoped_lock lock(g_input_mutex);
-			std::erase_if(g_input_events,
-			              [&](const auto& input) { return input.session != update.session; });
 		}
 		g_last_external_keycode = 0;
 		g_last_external_status  = 0;
@@ -866,6 +867,23 @@ struct SystemOverlay::Impl {
 		vulkan_initialized = true;
 	}
 
+	void ApplyControllerInput() {
+		auto& io = ImGui::GetIO();
+		for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; button++) {
+			const auto key = ControllerButtonToKey(button);
+			if (key != ImGuiKey_None) io.AddKeyEvent(key, controller_input.ButtonDown(button));
+		}
+		const float x = controller_input.Axis(SDL_GAMEPAD_AXIS_LEFTX);
+		const float y = controller_input.Axis(SDL_GAMEPAD_AXIS_LEFTY);
+		io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, x < -0.25f, std::max(-x, 0.0f));
+		io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, x > 0.25f, std::max(x, 0.0f));
+		io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, y < -0.25f, std::max(-y, 0.0f));
+		io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, y > 0.25f, std::max(y, 0.0f));
+		const float rx = controller_input.Axis(SDL_GAMEPAD_AXIS_RIGHTX);
+		const float ry = controller_input.Axis(SDL_GAMEPAD_AXIS_RIGHTY);
+		right_stick    = {std::abs(rx) > 0.2f ? rx : 0.0f, std::abs(ry) > 0.2f ? ry : 0.0f};
+	}
+
 	void DrainInput(OverlaySession session) {
 		std::deque<InputEvent> events;
 		bool                   reset = false;
@@ -880,6 +898,7 @@ struct SystemOverlay::Impl {
 			io.ClearEventsQueue();
 			io.ClearInputKeys();
 			io.ClearInputMouse();
+			controller_input = {};
 			right_stick = {};
 		}
 		for (const auto& event: events) {
@@ -888,37 +907,23 @@ struct SystemOverlay::Impl {
 			}
 			switch (event.kind) {
 				case InputKind::Button: {
-					const bool down = event.x != 0.0f;
-					if (session.kind == OverlayKind::Ime && down) {
+					const bool was_down = controller_input.ButtonDown(event.id);
+					controller_input.SetButton(event.source, event.id, event.x != 0.0f);
+					const bool down = controller_input.ButtonDown(event.id);
+					if (session.kind == OverlayKind::Ime && down && !was_down) {
 						if (event.id == SDL_GAMEPAD_BUTTON_EAST) {
 							Ime::HostCancel(session.generation);
 						} else if (event.id == SDL_GAMEPAD_BUTTON_NORTH) {
 							Ime::HostBackspace(session.generation);
 						}
 					}
-					const ImGuiKey key = ControllerButtonToKey(event.id);
-					if (key != ImGuiKey_None) {
-						io.AddKeyEvent(key, down);
-					}
+					ApplyControllerInput();
 					break;
 				}
 				case InputKind::Axis: {
 					const float value = event.x / (event.x < 0.0f ? 32768.0f : 32767.0f);
-					if (event.id == SDL_GAMEPAD_AXIS_LEFTX) {
-						io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, value < -0.25f,
-						                     std::max(-value, 0.0f));
-						io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, value > 0.25f,
-						                     std::max(value, 0.0f));
-					} else if (event.id == SDL_GAMEPAD_AXIS_LEFTY) {
-						io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, value < -0.25f,
-						                     std::max(-value, 0.0f));
-						io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, value > 0.25f,
-						                     std::max(value, 0.0f));
-					} else if (event.id == SDL_GAMEPAD_AXIS_RIGHTX) {
-						right_stick.x = std::abs(value) > 0.2f ? value : 0.0f;
-					} else if (event.id == SDL_GAMEPAD_AXIS_RIGHTY) {
-						right_stick.y = std::abs(value) > 0.2f ? value : 0.0f;
-					}
+					controller_input.SetAxis(event.source, event.id, value);
+					ApplyControllerInput();
 					break;
 				}
 				case InputKind::MousePosition: io.AddMousePosEvent(event.x, event.y); break;
@@ -932,9 +937,8 @@ struct SystemOverlay::Impl {
 				}
 				case InputKind::MouseWheel: io.AddMouseWheelEvent(event.x, event.y); break;
 				case InputKind::ResetController:
-					io.ClearEventsQueue();
-					io.ClearInputKeys();
-					right_stick = {};
+					controller_input.Reset(event.source);
+					ApplyControllerInput();
 					break;
 			}
 		}
@@ -1294,6 +1298,7 @@ struct SystemOverlay::Impl {
 			symbol_mode   = false;
 			panel_offset  = {};
 			right_stick   = {};
+			controller_input = {};
 			auto& io      = ImGui::GetIO();
 			io.ClearEventsQueue();
 			io.ClearInputKeys();
@@ -1371,6 +1376,7 @@ struct SystemOverlay::Impl {
 	float                                 button_height      = 42.0f;
 	ImVec2                                panel_offset {};
 	ImVec2                                right_stick {};
+	ModalControllerInput                        controller_input;
 	OverlaySession                              session;
 	std::unique_ptr<ImTextureData>              trophy_notification_image;
 	std::optional<TrophyNotification>           trophy_notification;

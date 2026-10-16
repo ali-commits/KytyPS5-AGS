@@ -15,7 +15,79 @@ void Check(bool value, const char *message) {
 }
 } // namespace
 
-int main() {
+namespace {
+void VisibilityKeepsCurrentRemotePress() {
+  struct Visibility {
+    uint64_t session;
+  };
+  struct Input {
+    uint64_t session;
+    uint32_t pressed;
+  };
+  RemoteOverlayInputRouter router;
+  const std::array<int, 6> neutral{128, 128, 128, 128, 0, 0};
+  router.Route(0, true, 0, neutral);
+  std::deque<Visibility> visibility{{1}, {2}};
+  router.Route(1, true, 0, neutral);
+  router.Route(2, true, 0, neutral);
+  const auto accepted = router.Route(2, true, 0x4000, neutral);
+  Check(accepted.guest_buttons == 0,
+        "current modal Accept is captured from the guest");
+  std::deque<Input> input{
+      {2, accepted.changed_buttons & accepted.overlay_buttons}};
+  Visibility latest{};
+  while (ConsumeNewestOverlayVisibility(visibility, input, latest)) {
+  }
+  Check(
+      input.size() == 1 && input.front().session == 2 &&
+          input.front().pressed == 0x4000,
+      "stale A visibility wake preserves exactly one current B Accept action");
+  const auto held = router.Route(2, true, 0x4000, neutral);
+  Check(held.changed_buttons == 0 && held.guest_buttons == 0,
+        "holding captured Accept does not duplicate its action or reach the "
+        "guest");
+}
+
+void ModalSourcesStayIndependent() {
+  ModalControllerInput input;
+  input.SetAxis(ModalInputSource::Local, 0, -0.8f);
+  input.SetButton(ModalInputSource::Local, 7, true);
+  input.SetAxis(ModalInputSource::Remote, 0, 0.0f);
+  Check(input.Axis(0) == -0.8f && input.ButtonDown(7),
+        "neutral remote snapshot preserves held local stick and Dpad");
+  input.SetButton(ModalInputSource::Remote, 8, true);
+  input.SetAxis(ModalInputSource::Remote, 1, 0.9f);
+  input.Reset(ModalInputSource::Remote);
+  Check(input.Axis(0) == -0.8f && input.ButtonDown(7) && !input.ButtonDown(8) &&
+            input.Axis(1) == 0.0f,
+        "remote disconnect clears remote holds while preserving local "
+        "navigation");
+  input.SetButton(ModalInputSource::Remote, 7, true);
+  input.SetButton(ModalInputSource::Remote, 7, false);
+  Check(input.ButtonDown(7),
+        "remote button release cannot release a local hold of the same key");
+  struct Event {
+    uint64_t session;
+    int kind;
+    int id;
+    ModalInputSource source;
+  };
+  const Event local{2, 1, 0, ModalInputSource::Local};
+  const Event remote{2, 1, 0, ModalInputSource::Remote};
+  Check(!CanCoalesceOverlayInput(local, remote),
+        "axis coalescing preserves different sources");
+  Check(CanCoalesceOverlayInput(remote, remote),
+        "same-source latest axis remains coalescible");
+}
+} // namespace
+
+int main(int argc, char **argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--sources-only") == 0) {
+    ModalSourcesStayIndependent();
+    return 0;
+  }
+  VisibilityKeepsCurrentRemotePress();
+  ModalSourcesStayIndependent();
   Check(!StreamOnlyRequested(nullptr, nullptr),
         "old launches show their game window");
   Check(!StreamOnlyRequested("1", nullptr),

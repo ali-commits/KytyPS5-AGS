@@ -1,8 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 
 namespace Libs::Graphics {
 
@@ -10,6 +13,59 @@ namespace Libs::Graphics {
 	return requested != nullptr && std::strcmp(requested, "1") == 0 && socket != nullptr &&
 	       *socket != '\0';
 }
+
+enum class ModalInputSource : uint8_t { Local, Remote };
+
+// Called with both visibility and input locks held; extra SDL wakeups may be stale.
+template <typename Visibility, typename Input>
+bool ConsumeNewestOverlayVisibility(std::deque<Visibility>& visibility, std::deque<Input>& input,
+                                    Visibility& update) {
+	if (visibility.empty()) return false;
+	update = visibility.back();
+	visibility.clear();
+	std::erase_if(input, [&](const auto& event) { return event.session != update.session; });
+	return true;
+}
+
+template <typename Input>
+bool CanCoalesceOverlayInput(const Input& previous, const Input& next) {
+	return previous.session == next.session && previous.kind == next.kind &&
+	       previous.id == next.id && previous.source == next.source;
+}
+
+// Per-source holds merge before ImGui sees them. A neutral/disconnected peer owns no local state.
+class ModalControllerInput {
+public:
+	void SetButton(ModalInputSource source, int button, bool down) noexcept {
+		if (button < 0 || button >= 32) return;
+		auto&          buttons = m_sources[static_cast<size_t>(source)].buttons;
+		const uint32_t bit     = uint32_t {1} << button;
+		if (down)
+			buttons |= bit;
+		else
+			buttons &= ~bit;
+	}
+	void SetAxis(ModalInputSource source, int axis, float value) noexcept {
+		if (axis >= 0 && axis < 4) m_sources[static_cast<size_t>(source)].axes[axis] = value;
+	}
+	void Reset(ModalInputSource source) noexcept { m_sources[static_cast<size_t>(source)] = {}; }
+	bool ButtonDown(int button) const noexcept {
+		return button >= 0 && button < 32 &&
+		       ((m_sources[0].buttons | m_sources[1].buttons) & (uint32_t {1} << button)) != 0;
+	}
+	float Axis(int axis) const noexcept {
+		if (axis < 0 || axis >= 4) return 0.0f;
+		const float local = m_sources[0].axes[axis], remote = m_sources[1].axes[axis];
+		return std::abs(local) >= std::abs(remote) ? local : remote;
+	}
+
+private:
+	struct Source {
+		uint32_t             buttons = 0;
+		std::array<float, 4> axes {};
+	};
+	std::array<Source, 2> m_sources {};
+};
 
 struct RemoteOverlayInputRoute {
 	bool               connected       = false;
