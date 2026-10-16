@@ -333,6 +333,7 @@ bool StreamingBackend::WriteConfiguration() {
 	    m_catalog, m_socket, m_audio.Device(), QDir(m_runtime).filePath("emulator.lock"),
 	    m_settings.resolution, m_settings.fps, m_settings.show_local);
 	auto actual_manifest = manifest;
+	actual_manifest.insert("unified_stream_profile", true);
 	actual_manifest.insert("host_nonce", m_host_nonce);
 	actual_manifest.insert("host_owner_file", QDir(m_runtime).filePath("host-owner.json"));
 	if (!m_audio.Server().isEmpty()) {
@@ -358,8 +359,8 @@ bool StreamingBackend::WriteConfiguration() {
 	                 "Streaming\nstream_audio = enabled\nav1_mode = 1\n";
 	config += QStringLiteral("port = %1\nmax_bitrate = %2\nhevc_mode = %3\n")
 	              .arg(m_settings.port)
-	              .arg(m_settings.bitrate * 1000)
-	              .arg(m_settings.codec == "H264" ? 1 : 2);
+	              .arg(150000)
+	              .arg(2);
 	config += QStringLiteral("kyty_controller_audio = %1\n")
 	              .arg(m_settings.controller_audio ? "true" : "false");
 	if (m_settings.controller_audio) {

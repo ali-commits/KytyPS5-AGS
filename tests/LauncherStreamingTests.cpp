@@ -3,6 +3,7 @@
 #include "streamingBackend.h"
 #include "streamingCatalog.h"
 #include "streamingProcess.h"
+#include "streamingProfile.h"
 #include "streamingSettings.h"
 #include "streamingWidget.h"
 
@@ -170,6 +171,116 @@ class LauncherStreamingTests: public QObject {
 		return 0;
 	}
 private slots:
+	void unifiedPhoneResolutionIsolatedFromLocalProfile() {
+		const QStringList local{
+				"--screen-width",     "2560", "--screen-height", "1440",
+				"--vblank-frequency", "60",   "--game",          "/games/Astro"};
+		for (const auto &mode :
+				 QList<QPair<QString, QString>>{{"1920", "1080"}, {"2560", "1440"}}) {
+			QProcessEnvironment client;
+			client.insert("SUNSHINE_CLIENT_WIDTH", mode.first);
+			client.insert("SUNSHINE_CLIENT_HEIGHT", mode.second);
+			client.insert("SUNSHINE_CLIENT_FPS", "30");
+			QProcessEnvironment output;
+			output.insert("KYTY_STREAM_WIDTH", "1280");
+			QStringList stream = local;
+			QString error;
+			QVERIFY2(StreamingProfile::Apply(true, client, &stream, &output, &error),
+							 qPrintable(error));
+			QCOMPARE(stream.at(stream.indexOf("--screen-width") + 1), mode.first);
+			QCOMPARE(stream.at(stream.indexOf("--screen-height") + 1), mode.second);
+			QCOMPARE(stream.at(stream.indexOf("--vblank-frequency") + 1),
+							 QString("60"));
+			QCOMPARE(output.value("KYTY_STREAM_WIDTH"), mode.first);
+			QCOMPARE(output.value("KYTY_STREAM_HEIGHT"), mode.second);
+			QCOMPARE(output.value("KYTY_STREAM_FPS"), QString("30"));
+			QCOMPARE(output.value("KYTY_STREAM_ONLY"), QString("1"));
+			QCOMPARE(local.at(1), QString("2560"));
+			QCOMPARE(local.at(3), QString("1440"));
+		}
+	}
+	void unifiedWrapperAppliesOneOutputSizeAtProcessBoundary() {
+		QTemporaryDir dir;
+		const auto wrapper = QDir(QCoreApplication::applicationDirPath())
+														 .filePath("libexec/kyty_stream_launch");
+		const auto local = dir.filePath("local.ini");
+		const QByteArray local_settings("resolution=2560x1440\n");
+		QVERIFY(Put(local, local_settings));
+		const StreamingLaunchEntry game{
+				"profile",
+				"Synthetic profile probe",
+				"/usr/bin/python3",
+				{"-c",
+				 "import "
+				 "os,json,sys;print(json.dumps({'args':sys.argv[1:],'width':os.getenv('"
+				 "KYTY_STREAM_WIDTH'),'height':os.getenv('KYTY_STREAM_HEIGHT'),'fps':"
+				 "os.getenv('KYTY_STREAM_FPS'),'headless':os.getenv('KYTY_STREAM_ONLY')"
+				 "}))",
+				 "--screen-width", "2560", "--screen-height", "1440"},
+				dir.path()};
+		auto manifest = StreamingCatalog::Manifest(
+				{game}, dir.filePath("frames.sock"), "private",
+				dir.filePath("game.lock"), "1440p", 60);
+		manifest.insert("unified_stream_profile", true);
+		manifest.insert("session_file", dir.filePath("session.json"));
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
+		QString error;
+		QVERIFY(StreamingCatalog::WritePrivate(
+				dir.filePath("launch.json"), QJsonDocument(manifest).toJson(), &error));
+		for (const auto &size :
+				 QList<QPair<QString, QString>>{{"1920", "1080"}, {"2560", "1440"}}) {
+			QProcess process;
+			HostEnvironment(&process, manifest);
+			auto env = process.processEnvironment();
+			env.insert("SUNSHINE_CLIENT_WIDTH", size.first);
+			env.insert("SUNSHINE_CLIENT_HEIGHT", size.second);
+			env.insert("SUNSHINE_CLIENT_FPS", "60");
+			process.setProcessEnvironment(env);
+			process.start(wrapper, {dir.filePath("launch.json"), "profile"});
+			QVERIFY(process.waitForFinished(5000));
+			QVERIFY2(process.exitCode() == 0,
+							 process.readAllStandardError().constData());
+			const auto result =
+					QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+			QCOMPARE(result.value("width").toString(), size.first);
+			QCOMPARE(result.value("height").toString(), size.second);
+			QCOMPARE(result.value("headless").toString(), QString("1"));
+			const auto args = result.value("args").toArray();
+			QCOMPARE(args, QJsonArray({"--screen-width", size.first,
+																 "--screen-height", size.second}));
+			QCOMPARE(Read(local), local_settings);
+			QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")),
+															 1000);
+		}
+	}
+	void unifiedProfileRejectsInvalidOrMissingModeWithoutMutation() {
+		for (const auto &mode : QList<QStringList>{{},
+																							 {"1920", "1440", "60"},
+																							 {"0", "0", "60"},
+																							 {"1920", "1080", "999"},
+																							 {"1920bad", "1080", "60"}}) {
+			QProcessEnvironment client;
+			if (mode.size() == 3) {
+				client.insert("SUNSHINE_CLIENT_WIDTH", mode[0]);
+				client.insert("SUNSHINE_CLIENT_HEIGHT", mode[1]);
+				client.insert("SUNSHINE_CLIENT_FPS", mode[2]);
+			}
+			QStringList stream{"--screen-width", "2560"};
+			QProcessEnvironment output;
+			output.insert("KYTY_STREAM_WIDTH", "2560");
+			QString error;
+			QVERIFY(!StreamingProfile::Apply(true, client, &stream, &output, &error));
+			QVERIFY(!error.isEmpty());
+			QCOMPARE(stream, QStringList({"--screen-width", "2560"}));
+			QCOMPARE(output.value("KYTY_STREAM_WIDTH"), QString("2560"));
+		}
+		QStringList args{"--screen-width", "2560", "--screen-height", "1440"};
+		QProcessEnvironment untouched;
+		QString error;
+		QVERIFY(StreamingProfile::Apply(false, {}, &args, &untouched, &error));
+		QCOMPARE(args.at(1), QString("2560"));
+		QVERIFY(untouched.isEmpty());
+	}
 	void controllerAudioLifecycleAndReceiverControls() {
 		QTemporaryDir dir;
 		QVERIFY(GenerateCertificate(dir.path()));

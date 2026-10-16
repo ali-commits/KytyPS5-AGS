@@ -86,15 +86,17 @@ launch_file = root / "launch-game.json"
 if launch_file.exists():
     launch = json.loads(launch_file.read_text())
     command = [launch["wrapper"], str(pathlib.Path(sys.argv[1]).parent / "launch.json"), "supervised"]
+    launch_environment = dict(os.environ, SUNSHINE_CLIENT_WIDTH="1920",
+                              SUNSHINE_CLIENT_HEIGHT="1080", SUNSHINE_CLIENT_FPS="60")
     if launch.get("stop_before_exec"):
         child = os.fork()
         if child == 0:
             os.setsid()
             os.kill(os.getpid(), signal.SIGSTOP)
-            os.execve(command[0], command, dict(os.environ))
+            os.execve(command[0], command, launch_environment)
     else:
         log = (root / "wrapper.log").open("ab")
-        child = subprocess.Popen(command, start_new_session=True, stdout=log, stderr=log).pid
+        child = subprocess.Popen(command, start_new_session=True, env=launch_environment, stdout=log, stderr=log).pid
     (root / "wrapper-pid").write_text(str(child))
 shutil.copyfile(root / "cert.pem", config["cert"])
 shutil.copyfile(root / "key.pem", config["pkey"])

@@ -91,7 +91,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_error->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	host_form->addRow(m_error);
 	layout->addWidget(host);
-	m_quality          = new QGroupBox(tr("Capture and delivery preferences"), content);
+	m_quality          = new QGroupBox(tr("Streaming host connection"), content);
 	auto* quality_form = new QFormLayout(m_quality);
 	auto* profile_row  = new QHBoxLayout;
 	m_resolution       = new QComboBox(m_quality);
@@ -117,10 +117,11 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_codec->setCurrentText(settings.codec);
 	profile_row->addWidget(m_codec);
 	quality_form->addRow(tr("Preferred output"), profile_row);
+	quality_form->setRowVisible(profile_row, false);
 	auto* hint =
-	    new QLabel(tr("Capture resolution scales the exported game image, not the game’s internal "
-	                  "rendering. Moonlight chooses the encoded resolution/FPS; match its settings "
-	                  "to the capture target. Bitrate is the host’s maximum."),
+	    new QLabel(tr("Choose streaming resolution, frame rate, quality and bitrate on your phone. "
+	                  "The TV, host capture and emulator streaming output use that one profile. "
+	                  "Local Library game settings stay separate. Streaming is headless."),
 	               m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
@@ -128,12 +129,14 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_show_local->setObjectName("streamShowLocal");
 	m_show_local->setChecked(settings.show_local);
 	quality_form->addRow(m_show_local);
+	quality_form->setRowVisible(m_show_local, false);
 	auto* display_hint =
 	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
 	                  "The PC still runs and renders the game."),
 	               m_quality);
 	display_hint->setWordWrap(true);
 	quality_form->addRow(display_hint);
+	quality_form->setRowVisible(display_hint, false);
 	m_adapter = new QLineEdit(settings.adapter, m_quality);
 	m_adapter->setObjectName("streamAdapter");
 	m_adapter->setPlaceholderText(tr("Automatic NVIDIA device (RTX 3090)"));

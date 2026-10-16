@@ -1,4 +1,5 @@
 #include "../include/streamingProcess.h"
+#include "../include/streamingProfile.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -162,6 +163,12 @@ int main(int argc, char** argv) {
 			return fail("Invalid emulator argument.");
 		arguments.append(arg.toString());
 	}
+	auto    child_environment = QProcessEnvironment::systemEnvironment();
+	QString profile_error;
+	if (!StreamingProfile::Apply(manifest.value("unified_stream_profile").toBool(),
+	                             QProcessEnvironment::systemEnvironment(), &arguments,
+	                             &child_environment, &profile_error))
+		return fail(profile_error);
 	const auto                 session_path = manifest.value("session_file").toString();
 	StreamingProcess::Identity self;
 	if (!StreamingProcess::ReadIdentity(int(::getpid()), &self))
@@ -218,6 +225,10 @@ int main(int argc, char** argv) {
 	    {"host_nonce", nonce},
 	    {"game", app.arguments()[2]},
 	    {"phase", "starting"},
+	    {"profile", manifest.value("unified_stream_profile").toBool() ? "streaming" : "legacy"},
+	    {"effective_width", child_environment.value("KYTY_STREAM_WIDTH")},
+	    {"effective_height", child_environment.value("KYTY_STREAM_HEIGHT")},
+	    {"effective_fps", child_environment.value("KYTY_STREAM_FPS")},
 	    {"width", qEnvironmentVariable("SUNSHINE_CLIENT_WIDTH")},
 	    {"height", qEnvironmentVariable("SUNSHINE_CLIENT_HEIGHT")},
 	    {"fps", qEnvironmentVariable("SUNSHINE_CLIENT_FPS")},
@@ -232,6 +243,7 @@ int main(int argc, char** argv) {
 	if (StreamingProcess::Exited(host_pidfd) || stop_requested)
 		return fail("Managed host exited before game launch.");
 	QProcess child;
+	child.setProcessEnvironment(child_environment);
 	child.setProcessChannelMode(QProcess::ForwardedChannels);
 	QObject::connect(&child, &QProcess::started, &app, [&] {
 		session.insert("phase", "running");
