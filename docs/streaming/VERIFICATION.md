@@ -1,14 +1,66 @@
 # Streaming-only and DualSense verification
 
 Date: 2026-10-16, Asia/Kuala_Lumpur.
-Status: implementation reviewed; user confirms streaming-only video, ordinary
-controls, gyro and adaptive-trigger resistance. Both post-reboot manual runs stopped
-cleanly. The user reports small extra gyro/feedback latency and reduced haptic
-fidelity compared with direct USB play; native haptic/speaker PCM remains separate work.
-Interactive tests are user-led. Authorized unattended tests must automatically
-close both the game and client within a bounded deadline.
+Status: v3 controller-audio candidate installed and waiting for a user-led Astro
+test. The v2 user results and earlier crash timeline remain below. Interactive
+game tests are user-led; authorized unattended tests must close both game and
+client within a bounded deadline.
 
-## Candidate and rollback
+## Controller-audio candidate v3
+
+The active experimental host is
+`/home/ali/.local/opt/kytyps5-streaming/20261016-native-v3`, with private settings
+under `/home/ali/.config/kytyps5-streaming/20261016-native-v3/streaming`.
+Native/launcher package source is `5ed1291329f316f7aca5e4c6be384733795bbf54`;
+the independent host is `0a68a0a9f4b2043e3e24e8c409e1736aaecc55fc`.
+The dedicated `kytyps5-streaming` command still selects the tested v2 rollback.
+Pairing and independent latest experimental saves were preserved. The candidate
+host was started only after verifying no game was running; no game or Moonlight
+client was launched by the agent during this companion phase.
+
+Thinker's installed companion is
+`/home/ali/.local/opt/kyty-controller-audio/20261016-v2/bin/controller-audio-receiver`,
+source `1af7464df18616824d815be7fbc563d6cdb48089`, SHA256
+`4c141d06805d172cbdbb00828563e09c8b9426905e5790e5eb5fd95416c587c1`.
+Its private settings are under
+`/home/ali/.config/kyty-controller-audio/20261016-v2`, and the enabled user unit is
+`kyty-controller-audio-v3b.service`. The earlier `kyty-controller-audio-v3.service`
+remains disabled/inactive. The receiver identity is linked to the existing Thinker
+Moonlight parent; its key stayed on the laptop. Prefix/config/identity directories
+are mode0700 and key/cert/config/unit files mode0600. No system packages or audio
+profile/default changes were made; a private signed RPM SDK supplied build headers.
+
+| Check | Result |
+|---|---|
+| Native producer → private Unix → production broker → real mTLS → guarded null helper | Exact 76,800 PCM bytes per kind, 153,600 total; distinct actuator/speaker hashes match |
+| Build-script integration and relevant existing suites | 11 CTest groups and 54 backend Kyty tests pass; existing 18 memory/pipeline regressions pass |
+| Final helper on PC / Fedora laptop | Four silent tests pass on each (6.55s / 6.50s), including actual SDL dummy and guarded TLS/null; sanitizer checks pass |
+| Initial physical startup failure | Reproduced SDL queue full while ALSA remained PREPARED, hw/appl pointers both zero |
+| Startup correction | `f21db009` requires owned RUNNING clock progress before Ready, with a 500ms preparation budget; queue/age limits unchanged |
+| Final bounded USB references | Three speaker and three actuator runs all exit0 in 1.079–1.098s; PCM closed before and after each |
+| Producer restart lifecycle | `1af7464d` accepts a fresh durable lease when a new emulator's local epoch restarts; stale-generation/epoch regressions remain rejected |
+| Final broad review and scoped fix reviews | No remaining Important/Critical findings; safe reconnect on Reset remains a documented Minor |
+| Actual Astro speaker, texture, gyro/trigger coexistence, helper-loss fallback | Pending user-led acceptance; no physical-parity claim |
+
+The ancestry-bound USB output negotiated S16_LE, four channels at48kHz, period240
+and buffer480. Readiness now proves hardware-clock progress before guest PCM is
+allowed. Offline reference success proves bounded physical output and cleanup;
+it does not establish fidelity or latency during a streamed game. The laptop's
+normal Speaker51 remained the default, and the active service held no USB PCM
+while the candidate host was idle. Software transport uses complete waveform PCM
+with explicit failure/fallback on queue or age violation, rather than reducing it
+to two vibration strengths.
+
+Source reports/reviews live under
+`.superpowers/sdd/2026-10-16-dualsense-controller-audio/`; local evidence is under
+`_Build/astro-evidence/controller-audio-20261016/`. Exact per-component PC hashes
+are in the candidate's `installation-provenance.json`. The PC package's unused
+helper component was refreshed from `1af7464d`; native/launcher/host bytes were
+unchanged. Keep v2 as the default until the user confirms the real game result.
+See [operation and rollback](CONTROLLER_AUDIO.md) for the general procedure;
+this installed candidate uses the exact unit/config paths above.
+
+## Tested v2 rollback
 
 - Candidate: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
 - Candidate settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
