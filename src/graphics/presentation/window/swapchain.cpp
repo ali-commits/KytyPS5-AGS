@@ -16,6 +16,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "libs/controller.h"
+#include "streaming/captureOptions.h"
 #include "streaming/exporter.h"
 #include "streaming/transport.h"
 
@@ -271,9 +272,9 @@ public:
 	KYTY_CLASS_NO_COPY(Swapchain);
 
 	/// Creates the Vulkan swapchain; sets m_minimized when the window or surface extent is zero.
-	void                 Create();
+	void Create();
 	/// Destroys then re-creates the swapchain, optionally recreating the Vulkan surface first.
-	void                 Recreate(bool surface_lost = false);
+	void Recreate(bool surface_lost = false);
 	/// Returns true when the swapchain must be recreated before the next present.
 	[[nodiscard]] bool   NeedsResize() const;
 	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
@@ -299,8 +300,8 @@ private:
 	vk::Format       m_format = vk::Format::eUndefined;
 	vk::Extent2D     m_extent {};
 	// Drawable pixel size observed when this swapchain was created.
-	vk::Extent2D                   m_window_extent {};
-	bool                           m_minimized         = false;
+	vk::Extent2D m_window_extent {};
+	bool         m_minimized = false;
 	/// True when m_minimized was set because the surface/drawable extent was {0,0} but
 	/// WindowContext::minimized is false (e.g. compositor not ready). Cleared on successful
 	/// swapchain creation or Destroy().
@@ -317,8 +318,8 @@ private:
 	vk::Pipeline                   m_overlay_pipeline    = nullptr;
 	vk::Sampler                    m_overlay_sampler     = nullptr;
 	PresentFilter                  m_filter; // KYTY_PRESENT_BOX_DOWNSCALE
-	uint32_t                       m_image_index         = static_cast<uint32_t>(-1);
-	uint32_t                       m_frame_index         = 0;
+	uint32_t                       m_image_index = static_cast<uint32_t>(-1);
+	uint32_t                       m_frame_index = 0;
 };
 
 static bool PresentUnlocked();
@@ -342,7 +343,7 @@ public:
 		m_height       = dimension("KYTY_STREAM_HEIGHT");
 		const auto fps = dimension("KYTY_STREAM_FPS");
 		if (m_width == UINT32_MAX || m_height == UINT32_MAX || (m_width == 0) != (m_height == 0) ||
-		    (fps != 0 && fps != 30 && fps != 60)) {
+		    !Streaming::IsCaptureFrameRateSupported(fps)) {
 			if (stream_only) EXIT("Streaming-only: invalid capture dimensions/FPS\n");
 			LOGF("Streaming disabled: invalid capture dimensions/FPS\n");
 			return;
@@ -551,15 +552,15 @@ struct Presenter::Impl {
 	}
 	void Present();
 
-	RenderContext&        renderer;
-	WindowContext&        window;
-	Swapchain             swapchain;
-	CommandScheduler      present_scheduler;
-	FramePool             frames;
+	RenderContext&                      renderer;
+	WindowContext&                      window;
+	Swapchain                           swapchain;
+	CommandScheduler                    present_scheduler;
+	FramePool                           frames;
 	std::unique_ptr<NativeStreamExport> stream_export;
-	Common::Mutex         present_mutex;
-	std::array<Layer, 2>  layers {};
-	std::atomic<uint64_t> presented_overlay_revision {0};
+	Common::Mutex                       present_mutex;
+	std::array<Layer, 2>                layers {};
+	std::atomic<uint64_t>               presented_overlay_revision {0};
 };
 
 /// Creates the Vulkan swapchain for the current window surface.
@@ -834,13 +835,13 @@ bool Swapchain::NeedsResize() const {
 		// in that case read the cached drawable size under the window mutex.
 		if (extent.width == std::numeric_limits<uint32_t>::max()) {
 			Common::LockGuard lock(m_window.mutex);
-			const bool drawable_ready = m_window.graphic_ctx.screen_width > 0 &&
-			                            m_window.graphic_ctx.screen_height > 0;
+			const bool        drawable_ready =
+			    m_window.graphic_ctx.screen_width > 0 && m_window.graphic_ctx.screen_height > 0;
 			return drawable_ready;
 		}
 		Common::LockGuard lock(m_window.mutex);
-		const bool drawable_ready = m_window.graphic_ctx.screen_width > 0 &&
-		                            m_window.graphic_ctx.screen_height > 0;
+		const bool        drawable_ready =
+		    m_window.graphic_ctx.screen_width > 0 && m_window.graphic_ctx.screen_height > 0;
 		return drawable_ready && extent.width > 0 && extent.height > 0;
 	}
 	if (window_minimized) {
@@ -904,7 +905,7 @@ static bool PresentBoxDownscaleEnabled() {
 // A pipeline that draws the fullscreen triangle with `fragment_code` into one `format` attachment.
 static vk::Pipeline CreateFullscreenPipeline(vk::Device device, vk::PipelineLayout layout,
                                              std::span<const uint32_t> fragment_code,
-                                             vk::Format format) {
+                                             vk::Format                format) {
 	const auto vertex   = CompileSPV(GPU_BLIT_FS_TRIANGLE_SPV, device);
 	const auto fragment = CompileSPV(fragment_code, device);
 	std::array<vk::PipelineShaderStageCreateInfo, 2> stages {};
@@ -992,8 +993,9 @@ void PresentFilter::Record(vk::Device device, vk::CommandBuffer command, vk::Ima
 		descriptors.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
 		descriptors.bindingCount = 1;
 		descriptors.pBindings    = &binding;
-		RequireVulkanSuccess(device.createDescriptorSetLayout(&descriptors, nullptr, &m_descriptors),
-		                     "create video-out downscale descriptor layout");
+		RequireVulkanSuccess(
+		    device.createDescriptorSetLayout(&descriptors, nullptr, &m_descriptors),
+		    "create video-out downscale descriptor layout");
 		const vk::PushConstantRange  constants {vk::ShaderStageFlagBits::eFragment, 0,
 		                                        sizeof(Constants)};
 		vk::PipelineLayoutCreateInfo layout {};
@@ -1009,8 +1011,9 @@ void PresentFilter::Record(vk::Device device, vk::CommandBuffer command, vk::Ima
 		m_pipeline = nullptr;
 	}
 	if (m_pipeline == nullptr) {
-		m_pipeline = CreateFullscreenPipeline(device, m_layout, GPU_VIDEO_OUT_DOWNSCALE_SPV, target_format);
-		m_format   = target_format;
+		m_pipeline =
+		    CreateFullscreenPipeline(device, m_layout, GPU_VIDEO_OUT_DOWNSCALE_SPV, target_format);
+		m_format = target_format;
 	}
 
 	const vk::DescriptorImageInfo image {m_sampler, source_view,
@@ -1041,7 +1044,8 @@ void PresentFilter::Record(vk::Device device, vk::CommandBuffer command, vk::Ima
 	rendering.pColorAttachments    = &attachment;
 	command.beginRendering(&rendering);
 	const vk::Viewport viewport {
-	    0.0f, 0.0f, static_cast<float>(target.width), static_cast<float>(target.height), 0.0f, 1.0f};
+	    0.0f, 0.0f, static_cast<float>(target.width), static_cast<float>(target.height),
+	    0.0f, 1.0f};
 	const vk::Rect2D scissor {{0, 0}, target};
 	command.setViewport(0, 1, &viewport);
 	command.setScissor(0, 1, &scissor);
@@ -1273,7 +1277,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	}
 
 	vk::ImageMemoryBarrier to_present {};
-	to_present.sType               = vk::StructureType::eImageMemoryBarrier;
+	to_present.sType = vk::StructureType::eImageMemoryBarrier;
 	to_present.srcAccessMask =
 	    filtered ? vk::AccessFlagBits::eColorAttachmentWrite : vk::AccessFlagBits::eTransferWrite;
 	to_present.dstAccessMask       = draw_attachment ? vk::AccessFlagBits::eColorAttachmentRead |
@@ -1378,14 +1382,15 @@ Swapchain::Status Swapchain::Present() {
 
 Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(window)) {}
 
-// KYTY_PRESENT_UNLOCKED (default on; =0 keeps the renderer's lock; chenxiao07/KytyPS5 a30144267): the
-// present thread records and submits the swapchain blit without the renderer's lock. What it uses is
-// the presenter's own: present_scheduler (its pool, timeline and command buffers; only the present
-// thread records on it), the presenter's frames (the flip queue hands a frame over only once the GPU
-// completed its copy, FlipQueue::Complete) and the swapchain images, and the graphics queue, which
-// has its own lock (queue_mutex, also taken by the RenderDoc capture boundaries). Under the
-// renderer's lock the GPU thread waited for that whole recording and submission once a frame. (This
-// tree has no frame generation, which shares the renderer's state and keeps the lock in theirs.)
+// KYTY_PRESENT_UNLOCKED (default on; =0 keeps the renderer's lock; chenxiao07/KytyPS5 a30144267):
+// the present thread records and submits the swapchain blit without the renderer's lock. What it
+// uses is the presenter's own: present_scheduler (its pool, timeline and command buffers; only the
+// present thread records on it), the presenter's frames (the flip queue hands a frame over only
+// once the GPU completed its copy, FlipQueue::Complete) and the swapchain images, and the graphics
+// queue, which has its own lock (queue_mutex, also taken by the RenderDoc capture boundaries).
+// Under the renderer's lock the GPU thread waited for that whole recording and submission once a
+// frame. (This tree has no frame generation, which shares the renderer's state and keeps the lock
+// in theirs.)
 static bool PresentUnlocked() {
 	static const bool enabled = [] {
 		const auto* value = std::getenv("KYTY_PRESENT_UNLOCKED");
@@ -1406,8 +1411,8 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		default: break;
 	}
 	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
-	RenderLockGuard   render_lock(m_impl->renderer.GetMutex());
-	auto&             image = m_impl->ResolveSurface(info);
+	RenderLockGuard render_lock(m_impl->renderer.GetMutex());
+	auto&           image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
@@ -1420,8 +1425,8 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,
                                                CommandBuffer* producer) {
 	KYTY_PROFILER_FUNCTION();
-	auto              format = m_impl->frames.GetFormat();
-	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
+	auto  format = m_impl->frames.GetFormat();
+	auto* frame  = m_impl->frames.Acquire({width, height}, format);
 	// Into the GPU thread's command buffer (its flip) under the renderer's lock; the present
 	// thread's blank frame (no producer) uses only the presenter's scheduler and frame.
 	std::optional<RenderLockGuard> render_lock;
@@ -1489,7 +1494,7 @@ void Presenter::ClearLayer(int bus) {
 		return;
 	}
 	Common::LockGuard lock(m_impl->present_mutex);
-	auto& layer = m_impl->layers[bus];
+	auto&             layer = m_impl->layers[bus];
 	if (layer.frame != nullptr) {
 		m_impl->frames.Release(layer.frame);
 		layer = {};
@@ -1531,8 +1536,8 @@ void Presenter::Impl::Present() {
 			if (!PresentUnlocked()) {
 				render_lock.emplace(renderer.GetMutex());
 			}
-			auto&             command = present_scheduler.BeginCommand();
-			const bool        draw_system_overlay =
+			auto&      command = present_scheduler.BeginCommand();
+			const bool draw_system_overlay =
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
 			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 			                                draw_system_overlay);

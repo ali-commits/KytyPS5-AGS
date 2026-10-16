@@ -238,8 +238,11 @@ private slots:
 			process.setProcessEnvironment(env);
 			process.start(wrapper, {dir.filePath("launch.json"), "profile"});
 			QVERIFY(process.waitForFinished(5000));
-			QVERIFY2(process.exitCode() == 0,
-							 process.readAllStandardError().constData());
+			const auto diagnostic = process.readAllStandardError();
+			QVERIFY2(process.exitCode() == 0, diagnostic.constData());
+			QVERIFY(diagnostic.contains("Kyty streaming profile: game=profile requested="));
+			QVERIFY(diagnostic.contains("effective=" + size.first.toUtf8() + "x" + size.second.toUtf8() + "@60"));
+			QVERIFY(diagnostic.contains("local_profile=unchanged"));
 			const auto result =
 					QJsonDocument::fromJson(process.readAllStandardOutput()).object();
 			QCOMPARE(result.value("width").toString(), size.first);
@@ -251,6 +254,20 @@ private slots:
 			QCOMPARE(Read(local), local_settings);
 			QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")),
 															 1000);
+		}
+	}
+	void unifiedProfileMatchesNativeCaptureFrameRates() {
+		for (const auto fps: {30, 60, 90, 120}) {
+			QProcessEnvironment client;
+			client.insert("SUNSHINE_CLIENT_WIDTH", "1920");
+			client.insert("SUNSHINE_CLIENT_HEIGHT", "1080");
+			client.insert("SUNSHINE_CLIENT_FPS", QString::number(fps));
+			QStringList args;
+			QProcessEnvironment output;
+			QString error;
+			QVERIFY(StreamingProfile::Apply(true, client, &args, &output, &error));
+			QVERIFY(Streaming::IsCaptureFrameRateSupported(output.value("KYTY_STREAM_FPS").toUInt()));
+			QCOMPARE(output.value("KYTY_STREAM_FPS"), QString::number(fps));
 		}
 	}
 	void unifiedProfileRejectsInvalidOrMissingModeWithoutMutation() {

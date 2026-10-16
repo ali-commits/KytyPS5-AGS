@@ -240,6 +240,17 @@ int main(int argc, char** argv) {
 		       status.write(QJsonDocument(session).toJson()) >= 0 && status.commit();
 	};
 	if (!publish()) return fail("Cannot publish private game ownership before launch.");
+	if (manifest.value("unified_stream_profile").toBool()) {
+		QTextStream(stderr) << "Kyty streaming profile: game=" << app.arguments()[2]
+		                    << " requested=" << session.value("width").toString() << 'x'
+		                    << session.value("height").toString() << '@'
+		                    << session.value("fps").toString()
+		                    << " effective=" << child_environment.value("KYTY_STREAM_WIDTH") << 'x'
+		                    << child_environment.value("KYTY_STREAM_HEIGHT") << '@'
+		                    << child_environment.value("KYTY_STREAM_FPS")
+		                    << " headless=1 local_profile=unchanged\n";
+	}
+
 	if (StreamingProcess::Exited(host_pidfd) || stop_requested)
 		return fail("Managed host exited before game launch.");
 	QProcess child;

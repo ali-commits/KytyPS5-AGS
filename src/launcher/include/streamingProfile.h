@@ -1,5 +1,7 @@
 #ifndef KYTY_STREAMING_PROFILE_H
 #define KYTY_STREAMING_PROFILE_H
+#include "../../streaming/captureOptions.h"
+
 #include <QProcessEnvironment>
 #include <QStringList>
 
@@ -12,8 +14,10 @@ inline bool Apply(bool unified, const QProcessEnvironment& client, QStringList* 
 	const auto        height = client.value("SUNSHINE_CLIENT_HEIGHT");
 	const auto        fps    = client.value("SUNSHINE_CLIENT_FPS");
 	const QStringList sizes {"1280x720", "1920x1080", "2560x1440", "3840x2160"};
-	if (!sizes.contains(width + 'x' + height) ||
-	    !QStringList {"30", "60", "90", "120"}.contains(fps)) {
+	bool              parsed = false;
+	const auto        rate   = fps.toUInt(&parsed);
+	if (!sizes.contains(width + 'x' + height) || !parsed || rate == 0 ||
+	    QString::number(rate) != fps || !Streaming::IsCaptureFrameRateSupported(rate)) {
 		if (error) *error = "Managed streaming needs a supported negotiated resolution and FPS.";
 		return false;
 	}

@@ -1,4 +1,5 @@
 #include "graphics/presentation/window/presentationPolicy.h"
+#include "streaming/captureOptions.h"
 
 #include <array>
 #include <cstdio>
@@ -82,6 +83,12 @@ void ModalSourcesStayIndependent() {
 } // namespace
 
 int main(int argc, char **argv) {
+  for (const auto fps : {0u, 30u, 60u, 90u, 120u})
+    Check(Streaming::IsCaptureFrameRateSupported(fps),
+          "native capture accepts every phone frame rate plus legacy default");
+  for (const auto fps : {1u, 29u, 61u, 144u, UINT32_MAX})
+    Check(!Streaming::IsCaptureFrameRateSupported(fps),
+          "native capture rejects unsupported frame rates");
   if (argc == 2 && std::strcmp(argv[1], "--sources-only") == 0) {
     ModalSourcesStayIndependent();
     return 0;
