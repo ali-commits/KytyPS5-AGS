@@ -320,3 +320,15 @@ and the original accessibility settings; host currentgame0 was verified. Two
 detached shell guards did not survive the adbd shutdown, so they must not be
 reused to guard a future adbd-stop test. No agent launched a game, claimed a USB
 interface, or sent a rumble command during this comparison.
+
+### Recovered Bluetooth TV playthrough (2026-10-16)
+
+The user power-cycled the controller after a diagnostic vibration test switched
+it into an input mode that the TV did not handle. They then played the full first
+stage and confirmed all buttons worked, with no gyro/vibration, and no crash on
+that run. Normal Bluetooth gameplay is recovered. The earlier end-of-stage crash
+remains recorded and deferred; one non-crashing run does not prove a fix.
+The temporary output tester was removed after all stop attempts finished. No
+production feedback path was added, because vibration had broken ordinary input.
+Further input-only feasibility work is isolated from the accepted TV client.
+The laptop companion remains paused; Bluetooth is the required play connection.
