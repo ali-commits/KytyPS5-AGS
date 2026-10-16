@@ -4,6 +4,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/presentation/window/presentationPolicy.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
@@ -186,6 +187,12 @@ bool                         g_input_lifecycle_active     = false;
 bool                         g_controller_captured        = false;
 OverlaySession               g_session;
 SDL_Window*                  g_input_window               = nullptr;
+RemoteOverlayInputRouter     g_remote_router;
+bool                         g_remote_enabled   = false;
+bool                         g_remote_connected = false;
+uint32_t                     g_remote_buttons   = 0;
+std::array<int, 6>           g_remote_axes {128, 128, 128, 128, 0, 0};
+uint64_t                     g_remote_session_revision = 0;
 struct TrophyNotification {
 	std::string            name;
 	int32_t                grade;
@@ -250,6 +257,36 @@ void QueueInput(InputEvent event) {
 	g_input_events.push_back(event);
 }
 
+// Caller holds the visibility mutex; the input queue has its own bounded lock.
+void RouteRemoteInputLocked() {
+	const auto routed = g_remote_router.Route(g_controller_captured ? g_remote_session_revision : 0,
+	                                          g_remote_connected, g_remote_buttons, g_remote_axes);
+	Controller::SetRemoteInput(routed.connected, routed.guest_buttons, routed.guest_axes);
+	if (!g_controller_captured) return;
+	constexpr std::array<std::pair<uint32_t, int>, 8> buttons {{
+	    {Controller::PAD_BUTTON_CROSS, SDL_GAMEPAD_BUTTON_SOUTH},
+	    {Controller::PAD_BUTTON_CIRCLE, SDL_GAMEPAD_BUTTON_EAST},
+	    {Controller::PAD_BUTTON_SQUARE, SDL_GAMEPAD_BUTTON_WEST},
+	    {Controller::PAD_BUTTON_TRIANGLE, SDL_GAMEPAD_BUTTON_NORTH},
+	    {Controller::PAD_BUTTON_LEFT, SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+	    {Controller::PAD_BUTTON_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+	    {Controller::PAD_BUTTON_UP, SDL_GAMEPAD_BUTTON_DPAD_UP},
+	    {Controller::PAD_BUTTON_DOWN, SDL_GAMEPAD_BUTTON_DPAD_DOWN},
+	}};
+	for (const auto& [mask, button]: buttons) {
+		if ((routed.changed_buttons & mask) != 0) {
+			QueueInput({InputKind::Button, g_session, button,
+			            (routed.overlay_buttons & mask) != 0 ? 1.0f : 0.0f, 0.0f});
+		}
+	}
+	for (int axis = 0; axis < 4; axis++) {
+		const int value = routed.overlay_axes[axis] - 128;
+		QueueInput({InputKind::Axis, g_session, axis,
+		            static_cast<float>(value < 0 ? value * 256 : value * 32767 / 127), 0.0f});
+	}
+	if (!routed.connected) QueueInput({InputKind::ResetController, g_session, 0, 0.0f, 0.0f});
+}
+
 void RetryVisibilityWakeup() {
 	const Uint32 type = g_visibility_event.load(std::memory_order_acquire);
 	if (type == static_cast<Uint32>(-1)) {
@@ -277,6 +314,7 @@ void RefreshVisibility() {
 		return;
 	}
 	g_session               = snapshot.session;
+	g_remote_session_revision++;
 	bool capture_controller = false;
 	bool capture_keyboard   = false;
 	bool text_input         = false;
@@ -291,6 +329,7 @@ void RefreshVisibility() {
 		multiline          = (snapshot.ime.option & Ime::OPTION_MULTILINE) != 0;
 	}
 	const bool was_controller = std::exchange(g_controller_captured, capture_controller);
+	if (g_remote_enabled) RouteRemoteInputLocked();
 	if (capture_controller || was_controller) {
 		Controller::ResetInputState();
 	}
@@ -480,6 +519,25 @@ void InitializeSystemOverlayInput(SDL_Window* window) {
 	RefreshVisibility();
 }
 
+void SetSystemOverlayRemoteInputEnabled(bool enabled) {
+	std::scoped_lock lock(g_visibility_mutex);
+	g_remote_enabled   = enabled;
+	g_remote_router    = {};
+	g_remote_connected = false;
+	g_remote_buttons   = 0;
+	g_remote_axes      = {128, 128, 128, 128, 0, 0};
+	Controller::SetRemoteInput(false, 0, g_remote_axes);
+}
+
+void SetRemoteSystemOverlayInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes) {
+	std::scoped_lock lock(g_visibility_mutex);
+	if (!g_remote_enabled) return;
+	g_remote_connected = connected;
+	g_remote_buttons   = buttons;
+	g_remote_axes      = axes;
+	RouteRemoteInputLocked();
+}
+
 void ShutdownSystemOverlayInput() {
 	CoreIme::SetVisibilityCallback(nullptr);
 	DialogIme::SetVisibilityCallback(nullptr);
@@ -531,7 +589,11 @@ bool ProcessSystemOverlayInput(const SDL_Event& event) {
 			update = g_visibility_updates.front();
 			g_visibility_updates.pop_front();
 		}
-		ClearInputEvents();
+		{
+			std::scoped_lock lock(g_input_mutex);
+			std::erase_if(g_input_events,
+			              [&](const auto& input) { return input.session != update.session; });
+		}
 		g_last_external_keycode = 0;
 		g_last_external_status  = 0;
 		g_input_session         = update.session;

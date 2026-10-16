@@ -88,8 +88,7 @@ bool GpuPool::Initialize(vk::PhysicalDevice physical, uint32_t width, uint32_t h
 		error = "binary semaphore opaque FD export unsupported";
 		return false;
 	}
-	const auto features =
-	    physical.getFormatProperties(vk::Format::eB8G8R8A8Unorm).optimalTilingFeatures;
+	const auto features = physical.getFormatProperties(CompositeFormat).optimalTilingFeatures;
 	const auto required = vk::FormatFeatureFlagBits::eBlitDst |
 	                      vk::FormatFeatureFlagBits::eColorAttachment |
 	                      vk::FormatFeatureFlagBits::eTransferSrc;
@@ -170,7 +169,7 @@ bool GpuPool::Initialize(vk::PhysicalDevice physical, uint32_t width, uint32_t h
 	image.extent      = {width, height, 1};
 	image.mipLevels   = 1;
 	image.arrayLayers = 1;
-	image.format      = vk::Format::eB8G8R8A8Unorm;
+	image.format      = CompositeFormat;
 	image.tiling      = vk::ImageTiling::eOptimal;
 	image.usage   = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc |
 	                vk::ImageUsageFlagBits::eColorAttachment;
@@ -276,7 +275,7 @@ bool GpuPool::CreateOverlay(std::string& error) {
 	vk::PipelineDynamicStateCreateInfo dynamic {};
 	dynamic.dynamicStateCount              = states.size();
 	dynamic.pDynamicStates                 = states.data();
-	const vk::Format                format = vk::Format::eB8G8R8A8Unorm;
+	const vk::Format                format = CompositeFormat;
 	vk::PipelineRenderingCreateInfo rendering {};
 	rendering.colorAttachmentCount    = 1;
 	rendering.pColorAttachmentFormats = &format;
@@ -298,7 +297,7 @@ bool GpuPool::CreateOverlay(std::string& error) {
 	return Check(result, "create stream overlay pipeline", error);
 }
 void GpuPool::Record(vk::CommandBuffer command, const Lease& lease, const CaptureLayer& main,
-                     const CaptureLayer& overlay) {
+                     const CaptureLayer& overlay, const OverlayRecorder& system_overlay) {
 	auto&                    slot = m_slots[lease.slot];
 	vk::BufferMemoryBarrier2 acquire {};
 	acquire.srcStageMask  = vk::PipelineStageFlagBits2::eNone;
@@ -329,11 +328,14 @@ void GpuPool::Record(vk::CommandBuffer command, const Lease& lease, const Captur
 		const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 		command.clearColorImage(m_image, vk::ImageLayout::eTransferDstOptimal, &black, 1, &range);
 	}
-	if (overlay.image && overlay.view) {
+	const bool draw_hud = overlay.image && overlay.view;
+	if (draw_hud || system_overlay) {
 		ImageBarrier(command, m_image, vk::ImageLayout::eTransferDstOptimal,
 		             vk::ImageLayout::eColorAttachmentOptimal, vk::AccessFlagBits2::eTransferWrite,
 		             vk::AccessFlagBits2::eColorAttachmentRead |
 		                 vk::AccessFlagBits2::eColorAttachmentWrite);
+	}
+	if (draw_hud) {
 		const vk::DescriptorImageInfo image {m_sampler, overlay.view,
 		                                     vk::ImageLayout::eShaderReadOnlyOptimal};
 		vk::WriteDescriptorSet        write {};
@@ -364,6 +366,18 @@ void GpuPool::Record(vk::CommandBuffer command, const Lease& lease, const Captur
 		command.setScissor(0, 1, &scissor);
 		command.draw(3, 1, 0, 0);
 		command.endRendering();
+	}
+	if (system_overlay) {
+		if (draw_hud) {
+			ImageBarrier(command, m_image, vk::ImageLayout::eColorAttachmentOptimal,
+			             vk::ImageLayout::eColorAttachmentOptimal,
+			             vk::AccessFlagBits2::eColorAttachmentWrite,
+			             vk::AccessFlagBits2::eColorAttachmentRead |
+			                 vk::AccessFlagBits2::eColorAttachmentWrite);
+		}
+		system_overlay(command, m_view);
+	}
+	if (draw_hud || system_overlay) {
 		ImageBarrier(command, m_image, vk::ImageLayout::eColorAttachmentOptimal,
 		             vk::ImageLayout::eTransferSrcOptimal,
 		             vk::AccessFlagBits2::eColorAttachmentWrite,

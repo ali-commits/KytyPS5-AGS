@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <span>
@@ -23,6 +24,9 @@ struct SystemOverlayVisualState {
 
 void                     InitializeSystemOverlayInput(SDL_Window* window);
 void                     ShutdownSystemOverlayInput();
+// Remote producer and visibility callbacks serialize ownership independently of SDL/local pads.
+void SetSystemOverlayRemoteInputEnabled(bool enabled);
+void SetRemoteSystemOverlayInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
 bool                     ProcessSystemOverlayInput(const SDL_Event& event);
 SystemOverlayVisualState GetSystemOverlayVisualState() noexcept;
 void                     NotifyTrophyUnlocked(std::string_view name, int32_t grade,

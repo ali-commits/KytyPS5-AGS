@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "streaming/protocol.h"
 
+#include <functional>
 #include <memory>
 namespace Streaming {
 struct CaptureLayer {
@@ -13,6 +14,8 @@ struct CaptureLayer {
 // Independently testable Vulkan producer. Caller owns command submission and source transitions.
 class GpuPool {
 public:
+	using OverlayRecorder = std::function<void(vk::CommandBuffer, vk::ImageView)>;
+	static constexpr vk::Format     CompositeFormat = vk::Format::eB8G8R8A8Unorm;
 	static std::unique_ptr<GpuPool> Create(vk::PhysicalDevice physical, vk::Device device,
 	                                       uint32_t family, uint32_t width, uint32_t height,
 	                                       uint64_t epoch, std::string& error);
@@ -20,7 +23,7 @@ public:
 	GpuPool(const GpuPool&)            = delete;
 	GpuPool& operator=(const GpuPool&) = delete;
 	void     Record(vk::CommandBuffer command, const Lease& lease, const CaptureLayer& main,
-	                const CaptureLayer& overlay);
+	                const CaptureLayer& overlay, const OverlayRecorder& system_overlay = {});
 	const PoolDescriptor&     Descriptor() const { return m_descriptor; }
 	const std::array<int, 9>& Fds() const { return m_fds; }
 	vk::Semaphore             Ready(uint32_t slot) const { return m_slots[slot].ready; }

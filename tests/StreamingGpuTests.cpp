@@ -1,3 +1,5 @@
+#include "imgui.h"
+#include "imgui_impl_vulkan.h"
 #include "streaming/exporter.h"
 #include "streaming/transport.h"
 #include <array>
@@ -44,6 +46,71 @@ public:
   vk::CommandBuffer command;
   vk::Fence fence;
   Image main, overlay, pre_overlay;
+  ImGuiContext *imgui = nullptr;
+  unsigned system_overlay_recordings = 0;
+  void PrepareSystemOverlay(vk::Extent2D extent) {
+    if (!imgui) {
+      imgui = ImGui::CreateContext();
+      ImGui::GetIO().IniFilename = nullptr;
+      ImGui::GetIO().LogFilename = nullptr;
+      Check(ImGui_ImplVulkan_LoadFunctions(
+                VK_API_VERSION_1_3,
+                [](const char *name, void *data) {
+                  return static_cast<Fixture *>(data)->instance.getProcAddr(
+                      name);
+                },
+                this),
+            "load ImGui Vulkan");
+      const VkFormat format = static_cast<VkFormat>(GpuPool::CompositeFormat);
+      ImGui_ImplVulkan_InitInfo info{};
+      info.ApiVersion = VK_API_VERSION_1_3;
+      info.Instance = static_cast<VkInstance>(instance);
+      info.PhysicalDevice = static_cast<VkPhysicalDevice>(physical);
+      info.Device = static_cast<VkDevice>(device);
+      info.QueueFamily = family;
+      info.Queue = static_cast<VkQueue>(queue);
+      info.DescriptorPoolSize =
+          IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE;
+      info.MinImageCount = 3;
+      info.ImageCount = 3;
+      info.UseDynamicRendering = true;
+      info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+      auto &rendering = info.PipelineInfoMain.PipelineRenderingCreateInfo;
+      rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+      rendering.colorAttachmentCount = 1;
+      rendering.pColorAttachmentFormats = &format;
+      Check(ImGui_ImplVulkan_Init(&info),
+            "initialize ImGui stream target format");
+    }
+    ImGui::SetCurrentContext(imgui);
+    ImGui::GetIO().DisplaySize = {float(extent.width), float(extent.height)};
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    ImGui_ImplVulkan_NewFrame();
+    ImGui::NewFrame();
+    ImGui::GetBackgroundDrawList()->AddRectFilled(
+        {float(extent.width) * 0.75f, float(extent.height) * 0.75f},
+        {float(extent.width), float(extent.height)},
+        IM_COL32(255, 0, 255, 255));
+    ImGui::Render();
+  }
+  void RecordSystemOverlay(vk::CommandBuffer command, vk::ImageView target,
+                           vk::Extent2D extent) {
+    system_overlay_recordings++;
+    vk::RenderingAttachmentInfo color{};
+    color.imageView = target;
+    color.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+    color.loadOp = vk::AttachmentLoadOp::eLoad;
+    color.storeOp = vk::AttachmentStoreOp::eStore;
+    vk::RenderingInfo rendering{};
+    rendering.renderArea.extent = extent;
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachments = &color;
+    command.beginRendering(rendering);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
+                                    static_cast<VkCommandBuffer>(command));
+    command.endRendering();
+  }
   Fixture() {
     static vk::detail::DynamicLoader loader;
     auto get = loader.getProcAddress<PFN_vkGetInstanceProcAddr>(
@@ -55,6 +122,9 @@ public:
     app.apiVersion = VK_API_VERSION_1_3;
     vk::InstanceCreateInfo create{};
     create.pApplicationInfo = &app;
+    const char *instance_extension = VK_KHR_SURFACE_EXTENSION_NAME;
+    create.enabledExtensionCount = 1;
+    create.ppEnabledExtensionNames = &instance_extension;
     Vk(vk::createInstance(&create, nullptr, &instance), "instance");
     VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
     uint32_t count = 0;
@@ -83,7 +153,8 @@ public:
     q.queueFamilyIndex = family;
     q.queueCount = 1;
     q.pQueuePriorities = &priority;
-    const std::array extensions{VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+    const std::array extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
                                 VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
                                 VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
     vk::PhysicalDeviceVulkan13Features features{};
@@ -249,17 +320,37 @@ public:
     device.freeMemory(staging_memory);
     return result;
   }
-  void Capture(GpuPool &pool, const Lease &lease, bool premultiplied = false) {
+  void Capture(GpuPool &pool, const Lease &lease, bool premultiplied = false,
+               bool system_overlay = false, bool ui_only = false) {
+    const vk::Extent2D extent{pool.Descriptor().width,
+                              pool.Descriptor().height};
+    if (system_overlay)
+      PrepareSystemOverlay(extent);
     Begin();
     auto &layer = premultiplied ? pre_overlay : overlay;
-    pool.Record(command, lease, {main.image, main.view, {4, 4}, false},
-                {layer.image, layer.view, {4, 4}, premultiplied});
+    const CaptureLayer main_layer =
+        ui_only ? CaptureLayer{}
+                : CaptureLayer{main.image, main.view, {4, 4}, false};
+    const CaptureLayer hud_layer =
+        ui_only ? CaptureLayer{}
+                : CaptureLayer{layer.image, layer.view, {4, 4}, premultiplied};
+    GpuPool::OverlayRecorder draw;
+    if (system_overlay)
+      draw = [&](auto command, auto target) {
+        RecordSystemOverlay(command, target, extent);
+      };
+    pool.Record(command, lease, main_layer, hud_layer, draw);
     Submit(pool.Ready(lease.slot),
            lease.recycled ? pool.Done(lease.slot) : vk::Semaphore{});
   }
   ~Fixture() {
     if (device) {
       Vk(device.waitIdle(), "idle");
+      if (imgui) {
+        ImGui::SetCurrentContext(imgui);
+        ImGui_ImplVulkan_Shutdown();
+        ImGui::DestroyContext(imgui);
+      }
       for (auto *image : {&main, &overlay, &pre_overlay}) {
         device.destroyImageView(image->view);
         device.destroyImage(image->image);
@@ -498,6 +589,29 @@ int main(int argc, char **argv) {
         Verify(pool->Descriptor(), bytes);
       Check(ring.Release(lease->epoch, lease->slot, lease->sequence),
             "dropped or consumed frame released");
+    }
+    for (const bool ui_only : {false, true}) {
+      const auto lease = *ring.TryAcquire();
+      const unsigned before = fixture.system_overlay_recordings;
+      fixture.Capture(*pool, lease, false, true, ui_only);
+      auto bytes = imported.Consume(lease.slot, true);
+      Check(fixture.system_overlay_recordings == before + 1,
+            "one ImGui render per exported frame");
+      const auto &d = pool->Descriptor();
+      const size_t visible =
+          size_t(d.height * 7 / 8) * d.stride + (d.width * 7 / 8) * 4;
+      Check(bytes[visible] == 255 && bytes[visible + 1] == 0 &&
+                bytes[visible + 2] == 255,
+            "ImGui overlay is in exported buffer after main/HUD composition");
+      const size_t background =
+          size_t(d.height / 8) * d.stride + (d.width * 7 / 8) * 4;
+      Check(bytes[background] == 0 &&
+                bytes[background + 1] == (ui_only ? 0 : 255) &&
+                bytes[background + 2] == 0,
+            "UI-only export clears absent guest frame and ordinary export "
+            "retains game pixels");
+      Check(ring.Release(lease.epoch, lease.slot, lease.sequence),
+            "ImGui frame released");
     }
     std::printf("PASS %ux%u pitch=%u UUID=%s: CUDA imports, BGRA+alpha, 3-slot "
                 "exhaustion, recycling, skipped frame READY/DONE\n",

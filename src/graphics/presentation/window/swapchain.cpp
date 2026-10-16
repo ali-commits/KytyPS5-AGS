@@ -326,8 +326,9 @@ static bool PresentUnlocked();
 // Optional producer is independent of swapchain acquisition and its physical extent.
 class NativeStreamExport final {
 public:
-	NativeStreamExport(GraphicContext& graphics, CommandScheduler& scheduler, const char* socket)
-	    : m_graphics(graphics), m_scheduler(scheduler) {
+	NativeStreamExport(GraphicContext& graphics, CommandScheduler& scheduler, const char* socket,
+	                   bool stream_only)
+	    : m_graphics(graphics), m_scheduler(scheduler), m_stream_only(stream_only) {
 		const auto dimension = [](const char* name) -> uint32_t {
 			const char* value = std::getenv(name);
 			if (value == nullptr || *value == '\0') return 0;
@@ -342,42 +343,59 @@ public:
 		const auto fps = dimension("KYTY_STREAM_FPS");
 		if (m_width == UINT32_MAX || m_height == UINT32_MAX || (m_width == 0) != (m_height == 0) ||
 		    (fps != 0 && fps != 30 && fps != 60)) {
+			if (stream_only) EXIT("Streaming-only: invalid capture dimensions/FPS\n");
 			LOGF("Streaming disabled: invalid capture dimensions/FPS\n");
 			return;
+		}
+		if (stream_only) {
+			m_system_overlay = std::make_unique<SystemOverlay>(graphics);
+			SetSystemOverlayRemoteInputEnabled(true);
 		}
 		m_interval  = std::chrono::nanoseconds(1000000000 / (fps == 0 ? 60 : fps));
 		m_transport = std::make_unique<Streaming::Transport>(
 		    socket,
-		    [](const Streaming::Input* input) {
-			    Libs::Controller::SetRemoteInput(
-			        input != nullptr && input->connected, input != nullptr ? input->buttons : 0,
-			        input != nullptr ? input->axes : std::array<int, 6> {128, 128, 128, 128, 0, 0});
+		    [stream_only](const Streaming::Input* input) {
+			    const bool connected = input != nullptr && input->connected;
+			    const auto buttons   = input != nullptr ? input->buttons : 0;
+			    const auto axes =
+			        input != nullptr ? input->axes : std::array<int, 6> {128, 128, 128, 128, 0, 0};
+			    if (stream_only)
+				    SetRemoteSystemOverlayInput(connected, buttons, axes);
+			    else
+				    Libs::Controller::SetRemoteInput(connected, buttons, axes);
 		    },
-		    [&scheduler](uint64_t tick) { return scheduler.IsFree(tick); });
+		    [&scheduler](uint64_t tick) { return scheduler.IsFree(tick); },
+		    [](const Streaming::Motion* motion) { Libs::Controller::SetRemoteMotion(motion); });
 	}
 	~NativeStreamExport() {
 		m_transport.reset();
+		if (m_stream_only) SetSystemOverlayRemoteInputEnabled(false);
 		m_scheduler.Wait(m_last_tick);
 	}
-	void Capture(const std::array<Presenter::Layer, 2>& layers) {
-		if (m_transport == nullptr || (layers[0].frame == nullptr && layers[1].frame == nullptr))
-			return;
+	bool Capture(const std::array<Presenter::Layer, 2>& layers) {
+		if (m_transport == nullptr) return false;
+		if (layers[0].frame == nullptr && layers[1].frame == nullptr && !m_stream_only)
+			return false;
 		const auto generation = m_transport->Generation();
-		if (generation == 0) return;
+		if (generation == 0) return false;
 		const auto*    source = layers[0].frame != nullptr ? layers[0].frame : layers[1].frame;
-		const uint32_t width  = m_width != 0 ? m_width : source->image.extent.width;
-		const uint32_t height = m_height != 0 ? m_height : source->image.extent.height;
+		const uint32_t width  = m_width != 0        ? m_width
+		                        : source != nullptr ? source->image.extent.width
+		                                            : m_graphics.screen_width;
+		const uint32_t height = m_height != 0       ? m_height
+		                        : source != nullptr ? source->image.extent.height
+		                                            : m_graphics.screen_height;
 		if (m_pool != nullptr && m_generation == generation &&
 		    (m_pool->Descriptor().width != width || m_pool->Descriptor().height != height)) {
 			m_transport->Reconnect();
-			return;
+			return false;
 		}
 		if (m_generation != generation) {
 			// Retain at most two old pools plus the active pool across peer loss.
 			if (m_pool != nullptr && m_retired.size() >= 2) {
 				LOGF("Streaming disabled: retired GPU pool limit reached after peer loss/resize\n");
 				m_transport.reset();
-				return;
+				return false;
 			}
 			if (m_pool != nullptr) m_retired.push_back(std::move(m_pool));
 			std::string error;
@@ -387,7 +405,7 @@ public:
 			if (m_pool == nullptr) {
 				LOGF("Streaming disabled: %s\n", error.c_str());
 				m_transport.reset();
-				return;
+				return false;
 			}
 			m_generation = generation;
 			m_ring       = std::make_shared<Streaming::LeaseRing>(m_epoch);
@@ -396,15 +414,27 @@ public:
 			     m_pool->Descriptor().stride, static_cast<unsigned long long>(m_epoch),
 			     m_pool->Descriptor().gpu_uuid.c_str());
 		}
-		if (!m_transport->Attached()) return;
+		if (!m_transport->Attached()) return false;
 		const auto now = std::chrono::steady_clock::now();
-		if (now - m_last_capture < m_interval) return;
+		if (now - m_last_capture < m_interval) return false;
 		const auto lease = m_ring->TryAcquire();
 		if (!lease) {
 			m_transport->Drop();
-			return;
+			return false;
 		}
 		m_last_capture = now;
+		Streaming::GpuPool::OverlayRecorder draw_overlay;
+		if (m_system_overlay != nullptr && GetSystemOverlayVisualState().active) {
+			// ImGui owns transient vertex/index/texture uploads. Finish the previous use before
+			// preparing the next frame; there is exactly one target and RenderDrawData per frame.
+			m_scheduler.Wait(m_last_tick);
+			if (m_system_overlay->PrepareFrame({width, height}, Streaming::GpuPool::CompositeFormat,
+			                                   3)) {
+				draw_overlay = [this](auto command, auto target) {
+					m_system_overlay->Record(command, target);
+				};
+			}
+		}
 		std::optional<RenderLockGuard> render_lock;
 		if (!PresentUnlocked()) render_lock.emplace(m_scheduler.Context().GetMutex());
 		auto& wrapper = m_scheduler.BeginCommand();
@@ -436,7 +466,7 @@ public:
 				                layers[bus].premultiplied_alpha};
 			}
 		}
-		m_pool->Record(command, *lease, capture[0], capture[1]);
+		m_pool->Record(command, *lease, capture[0], capture[1], draw_overlay);
 		SubmitInfo submit;
 		if (lease->recycled)
 			submit.AddWait(m_pool->Done(lease->slot), 0, vk::PipelineStageFlagBits::eTransfer);
@@ -450,6 +480,7 @@ public:
 		     static_cast<uint64_t>(
 		         std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch())
 		             .count())});
+		return true;
 	}
 
 private:
@@ -459,6 +490,8 @@ private:
 	std::vector<std::unique_ptr<Streaming::GpuPool>> m_retired;
 	std::shared_ptr<Streaming::LeaseRing>            m_ring;
 	std::unique_ptr<Streaming::Transport>            m_transport;
+	std::unique_ptr<SystemOverlay>                   m_system_overlay;
+	bool                                             m_stream_only = false;
 	uint64_t                                         m_generation = 0, m_epoch = 0, m_last_tick = 0;
 	uint32_t                                         m_width = 0, m_height = 0;
 	std::chrono::nanoseconds                         m_interval {};
@@ -471,14 +504,18 @@ struct Presenter::Impl {
 	      present_scheduler(renderer, owner.graphic_ctx, CommandScheduler::Role::Presenter),
 	      frames(owner, present_scheduler) {
 		EXIT_IF(owner.render_context == nullptr);
-		swapchain.Create();
+		if (!owner.stream_only) swapchain.Create();
 		const uint32_t image_count = swapchain.ImageCount() > 0 ? swapchain.ImageCount() : 3;
-		frames.Initialize(image_count, swapchain.Format());
+		frames.Initialize(image_count, owner.stream_only ? Streaming::GpuPool::CompositeFormat
+		                                                 : swapchain.Format());
 #if defined(__linux__)
+		if (owner.stream_only && !owner.graphic_ctx.streaming_external_enabled) {
+			EXIT("Streaming-only: Vulkan external-memory streaming is unavailable\n");
+		}
 		if (const char* socket = std::getenv("KYTY_STREAM_SOCKET");
 		    socket != nullptr && *socket != '\0' && owner.graphic_ctx.streaming_external_enabled) {
-			stream_export =
-			    std::make_unique<NativeStreamExport>(owner.graphic_ctx, present_scheduler, socket);
+			stream_export = std::make_unique<NativeStreamExport>(
+			    owner.graphic_ctx, present_scheduler, socket, owner.stream_only);
 		}
 #endif
 	}
@@ -1462,8 +1499,14 @@ void Presenter::ClearLayer(int bus) {
 void Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 
-	if (stream_export != nullptr) stream_export->Capture(layers);
 	const auto overlay_visual = GetSystemOverlayVisualState();
+	const bool exported       = stream_export != nullptr && stream_export->Capture(layers);
+	if (window.stream_only) {
+		// A throttled/dropped frame must retry the final redraw that removes a closed dialog.
+		if (exported)
+			presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
+		return;
+	}
 	// Some window systems keep presenting an old swapchain after a resize.
 	if (swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);

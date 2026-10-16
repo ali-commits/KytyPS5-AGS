@@ -1,17 +1,15 @@
 #include "graphics/presentation/window.h"
 
-#include <SDL3/SDL.h>
-
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/stringUtils.h"
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
-#include "common/stringUtils.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -19,20 +17,22 @@
 #include "graphics/presentation/renderDoc.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
+#include "graphics/presentation/window/presentationPolicy.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
 
+#include <SDL3/SDL.h>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fmt/format.h>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 #include <vulkan/vk_platform.h>
-#include <filesystem>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -826,7 +826,13 @@ static void WindowCreate(WindowContext& context) {
 
 	LOGF("WindowCreate(): width = %d, height = %d\n", width, height);
 
-	uint32_t window_flags = WindowContext::InitialWindowFlags(Config::FullscreenEnabled());
+#if defined(__linux__)
+	context.stream_only =
+	    StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), std::getenv("KYTY_STREAM_SOCKET"));
+#endif
+	uint32_t window_flags =
+	    WindowContext::InitialWindowFlags(Config::FullscreenEnabled(), context.stream_only);
+	if (context.stream_only) LOGF("Streaming-only: hidden window; local presentation disabled\n");
 #if defined(__APPLE__)
 	// SDL loads Vulkan while creating a Vulkan window, so select the bundled
 	// MoltenVK loader before calling SDL_CreateWindow. Keep an explicit user
@@ -864,9 +870,11 @@ static void WindowCreate(WindowContext& context) {
 	context.UpdateIcon();
 }
 
-uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {
+uint32_t WindowContext::InitialWindowFlags(bool fullscreen, bool stream_only) noexcept {
 	auto flags = static_cast<uint32_t>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
-	if (fullscreen) {
+	if (stream_only) {
+		flags |= static_cast<uint32_t>(SDL_WINDOW_HIDDEN);
+	} else if (fullscreen) {
 		flags |= static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
 	}
 	return flags;

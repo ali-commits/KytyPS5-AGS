@@ -68,7 +68,8 @@ struct WindowContext {
 	[[nodiscard]] static vk::PhysicalDeviceVulkan11Features RequiredVulkan11Features() noexcept;
 	[[nodiscard]] static vk::PhysicalDeviceVulkan12Features RequiredVulkan12Features() noexcept;
 	[[nodiscard]] static vk::PhysicalDeviceVulkan13Features RequiredVulkan13Features() noexcept;
-	[[nodiscard]] static uint32_t InitialWindowFlags(bool fullscreen) noexcept;
+	[[nodiscard]] static uint32_t InitialWindowFlags(bool fullscreen,
+	                                                 bool stream_only = false) noexcept;
 	void                                                    CreateVulkan();
 	void                                                    RecreateSurface();
 	void                                                    RefreshSurfaceCapabilities();
@@ -92,6 +93,7 @@ struct WindowContext {
 	std::unique_ptr<Presenter>     presenter;
 	WindowLoopState                loop;
 	std::atomic_bool               minimized     = false;
+	bool                           stream_only   = false;
 
 	Common::Mutex mutex;
 
