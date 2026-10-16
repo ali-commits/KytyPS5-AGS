@@ -91,7 +91,7 @@ To open the candidate launcher on its Streaming tab and start hosting with its s
 preferences, run the candidate's executable with the explicit flag:
 
 ```sh
-/absolute/candidate/kyty_launcher --start-streaming-host
+/absolute/candidate/start-streaming.sh --start-streaming-host
 ```
 
 The launcher validates the emulator and prepares its library catalog before requesting
