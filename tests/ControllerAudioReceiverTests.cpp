@@ -48,9 +48,11 @@ struct Fake final: UsbOutput {
 		reports.push_back(r);
 		return !fail;
 	}
-	void Close(uint32_t) override { closes++; }
-	void Shutdown() override { shutdowns++; }
-	bool Alive() override { return alive; }
+	void        Close(uint32_t) override { closes++; }
+	void        Shutdown() override { shutdowns++; }
+	bool        Alive() override { return alive; }
+	std::string error_text = "fake output reason";
+	std::string Error() const override { return error_text; }
 };
 Header Port(Type t, Kind k = Kind::Actuator) {
 	return {t, k, 2, 7, 9, 0, 48000, 1, 1, 0, 1000000};
@@ -78,6 +80,23 @@ int main() {
 	      "Controller'", "VeryLongCardId16x"})
 		Check(!ExplicitAlsaPlaybackSpec(invalid, 0), "ALSA card ID syntax injection refused");
 	Check(!ExplicitAlsaPlaybackSpec("Controller", UINT32_MAX), "ALSA playback device bound");
+	{
+		auto    device = std::make_unique<Fake>();
+		auto*   out    = device.get();
+		UsbSink sink(std::move(device));
+		Check(sink.Prepare(), "runtime diagnostic setup");
+		auto port = Port(Type::Open);
+		Check(sink.Open(port), "runtime diagnostic port");
+		out->fail = true;
+		port.type = Type::Pcm;
+		Check(!sink.Pcm(port, Samples({0, 0}), 1000000) &&
+		          sink.Error().find("PCM write: fake output reason") != std::string::npos,
+		      "PCM write failure preserves output reason");
+		out->alive = false;
+		out->error_text.assign(400, 'x');
+		Check(!sink.Tick(1000010) && sink.Error().size() <= 128,
+		      "runtime diagnostic remains bounded");
+	}
 	auto playback = ParseAlsaPlaybackNode("pcmC1D0p");
 	Check(playback && playback->first == 1 && playback->second == 0, "exact dynamic playback node");
 	Check(!ParseAlsaPlaybackNode("pcmC1D0c"), "capture node must not become duplicate playback");
@@ -180,6 +199,8 @@ int main() {
 	f->latency = 0;
 	f->queued  = 21000;
 	Check(!usb.Pcm(h, stereo, 1110000), "queue overflow explicit failure");
+	Check(usb.Error().find("PCM queue") != std::string::npos,
+	      "queue failure identifies PCM branch");
 	f->queued = 0;
 	Check(UsbSink::FrequencyRatio(0) >= .995f && UsbSink::FrequencyRatio(1000000) <= 1.005f,
 	      "drift clamp");
@@ -195,6 +216,9 @@ int main() {
 	Check(usb.Tick(2200000) && f->reports.back()[4] == 0, "native 250ms hold");
 	f->alive = false;
 	Check(!usb.Tick(2300000), "device loss");
+	Check(usb.Error().find("service liveness") != std::string::npos &&
+	          usb.Error().find("fake output reason") != std::string::npos,
+	      "service failure preserves physical reason");
 	usb.Reset();
 	// Simulated +/-1000ppm USB clocks run for ten minutes without overflowing 20ms.
 	for (double physical: {.999, 1.001}) {

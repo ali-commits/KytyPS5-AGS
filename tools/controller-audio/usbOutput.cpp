@@ -124,15 +124,25 @@ class SdlOutput final: public UsbOutput {
 	SDL_AudioDeviceID device_          = 0;
 	bool              initialized_     = false;
 	uint64_t          next_diagnostic_ = 0;
-	bool              PrepareFailure(const char* stage, const char* detail) {
+	std::string       error_;
+	bool              RuntimeFailure(const char* stage, const std::string& detail) {
+		error_ = std::string(stage) + ": " + detail;
+		for (auto& c: error_)
+			if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+		if (error_.size() > 128) error_.resize(128);
 		auto now = NowUs();
 		if (now >= next_diagnostic_) {
-			std::fprintf(stderr, "controller audio USB prepare %.40s: %.128s\n", stage, detail);
+			std::fprintf(stderr, "controller audio USB %.128s\n", error_.c_str());
 			next_diagnostic_ = now + 2000000;
 		}
+		return false;
+	}
+	bool PrepareFailure(const char* stage, const char* detail) {
+		RuntimeFailure((std::string("prepare ") + stage).c_str(), detail);
 		Shutdown();
 		return false;
 	}
+
 	struct Stream {
 		SDL_AudioStream* stream;
 		uint32_t         rate;
@@ -143,6 +153,7 @@ public:
 	explicit SdlOutput(Config c): config_(std::move(c)) {}
 	~SdlOutput() override { Shutdown(); }
 	bool Prepare() override {
+		error_.clear();
 		const char* stage = "discovery";
 		try {
 			selected_ = Discover(config_);
@@ -250,9 +261,13 @@ public:
 	}
 	bool Write(uint32_t port, std::span<const float> data, float ratio) override {
 		auto it = streams_.find(port);
-		return it != streams_.end() && SDL_SetAudioStreamFrequencyRatio(it->second.stream, ratio) &&
-		       SDL_PutAudioStreamData(it->second.stream, data.data(),
-		                              static_cast<int>(data.size_bytes()));
+		if (it == streams_.end()) return RuntimeFailure("PCM stream lookup", "port not bound");
+		if (!SDL_SetAudioStreamFrequencyRatio(it->second.stream, ratio))
+			return RuntimeFailure("SDL frequency ratio", SDL_GetError());
+		if (!SDL_PutAudioStreamData(it->second.stream, data.data(),
+		                            static_cast<int>(data.size_bytes())))
+			return RuntimeFailure("SDL PCM write", SDL_GetError());
+		return true;
 	}
 	uint64_t PlaybackLatencyUs() override { return hardware_latency_us_; }
 	uint64_t PlayedUs() override { return played_frames_ * 1000000 / 48000; }
@@ -260,13 +275,22 @@ public:
 		auto it = streams_.find(port);
 		if (it == streams_.end()) return 0;
 		int queued = SDL_GetAudioStreamQueued(it->second.stream);
-		if (queued < 0) return UINT64_MAX;
+		if (queued < 0) {
+			RuntimeFailure("SDL queued input", SDL_GetError());
+			return UINT64_MAX;
+		}
 		return uint64_t(queued) * 1000000 / (uint64_t(it->second.rate) * 4 * sizeof(float));
 	}
 	bool Report(const UsbReport& report) override {
 		// Only compiled, narrow encoders can reach this boundary. Refuse trigger/LED masks.
-		if (hid_ < 0 || !IsOwnedReport(report)) return false;
-		return ::write(hid_, report.data(), report.size()) == static_cast<ssize_t>(report.size());
+		if (hid_ < 0) return RuntimeFailure("hidraw report", "descriptor closed");
+		if (!IsOwnedReport(report))
+			return RuntimeFailure("hidraw report", "encoding outside helper-owned fields");
+		auto n = ::write(hid_, report.data(), report.size());
+		if (n != static_cast<ssize_t>(report.size()))
+			return RuntimeFailure("hidraw write",
+			                      "bytes=" + std::to_string(n) + " " + std::strerror(errno));
+		return true;
 	}
 	void Close(uint32_t port) override {
 		auto it = streams_.find(port);
@@ -295,23 +319,35 @@ public:
 			initialized_ = false;
 		}
 	}
-	bool Alive() override {
-		auto bounds =
-		    ParseAlsaPlayback(parameters_, ReadText(status_path_), getpid(), period_frames_);
-		if (!bounds || bounds->played_frames < played_frames_ ||
-		    bounds->latency_us != hardware_latency_us_)
-			return false;
+	std::string Error() const override { return error_; }
+	bool        Alive() override {
+		auto status = ReadText(status_path_);
+		auto bounds = ParseAlsaPlayback(parameters_, status, getpid(), period_frames_);
+		if (!bounds)
+			return RuntimeFailure("ALSA proc validation",
+			                      status.empty() ? "status unavailable" : status);
+		if (bounds->played_frames < played_frames_)
+			return RuntimeFailure("ALSA progress regression",
+			                      "previous=" + std::to_string(played_frames_) +
+			                          " current=" + std::to_string(bounds->played_frames));
+		if (bounds->latency_us != hardware_latency_us_)
+			return RuntimeFailure("ALSA playback bound", "latency changed");
 		played_frames_ = bounds->played_frames;
 		std::error_code ec;
-		if (hid_ < 0 || !fs::exists(selected_.usb, ec) ||
-		    Read(selected_.usb / "busnum") + ":" + Read(selected_.usb / "devnum") !=
-		        selected_.identity)
-			return false;
+		if (hid_ < 0 || !fs::exists(selected_.usb, ec))
+			return RuntimeFailure("USB identity", "device path or descriptor unavailable");
+		if (Read(selected_.usb / "busnum") + ":" + Read(selected_.usb / "devnum") !=
+		    selected_.identity)
+			return RuntimeFailure("USB identity", "bus/device number changed");
 		if (UsbParent(fs::path("/sys/class/hidraw") / selected_.hid.filename() / "device") !=
 		    selected_.usb)
-			return false;
+			return RuntimeFailure("hidraw ancestry", "USB parent changed");
 		pollfd fd {hid_, POLLOUT, 0};
-		return ::poll(&fd, 1, 0) >= 0 && !(fd.revents & (POLLERR | POLLHUP | POLLNVAL));
+		auto   n = ::poll(&fd, 1, 0);
+		if (n < 0) return RuntimeFailure("hidraw poll", std::strerror(errno));
+		if (fd.revents & (POLLERR | POLLHUP | POLLNVAL))
+			return RuntimeFailure("hidraw poll", "revents=" + std::to_string(fd.revents));
+		return true;
 	}
 };
 } // namespace

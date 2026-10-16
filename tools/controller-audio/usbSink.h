@@ -30,37 +30,41 @@ bool                        IsOwnedReport(const UsbReport&);
 // Physical boundary is injected in tests; null output never constructs it.
 class UsbOutput {
 public:
-	virtual ~UsbOutput()                                            = default;
-	virtual bool     Prepare()                                      = 0;
-	virtual bool     Open(uint32_t, uint32_t)                       = 0;
-	virtual bool     Write(uint32_t, std::span<const float>, float) = 0;
-	virtual uint64_t QueuedUs(uint32_t)                             = 0;
-	virtual uint64_t PlaybackLatencyUs() { return 0; }
-	virtual uint64_t PlayedUs() { return 0; }
-	virtual bool     Report(const UsbReport&) = 0;
-	virtual void     Close(uint32_t)          = 0;
-	virtual void     Shutdown()               = 0;
-	virtual bool     Alive()                  = 0;
+	virtual ~UsbOutput()                                               = default;
+	virtual bool        Prepare()                                      = 0;
+	virtual bool        Open(uint32_t, uint32_t)                       = 0;
+	virtual bool        Write(uint32_t, std::span<const float>, float) = 0;
+	virtual uint64_t    QueuedUs(uint32_t)                             = 0;
+	virtual uint64_t    PlaybackLatencyUs() { return 0; }
+	virtual uint64_t    PlayedUs() { return 0; }
+	virtual std::string Error() const { return {}; }
+	virtual bool        Report(const UsbReport&) = 0;
+	virtual void        Close(uint32_t)          = 0;
+	virtual void        Shutdown()               = 0;
+	virtual bool        Alive()                  = 0;
 };
 class UsbSink final: public Sink {
 public:
 	explicit UsbSink(std::unique_ptr<UsbOutput> output): output_(std::move(output)) {}
 	~UsbSink() override;
-	bool         Prepare() override;
-	bool         Open(const Header&) override;
-	bool         Pcm(const Header&, std::span<const uint8_t>, uint64_t) override;
-	bool         Close(uint32_t) override;
-	void         Reset() override;
-	bool         Rumble(uint16_t, uint16_t, uint32_t, uint64_t) override;
-	bool         Tick(uint64_t) override;
-	uint64_t     QueuedUs(uint32_t) override;
-	uint64_t     PendingFrames(uint32_t port, uint32_t rate) override;
-	uint64_t     PlaybackLatencyUs() override { return output_->PlaybackLatencyUs(); }
-	uint64_t     PlayedUs() override { return output_->PlayedUs(); }
-	static float FrequencyRatio(uint64_t queued_us);
+	bool               Prepare() override;
+	bool               Open(const Header&) override;
+	bool               Pcm(const Header&, std::span<const uint8_t>, uint64_t) override;
+	bool               Close(uint32_t) override;
+	void               Reset() override;
+	bool               Rumble(uint16_t, uint16_t, uint32_t, uint64_t) override;
+	bool               Tick(uint64_t) override;
+	uint64_t           QueuedUs(uint32_t) override;
+	uint64_t           PendingFrames(uint32_t port, uint32_t rate) override;
+	uint64_t           PlaybackLatencyUs() override { return output_->PlaybackLatencyUs(); }
+	uint64_t           PlayedUs() override { return output_->PlayedUs(); }
+	static float       FrequencyRatio(uint64_t queued_us);
+	const std::string& Error() const { return error_; }
 
 private:
 	bool                       Apply(uint64_t);
+	bool                       Fail(const char*, const std::string&);
+	std::string                error_;
 	std::unique_ptr<UsbOutput> output_;
 	std::map<uint32_t, Header> ports_;
 	uint64_t                   pcm_until_ = 0, rumble_until_ = 0;

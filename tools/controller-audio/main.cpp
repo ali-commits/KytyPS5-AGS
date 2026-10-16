@@ -46,8 +46,12 @@ int Reference(const Config& config, uint32_t seconds, Kind kind) {
 				for (int j = 0; j < 4; j++)
 					bytes.push_back(b >> (8 * j));
 		}
-		if (!sink.Pcm(h, bytes, NowUs()) || !sink.Tick(NowUs()))
-			throw std::runtime_error("reference output failed");
+		if (!sink.Pcm(h, bytes, NowUs()))
+			throw std::runtime_error("reference PCM failed at frame " +
+			                         std::to_string(sample - 240) + ": " + sink.Error());
+		if (!sink.Tick(NowUs()))
+			throw std::runtime_error("reference service failed after frame " +
+			                         std::to_string(sample) + ": " + sink.Error());
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
 	sink.Reset();

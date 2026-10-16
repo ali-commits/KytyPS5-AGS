@@ -146,10 +146,18 @@ std::vector<float> MapQuad(Kind kind, std::span<const uint8_t> p) {
 	}
 	return out;
 }
+bool UsbSink::Fail(const char* stage, const std::string& detail) {
+	error_ = std::string(stage) + ": " + detail;
+	for (auto& c: error_)
+		if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+	if (error_.size() > 128) error_.resize(128);
+	return false;
+}
 UsbSink::~UsbSink() {
 	Reset();
 }
 bool UsbSink::Prepare() {
+	error_.clear();
 	if (prepared_) return true;
 	prepared_ = output_->Prepare();
 	if (!prepared_) output_->Shutdown();
@@ -172,18 +180,24 @@ float UsbSink::FrequencyRatio(uint64_t queued_us) {
 	return std::clamp(1.0f + (float(queued_us) - 15000.f) / 1000000.f, .995f, 1.005f);
 }
 bool UsbSink::Pcm(const Header& h, std::span<const uint8_t> p, uint64_t now) {
-	if (!prepared_ || !ports_.contains(h.port) || !output_->Alive()) return false;
+	if (!prepared_) return Fail("PCM readiness", "output not prepared");
+	if (!ports_.contains(h.port)) return Fail("PCM port", "source port not opened");
+	if (!output_->Alive()) return Fail("PCM liveness", output_->Error());
 	auto queue    = output_->QueuedUs(h.port);
 	auto duration = (p.size() / 8 * 1000000ULL + h.rate - 1) / h.rate;
-	if (queue > 20000 || duration > 20000 - queue) return false;
+	if (queue > 20000 || duration > 20000 - queue)
+		return Fail("PCM queue", "queued_us=" + std::to_string(queue) + " duration_us=" +
+		                             std::to_string(duration) + " " + output_->Error());
 	auto quad = MapQuad(h.kind, p);
 	if (h.kind == Kind::Actuator && std::any_of(quad.begin(), quad.end(), [](float sample) {
 		    return std::fabs(sample) > 1.f / 1024.f;
 	    })) {
 		pcm_until_ = std::max(pcm_until_, now + std::max<uint64_t>(queue + duration, 250000));
-		if (!Apply(now)) return false;
+		if (!Apply(now)) return Fail("PCM rumble arbitration", output_->Error());
 	}
-	return output_->Write(h.port, quad, FrequencyRatio(queue + duration));
+	if (!output_->Write(h.port, quad, FrequencyRatio(queue + duration)))
+		return Fail("PCM write", output_->Error());
+	return true;
 }
 bool UsbSink::Close(uint32_t port) {
 	auto found = ports_.find(port);
@@ -234,7 +248,10 @@ bool UsbSink::Rumble(uint16_t large, uint16_t small, uint32_t duration, uint64_t
 	return Apply(now);
 }
 bool UsbSink::Tick(uint64_t now) {
-	return prepared_ && output_->Alive() && Apply(now);
+	if (!prepared_) return Fail("service readiness", "output not prepared");
+	if (!output_->Alive()) return Fail("service liveness", output_->Error());
+	if (!Apply(now)) return Fail("service rumble arbitration", output_->Error());
+	return true;
 }
 uint64_t UsbSink::PendingFrames(uint32_t port, uint32_t rate) {
 	auto us = output_->QueuedUs(port);
