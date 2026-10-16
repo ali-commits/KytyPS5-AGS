@@ -56,26 +56,6 @@ struct EventKeyboard {
 	double   timestamp_seconds;
 };
 
-static uint32_t ControllerButtonToPadButton(int button) {
-	switch (button) {
-		case SDL_GAMEPAD_BUTTON_SOUTH: return Controller::PAD_BUTTON_CROSS;
-		case SDL_GAMEPAD_BUTTON_EAST: return Controller::PAD_BUTTON_CIRCLE;
-		case SDL_GAMEPAD_BUTTON_WEST: return Controller::PAD_BUTTON_SQUARE;
-		case SDL_GAMEPAD_BUTTON_NORTH: return Controller::PAD_BUTTON_TRIANGLE;
-		case SDL_GAMEPAD_BUTTON_START: return Controller::PAD_BUTTON_OPTIONS;
-		case SDL_GAMEPAD_BUTTON_LEFT_STICK: return Controller::PAD_BUTTON_L3;
-		case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return Controller::PAD_BUTTON_R3;
-		case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return Controller::PAD_BUTTON_L1;
-		case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return Controller::PAD_BUTTON_R1;
-		case SDL_GAMEPAD_BUTTON_DPAD_UP: return Controller::PAD_BUTTON_UP;
-		case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return Controller::PAD_BUTTON_DOWN;
-		case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return Controller::PAD_BUTTON_LEFT;
-		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return Controller::PAD_BUTTON_RIGHT;
-		case SDL_GAMEPAD_BUTTON_TOUCHPAD: return Controller::PAD_BUTTON_TOUCH_PAD;
-		default: return 0;
-	}
-}
-
 static Controller::Axis ControllerAxisFromSdl(int axis_id) {
 	switch (axis_id) {
 		case SDL_GAMEPAD_AXIS_LEFTX: return Controller::Axis::LeftX;
@@ -89,8 +69,7 @@ static Controller::Axis ControllerAxisFromSdl(int axis_id) {
 }
 
 static bool ControllerAxisIsTrigger(int axis_id) {
-	return axis_id == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
-	       axis_id == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+	return axis_id == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || axis_id == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
 }
 
 static int ControllerAxisValueFromSdl(int axis_id, int axis_value) {
@@ -182,7 +161,7 @@ static void ToggleDesktopFullscreen() {
 		return;
 	}
 
-	const auto flags = static_cast<uint32_t>(SDL_GetWindowFlags(g_window->window));
+	const auto flags      = static_cast<uint32_t>(SDL_GetWindowFlags(g_window->window));
 	const bool fullscreen = (flags & SDL_WINDOW_FULLSCREEN) != 0u;
 	if (!SDL_SetWindowFullscreen(g_window->window, !fullscreen)) {
 		LOGF("Toggle fullscreen failed: %s\n", SDL_GetError());
@@ -270,6 +249,15 @@ static void GameEventMouse([[maybe_unused]] const EventMouse& mb) {
 		}
 
 		HostInputMouseButton(mouse_button, mb.down);
+		if (!mb.touch && mb.left) {
+			HostInputMouseTouchPad(mb.down, static_cast<float>(mb.x), static_cast<float>(mb.y));
+		}
+	} else if (mb.motion && !mb.touch) {
+		if (mb.left) {
+			HostInputMouseTouchPad(true, static_cast<float>(mb.x), static_cast<float>(mb.y));
+		} else {
+			HostInputMouseMotion(static_cast<float>(mb.x), static_cast<float>(mb.y));
+		}
 	}
 }
 
@@ -318,6 +306,7 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.removed) {
+		HostInputDisconnectGamepad(f.id);
 		if (auto* pad = SDL_GetGamepadFromID(f.id); pad != nullptr) {
 			Controller::Disconnect(f.id);
 			SDL_CloseGamepad(pad);
@@ -325,17 +314,22 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.down || f.up) {
-		const auto button = ControllerButtonToPadButton(f.button);
-		if (button != 0) {
-			Controller::SetButton(f.id, button, f.down);
-		}
+		HostInputPadButton(f.id, f.button, f.down);
 	}
 
 	if (f.axis) {
-		const auto axis = ControllerAxisFromSdl(f.axis_id);
-		if (axis != Controller::Axis::AxisMax) {
-			Controller::SetAxis(f.id, axis,
+		if (f.axis_id == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+		    f.axis_id == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
+			HostInputPadTrigger(f.id, f.axis_id == SDL_GAMEPAD_AXIS_LEFT_TRIGGER,
 			                    ControllerAxisValueFromSdl(f.axis_id, f.axis_value));
+		} else if (const auto axis = ControllerAxisFromSdl(f.axis_id);
+		           axis != Controller::Axis::AxisMax) {
+			const int value = ControllerAxisValueFromSdl(f.axis_id, f.axis_value);
+			if ((f.axis_id == SDL_GAMEPAD_AXIS_LEFTX || f.axis_id == SDL_GAMEPAD_AXIS_LEFTY) &&
+			    HostInputGamepadAxis(f.id, f.axis_id == SDL_GAMEPAD_AXIS_LEFTX, value)) {
+				return;
+			}
+			Controller::SetAxis(f.id, axis, value);
 		}
 	}
 }
@@ -469,6 +463,7 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
 			LOGF("Mouse left window %" PRIu32 "\n", window_event.windowID);
+			HostInputSetTouchPadMode(false);
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
 			LOGF("Window %" PRIu32 " gained keyboard focus\n", window_event.windowID);
@@ -732,9 +727,8 @@ void WindowContext::ProcessEvent(double time_s) {
 				                      sensor.sensor == SDL_SENSOR_ACCEL ? Controller::Sensor::Accel
 				                                                        : Controller::Sensor::Gyro,
 				                      sensor.data,
-				                      sensor.sensor_timestamp != 0
-				                          ? sensor.sensor_timestamp / 1000
-				                          : sensor.timestamp / 1000);
+				                      sensor.sensor_timestamp != 0 ? sensor.sensor_timestamp / 1000
+				                                                   : sensor.timestamp / 1000);
 			}
 			break;
 		}
@@ -840,7 +834,7 @@ static void WindowCreate(WindowContext& context) {
 	if (std::getenv("SDL_VULKAN_LIBRARY") == nullptr) {
 		if (const char* base_path = SDL_GetBasePath(); base_path != nullptr) {
 			const std::string base_path_str = base_path;
-			std::string moltenvk_path = base_path_str + "libMoltenVK.dylib";
+			std::string       moltenvk_path = base_path_str + "libMoltenVK.dylib";
 			if (!Common::File::IsFileExisting(moltenvk_path)) {
 				moltenvk_path = base_path_str + "../Frameworks/libMoltenVK.dylib";
 			}
@@ -966,8 +960,8 @@ static void WindowLoadPngIcon(const std::filesystem::path& path, WindowIcon* ico
 
 	EXIT_IF(icon->pixels == nullptr);
 
-	icon->surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, icon->pixels,
-	                                      width * 4);
+	icon->surface =
+	    SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, icon->pixels, width * 4);
 	EXIT_NOT_IMPLEMENTED(icon->surface == nullptr);
 }
 
@@ -1008,7 +1002,7 @@ void WindowContext::UpdateTitle(uint64_t frame_num, double current_fps) {
 #endif
 
 	const auto* device_name = graphic_ctx.GetPhysicalDeviceProperties().deviceName.data();
-	auto text = fmt::format(
+	auto        text        = fmt::format(
 	    "[{} | {}] {}{}{}{}{}{}[{}] [{}], frame: {}, fps: {:.0f}", KYTY_BUILD_LABEL, build_type,
 	    (has_title ? title : ""), (has_title ? ", " : ""), (has_title_id ? title_id : ""),
 	    (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""), (has_app_ver ? " " : ""),

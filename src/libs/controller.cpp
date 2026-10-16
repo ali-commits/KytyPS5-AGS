@@ -98,10 +98,10 @@ struct ControllerState {
 		uint16_t y    = 0;
 	};
 
-	uint64_t time                                  = 0;
-	uint32_t buttons                               = 0;
-	int      axes[static_cast<int>(Axis::AxisMax)] = {128, 128, 128, 128, 0, 0};
-	Touch    touch[2];
+	uint64_t             time                                  = 0;
+	uint32_t             buttons                               = 0;
+	int                  axes[static_cast<int>(Axis::AxisMax)] = {128, 128, 128, 128, 0, 0};
+	Touch                touch[2];
 	std::array<float, 3> accel {0.0f, 1.0f, 0.0f};
 	std::array<float, 3> gyro {};
 	std::array<float, 4> orientation {0.0f, 0.0f, 0.0f, 1.0f};
@@ -113,29 +113,30 @@ public:
 
 	KYTY_CLASS_NO_COPY(GameController);
 
-	void Connect(int id);
-	void Disconnect(int id);
-	void Button(int id, uint32_t button, bool down);
-	void Axis(int id, Axis axis, int value);
-	void RightStick(int id, int x, int y);
-	void TouchPad(int id, int finger, bool down, float x, float y);
-	void Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
-	void SetMotionSensorState(bool enable);
+	void  Connect(int id);
+	void  Disconnect(int id);
+	void  Button(int id, uint32_t button, bool down);
+	void  Axis(int id, Axis axis, int value);
+	void  RightStick(int id, int x, int y);
+	void  TouchPad(int id, int finger, bool down, float x, float y);
+	void  Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
+	void  SetMotionSensorState(bool enable);
 	void  RemoteMotion(const Streaming::Motion* motion);
-	void ResetOrientation();
-	void ResetInputState();
+	void  ResetOrientation();
+	void  ToggleGyroEmulation(int id);
+	void  ResetInputState();
 	void  RemoteInput(bool connected, uint32_t buttons, const std::array<int, 6>& axes);
-	void ReleaseHostPads();
-	void GetConnectionInfo(bool* flag, int* count);
-	void SetVibration(uint8_t large_motor, uint8_t small_motor);
-	int  GetActiveControllerId();
-	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
-	bool SetTriggerEffect(const PadTriggerEffectParam& param);
-	void GetTriggerEffectState(int32_t* state);
+	void  ReleaseHostPads();
+	void  GetConnectionInfo(bool* flag, int* count);
+	void  SetVibration(uint8_t large_motor, uint8_t small_motor);
+	int   GetActiveControllerId();
+	void  SetLightBar(uint8_t r, uint8_t g, uint8_t b);
+	bool  SetTriggerEffect(const PadTriggerEffectParam& param);
+	void  GetTriggerEffectState(int32_t* state);
 	void  CycleSetting(Setting setting);
 	float GetSettingScale(Setting setting) const;
-	void ReadState(ControllerState* state, bool* flag, int* count);
-	int  ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
+	void  ReadState(ControllerState* state, bool* flag, int* count);
+	int   ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
 
 private:
 	static constexpr uint32_t STATES_MAX = 64;
@@ -144,43 +145,49 @@ private:
 	void AddState();
 	void ApplyMotion(Sensor sensor, const float* data, uint64_t time_us);
 	void ResetRemoteMotion();
+	// Emulated tilt: the right stick drives pitch and roll instead of the stick axes.
+	void UpdateEmulatedTilt();
 	// Apply cached output without changing its game-requested lifetime; caller holds m_mutex.
 	void ApplyVibration();
 	bool SendTriggerEffect(const PadTriggerEffectParam& param);
 
-	Common::Mutex    m_mutex;
-	std::vector<int> m_connected_ids;
-	int              m_active_id       = -1;
-	bool             m_connected       = false;
-	int              m_connected_count = 0;
-	bool             m_motion_enabled  = true;
-	uint64_t         m_gyro_time       = 0;
+	Common::Mutex      m_mutex;
+	std::vector<int>   m_connected_ids;
+	int                m_active_id       = -1;
+	bool               m_connected       = false;
+	int                m_connected_count = 0;
+	bool               m_motion_enabled  = true;
+	uint64_t           m_gyro_time       = 0;
+	bool               m_gyro_emulation  = false;
+	uint64_t           m_emulated_time   = 0;
+	std::array<int, 2> m_emulated_stick {128, 128};
 	// Accelerometer gravity direction in the reset frame.
-	std::array<float, 3> m_up_reference {0.0f, 1.0f, 0.0f};
-	bool                 m_up_reference_valid = false;
-	SourceState          m_input_sources;
+	std::array<float, 3>   m_up_reference {0.0f, 1.0f, 0.0f};
+	bool                   m_up_reference_valid = false;
+	SourceState            m_input_sources;
 	bool                   m_remote_connected = false, m_remote_motion = false;
 	Streaming::MotionOrder m_remote_motion_order;
-	ControllerState  m_state;
-	ControllerState  m_states[STATES_MAX];
-	bool             m_obtained[STATES_MAX] {};
-	uint32_t         m_states_num    = 0;
-	uint32_t         m_first_state   = 0;
-	uint8_t          m_next_touch_id = 1;
+	ControllerState        m_state;
+	ControllerState        m_states[STATES_MAX];
+	bool                   m_obtained[STATES_MAX] {};
+	uint32_t               m_states_num    = 0;
+	uint32_t               m_first_state   = 0;
+	uint8_t                m_next_touch_id = 1;
 	// The game's last requests, re-sent when their intensity setting changes.
 	std::array<uint8_t, 2> m_vibration {};
 	uint64_t               m_vibration_until = 0;
 	PadTriggerEffectParam  m_trigger_effect {};
-	// Every effect the game set, for scePadGetTriggerEffectState (m_trigger_effect only keeps sent ones).
-	PadTriggerEffectParam  m_state_effect {};
+	// Every effect the game set, for scePadGetTriggerEffectState (m_trigger_effect only keeps sent
+	// ones).
+	PadTriggerEffectParam m_state_effect {};
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
 };
 
 static GameController* g_controller = nullptr;
 
-// A trigger's travel, 0..255. An L2/R2 that arrives as a button only (input remapping, pads or tools
-// that report the trigger digitally) counts as full travel, as for the keyboard.
+// A trigger's travel, 0..255. An L2/R2 that arrives as a button only (input remapping, pads or
+// tools that report the trigger digitally) counts as full travel, as for the keyboard.
 static int TriggerTravel(const ControllerState& state, Axis axis) {
 	const auto button = axis == Axis::TriggerLeft ? PAD_BUTTON_L2 : PAD_BUTTON_R2;
 	const int  value  = state.axes[static_cast<int>(axis)];
@@ -194,13 +201,13 @@ static void pad_fill_data(PadData* data, const ControllerState& state, bool conn
 
 	std::memset(data, 0, sizeof(*data));
 
-	data->buttons           = state.buttons;
-	data->left_stick_x      = state.axes[static_cast<int>(Axis::LeftX)];
-	data->left_stick_y      = state.axes[static_cast<int>(Axis::LeftY)];
-	data->right_stick_x     = state.axes[static_cast<int>(Axis::RightX)];
-	data->right_stick_y     = state.axes[static_cast<int>(Axis::RightY)];
-	data->analog_buttons_l2 = static_cast<uint8_t>(TriggerTravel(state, Axis::TriggerLeft));
-	data->analog_buttons_r2 = static_cast<uint8_t>(TriggerTravel(state, Axis::TriggerRight));
+	data->buttons            = state.buttons;
+	data->left_stick_x       = state.axes[static_cast<int>(Axis::LeftX)];
+	data->left_stick_y       = state.axes[static_cast<int>(Axis::LeftY)];
+	data->right_stick_x      = state.axes[static_cast<int>(Axis::RightX)];
+	data->right_stick_y      = state.axes[static_cast<int>(Axis::RightY)];
+	data->analog_buttons_l2  = static_cast<uint8_t>(TriggerTravel(state, Axis::TriggerLeft));
+	data->analog_buttons_r2  = static_cast<uint8_t>(TriggerTravel(state, Axis::TriggerRight));
 	data->acceleration_x     = state.accel[0];
 	data->acceleration_y     = state.accel[1];
 	data->acceleration_z     = state.accel[2];
@@ -381,13 +388,15 @@ constexpr int TRIGGER_PRESSED_MIN = 8;
 
 int32_t TriggerEffectState(const PadTriggerEffectCommand& command, int value) {
 	const int pos = std::clamp(value, 0, 255) * 10 / 256;
-	// A feedback trigger pushes, and a vibration trigger fires, only while it is pressed: an effect from
-	// position 0 on an untouched trigger is "no force" (Astro's Playroom waits for the change).
+	// A feedback trigger pushes, and a vibration trigger fires, only while it is pressed: an effect
+	// from position 0 on an untouched trigger is "no force" (Astro's Playroom waits for the
+	// change).
 	const bool pressed = value >= TRIGGER_PRESSED_MIN;
 	switch (command.mode) {
 		case 1: // feedback: resistance from position data[0], strength data[1]
-			return pressed && command.data[1] != 0 && pos >= command.data[0] ? TRIGGER_STATE_FEEDBACK_IS_PUSHING
-			                                                      : TRIGGER_STATE_FEEDBACK_NO_FORCE;
+			return pressed && command.data[1] != 0 && pos >= command.data[0]
+			           ? TRIGGER_STATE_FEEDBACK_IS_PUSHING
+			           : TRIGGER_STATE_FEEDBACK_NO_FORCE;
 		case 2: // weapon: resistance from data[0], released at data[1]
 			if (pos >= command.data[1]) {
 				return TRIGGER_STATE_WEAPON_FULLY_PRESSED;
@@ -400,10 +409,10 @@ int32_t TriggerEffectState(const PadTriggerEffectCommand& command, int value) {
 			           : TRIGGER_STATE_VIBRATION_NOT_FIRING;
 		case 4: // multiple-position feedback: strength per position
 			return pressed && command.data[pos] != 0 ? TRIGGER_STATE_FEEDBACK_IS_PUSHING
-			                              : TRIGGER_STATE_FEEDBACK_NO_FORCE;
+			                                         : TRIGGER_STATE_FEEDBACK_NO_FORCE;
 		case 5: // slope feedback from position data[0]
 			return pressed && pos >= command.data[0] ? TRIGGER_STATE_FEEDBACK_IS_PUSHING
-			                              : TRIGGER_STATE_FEEDBACK_NO_FORCE;
+			                                         : TRIGGER_STATE_FEEDBACK_NO_FORCE;
 		case 6: // multiple-position vibration: frequency data[0], amplitude per position
 			return pressed && command.data[0] != 0 && command.data[1 + pos] != 0
 			           ? TRIGGER_STATE_VIBRATION_IS_FIRING
@@ -450,7 +459,9 @@ static bool HostInputOnly() {
 
 void GameController::Connect(int id) {
 	Common::LockGuard lock(m_mutex);
-	if (HostInputOnly() && id != HOST_INPUT_CONTROLLER_ID) { return; }
+	if (HostInputOnly() && id != HOST_INPUT_CONTROLLER_ID) {
+		return;
+	}
 
 	if (std::find(m_connected_ids.begin(), m_connected_ids.end(), id) != m_connected_ids.end()) {
 		return;
@@ -459,8 +470,7 @@ void GameController::Connect(int id) {
 	m_connected_ids.push_back(id);
 
 	if (id != HOST_INPUT_CONTROLLER_ID) {
-		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(id));
-		    pad != nullptr) {
+		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(id)); pad != nullptr) {
 			if (const auto& color = Config::GetControllerColor()) {
 				(void)SDL_SetGamepadLED(pad, (*color)[0], (*color)[1], (*color)[2]);
 			}
@@ -479,7 +489,9 @@ void GameController::Connect(int id) {
 void GameController::Disconnect(int id) {
 	Common::LockGuard lock(m_mutex);
 	// An ignored pad can still emit its SDL removal event.
-	if (HostInputOnly() && id != HOST_INPUT_CONTROLLER_ID) { return; }
+	if (HostInputOnly() && id != HOST_INPUT_CONTROLLER_ID) {
+		return;
+	}
 
 	const auto it = std::find(m_connected_ids.begin(), m_connected_ids.end(), id);
 	EXIT_IF(it == m_connected_ids.end());
@@ -510,9 +522,9 @@ void GameController::CheckActive() {
 	if (!m_connected && new_connected) {
 		m_connected_count++;
 	}
-	m_active_id     = new_active_id;
-	m_connected     = new_connected;
-	m_state         = {};
+	m_active_id = new_active_id;
+	m_connected = new_connected;
+	m_state     = {};
 	if (m_remote_connected)
 		m_input_sources.ResetLocal();
 	else
@@ -520,11 +532,14 @@ void GameController::CheckActive() {
 	m_state.buttons = m_input_sources.Buttons();
 	for (size_t i = 0; i < 6; i++)
 		m_state.axes[i] = m_input_sources.Axis(i);
-	m_gyro_time     = 0;
+	m_gyro_time          = 0;
+	m_gyro_emulation     = false;
+	m_emulated_time      = 0;
+	m_emulated_stick     = {128, 128};
 	m_up_reference_valid = false;
-	m_states_num    = 0;
-	m_first_state   = 0;
-	m_next_touch_id = 1;
+	m_states_num         = 0;
+	m_first_state        = 0;
+	m_next_touch_id      = 1;
 	m_vibration          = {};
 	m_vibration_until    = 0;
 	m_trigger_effect     = {};
@@ -566,6 +581,13 @@ void GameController::Axis(int id, Controller::Axis axis, int value) {
 
 		EXIT_IF(axis_id < 0 || axis_id >= static_cast<int>(Controller::Axis::AxisMax));
 
+		if (m_gyro_emulation &&
+		    (axis == Controller::Axis::RightX || axis == Controller::Axis::RightY)) {
+			m_emulated_stick[axis == Controller::Axis::RightY ? 1 : 0] = value;
+			UpdateEmulatedTilt();
+			return;
+		}
+
 		m_input_sources.LocalAxis(axis_id, value);
 		m_state.axes[axis_id] = value;
 		Common::HostInputTrace("axis", id, axis_id, value);
@@ -580,7 +602,13 @@ void GameController::RightStick(int id, int x, int y) {
 	Common::LockGuard lock(m_mutex);
 
 	if (m_active_id == id || id == HOST_INPUT_CONTROLLER_ID) {
-		m_state.time                                 = LibKernel::KernelGetProcessTime();
+		m_state.time = LibKernel::KernelGetProcessTime();
+		if (m_gyro_emulation) {
+			m_emulated_stick = {x, y};
+			UpdateEmulatedTilt();
+			return;
+		}
+		m_state.time = LibKernel::KernelGetProcessTime();
 		m_input_sources.LocalAxis(static_cast<int>(Axis::RightX), x);
 		m_input_sources.LocalAxis(static_cast<int>(Axis::RightY), y);
 		m_state.axes[static_cast<int>(Axis::RightX)] = x;
@@ -762,12 +790,88 @@ void GameController::SetMotionSensorState(bool enable) {
 	}
 }
 
+static Quat QuatMultiply(const Quat& a, const Quat& b) {
+	return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+	        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+	        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+	        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+}
+
+void GameController::UpdateEmulatedTilt() {
+	constexpr float max_angle = 0.7853982f; // 45 degrees at full stick deflection
+	const auto      angle     = [](int value) {
+		return std::clamp((value - 128) / 127.0f, -1.0f, 1.0f) * max_angle;
+	};
+	const float roll  = angle(m_emulated_stick[0]);
+	const float pitch = angle(m_emulated_stick[1]);
+
+	const Quat q_pitch {std::sin(pitch * 0.5f), 0.0f, 0.0f, std::cos(pitch * 0.5f)};
+	const Quat q_roll {0.0f, 0.0f, std::sin(-roll * 0.5f), std::cos(-roll * 0.5f)};
+	Quat       q = QuatMultiply(q_roll, q_pitch);
+
+	const uint64_t now = LibKernel::KernelGetProcessTime();
+	Vec3           rate {};
+	if (m_emulated_time != 0 && now > m_emulated_time) {
+		const float dt =
+		    std::clamp(static_cast<float>(now - m_emulated_time) * 0.000001f, 0.001f, 0.1f);
+		auto delta = QuatMultiply(QuatConjugate(m_state.orientation), q);
+		if (delta[3] < 0.0f) {
+			for (auto& v: delta) {
+				v = -v;
+			}
+		}
+		rate = {2.0f * delta[0] / dt, 2.0f * delta[1] / dt, 2.0f * delta[2] / dt};
+	}
+	m_emulated_time = now;
+
+	m_state.time        = now;
+	m_state.orientation = q;
+	m_state.accel       = QuatRotate(QuatConjugate(q), {0.0f, 1.0f, 0.0f});
+	m_state.gyro        = rate;
+	AddState();
+	// Angular velocity is only nonzero while the tilt changes.
+	m_state.gyro = {};
+}
+
+void GameController::ToggleGyroEmulation(int id) {
+	Common::LockGuard lock(m_mutex);
+	if (id != HOST_INPUT_CONTROLLER_ID && id != m_active_id) {
+		return;
+	}
+	// Pads with a real gyroscope report it directly.
+	if (m_active_id != HOST_INPUT_CONTROLLER_ID) {
+		auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
+		if (pad != nullptr && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
+			return;
+		}
+	}
+
+	m_gyro_emulation = !m_gyro_emulation;
+	m_emulated_time  = 0;
+	m_state.time     = LibKernel::KernelGetProcessTime();
+	if (m_gyro_emulation) {
+		m_emulated_stick = {m_state.axes[static_cast<int>(Axis::RightX)],
+		                    m_state.axes[static_cast<int>(Axis::RightY)]};
+		m_state.axes[static_cast<int>(Axis::RightX)] = 128;
+		m_state.axes[static_cast<int>(Axis::RightY)] = 128;
+		UpdateEmulatedTilt();
+	} else {
+		m_state.orientation                          = {0.0f, 0.0f, 0.0f, 1.0f};
+		m_state.accel                                = {0.0f, 1.0f, 0.0f};
+		m_state.gyro                                 = {};
+		m_state.axes[static_cast<int>(Axis::RightX)] = m_emulated_stick[0];
+		m_state.axes[static_cast<int>(Axis::RightY)] = m_emulated_stick[1];
+		AddState();
+	}
+	LOGF("Emulated gyro tilt: %s\n", m_gyro_emulation ? "enabled" : "disabled");
+}
+
 void GameController::ResetOrientation() {
 	Common::LockGuard lock(m_mutex);
 	m_state.orientation  = {0.0f, 0.0f, 0.0f, 1.0f};
 	m_gyro_time          = 0;
 	m_up_reference_valid = false;
-	m_state.time        = LibKernel::KernelGetProcessTime();
+	m_state.time         = LibKernel::KernelGetProcessTime();
 	AddState();
 }
 
@@ -825,11 +929,10 @@ void GameController::ReleaseHostPads() {
 		if (id == HOST_INPUT_CONTROLLER_ID) {
 			continue;
 		}
-		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(id));
-		    pad != nullptr) {
+		if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(id)); pad != nullptr) {
 			if (SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5) {
 				DualSenseEffects effect {};
-				effect.enable_bits     = 0x0c;
+				effect.enable_bits      = 0x0c;
 				effect.right_trigger[0] = 0x05;
 				effect.left_trigger[0]  = 0x05;
 				(void)SDL_SendGamepadEffect(pad, &effect, sizeof(effect));
@@ -927,10 +1030,12 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
 				if ((param.trigger_mask & (1u << i)) != 0) {
 					const auto& c = param.command[i];
 					std::fprintf(stderr,
-					             "Pad: trigger effect not sent to the controller: mask=0x%x trigger=%d mode=%u "
+					             "Pad: trigger effect not sent to the controller: mask=0x%x "
+					             "trigger=%d mode=%u "
 					             "data=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-					             param.trigger_mask, i, c.mode, c.data[0], c.data[1], c.data[2], c.data[3],
-					             c.data[4], c.data[5], c.data[6], c.data[7], c.data[8], c.data[9], c.data[10]);
+					             param.trigger_mask, i, c.mode, c.data[0], c.data[1], c.data[2],
+					             c.data[3], c.data[4], c.data[5], c.data[6], c.data[7], c.data[8],
+					             c.data[9], c.data[10]);
 				}
 			}
 		}
@@ -947,20 +1052,23 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
 
 void GameController::GetTriggerEffectState(int32_t* state) {
 	Common::LockGuard lock(m_mutex);
-	const int axes[2] = {static_cast<int>(Controller::Axis::TriggerLeft), static_cast<int>(Controller::Axis::TriggerRight)};
+	const int         axes[2] = {static_cast<int>(Controller::Axis::TriggerLeft),
+	                             static_cast<int>(Controller::Axis::TriggerRight)};
 	for (int i = 0; i < 2; i++) {
-		state[i] = (m_state_effect.trigger_mask & (1u << i)) != 0
-		               ? TriggerEffectState(m_state_effect.command[i],
-		                                    TriggerTravel(m_state, static_cast<Controller::Axis>(axes[i])))
-		               : 0;
+		state[i] =
+		    (m_state_effect.trigger_mask & (1u << i)) != 0
+		        ? TriggerEffectState(m_state_effect.command[i],
+		                             TriggerTravel(m_state, static_cast<Controller::Axis>(axes[i])))
+		        : 0;
 	}
 	// The first changes, for reports from games whose trigger actions still do not react.
 	static int                    reports = 0;
 	static std::array<int32_t, 2> last {-1, -1};
 	if (reports < 32 && (state[0] != last[0] || state[1] != last[1])) {
-		std::fprintf(stderr, "Pad: trigger state %d,%d (modes %u,%u, travel %d,%d)\n", state[0], state[1],
-		             m_state_effect.command[0].mode, m_state_effect.command[1].mode,
-		             TriggerTravel(m_state, Controller::Axis::TriggerLeft), TriggerTravel(m_state, Controller::Axis::TriggerRight));
+		std::fprintf(stderr, "Pad: trigger state %d,%d (modes %u,%u, travel %d,%d)\n", state[0],
+		             state[1], m_state_effect.command[0].mode, m_state_effect.command[1].mode,
+		             TriggerTravel(m_state, Controller::Axis::TriggerLeft),
+		             TriggerTravel(m_state, Controller::Axis::TriggerRight));
 		last = {state[0], state[1]};
 		reports++;
 	}
@@ -1078,6 +1186,10 @@ void SetTouchPad(int id, int finger, bool down, float x, float y) {
 
 void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us) {
 	g_controller->Motion(id, sensor, data, time_us);
+}
+
+void ToggleGyroEmulation(int id) {
+	g_controller->ToggleGyroEmulation(id);
 }
 
 void ResetInputState() {

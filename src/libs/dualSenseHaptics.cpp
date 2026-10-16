@@ -376,7 +376,9 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 
 	if (!stream->speaker &&
 	    SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(controller)) != SDL_GAMEPAD_TYPE_PS5) {
-		float peak[2] = {0.0f, 0.0f};
+		CloseDevice(stream);
+		stream->next_check = 0;
+		float peak[2]      = {0.0f, 0.0f};
 		for (uint32_t frame = 0; frame < frames; frame++) {
 			for (uint32_t ch = 0; ch < 2; ch++) {
 				const float value = stream->stereo[static_cast<size_t>(frame) * 2 + ch];
