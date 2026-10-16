@@ -35,6 +35,24 @@ bool ClockMap::Sample(uint64_t sent, uint64_t receive, uint64_t server_receive,
 bool ClockMap::Fresh(uint64_t now) const {
 	return uncertainty <= 20000 && now >= sampled_at && now - sampled_at <= 10000000;
 }
+PlaybackClockState PlaybackClockGate::Observe(uint64_t                             now,
+                                              std::optional<PlaybackClockProgress> progress) {
+	if (state_ != PlaybackClockState::Waiting) return state_;
+	if (now < start_ || now - start_ >= BudgetUs || !progress)
+		return state_ = PlaybackClockState::Failed;
+	if (previous_) {
+		if (progress->hardware_frames < previous_->hardware_frames ||
+		    progress->application_frames < previous_->application_frames ||
+		    (!progress->running && previous_->running))
+			return state_ = PlaybackClockState::Failed;
+		if (progress->running && previous_->running &&
+		    progress->hardware_frames > previous_->hardware_frames &&
+		    progress->application_frames > 0)
+			return state_ = PlaybackClockState::Ready;
+	}
+	previous_ = progress;
+	return state_;
+}
 struct NullSink::Data {
 	std::array<EVP_MD_CTX*, 2> hashes {};
 	std::array<uint64_t, 2>    bytes {};

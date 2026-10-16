@@ -15,6 +15,22 @@ struct ClockMap {
 	bool     Fresh(uint64_t now) const;
 	uint64_t sampled_at = 0, best_sample_at = 0;
 };
+enum class PlaybackClockState { Waiting, Ready, Failed };
+struct PlaybackClockProgress {
+	bool     running;
+	uint64_t hardware_frames, application_frames;
+};
+class PlaybackClockGate {
+public:
+	explicit PlaybackClockGate(uint64_t start): start_(start) {}
+	PlaybackClockState        Observe(uint64_t now, std::optional<PlaybackClockProgress>);
+	static constexpr uint64_t BudgetUs = 500000;
+
+private:
+	uint64_t                             start_;
+	std::optional<PlaybackClockProgress> previous_;
+	PlaybackClockState                   state_ = PlaybackClockState::Waiting;
+};
 class Sink {
 public:
 	virtual ~Sink()                                                             = default;

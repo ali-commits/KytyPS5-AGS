@@ -4,6 +4,7 @@
 
 #include <SDL3/SDL.h>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,16 @@ void Check(bool yes, const char* message) {
 		std::fprintf(stderr, "SDL receiver test: %s (%s)\n", message, SDL_GetError());
 		std::abort();
 	}
+}
+struct SilentMix {
+	std::atomic_uint callbacks {0};
+	std::atomic_bool nonzero {false};
+};
+void SDLCALL ObserveSilentMix(void* userdata, const SDL_AudioSpec*, float* samples, int bytes) {
+	auto& mix = *static_cast<SilentMix*>(userdata);
+	for (int i = 0; i < bytes / static_cast<int>(sizeof(float)); i++)
+		if (samples[i] != 0) mix.nonzero.store(true);
+	mix.callbacks.fetch_add(1);
 }
 SDL_AudioDeviceID OpenDummy(const SDL_AudioSpec& format) {
 	Check(SDL_GetCurrentAudioDriver() && std::strcmp(SDL_GetCurrentAudioDriver(), "dummy") == 0,
@@ -61,6 +72,15 @@ int main() {
 	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "240");
 	auto device = OpenDummy(format);
 	Check(device, "dummy device open");
+	SilentMix silent;
+	Check(SDL_SetAudioPostmixCallback(device, ObserveSilentMix, &silent),
+	      "observe silent no-stream callback");
+	auto silent_start = SDL_GetTicks();
+	while (silent.callbacks.load() < 2 && SDL_GetTicks() - silent_start < 500)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	Check(silent.callbacks.load() >= 2 && !silent.nonzero.load(),
+	      "unbound SDL output progresses with silence and no source submissions");
+	Check(SDL_SetAudioPostmixCallback(device, nullptr, nullptr), "remove silent observer");
 	auto* stream = SDL_CreateAudioStream(&format, &format);
 	Check(stream && SDL_BindAudioStream(device, stream), "dummy stream binding");
 	Check(SDL_PutAudioStreamData(stream, data.data(), sizeof(data)), "dummy input");

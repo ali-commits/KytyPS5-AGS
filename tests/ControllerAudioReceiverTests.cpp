@@ -71,6 +71,51 @@ Frame Active(uint64_t gen = 7, uint64_t epoch = 9) {
 	return f;
 }
 int main() {
+	PlaybackClockGate delayed(1000000);
+	Check(delayed.Observe(1000000, PlaybackClockProgress {false, 0, 0}) ==
+	          PlaybackClockState::Waiting,
+	      "PREPARED zero pointers must not announce usable output");
+	Check(delayed.Observe(1030000, PlaybackClockProgress {false, 0, 0}) ==
+	          PlaybackClockState::Waiting,
+	      "delayed SDL thread remains preparing");
+	Check(delayed.Observe(1040000, PlaybackClockProgress {true, 0, 480}) ==
+	          PlaybackClockState::Waiting,
+	      "RUNNING alone is not clock progress");
+	Check(delayed.Observe(1045000, PlaybackClockProgress {true, 192, 480}) ==
+	          PlaybackClockState::Ready,
+	      "owned silent hardware clock progressed before readiness");
+	PlaybackClockGate never(1000000);
+	Check(never.Observe(1000000, PlaybackClockProgress {false, 0, 0}) ==
+	              PlaybackClockState::Waiting &&
+	          never.Observe(1500000, PlaybackClockProgress {false, 0, 0}) ==
+	              PlaybackClockState::Failed,
+	      "never-start clock fails within independent500ms budget");
+	PlaybackClockGate frozen(1000000);
+	Check(frozen.Observe(1000000, PlaybackClockProgress {true, 192, 480}) ==
+	              PlaybackClockState::Waiting &&
+	          frozen.Observe(1499999, PlaybackClockProgress {true, 192, 480}) ==
+	              PlaybackClockState::Waiting &&
+	          frozen.Observe(1500000, PlaybackClockProgress {true, 192, 480}) ==
+	              PlaybackClockState::Failed,
+	      "stuck RUNNING counter cannot become ready");
+	PlaybackClockGate regression(1000000);
+	regression.Observe(1000000, PlaybackClockProgress {true, 192, 480});
+	Check(regression.Observe(1005000, PlaybackClockProgress {true, 0, 480}) ==
+	          PlaybackClockState::Failed,
+	      "startup hardware counter regression fails closed");
+	PlaybackClockGate appregression(1000000);
+	appregression.Observe(1000000, PlaybackClockProgress {true, 192, 480});
+	Check(appregression.Observe(1005000, PlaybackClockProgress {true, 240, 0}) ==
+	          PlaybackClockState::Failed,
+	      "startup application counter regression fails closed");
+	PlaybackClockGate closed(1000000);
+	Check(closed.Observe(1000000, {}) == PlaybackClockState::Failed,
+	      "closed/unverified startup status fails closed");
+	PlaybackClockGate no_application(1000000);
+	no_application.Observe(1000000, PlaybackClockProgress {true, 0, 0});
+	Check(no_application.Observe(1005000, PlaybackClockProgress {true, 192, 0}) ==
+	          PlaybackClockState::Waiting,
+	      "unsubmitted hardware counter alone cannot prove output");
 	auto explicit_pcm = ExplicitAlsaPlaybackSpec("Controller", 0);
 	Check(explicit_pcm && *explicit_pcm == "hw:CARD=Controller,DEV=0",
 	      "verified explicit ALSA hw device string");

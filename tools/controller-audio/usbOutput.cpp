@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -246,6 +247,42 @@ public:
 				              "ring/progress; matches=" +
 				              std::to_string(owned);
 				return PrepareFailure(stage, detail.c_str());
+			}
+			// SDL_OpenAudioDevice creates the callback thread asynchronously. Its
+			// unbound-stream mixer feeds silence, so verify a live owned DMA clock
+			// before announcing readiness or accepting any source PCM.
+			stage                           = "owned silent clock readiness";
+			const auto        clock_started = NowUs();
+			PlaybackClockGate clock_gate(clock_started);
+			const auto        poll_ms = std::clamp<uint32_t>(period_frames_ * 1000 / 48000, 1, 5);
+			for (;;) {
+				auto     status = ReadText(status_path_);
+				auto     bounds = ParseAlsaPlayback(parameters_, status, getpid(), period_frames_);
+				auto     app_text    = ProcValue(status, "appl_ptr");
+				uint64_t application = 0;
+				auto parsed = std::from_chars(app_text.data(), app_text.data() + app_text.size(),
+				                              application);
+				std::optional<PlaybackClockProgress> progress;
+				if (bounds && bounds->played_frames >= played_frames_ &&
+				    parsed.ec == std::errc {} && parsed.ptr == app_text.data() + app_text.size())
+					progress = PlaybackClockProgress {ProcValue(status, "state") == "RUNNING",
+					                                  bounds->played_frames, application};
+				auto result = clock_gate.Observe(NowUs(), progress);
+				if (result == PlaybackClockState::Failed) {
+					auto detail = "no verified clock progress within500ms or invalid/regressed "
+					              "status: state=" +
+					              ProcValue(status, "state") +
+					              " hw=" + ProcValue(status, "hw_ptr") + " appl=" + app_text;
+					return PrepareFailure(stage, detail.c_str());
+				}
+				if (result == PlaybackClockState::Ready) {
+					played_frames_ = bounds->played_frames;
+					break;
+				}
+				auto elapsed = NowUs() - clock_started;
+				if (elapsed < PlaybackClockGate::BudgetUs)
+					SDL_DelayNS(std::min<uint64_t>(uint64_t(poll_ms) * 1000000,
+					                               (PlaybackClockGate::BudgetUs - elapsed) * 1000));
 			}
 			stage = "hidraw open/USB identity";
 			hid_  = ::open(selected_.hid.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
