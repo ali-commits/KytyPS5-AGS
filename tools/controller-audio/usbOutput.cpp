@@ -44,7 +44,7 @@ fs::path UsbParent(fs::path path) {
 }
 struct Selection {
 	fs::path    usb, hid, proc;
-	std::string name, identity;
+	std::string name, identity, alsa_spec;
 };
 Selection Discover(const Config& config) {
 	std::set<fs::path> controllers;
@@ -89,8 +89,14 @@ Selection Discover(const Config& config) {
 		            ioctl(fd, SNDRV_CTL_IOCTL_PCM_INFO, &pi) == 0;
 		::close(fd);
 		if (!ok) throw std::runtime_error("cannot identify controller ALSA playback endpoint");
-		selected.proc = fs::path("/proc/asound") / ("card" + std::to_string(card)) /
-		                ("pcm" + std::to_string(device) + "p");
+		auto* id  = reinterpret_cast<const char*>(ci.id);
+		auto spec = ExplicitAlsaPlaybackSpec(std::string(id, ::strnlen(id, sizeof(ci.id))), device);
+		if (!spec)
+			throw std::runtime_error(
+			    "verified ALSA card ID is not a safe explicit hardware identifier");
+		selected.alsa_spec = *spec;
+		selected.proc      = fs::path("/proc/asound") / ("card" + std::to_string(card)) /
+		                     ("pcm" + std::to_string(device) + "p");
 		endpoints.emplace_back(std::string(reinterpret_cast<char*>(ci.name)) + ":" +
 		                       reinterpret_cast<char*>(pi.name));
 	}
@@ -149,15 +155,13 @@ public:
 			auto* driver = SDL_GetCurrentAudioDriver();
 			if (!driver || std::string(driver) != "alsa")
 				return PrepareFailure("SDL driver", "required explicit ALSA backend unavailable");
-			stage                       = "SDL endpoint selection";
-			int               count     = 0;
-			auto*             devices   = SDL_GetAudioPlaybackDevices(&count);
-			SDL_AudioDeviceID candidate = 0;
-			int               matches   = 0;
+			stage         = "SDL endpoint selection";
+			int   count   = 0;
+			auto* devices = SDL_GetAudioPlaybackDevices(&count);
+			int   matches = 0;
 			for (int i = 0; i < count; i++) {
 				auto* name = SDL_GetAudioDeviceName(devices[i]);
 				if (name && selected_.name == name) {
-					candidate = devices[i];
 					matches++;
 				}
 			}
@@ -172,8 +176,15 @@ public:
 			// format after opening the explicit ancestry-bound device.
 			SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "240");
 			const SDL_AudioSpec desired {SDL_AUDIO_F32, 4, 48000};
+			// SDL's named ALSA path guesses a system prefix that may not accept DEV.
+			// The playback override is process-local and pins its generic handle to the
+			// exact verified USB card ID/device; it does not alter the system default.
+			stage = "SDL exact hardware selection";
+			if (!SDL_SetHintWithPriority(SDL_HINT_AUDIO_ALSA_DEFAULT_PLAYBACK_DEVICE,
+			                             selected_.alsa_spec.c_str(), SDL_HINT_OVERRIDE))
+				return PrepareFailure(stage, SDL_GetError());
 			stage   = "SDL explicit output open";
-			device_ = SDL_OpenAudioDevice(candidate, &desired);
+			device_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired);
 			if (!device_) return PrepareFailure(stage, SDL_GetError());
 			int sample_frames = 0;
 			if (!SDL_GetAudioDeviceFormat(device_, &actual, &sample_frames) ||

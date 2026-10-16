@@ -66,6 +66,18 @@ Frame Active(uint64_t gen = 7, uint64_t epoch = 9) {
 	return f;
 }
 int main() {
+	auto explicit_pcm = ExplicitAlsaPlaybackSpec("Controller", 0);
+	Check(explicit_pcm && *explicit_pcm == "hw:CARD=Controller,DEV=0",
+	      "verified explicit ALSA hw device string");
+	Check(ExplicitAlsaPlaybackSpec("USB_Audio-2", 3) ==
+	          std::optional<std::string> {"hw:CARD=USB_Audio-2,DEV=3"},
+	      "strict safe ALSA card ID");
+	for (auto invalid:
+	     {"", "123", "1Controller", "Controller,DEV=9", "Controller:foo", "Controller=Other",
+	      "Controller USB", "Controller/Other", "Controller\\Other", "Controller\n", "Controller\"",
+	      "Controller'", "VeryLongCardId16x"})
+		Check(!ExplicitAlsaPlaybackSpec(invalid, 0), "ALSA card ID syntax injection refused");
+	Check(!ExplicitAlsaPlaybackSpec("Controller", UINT32_MAX), "ALSA playback device bound");
 	auto playback = ParseAlsaPlaybackNode("pcmC1D0p");
 	Check(playback && playback->first == 1 && playback->second == 0, "exact dynamic playback node");
 	Check(!ParseAlsaPlaybackNode("pcmC1D0c"), "capture node must not become duplicate playback");

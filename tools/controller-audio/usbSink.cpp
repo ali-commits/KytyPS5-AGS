@@ -44,6 +44,16 @@ std::optional<std::pair<uint32_t, uint32_t>> ParseAlsaPlaybackNode(const std::st
 	if (d.ec != std::errc {} || d.ptr != end || device > INT32_MAX) return {};
 	return std::pair {card, device};
 }
+std::optional<std::string> ExplicitAlsaPlaybackSpec(const std::string& card_id, uint32_t device) {
+	auto letter = [](char c) {
+		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+	};
+	if (card_id.empty() || card_id.size() > 15 || !letter(card_id.front()) || device > INT32_MAX)
+		return {};
+	for (char c: card_id)
+		if (!letter(c) && !(c >= '0' && c <= '9') && c != '-') return {};
+	return "hw:CARD=" + card_id + ",DEV=" + std::to_string(device);
+}
 std::optional<AlsaPlayback> ParseAlsaPlayback(const std::string& parameters,
                                               const std::string& status, uint32_t owner_pid,
                                               uint32_t sdl_period) {
