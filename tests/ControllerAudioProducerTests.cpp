@@ -103,6 +103,47 @@ struct Server {
 		std::filesystem::remove_all(dir);
 	}
 };
+static void TestImmediateTwoPortHandoff() {
+	Server                  server;
+	int                     volume[] {32768, 32768};
+	std::array<float, 1024> samples {};
+	PcmView                 view {samples.data(), 512, 2, 48000, true, volume, 1, nullptr};
+	uint64_t                max_publish_us = 0;
+	for (uint64_t revision = 100; revision < 300; revision++) {
+		Producer::Configure({server.path, std::string(64, 'a'), revision, 7}, true);
+		if (server.peer >= 0) {
+			close(server.peer);
+			server.peer = -1;
+		}
+		server.Accept(revision);
+		Producer::OpenPort(4, revision, Kind::Actuator, 48000);
+		Producer::OpenPort(5, revision, Kind::Speaker, 48000);
+		for (uint32_t id: {4u, 5u}) {
+			const auto start = std::chrono::steady_clock::now();
+			assert(Producer::Publish(id, revision, id == 4 ? Kind::Actuator : Kind::Speaker, view));
+			const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+			                         std::chrono::steady_clock::now() - start)
+			                         .count();
+			max_publish_us     = std::max(max_publish_us, uint64_t(elapsed));
+		}
+		unsigned opens = 0, pcm = 0;
+		size_t   bytes = 0;
+		for (unsigned i = 0; i < 6; i++) {
+			auto frame = ReadFrame(server.peer);
+			opens += frame.header.type == Type::Open;
+			pcm += frame.header.type == Type::Pcm;
+			bytes += frame.payload.size();
+		}
+		assert(opens == 2 && pcm == 4 && bytes == 8192 && Producer::Ready());
+		Producer::ClosePort(4, revision);
+		Producer::ClosePort(5, revision);
+		assert(ReadFrame(server.peer).header.type == Type::Close);
+		assert(ReadFrame(server.peer).header.type == Type::Close);
+	}
+	std::printf(
+	    "ControllerAudioProducerTests: 200 immediate two-port handoffs; max Publish %llu us\n",
+	    static_cast<unsigned long long>(max_publish_us));
+}
 int main() {
 	Server            s;
 	const std::string nonce(64, 'a');
@@ -213,6 +254,7 @@ int main() {
 	assert(!Producer::Ready());
 	assert(!Producer::Publish(1, 2, Kind::Speaker, view));
 	Producer::ClosePort(1, 3);
+	TestImmediateTwoPortHandoff();
 	std::puts("ControllerAudioProducerTests: all assertions passed (real Unix, no devices)");
 	return 0;
 }

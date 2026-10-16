@@ -1237,36 +1237,48 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	EXIT_NOT_IMPLEMENTED(num == 0 || num > OUT_PORTS_MAX);
 	EXIT_NOT_IMPLEMENTED(!AudioOutValid(params[0].handle));
 
-	auto&                           first_port = m_out_ports[params[0].handle.GetId()];
-	std::array<bool, OUT_PORTS_MAX> paced {};
-	bool                            any_device = false;
-	uint64_t                        deadline   = 0;
-	const bool                      trace      = Diag::TraceEnabled();
-	if (trace) {
-		auto&      t     = first_port.trace;
-		const auto start = LibKernel::KernelGetProcessTime();
-		if (t.last_return != 0 && start > t.last_return) {
-			const auto gap = start - t.last_return;
-			const auto period =
-			    first_port.freq != 0 ? 1000000ULL * first_port.samples_num / first_port.freq : 0;
-			t.gap_sum += gap;
-			t.gap_max = std::max(t.gap_max, gap);
-			t.gaps++;
-			t.late_gaps += gap > period ? 1 : 0;
+	auto&                               first_port = m_out_ports[params[0].handle.GetId()];
+	std::array<bool, OUT_PORTS_MAX>     paced {};
+	bool                                any_device = false;
+	uint64_t                            deadline   = 0;
+	const bool                          trace      = Diag::TraceEnabled();
+	std::array<uint64_t, OUT_PORTS_MAX> port_generations {};
+	std::array<bool, OUT_PORTS_MAX>     primed_before {};
+	uint32_t                            primed_count = 0, first_samples = 0;
+	{
+		Common::LockGuard lifetime(m_mutex);
+		if (!first_port.used) return 0;
+		first_samples = first_port.samples_num;
+		for (uint32_t i = 0; i < num; i++)
+			port_generations[i] = m_out_ports[params[i].handle.GetId()].controller_generation;
+		if (trace) {
+			auto&      t     = first_port.trace;
+			const auto start = LibKernel::KernelGetProcessTime();
+			if (t.last_return != 0 && start > t.last_return) {
+				const auto gap    = start - t.last_return;
+				const auto period = first_port.freq != 0
+				                        ? 1000000ULL * first_port.samples_num / first_port.freq
+				                        : 0;
+				t.gap_sum += gap;
+				t.gap_max = std::max(t.gap_max, gap);
+				t.gaps++;
+				t.late_gaps += gap > period ? 1 : 0;
+			}
 		}
-	}
-	// Which ports already pace this batch (see KYTY_AUDIO_PAD_PRIME): a port is padded only when
-	// another one does.
-	std::array<bool, OUT_PORTS_MAX> primed_before {};
-	uint32_t                        primed_count = 0;
-	for (uint32_t i = 0; i < num && blocking && audio_out_pad_prime(); i++) {
-		const auto& port = m_out_ports[params[i].handle.GetId()];
-		primed_before[i] = port.stream != nullptr && port.queue_primed;
-		primed_count += primed_before[i] ? 1 : 0;
+		// Which ports already pace this batch (see KYTY_AUDIO_PAD_PRIME): a port is padded only
+		// when another one does.
+		for (uint32_t i = 0; i < num && blocking && audio_out_pad_prime(); i++) {
+			const auto& port = m_out_ports[params[i].handle.GetId()];
+			primed_before[i] = port.stream != nullptr && port.queue_primed;
+			primed_count += primed_before[i] ? 1 : 0;
+		}
 	}
 
 	for (uint32_t i = 0; i < num; i++) {
-		auto& port = m_out_ports[params[i].handle.GetId()];
+		Common::LockGuard lifetime(m_mutex);
+		auto&             port = m_out_ports[params[i].handle.GetId()];
+		// A close/reopen between the batch snapshot and this lock cannot inherit output.
+		if (!port.used || port.controller_generation != port_generations[i]) continue;
 		// The DualSense speaker/vibration setting also scales a pad speaker port that falls back
 		// to the main output, so the speaker hotkey keeps working there.
 		const float gain =
@@ -1378,37 +1390,45 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	// per batch, so a clock kept by a fuller port would go on draining the short one. The fuller
 	// ports' own queue waits keep them at their targets.
 	bool batch_catch_up = false;
-	for (uint32_t i = 0; i < num; i++) {
-		const auto& port = m_out_ports[params[i].handle.GetId()];
-		batch_catch_up |= port.catch_up && port.stream != nullptr;
-	}
-	for (uint32_t i = 0; i < num; i++) {
-		auto& port = m_out_ports[params[i].handle.GetId()];
-		if (batch_catch_up) {
-			paced[i] = false;
+	{
+		Common::LockGuard lifetime(m_mutex);
+		for (uint32_t i = 0; i < num; i++) {
+			const auto& port = m_out_ports[params[i].handle.GetId()];
+			if (!port.used || port.controller_generation != port_generations[i]) continue;
+			batch_catch_up |= port.catch_up && port.stream != nullptr;
 		}
-		if (blocking && (paced[i] || !any_device)) {
-			deadline = std::max(deadline, port.clock.Advance(now, port.samples_num,
-			                                                 audio_out_clock_rate(port.freq)));
-		} else {
-			port.clock = {};
-		}
-		if (!blocking) {
-			port.queue_primed = false;
+		for (uint32_t i = 0; i < num; i++) {
+			auto& port = m_out_ports[params[i].handle.GetId()];
+			if (!port.used || port.controller_generation != port_generations[i]) continue;
+			if (batch_catch_up) {
+				paced[i] = false;
+			}
+			if (blocking && (paced[i] || !any_device)) {
+				deadline = std::max(deadline, port.clock.Advance(now, port.samples_num,
+				                                                 audio_out_clock_rate(port.freq)));
+			} else {
+				port.clock = {};
+			}
+			if (!blocking) {
+				port.queue_primed = false;
+			}
 		}
 	}
 	if (deadline > now) {
 		Common::Thread::SleepMicro(deadline - now);
-		if (trace) {
+		Common::LockGuard lifetime(m_mutex);
+		if (trace && first_port.used && first_port.controller_generation == port_generations[0]) {
 			first_port.trace.sleep_us += deadline - now;
 			first_port.trace.sleeps++;
 		}
 	}
 	if (trace) {
-		first_port.trace.last_return = LibKernel::KernelGetProcessTime();
+		Common::LockGuard lifetime(m_mutex);
+		if (first_port.used && first_port.controller_generation == port_generations[0])
+			first_port.trace.last_return = LibKernel::KernelGetProcessTime();
 	}
 
-	return first_port.samples_num;
+	return first_samples;
 }
 
 static bool RecordingDevicePresent(SDL_AudioDeviceID device) {

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -35,6 +36,7 @@ bool                                 fail_open = false, fail_put = false, stalle
 bool                                 pad_connected = false, pad_bluetooth = false;
 uint64_t                             pad_queue_us = 0;
 const float*                         queued_pad_gains = nullptr;
+std::function<void()>                haptics_close_hook;
 int                                  clears = 0;
 float                                last_put_sample = 0.0f; // First sample of the last queued block.
 
@@ -158,7 +160,9 @@ Stream* Open(uint32_t, bool) {
 	static int pad_stream;
 	return pad_connected ? reinterpret_cast<Stream*>(&pad_stream) : nullptr;
 }
-void     Close(Stream*) {}
+void Close(Stream*) {
+	if (haptics_close_hook) haptics_close_hook();
+}
 bool UsesBluetooth(const Stream* stream) {
 	return stream != nullptr && pad_bluetooth;
 }

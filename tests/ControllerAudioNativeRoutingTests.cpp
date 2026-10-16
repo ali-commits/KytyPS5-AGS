@@ -1,6 +1,8 @@
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
+#include <atomic>
+#include <latch>
 // Reuse the consuming SDL boundary and real Unix fixture; neither opens audio hardware.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wreturn-type"
@@ -82,6 +84,11 @@ static void TestNegotiatedState() {
 		assert(Streaming::SendPacket(peer, state));
 		audio.Accept(31);
 		assert(ReadFrame(audio.peer).header.port == 7);
+		// Active bindings cannot be withdrawn/replayed with a stale equal generation.
+		assert(Streaming::SendPacket(
+		    peer, {{"type", "controller-audio-state"}, {"ready", false}, {"generation", 31u}}));
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		assert(Producer::Ready());
 		assert(Streaming::SendPacket(peer, state));
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		assert(Producer::Ready());
@@ -110,7 +117,44 @@ static void TestNegotiatedState() {
 	close(listener);
 	unlink(video_path.c_str());
 }
+static void TestCloseDuringRoutingTransition() {
+	Server  server;
+	Fixture fixture;
+	pad_connected   = true;
+	const auto port = fixture.Open(512, 4);
+	Producer::Configure({server.path, std::string(64, 'a'), 41, 7}, true);
+	server.Accept(41);
+	ReadFrame(server.peer);
+	std::latch            entered(1), release(1), close_started(1);
+	std::atomic<unsigned> calls {0};
+	std::atomic<bool>     closed {false};
+	haptics_close_hook = [&] {
+		if (calls.fetch_add(1) == 0) {
+			entered.count_down();
+			release.wait();
+		}
+	};
+	std::thread output([&] { fixture.Output(port, false); });
+	entered.wait();
+	ReadFrame(server.peer);
+	ReadFrame(server.peer);
+	std::thread closer([&] {
+		close_started.count_down();
+		fixture.audio.AudioOutClose(port);
+		closed = true;
+	});
+	close_started.wait();
+	std::this_thread::sleep_for(std::chrono::milliseconds(30));
+	Check(calls.load() == 1 && !closed.load(),
+	      "concurrent close crossed an active haptics routing transition");
+	release.count_down();
+	output.join();
+	closer.join();
+	haptics_close_hook = {};
+	Check(closed.load() && streams.empty(), "serialized close did not clean up the stream");
+}
 int main() {
+	TestCloseDuringRoutingTransition();
 	TestNegotiatedState();
 	{
 		Server     server;

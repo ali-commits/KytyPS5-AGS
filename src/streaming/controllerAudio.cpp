@@ -1,5 +1,6 @@
 #include "streaming/controllerAudio.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -35,9 +36,9 @@ struct Port {
 	uint32_t queued = 0;
 };
 struct Entry {
-	Header                            header {};
-	uint32_t                          bytes = 0, frames = 0;
-	std::array<uint8_t, PayloadLimit> payload {};
+	Header                                          header {};
+	uint32_t                                        bytes = 0, frames = 0;
+	std::array<float, PayloadLimit / sizeof(float)> samples {};
 };
 class Producer {
 public:
@@ -196,6 +197,7 @@ void Producer::Run(std::stop_token stop) {
 		Endpoint next;
 		uint64_t next_revision = 0;
 		bool     connect       = false;
+		int      retired       = -1;
 		{
 			std::unique_lock lock(mutex);
 			wake.wait_for(lock, std::chrono::milliseconds(2), [&] {
@@ -204,18 +206,19 @@ void Producer::Run(std::stop_token stop) {
 			});
 			if (stop.stop_requested()) break;
 			if (revision != bound || (fd >= 0 && !ready.load())) {
-				if (fd >= 0) close(fd);
-				fd = -1;
+				retired = fd;
+				fd      = -1;
 				Clear();
 				bound = revision;
 				if (configured) {
-					next          = endpoint;
+					next          = std::move(endpoint);
 					next_revision = revision;
 					connect       = true;
 					configured    = false;
 				}
 			}
 		}
+		if (retired >= 0) close(retired);
 		if (connect) {
 			fd = Connect(next);
 			std::vector<uint8_t> nonce;
@@ -234,16 +237,21 @@ void Producer::Run(std::stop_token stop) {
 			accepted            = reply && reply->header.type == Type::Ready &&
 			                      reply->header.generation == next.generation &&
 			                      reply->header.producer_epoch == next.producer_epoch;
-			std::lock_guard lock(mutex);
-			if (accepted && revision == next_revision) {
-				for (uint32_t id = 0; id < ports.size(); id++)
-					if (ports[id].active) {
-						auto& p = ports[id];
-						++p.sequence;
-						Push(Make(Type::Open, id, p));
-					}
-				ready.store(true, std::memory_order_release);
-			} else {
+			bool keep           = false;
+			{
+				std::lock_guard lock(mutex);
+				if (accepted && revision == next_revision) {
+					for (uint32_t id = 0; id < ports.size(); id++)
+						if (ports[id].active) {
+							auto& p = ports[id];
+							++p.sequence;
+							Push(Make(Type::Open, id, p));
+						}
+					ready.store(true, std::memory_order_release);
+					keep = true;
+				}
+			}
+			if (!keep) {
 				if (fd >= 0) close(fd);
 				fd = -1;
 			}
@@ -269,9 +277,13 @@ void Producer::Run(std::stop_token stop) {
 			const auto deadline = entry.header.type == Type::Pcm
 			                          ? entry.header.source_time_us + 20000
 			                          : Now() + 20000;
-			bool       sent     = Send(
-			    fd, {entry.header, {entry.payload.begin(), entry.payload.begin() + entry.bytes}},
-			    deadline);
+			Frame      frame {entry.header, std::vector<uint8_t>(entry.bytes)};
+			for (size_t i = 0; i < size_t(entry.frames) * 2; i++) {
+				const auto bits = std::bit_cast<uint32_t>(entry.samples[i]);
+				for (unsigned j = 0; j < 4; j++)
+					frame.payload[i * 4 + j] = uint8_t(bits >> (8 * j));
+			}
+			bool sent = Send(fd, frame, deadline);
 			if (sent) bytes.fetch_add(entry.bytes, std::memory_order_relaxed);
 			{
 				std::lock_guard lock(mutex);
@@ -290,16 +302,20 @@ void Producer::Run(std::stop_token stop) {
 }
 } // namespace
 void Configure(const Endpoint& endpoint, bool ready) {
-	auto&           s = State();
-	std::lock_guard lock(s.mutex);
-	s.Withdraw(false);
-	++s.revision;
-	s.Clear();
-	s.endpoint   = endpoint;
-	s.configured = ready && endpoint.generation && endpoint.producer_epoch &&
-	               endpoint.nonce_hex.size() == 64 &&
-	               endpoint.nonce_hex.find_first_not_of("0123456789abcdef") == std::string::npos;
-	s.wake.notify_one();
+	Endpoint prepared = endpoint; // Allocate/copy strings before taking the bounded local lock.
+	auto&    s        = State();
+	{
+		std::lock_guard lock(s.mutex);
+		s.Withdraw(false);
+		++s.revision;
+		s.Clear();
+		std::swap(s.endpoint, prepared);
+		s.configured =
+		    ready && endpoint.generation && endpoint.producer_epoch &&
+		    endpoint.nonce_hex.size() == 64 &&
+		    endpoint.nonce_hex.find_first_not_of("0123456789abcdef") == std::string::npos;
+		s.wake.notify_one();
+	} // Any old endpoint strings are freed after releasing the local publisher lock.
 }
 void Disable() noexcept {
 	auto&           s = State();
@@ -342,11 +358,9 @@ bool Publish(uint32_t id, uint64_t generation, ::ControllerAudio::Kind kind,
              const ::ControllerAudio::PcmView& view) noexcept {
 	auto& s = State();
 	if (!s.ready.load(std::memory_order_acquire)) return false;
-	std::unique_lock lock(s.mutex, std::try_to_lock);
-	if (!lock.owns_lock()) {
-		s.Withdraw();
-		return false;
-	}
+	// The worker holds this local lock only to move metadata or copy bounded storage.
+	// It never allocates, encodes, performs I/O or waits for a peer while holding it.
+	std::lock_guard lock(s.mutex);
 	if (!s.ready.load()) return false;
 	if (id >= s.ports.size()) {
 		s.Withdraw();
@@ -384,11 +398,7 @@ bool Publish(uint32_t id, uint64_t generation, ::ControllerAudio::Kind kind,
 		e.header.source_time_us = now;
 		e.frames                = part.frames;
 		e.bytes                 = part.frames * 8;
-		for (size_t i = 0; i < size_t(part.frames) * 2; i++) {
-			const auto bits = std::bit_cast<uint32_t>(converted[i]);
-			for (unsigned j = 0; j < 4; j++)
-				e.payload[i * 4 + j] = uint8_t(bits >> (8 * j));
-		}
+		std::copy_n(converted.begin(), size_t(part.frames) * 2, e.samples.begin());
 		p.position += part.frames;
 		p.queued += part.frames;
 		offset += part.frames;

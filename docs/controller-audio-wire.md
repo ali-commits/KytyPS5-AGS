@@ -13,9 +13,10 @@ headers are big-endian; canonical stereo float payloads are explicitly little-en
 The Unix Hello carries the raw 32-byte nonce; its matching Ready acknowledgement is empty.
 Control JSON interpretation and direction/session checks belong to the relevant boundary.
 
-`Publish` performs a bounded conversion/copy into preallocated storage with a nonblocking
-mutex attempt. It never serializes frames, connects, writes, or waits for a receiver.
-Contention, bad source data, stale port identity, unsupported block size, queue pressure or
+`Publish` performs a bounded conversion/copy into preallocated storage under a short local
+metadata/copy mutex. Its queue owns converted floats; only the worker packs F32LE bytes
+and serializes frames. It never connects, writes, or waits for a receiver. No worker
+allocation, encoding or I/O holds that mutex. Bad source data, stale port identity, unsupported block size, queue pressure or
 an expired delivery deadline withdraw readiness. The worker closes that lease and reports
 one bounded diagnostic per discontinuity. Native audio immediately resumes its existing
 controller/PADSPK fallback policy; it does not call the stream lossless after discarding data.

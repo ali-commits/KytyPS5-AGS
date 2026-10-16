@@ -278,8 +278,8 @@ void Transport::Run(std::stop_token stop) {
 				}
 				// Preparing and active share a binding generation. Accept its readiness
 				// transition once while ignoring duplicate state and older bindings.
-				if (state.generation > audio_generation ||
-				    (state.generation == audio_generation && state.ready != audio_ready_proposed)) {
+				if (state.generation > audio_generation || (state.generation == audio_generation &&
+				                                            state.ready && !audio_ready_proposed)) {
 					audio_generation     = state.generation;
 					audio_ready_proposed = state.ready;
 					ControllerAudio::Configure(
