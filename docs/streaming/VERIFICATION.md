@@ -1,110 +1,151 @@
-# Native streaming verification
+# Streaming-only and DualSense verification
 
 Date: 2026-10-16, Asia/Kuala_Lumpur.
-Status: all planned modules built, reviewed and installed for experimental device testing.
-The remaining morning checks require the actual TV/controller and are listed in [README.md](README.md).
+Status: implementation reviewed and candidate installed; laptop streaming-only video verified.
+Controller hardware acceptance and a later fatal native exit remain unresolved.
+No further game test will run without explicit user permission.
 
-## Installed programs
+## Candidate and rollback
 
-- Command: `kytyps5-streaming`. Application-menu entry: **KytyPS5 Native Streaming (Experimental)**.
-- Prefix: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v1`.
-- Private configuration: `/home/ali/.config/kytyps5-streaming/20261016-native-v1`.
-- Initial preference: 1080p, 60 FPS, HEVC, 30 Mbps; base port 48189, management 48190.
-- Kyty runtime code: `d1d262cfacdce8397e68bab1d94fdc1a964166de`.
-- Independent streaming host: `1cceda1eafa97e26bab3084cf36d8daac8515b7a`.
-- The final documentation/test-registration commit changes no installed program source.
-- Source branches and the managed worktree are retained locally. No public push or PR was made.
+- Candidate: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
+- Candidate settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
+- Kyty runtime code: `3c624be545b000022116502d7aa36c107bfc99a4`.
+- Native SHA256: `f225e03e2839630b316a6c616a5b31b1f26dc85793b78622998856ab065afc1a`.
+- Matching map SHA256: `0f0f26bf399a34b5c408b777c63daa87ff730f8774505961320721d608ea13ce`.
+- Host code: `f35169866ddf9824a6a580abf0524bec694baede`; pinned by Kyty commit `598670dc`.
+- Host SHA256: `d65260ae0b779b07565f3784c4bcd9b7dfe2edcc4a0bfd4273e15c30852a46e1`.
+- The `kytyps5-streaming` command still selects the working `20261016-native-v1` until the remaining acceptance checks finish.
+- Working v1 and normal Kyty/Sunshine installations remain separate; no public push or PR.
 
-The two programs build independently. The host is based on Sunshine
-019b1ba661d829e334706557a3e2bdc3d2374591 and uses CUDA architecture 86,
-with its browser frontend and tray disabled. The build script enforces the exact
-host revision and clean, initialized recursive dependencies.
+The candidate copied the latest v1 experimental saves, cache and trophies into
+independent writable state. Neither edition writes back into the normal game state.
+Source revisions and executable hashes are recorded in `installation-provenance.json`.
+Crash capture remains enabled with a matching native map.
 
-## Verification matrix
+## Current feature checks
 
 | Check | Result | Evidence |
 |---|---|---|
-| Emulator, native launcher, launch wrapper and independent host | Release builds pass | Build/staging logs and installation provenance |
-| Protocol, real Vulkan/CUDA export, audio selector, controller state, launcher | 5 CTest groups pass, 61.17 s; launcher includes 31 cases | `final-ctest.log` |
-| Backend protocol, listener lifecycle, GPU ownership, input, pairing and configuration | 63 focused tests pass, 0.969 s | `final-backend-tests.log` |
-| Pinned source/dependency enforcement | 13 real Git-fixture tests pass | `tools/streaming/test_build_pin.py` |
-| Independent save/config copy and overwrite refusal | Pass | `final-package-tests.log` |
-| Existing memory and pipeline regressions | 18 tests pass, 8.75 s | `final-regressions-green.log` |
-| Prefetch modes with explicit preparation setup | Inline and parallel cases each pass 10 repetitions | `prefetch-fixed-repeat.log` |
-| Real RTX 3090 external-memory/semaphore import | 1080p and 1440p pass; pitch, alpha, orientation, three-slot saturation/reuse and skipped frames | Task 1/2 GPU reports |
-| NVENC output independently decoded with FFmpeg | Expected blue image, RGB center [0, 0, 241] | `gpu-nvenc-decode.json` |
-| Stock Moonlight protocol | Pair, catalog, H.264 video/audio; HEVC 1440p output request and same-producer reconnect pass | Loopback logs and GPU snapshot counters |
-| Private audio isolation | Real tone capture and actual game PCM; global default unchanged | Audio reports and final Astro result |
-| Killed host and stale private socket | Same-path restart returns waiting | `stale-socket-result.json` |
-| Killed host, stubborn game descendants and UI restart | Owned group exits in 6.104 s; ownership held in 152 live-group samples; same-profile second launch passes | `crash-recovery-20261015T181944Z-787353/postcheck.json` |
-| Final real Astro boot through the installed UI and stock client | Pass; decoded 1080p picture, game audio and clean shutdown | `final-astro-postcheck.json` |
+| Full emulator, launcher and protected wrapper release build | Pass | `/tmp/kyty-stream-only-full-build.log` |
+| Full launcher suite, including migration, stream-only env and wrapper validation | 33 cases pass, 59.75 s | `/tmp/kyty-stream-only-full-qt.log` |
+| Protocol, presentation policy, real GPU export and controller state | 4 CTest groups pass, 0.89 s | `/tmp/kyty-stream-only-final-core.log` |
+| Audio output selection | Pass | `/tmp/kyty-stream-only-final-audio.log` |
+| Existing memory/pipeline regression suite | 18 pass, 8.94 s | `/tmp/kyty-stream-only-regressions.log` |
+| Backend motion/effect bridge, reconnect ownership and standard Moonlight packets | 47 focused tests pass, 2.026 s, including real GPU/IPC regressions | Task 2 report and reconnect logs |
+| CUDA-disabled backend compilation boundary | Actual input/capability/test translation units compile without Kyty symbols | Task 2 report |
+| Actual packaged streaming-only Astro boot | 776 GPU copies, zero dropped exports, 1080p decoded picture/audio, no local game window | `headless-loopback/` and strict postcheck |
+| Production SystemOverlay through Vulkan/CUDA export | 57 frames, 45 overlay recordings; dialog acceptance and numeric IME input pass | `dialog-proof-2/result.json` and PNGs |
+| Stock laptop Moonlight 6.2.0 video/audio | Actual Astro title decoded; 3,391 client presents; no local game window | `laptop-proof-v2-video-1-final/`, `laptop-v2-host/` |
+| Physical laptop DualSense sensors and trigger resistance | Access denied: 0 sensor samples/HID writes; 3,718 SDL effect attempts failed | Laptop observer/result and access proposal |
+| Native stop boundary after laptop disconnect | Fatal guest error, native exit 65; cause relative to user Stop unknown | Preserved crash capture and timeline below |
 
-The focused checks are the changed-module and relevant regression suites; this is
-not a claim that every repository test target was built or run. Synthetic network
-fixtures used Moonlight's fake output platform. The real Astro test additionally
-used the unmodified client's SDL/software-FFmpeg decoder and inspected its picture.
-Test-only frame readback and Qt adapters are retained as QA artifacts and are not installed.
+Detailed new evidence lives under
+`_Build/astro-evidence/stream-only-dualsense-20261016/`; reports and reviews live under
+`.superpowers/sdd/2026-10-16-stream-only-dualsense/`. Generated evidence is local,
+not added to Git. Focused checks cover changed modules and relevant regressions;
+this is not a claim that every repository target was built or run.
 
-## Final actual-game result
+The real Astro check used the packaged launcher/guard and stock Moonlight Embedded
+SDL/FFmpeg decoder. Frame 600 shows the Astro starfield. Private stereo PCM contained
+4,377,600 bytes with RMS 417.29; the launcher exited 0. A KWin query found no window
+for the live native game PID. These counts are not an FPS or latency benchmark.
+The original QA aggregate retained a false result because it expected yesterday's
+normal Sunshine PID. A separate strict postcheck records the actual feature result
+and confirms normal Sunshine remained absent, as it was before this morning's work.
 
-The installed launcher started its own host; stock Moonlight paired, read the real
-ASTRO BOT catalog and launched the packaged guarded emulator. The stream used
-1920×1080 capture and HEVC output, with 797 GPU snapshots and
-0 dropped exports at the sample point. Decoded frame 600
-shows the game's Team Asobi logo and starfield. Counts are not a frame-rate or
-latency benchmark. Private game audio contained 4343040
-bytes of signed 16-bit stereo PCM, RMS 713.37; Moonlight
-received both encoded video and audio packets.
+The overlay fixture uses actual production SystemOverlay, controller handlers,
+Vulkan rendering and CUDA export with synthetic remote input. It accepted an error
+dialog with Cross, prevented that press from reaching the guest, inserted `1` into
+the numeric IME, navigated to Done and accepted. Closing the panels restored exact
+baseline pixels. This is rendering/input proof, not a physical controller claim.
 
-The launcher exited 0. Native crash-capture metadata records exit 0 and a completed
-end timestamp at `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v1/_CrashCapture/20261015T182908.528853Z`. The native executable SHA matches the
-installed provenance. Every experimental executable/guard exited; only the original
-system PipeWire/WirePlumber processes remain. Normal save hashes and audio default
-`auto_null` stayed unchanged, and ordinary Sunshine continued running.
+## Review findings
 
-## Issues found and resolved during verification
+Presentation review found two modal-input ownership/wakeup races. Production-helper
+regressions reproduced both before the fixes; the scoped fix review approved
+`3c624be5`. Launcher review approved the default-preserving setting and protected
+launch environment. Controller review found one reconnect case where motion resumed
+before the new producer received connected controller state; the focused fix and
+review passed. The bounded authenticated snapshot is replayed before motion;
+controller removal, session detach and replacement owners clear it. The final broad
+feature review reports SPEC PASS for implementation and QUALITY APPROVED, with no
+new code findings. Hardware acceptance and the runtime fault below remain open.
 
-The whole-branch review found two shutdown/restart defects and one build-reproducibility
-gap. Verified stale-socket recovery, per-host nonce/pidfd supervision with a group
-guardian, and strict backend source/dependency checks resolve them. The scoped final
-review approved all three fixes with no new findings. Native tests and actual packaged
-SIGKILL/restart testing cover their failure paths.
+## Actual laptop result and disconnect timeline
 
-A pre-existing pipeline test assumed a worker always prepares a cold draw before
-the command processor. The unchanged executable passed twice then failed while
-its image readbacks were correct. Baseline-identical sources and ten inline passes
-confirmed the scheduling assumption. Its registration now selects inline preparation
-for the required prefetch-consumption assertion; the companion test explicitly
-retains parallel preparation. Assertions and renderer behavior are unchanged. A fresh
-fixture rebuild, all 18 regressions and ten repetitions of both modes pass.
+The final host served the user's unmodified Fedora Flatpak Moonlight 6.2.0 with
+copied client settings and existing pairing. The actual 1920×1080 HEVC picture
+shows Astro's title/characters/ship in `laptop-proof-v2-video-1-final/client-frame-900.png`.
+The host's 175 live-viewer samples reached 3,311 copied frames with zero dropped
+exports. Drops after the viewer left are recorded separately and are expected when
+the producer continues without a consumer. Private audio contained 5,798,400 bytes
+of stereo PCM, RMS 1141.20. KWin found no window for native PID1334315.
 
-The expanded test-only Qt adapter initially polled a widget tree during nested
-destructor event processing. A core trace and CPU-only reproducer identified the
-adapter callback. Its timer now stops before quit, is bound to the window, and guards
-window access. STOP, fallback and external-quit reproductions all exit 0; the final
-real Astro repeat also exits 0. No product change was needed for that adapter defect.
+The original Moonlight process/configuration stayed unchanged. The laptop's actual
+default audio node remained the built-in Speaker51. A raw QA comparison initially
+reported false because ALSA activation added unrelated latency/headroom properties;
+the separate preservation audit compares stable node identity and retains the raw
+result. No audio settings or controller permissions were changed.
 
-## Preserved state and limitations
+The observer recorded 3,718 adaptive-effect SDL calls, all failing; zero raw-HID
+writes and zero motion samples were observed. This establishes network delivery
+to Moonlight, not physical adaptive-trigger operation. Current permissions block
+the required raw controller path.
 
-The normal `kytyps5` command, native binary and Sunshine configuration retain their
-original SHA256 values. The ordinary `/usr/bin/sunshine` process remains active.
-Experimental saves/cache/trophies are independent copies with no automatic writeback.
-Older experimental ELF/map/provenance versions are kept under the prefix's
-`verification/build-*` directories for existing crash captures.
+The automated client used a 90-second deadline and `--no-quit-after`. This was
+confusing during the user's manual play: disconnecting that client deliberately
+left Astro running. The saved chronology is:
 
-Physical TV gameplay, subjective latency, controller compatibility, advanced haptics,
-audible physical-speaker playback, and local 4K/maximized/minimized-window behavior
-remain device checks. The real Astro result is a boot/decode test, not a gameplay
-playthrough. Actual 1440p Astro gameplay has not been tested; native 1440p GPU export
-and a synthetic 1440p negotiated output were tested separately.
+| Event | UTC | Local time (MYT) |
+|---|---|---|
+| Timed client disconnect, followed by orderly client cleanup | about 03:28:34 | about 11:28:34 |
+| Final terminal write, including fatal guest fault | 03:29:08.445758 | 11:29:08.445758 |
+| Native process ended with exit65 | 03:29:08.883222 | 11:29:08.883222 |
+| Root test-launcher stop marker | 03:29:22.158058 | 11:29:22.158058 |
 
-Guest VideoOut layers and game HUD are captured. Kyty's separate IME, sign-in/error
-panels and trophy toasts remain local-only; remote input does not operate those
-panels. This edition also has a bounded two-retired-plus-one-active GPU-pool limit,
-SDR/H.264/HEVC/stereo/single remote player, and catalog refresh on host restart.
-These limits and the morning checklist are documented in the operator guide.
+Host samples prove rendering continued after the initial client disconnect. The
+user reported using Moonlight's Stop action afterward, but that click has no saved
+timestamp. The fatal error predates root cleanup by roughly 13 seconds. The records
+cannot prove whether it preceded, followed or resulted from the user's stop.
+The fault is in guest thread `Draw Extra Geometry`, PC `0x9004a0c3e`, at bytes
+`cd 42` (`INT 0x42`). Its precise guest meaning is not established. Exit65 maps
+to Kyty's fatal `DbgExit(321)` path, so this is not recorded as a clean native exit.
+The outer host's app-wrapper exit0 does not override the native manifest.
 
-Detailed artifacts live at `_Build/astro-evidence/streaming-20261016/` in the managed
-worktree. Task briefs/reports and scoped review artifacts are retained under
-`.superpowers/sdd/2026-10-16-kyty-native-streaming/`. Large generated evidence is local
-and is not added to Git.
+Capture: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2/_CrashCapture/20261016T032705.202338Z`.
+All candidate game/host/launcher processes exited; normal saves, system audio and
+ordinary Sunshine process state were preserved. No second game run was attempted.
+The user now requires being asked to perform any further game test; implementation
+and read-only diagnosis can continue, but no game/session launch is authorized.
+
+## Limits and remaining device checks
+
+Streaming-only output keeps a hidden SDL/Vulkan surface and desktop connection. It
+skips local presentation; game rendering and encoding still run. Existing profiles
+keep local display enabled by default. Local-window mode retains its existing system
+UI path; remote system UI composition is enabled for streaming-only mode.
+
+Motion and adaptive triggers depend on Moonlight and its controller driver exposing
+the relevant capabilities. Fedora currently permits ordinary gamepad input but denies
+Moonlight raw DualSense HID access; a narrowly scoped access rule has been proposed
+and has not been installed. Sensor packet delivery and successful effect writes can
+be observed automatically, while gyro gameplay and perceived trigger resistance need
+physical confirmation. HD haptic PCM, controller-speaker audio, touchpad forwarding
+and USB/IP are not part of this change. Laptop speaker routing is unchanged.
+
+SDR, H.264/HEVC, stereo, a single remote player, catalog refresh on host restart and
+the bounded two-retired-plus-one-active GPU-pool limit remain. Actual 1440p Astro
+playthrough and subjective latency remain device checks; 1440p GPU export and
+negotiated synthetic output were verified separately.
+
+## Previous v1 baseline
+
+The earlier v1 verification covered 63 backend tests, 13 source-pin Git fixtures,
+independent package state/overwrite refusal, real NVENC decode, standard Moonlight
+pairing/catalog/reconnect, audio isolation, and killed-host cleanup/restart. A v1
+actual Astro boot decoded 797 GPU copies with nonzero audio and clean shutdown.
+Its detailed evidence remains under `_Build/astro-evidence/streaming-20261016/`,
+including `final-ctest.log`, `final-backend-tests.log`, `final-package-tests.log`,
+`final-astro-postcheck.json` and the crash-recovery postcheck. V1's prior local-only
+system-panel and controller-extension limitations are superseded in v2 as described
+above; physical TV compatibility still requires testing on that client.

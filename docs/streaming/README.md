@@ -11,11 +11,18 @@ repositories. This is a private experiment, not a supported upstream release.
 
 ## Start and pair
 
-Run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
+This guide describes the v2 candidate. The dedicated `kytyps5-streaming` command
+still selects v1 while controller access and the recorded shutdown fault await
+a user-led check. No further game test will start without explicit permission.
+See [VERIFICATION.md](VERIFICATION.md) for current results.
+
+Once the candidate is activated, run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
 tabs. The library and game settings start from a copy of the working installation.
 
 1. Open **Streaming** and use **1080p**, **60 FPS**, **HEVC**, and the default 30 Mbps
    maximum for the first TV test. Leave the NVIDIA adapter field empty for RTX 3090.
+   Clear **Show game window on this PC** for streaming-only play. Existing profiles
+   keep this option enabled until you change it.
 2. Select **Start hosting** and wait for **Ready**. Copy the displayed LAN address,
    including its port. The default base port is 48189, separate from system Sunshine.
 3. In Moonlight, manually add that address, for example `192.168.1.3:48189`.
@@ -39,6 +46,14 @@ While hosting, local Library launch is disabled so Moonlight owns the one game
 session. Stop hosting to launch locally. A global emulator guard also prevents
 normal and experimental Kyty games from running together accidentally.
 
+Streaming-only play exports the composed image without presenting a local game
+window. It still renders the game on the RTX 3090 and keeps a hidden SDL/Vulkan
+surface connected to the desktop. It avoids local presentation and cross-GPU window
+composition; it does not remove game rendering or guarantee a particular FPS gain.
+System dialogs, the on-screen keyboard and trophy notices are included in the
+stream in this mode. The remote controller operates interactive system panels;
+buttons used there are released before game input resumes.
+
 ## Audio, input and state
 
 Game audio uses an explicitly selected private SDL/Pulse output. The host captures
@@ -54,12 +69,18 @@ owns and stops those private processes.
 
 Remote gamepad state goes directly into Kyty's controller state. Disconnect releases
 remote-owned buttons/axes while preserving local held buttons. Basic rumble and a
-bounded vibration-PCM fallback are implemented. Advanced DualSense haptics, adaptive
-triggers, touch/motion and physical TV controller behavior need device testing.
+bounded vibration-PCM fallback are implemented. The controller extension forwards
+accelerometer/gyro samples into Kyty and sends adaptive-trigger effects back through
+standard Moonlight feedback. It requires a client and controller driver that expose
+those capabilities. Linux Moonlight may need access to the DualSense raw HID device;
+ordinary gamepad buttons can work even when raw HID sensors/effects are unavailable.
+HD haptic audio, controller-speaker audio and touchpad forwarding are separate work.
 Keyboard and mouse forwarding are intentionally ignored by the native host.
 
-Installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v1`.
-Private settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v1`.
+Candidate installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
+Candidate settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
+The working `20261016-native-v1` installation is retained for rollback. See
+[VERIFICATION.md](VERIFICATION.md) for the tested candidate and command status.
 The normal `kytyps5`, `astro-bot`, system Sunshine and their settings remain separate.
 
 `_SaveData`, `_PipelineCache`, trophies and other writable game state are independent
@@ -95,18 +116,18 @@ settings, process mappings and the native executable hash under `_CrashCapture`.
  a second catalog entry. No owned descendants or zombies remained.
 - Existing 18 memory/pipeline regression checks pass. Full launcher Library and
  Streaming windows were rendered offscreen and inspected.
+- Streaming-only Astro boot exported 776 GPU frames without a local game window;
+  stock Moonlight decoded the starfield and received nonzero game audio. Actual
+  SystemOverlay error-dialog and numeric-keyboard rendering/input were also checked
+  through production Vulkan/CUDA export. These are automated checks, separate from
+  physical laptop/controller confirmation.
 
 The synthetic network tests use Moonlight's fake platform; the real Astro boot
 check additionally verifies offscreen decoded pictures. Neither substitutes for
 viewing on the actual TV. Gameplay, subjective latency, physical speaker playback,
 controller compatibility and minimized-window behavior still need device testing.
-
-The capture contains guest VideoOut layers. Kyty's separately rendered system
-panels—IME keyboards, sign-in/error prompts and trophy toasts—remain local-only
-in this first edition, and remote input does not operate those panels. A game
-waiting on one of these needs interaction at the PC. Existing login, save-data
-and message dialogs auto-complete in the emulator; they are not additional hidden
-interactive panels. This limitation does not claim full PS5 system-UI parity.
+Existing login, save-data and message dialogs auto-complete in the emulator; this
+does not claim full PS5 system-UI parity.
 
 A slow/disconnected consumer cannot make the producer wait for a free capture slot.
 For safety, the first edition retains at most two old GPU pools plus one active
@@ -130,17 +151,19 @@ killed host are recovered without removing another live listener.
 
 1. Start at 1080p/60 and play a short Astro section. Check movement, jumping, menu
    buttons, audio timing and basic rumble using the controller connected to the TV.
-2. Resize or maximize the local game window, then minimize it. Confirm the TV keeps
-   receiving the game while the Intel monitors remain usable.
+2. Clear **Show game window on this PC**, restart hosting and launch from Moonlight.
+   Confirm the client receives the game while no game window appears on the PC.
+   With the option enabled, also check resizing, maximizing and minimizing locally.
 3. Disconnect and reconnect Moonlight to the running game. Confirm picture, sound
    and controller release/reconnect without restarting the emulator.
 4. Stop the game and hosting, select 1440p, restart hosting and match Moonlight's
    resolution. Compare detail, frame pacing and latency on the TV.
 5. Stop the game normally and confirm the last crash-capture manifest records an
    exit. Keep any failing session's `_CrashCapture` directory for diagnosis.
+6. With a supported DualSense client, test a gyro action and both adaptive triggers
+   in gameplay. Compare physical trigger resistance separately from ordinary rumble.
 
-Changes to experimental game progress stay in the experimental save copy. If an
-emulated system prompt appears only on the PC, complete it locally for this edition.
+Changes to experimental game progress stay in the experimental save copy.
 
 ## Build and inspect
 
