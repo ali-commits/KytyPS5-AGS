@@ -8229,7 +8229,49 @@ void TestNewShaderRecompilerCfgLoopBreakContinue() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void CheckLoopBufferDescriptor(std::span<const uint32_t> shader,
+                               ShaderRecompiler::IR::ValueOpcode load_opcode) {
+  using namespace ShaderRecompiler;
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+  const auto saved = GetCodegenOptions();
+  auto variant = saved;
+  variant.srt_variant_reads = true;
+  SetCodegenOptions(variant);
+  const auto result = RecompileForTest(shader, options);
+  SetCodegenOptions(saved);
+  bool indirect_load = false;
+  uint32_t stores = 0;
+  for (const auto *block : result.program.blocks) {
+    for (const auto &inst : *block) {
+      if (inst.GetOpcode() == load_opcode) {
+        const auto &memory = result.program.memory_info.at(
+            inst.Flags<IR::MemoryFlags>().index);
+        indirect_load |= memory.kind == IR::ResourceKind::IndirectBuffer &&
+                         memory.resource == IR::NoIndirectBufferResource;
+      }
+      stores += inst.GetOpcode() == IR::ValueOpcode::StoreBufferU32;
+    }
+  }
+  Check(!result.program.dispatcher_fallback &&
+            SpirvContainsOpcode(result.spirv, 246),
+        "runtime buffer descriptor lost its structured GPU loop");
+  Check(indirect_load && result.program.info.uses_dma && stores == 1u,
+        "runtime descriptor read or its output store was dropped instead of using BDA");
+  const auto source = DisassembleSpirvBinary(result.spirv);
+  Check(source.find("OpConvertUToPtr") != std::string::npos,
+        "runtime descriptor load did not emit a physical buffer address");
+  CheckSpirvBinaryValidates(result.spirv);
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  ExpectFatal([&] {
+    auto strict = saved;
+    strict.srt_variant_reads = false;
+    SetCodegenOptions(strict);
+    (void)RecompileForTest(shader, options);
+  }, "runtime buffer descriptor was accepted with variant reads disabled");
+#endif
+}
+
 void TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured() {
   const uint32_t shader[] = {
       EncodeSMovB32(0, 128), // preheader: s0 = 0
@@ -8244,11 +8286,7 @@ void TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured() {
       0xbf810000u,
   };
 
-  auto options = MakeCompileOptions(ShaderType::Compute);
-  options.dump_ir = true;
-  ExpectFatal([&] { (void)RecompileForTest(shader, options); },
-              "self-modifying scalar-buffer descriptor did not terminate "
-              "compilation");
+  CheckLoopBufferDescriptor(shader, ShaderRecompiler::IR::ValueOpcode::ReadConstBuffer);
 }
 
 void TestNewShaderRecompilerCfgLoopHeaderBufferLoadDispatcher() {
@@ -8264,13 +8302,8 @@ void TestNewShaderRecompilerCfgLoopHeaderBufferLoadDispatcher() {
       0xbf810000u,
   };
 
-  auto options = MakeCompileOptions(ShaderType::Compute);
-  options.dump_ir = true;
-  ExpectFatal([&] { (void)RecompileForTest(shader, options); },
-              "self-modifying vector-buffer descriptor did not terminate "
-              "compilation");
+  CheckLoopBufferDescriptor(shader, ShaderRecompiler::IR::ValueOpcode::LoadBufferU32);
 }
-#endif
 
 void TestNewShaderRecompilerCfgLoopHeaderDsAppendConsumeStructured() {
   const uint32_t shader[] = {
@@ -15621,6 +15654,12 @@ int main(int argc, char **argv) {
     TestRdna2LdsWaitcntBarrierAndFloatControls();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--loop-buffer-descriptors-only") == 0) {
+    TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured();
+    TestNewShaderRecompilerCfgLoopHeaderBufferLoadDispatcher();
+    std::puts("shader_cfg --loop-buffer-descriptors-only: ok");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--mesh-indirect-only") == 0) {
     TestMeshExportStorage();
     TestMeshIndirectParams();
@@ -15727,13 +15766,9 @@ int main(int argc, char **argv) {
   TestNewShaderRecompilerCfgPostEndTargetMergePS();
   TestNewShaderRecompilerCfgIdenticalBranchTargets();
   TestNewShaderRecompilerCfgLoopBreakContinue();
-  // Upstream b4d32394b/ec3e48cdd made these two loop-carried descriptor cases structured GPU loops
-  // (TestNewShaderRecompilerCfgLoopHeaderBufferLoadStructured); our resource tracker still rejects
-  // them, as before this merge.
-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  // Runtime descriptors use BDA with variant reads enabled; strict mode still rejects them.
   TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured();
   TestNewShaderRecompilerCfgLoopHeaderBufferLoadDispatcher();
-#endif
   TestNewShaderRecompilerCfgLoopHeaderDsAppendConsumeStructured();
   TestNewShaderRecompilerCfgLoopHeaderDsReadStructured();
   TestNewShaderRecompilerCfgLoopHeaderDsRead2B64Structured();
