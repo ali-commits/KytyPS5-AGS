@@ -1166,7 +1166,7 @@ target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
-			pipeline_compile_queue_tests virtual_memory_allocation_tests)
+			pipeline_compile_queue_tests shader_precompile_tests virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
 endif()
