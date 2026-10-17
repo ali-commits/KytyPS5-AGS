@@ -238,6 +238,53 @@ void TestRemoteMotionAndEffects() {
 	      "shutdown publishes both trigger stop effects");
 	Streaming::adaptive_enabled = false;
 }
+void TestEmulatedMotionRespectsRemoteOwnershipAndSensorState() {
+	Controller controller;
+	const auto read = [] {
+		PadData data {};
+		Check(PadReadState(1, &data) == OK, "motion fixture pad read failed");
+		return data;
+	};
+	const auto same_motion = [](const PadData& a, const PadData& b) {
+		return a.acceleration_x == b.acceleration_x && a.acceleration_y == b.acceleration_y &&
+		       a.acceleration_z == b.acceleration_z && a.angular_velocity_x == b.angular_velocity_x &&
+		       a.angular_velocity_y == b.angular_velocity_y && a.angular_velocity_z == b.angular_velocity_z &&
+		       a.orientation_x == b.orientation_x && a.orientation_y == b.orientation_y &&
+		       a.orientation_z == b.orientation_z && a.orientation_w == b.orientation_w;
+	};
+	ToggleGyroEmulation(1);
+	SetRightStick(1, 255, 128);
+	Check(std::abs(read().orientation_z) > 0.1f, "local stick did not produce emulated tilt");
+	SetRemoteInput(true, 0, {128,128,31,220,0,0});
+	Streaming::Motion sample {Streaming::Motion::Sensor::Gyro, 1, 10000, {0,0,1}};
+	SetRemoteMotion(&sample);
+	sample.sequence = 2; sample.timestamp_us = 20000;
+	SetRemoteMotion(&sample);
+	const auto remote = read();
+	SetAxis(1, Axis::RightX, 0);
+	SetRightStick(1, 20, 240);
+	Check(same_motion(read(), remote), "local emulated tilt overwrote remote sensor ownership");
+	ToggleGyroEmulation(1);
+	Check(same_motion(read(), remote) && read().right_stick_x == 31 && read().right_stick_y == 220,
+	      "leaving emulated tilt reset remote motion or replaced remote axes");
+	ToggleGyroEmulation(1);
+	Check(same_motion(read(), remote) && read().right_stick_x == 31 && read().right_stick_y == 220,
+	      "entering emulated tilt reset remote motion or centered remote axes");
+	Check(PadSetMotionSensorState(1, false) == OK, "disabling motion sensors failed");
+	const auto disabled = read();
+	SetRightStick(1, 255, 0);
+	ToggleGyroEmulation(1);
+	ToggleGyroEmulation(1);
+	Check(same_motion(read(), disabled), "disabled sensors received emulated motion or toggle resets");
+	SetRemoteInput(false,0,{128,128,128,128,0,0});
+	const auto disconnected = read();
+	SetAxis(1, Axis::RightY, 255);
+	Check(same_motion(read(), disconnected), "disabled local tilt published after remote disconnect");
+	Check(PadSetMotionSensorState(1, true) == OK, "enabling motion sensors failed");
+	SetRightStick(1, 255, 0);
+	Check(std::abs(read().orientation_z) > 0.1f, "local tilt did not resume after remote disconnect and sensor enable");
+}
+
 void TestSettingCycles() {
 	Controller controller;
 	for (auto setting:
@@ -654,6 +701,7 @@ int main() {
 	Config::Initialize();
         TestRemoteSourceReset();
 	    TestRemoteMotionAndEffects();
+	TestEmulatedMotionRespectsRemoteOwnershipAndSensorState();
 	    TestSettingCycles();
         TestGlobalControllerLevels();
 	TestPlayerUserIds();

@@ -837,6 +837,12 @@ static Quat QuatMultiply(const Quat& a, const Quat& b) {
 }
 
 void GameController::UpdateEmulatedTilt() {
+	// Remote sensors own the fused motion state until they disconnect; guest sensor
+	// disable applies equally to physical, remote and emulated inputs.
+	if (m_remote_motion || !m_motion_enabled) {
+		m_emulated_time = 0;
+		return;
+	}
 	constexpr float max_angle = 0.7853982f; // 45 degrees at full stick deflection
 	const auto      angle     = [](int value) {
 		return std::clamp((value - 128) / 127.0f, -1.0f, 1.0f) * max_angle;
@@ -891,15 +897,29 @@ void GameController::ToggleGyroEmulation(int id) {
 	if (m_gyro_emulation) {
 		m_emulated_stick = {m_state.axes[static_cast<int>(Axis::RightX)],
 		                    m_state.axes[static_cast<int>(Axis::RightY)]};
-		m_state.axes[static_cast<int>(Axis::RightX)] = 128;
-		m_state.axes[static_cast<int>(Axis::RightY)] = 128;
+		if (!m_remote_connected) {
+			m_input_sources.LocalAxis(static_cast<int>(Axis::RightX), 128);
+			m_input_sources.LocalAxis(static_cast<int>(Axis::RightY), 128);
+			m_state.axes[static_cast<int>(Axis::RightX)] =
+			    m_input_sources.Axis(static_cast<int>(Axis::RightX));
+			m_state.axes[static_cast<int>(Axis::RightY)] =
+			    m_input_sources.Axis(static_cast<int>(Axis::RightY));
+		}
 		UpdateEmulatedTilt();
 	} else {
-		m_state.orientation                          = {0.0f, 0.0f, 0.0f, 1.0f};
-		m_state.accel                                = {0.0f, 1.0f, 0.0f};
-		m_state.gyro                                 = {};
-		m_state.axes[static_cast<int>(Axis::RightX)] = m_emulated_stick[0];
-		m_state.axes[static_cast<int>(Axis::RightY)] = m_emulated_stick[1];
+		if (!m_remote_motion && m_motion_enabled) {
+			m_state.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+			m_state.accel       = {0.0f, 1.0f, 0.0f};
+			m_state.gyro        = {};
+		}
+		if (!m_remote_connected) {
+			m_input_sources.LocalAxis(static_cast<int>(Axis::RightX), m_emulated_stick[0]);
+			m_input_sources.LocalAxis(static_cast<int>(Axis::RightY), m_emulated_stick[1]);
+			m_state.axes[static_cast<int>(Axis::RightX)] =
+			    m_input_sources.Axis(static_cast<int>(Axis::RightX));
+			m_state.axes[static_cast<int>(Axis::RightY)] =
+			    m_input_sources.Axis(static_cast<int>(Axis::RightY));
+		}
 		AddState();
 	}
 	LOGF("Emulated gyro tilt: %s\n", m_gyro_emulation ? "enabled" : "disabled");
