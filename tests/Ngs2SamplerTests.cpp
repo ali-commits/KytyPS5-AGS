@@ -61,6 +61,24 @@ struct Fixture {
 	}
 };
 
+void TestSystemLockUnlock() {
+	Check(Ngs2SystemLock(0) == NGS2_ERROR_INVALID_SYSTEM_HANDLE &&
+	          Ngs2SystemUnlock(0) == NGS2_ERROR_INVALID_SYSTEM_HANDLE,
+	      "system lock/unlock accepted an invalid handle");
+	Ngs2Internal system;
+	auto* previous = g_ngs_list;
+	system.next = previous;
+	g_ngs_list = &system;
+	const auto handle = reinterpret_cast<uintptr_t>(&system);
+	Check(Ngs2SystemLock(handle) == OK, "valid system did not lock");
+	Check(Ngs2SystemUnlock(handle) == OK, "valid system did not unlock");
+	Check(Ngs2SystemLock(handle) == OK && Ngs2SystemUnlock(handle) == OK,
+	      "system lock/unlock could not be repeated");
+	g_ngs_list = previous;
+	Check(Ngs2SystemLock(handle) == NGS2_ERROR_INVALID_SYSTEM_HANDLE,
+	      "removed system handle remained valid");
+}
+
 void TestStreamingResample() {
 	Fixture              f(44100, 2);
 	std::vector<int16_t> pcm(441 * 2);
@@ -1238,6 +1256,7 @@ void TestFiniteFilterTail() {
 } // namespace
 
 int main() {
+	TestSystemLockUnlock();
 	TestAtrac9Vibration();
 	TestAtrac9Discrete();
 	TestPcm16RenderOutput();

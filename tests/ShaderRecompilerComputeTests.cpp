@@ -38859,6 +38859,28 @@ TestCase VectorFloatSpecialOps() {
            O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+TestCase PackedNormNanToZero() {
+  using O = ShaderOpcode;
+  std::vector<u32> code;
+  // Preserve the finite lane while quiet/signaling NaNs in either lane become zero.
+  AppendVMovLiteral(&code, 0, 0x7fc01234u);
+  AppendVMovLiteral(&code, 1, 0x3f800000u);
+  AppendVMovLiteral(&code, 2, 0xbf800000u);
+  AppendVMovLiteral(&code, 3, 0x7f800001u);
+  AppendVop3(&code, 0x368, 4, Vgpr(0), Vgpr(1));
+  AppendVop3(&code, 0x369, 5, Vgpr(0), Vgpr(1));
+  AppendVop3(&code, 0x368, 6, Vgpr(2), Vgpr(3));
+  AppendVop3(&code, 0x369, 7, Vgpr(2), Vgpr(3));
+  AppendVop3(&code, 0x368, 8, Vgpr(3), Vgpr(0));
+  AppendVop3(&code, 0x369, 9, Vgpr(3), Vgpr(0));
+  for (u32 i = 0; i < 6; ++i) AppendStoreVgpr(&code, 4 + i, i);
+  AppendEnd(&code);
+  return {"PackedNormNanToZero", code, {},
+          {0x7fff0000u, 0xffff0000u, 0x00008001u, 0u, 0u, 0u},
+          {O::V_MOV_B32, O::V_CVT_PKNORM_I16_F32, O::V_CVT_PKNORM_U16_F32,
+           O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+}
+
 TestCase MadMixF16LiteralHalfSourceUsesOpsel() {
   using O = ShaderOpcode;
 
@@ -50537,6 +50559,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(Vop1MoveRelSource);
   AddCase(Vop1MoveRelDestination);
   AddCase(VectorFloatSpecialOps);
+  AddCase(PackedNormNanToZero);
   AddCase(CubeIdCapturedNegationAndOutputScale);
   AddCase(MadMixF16LiteralHalfSourceUsesOpsel);
   AddCase(MadMixF16NegHiIsAbsAndNegIsIndependent);
@@ -56417,6 +56440,11 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--unmapped-buffer-null-only") == 0) {
     WaveClusterTests::CheckUnmappedBufferNull();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--packed-norm-nan-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, PackedNormNanToZero());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--empty-buffer-fill-only") == 0) {
