@@ -961,6 +961,8 @@ target_include_directories(thread_service_tests PRIVATE ${inc_headers})
 add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 target_link_libraries(kernel_file_system_tests ZArchive::zarchive)
+set_property(SOURCE "${KYTY_SOURCE_DIR}/libs/libSysmodule.cpp" APPEND PROPERTY
+	COMPILE_DEFINITIONS "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,kernel_file_system_tests>:KYTY_SYSMODULE_TESTS=1>")
 
 add_executable(sync_on_address_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SyncOnAddressTests.cpp"

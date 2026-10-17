@@ -60,6 +60,14 @@ void InitSystemService_1(Loader::SymbolDatabase *symbols);
 void InitAppContent_1(Loader::SymbolDatabase *symbols);
 }
 
+namespace Libs::Sysmodule {
+void TestSetNativeModuleCallbacks(int32_t (*load)(const char*), int (*unload)(int32_t));
+}
+
+namespace Libs::LibAmpr {
+void InitAmpr_1(Loader::SymbolDatabase *symbols);
+}
+
 namespace Libs::LibNet {
 void InitNet_1_Net(Loader::SymbolDatabase *symbols);
 }
@@ -312,6 +320,48 @@ void TestFileDescriptorFlags() {
   }
 }
 
+namespace NativeModuleCallbacks {
+using ModuleCall = int (KYTY_SYSV_ABI *)(uint16_t);
+ModuleCall load = nullptr;
+ModuleCall unload = nullptr;
+ModuleCall is_loaded = nullptr;
+std::atomic<int> starts{0};
+std::atomic<int> stops{0};
+std::atomic<bool> release_start{true};
+std::promise<void>* entered_start = nullptr;
+bool fail_start = false;
+bool fail_stop = false;
+constexpr int unloaded = static_cast<int>(0x805a1001u);
+constexpr int fatal = static_cast<int>(0x805a10ffu);
+constexpr int32_t handle = 42;
+
+void CheckReentry() {
+  Check(is_loaded(0x115) == unloaded,
+        "native lifecycle exposes only completed module loads");
+  Check(load(0x115) == fatal && unload(0x115) == fatal,
+        "recursive lifecycle operations fail without changing references");
+  Check(load(0x113) == OK && is_loaded(0x113) == OK && unload(0x113) == OK,
+        "native entry point can load and release a dependency");
+}
+
+int32_t Start(const char* path) {
+  Check(std::string_view(path) == "/app0/sce_module/libSceNpCppWebApi.prx",
+        "native module path is preserved");
+  starts.fetch_add(1);
+  if (entered_start != nullptr) entered_start->set_value();
+  release_start.wait(false);
+  CheckReentry();
+  return fail_start ? Libs::LibKernel::KERNEL_ERROR_ENOENT : handle;
+}
+
+int Stop(int32_t value) {
+  Check(value == handle, "native stop receives the loaded handle");
+  stops.fetch_add(1);
+  CheckReentry();
+  return fail_stop ? Libs::LibKernel::KERNEL_ERROR_EBUSY : OK;
+}
+} // namespace NativeModuleCallbacks
+
 void TestSysmoduleReferences() {
   Loader::SymbolDatabase symbols;
   Libs::InitSysmodule_1(&symbols);
@@ -355,6 +405,57 @@ void TestSysmoduleReferences() {
   Check(internal_load(0xb4, 0, 0, 0, &result) == OK && result == OK &&
             is_loaded(0xb4) == OK && unload(0xb4) == OK && is_loaded(0xb4) == unloaded,
         "internal and public module operations share load state");
+
+  using namespace NativeModuleCallbacks;
+  NativeModuleCallbacks::load = load;
+  NativeModuleCallbacks::unload = unload;
+  NativeModuleCallbacks::is_loaded = is_loaded;
+  Libs::Sysmodule::TestSetNativeModuleCallbacks(Start, Stop);
+  std::promise<void> entered;
+  auto entered_future = entered.get_future();
+  entered_start = &entered;
+  release_start.store(false);
+  std::array<std::future<int>, 6> loads;
+  loads[0] = std::async(std::launch::async, [=] { return load(0x115); });
+  Check(entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+        "native start callback begins without retaining the state mutex");
+  Check(is_loaded(0x115) == unloaded,
+        "queries can observe an in-progress native load without blocking");
+  for (size_t i = 1; i < loads.size(); ++i) {
+    loads[i] = std::async(std::launch::async, [=] { return load(0x115); });
+  }
+  release_start.store(true);
+  release_start.notify_all();
+  for (auto& result : loads) {
+    Check(result.wait_for(std::chrono::seconds(5)) == std::future_status::ready &&
+              result.get() == OK,
+          "concurrent loads complete and native callbacks can reenter module APIs");
+  }
+  entered_start = nullptr;
+  Check(starts.load() == 1 && is_loaded(0x115) == OK,
+        "concurrent native loads execute one start callback");
+  for (size_t i = 1; i < loads.size(); ++i) {
+    Check(unload(0x115) == OK && stops.load() == 0,
+          "shared native references defer the stop callback");
+  }
+  auto stopped = std::async(std::launch::async, [=] { return unload(0x115); });
+  Check(stopped.wait_for(std::chrono::seconds(5)) == std::future_status::ready &&
+            stopped.get() == OK && stops.load() == 1 && is_loaded(0x115) == unloaded,
+        "last native unload runs a reentrant stop callback exactly once");
+
+  fail_start = true;
+  Check(load(0x115) == Libs::LibKernel::KERNEL_ERROR_ENOENT &&
+            is_loaded(0x115) == unloaded,
+        "failed native start removes its in-progress state");
+  fail_start = false;
+  Check(load(0x115) == OK, "failed native start permits a later retry");
+  fail_stop = true;
+  Check(unload(0x115) == fatal && is_loaded(0x115) == OK,
+        "failed native stop retains its loaded reference");
+  fail_stop = false;
+  Check(unload(0x115) == OK && is_loaded(0x115) == unloaded,
+        "failed native stop permits a later retry");
+  Libs::Sysmodule::TestSetNativeModuleCallbacks(nullptr, nullptr);
 }
 
 void TestSystemServiceEntitlementEvents() {

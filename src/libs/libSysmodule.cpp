@@ -21,39 +21,80 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleI
 
 namespace Sysmodule {
 
-constexpr int      SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805a1001u);
-constexpr int      SYSMODULE_ERROR_FATAL    = static_cast<int>(0x805a10ffu);
+constexpr int SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805a1001u);
+constexpr int SYSMODULE_ERROR_FATAL    = static_cast<int>(0x805a10ffu);
 
 static constexpr struct NativeModule {
 	uint16_t    id;
 	const char* path;
 } g_native_modules[] = {{0x0115, "/app0/sce_module/libSceNpCppWebApi.prx"}};
 
+enum class ModuleState { Loading, Loaded, Unloading };
+
 struct Module {
+	ModuleState             state      = ModuleState::Loading;
 	uint32_t                references = 0;
 	LibKernel::KernelModule handle     = -1;
 };
 
-static std::mutex                          g_module_mutex;
+// Lifecycle calls execute guest entry points, which may load dependencies. Serialize
+// lifecycle operations across threads while allowing same-thread dependency loads;
+// the explicit state rejects recursion into the module currently starting/stopping.
+static std::recursive_mutex                 g_lifecycle_mutex;
+static std::mutex                           g_module_mutex;
 static std::unordered_map<uint16_t, Module> g_modules;
 
+#if defined(KYTY_SYSMODULE_TESTS)
+static LibKernel::KernelModule (*g_test_load)(const char*) = nullptr;
+static int (*g_test_unload)(LibKernel::KernelModule)       = nullptr;
+
+void TestSetNativeModuleCallbacks(LibKernel::KernelModule (*load)(const char*),
+                                  int (*unload)(LibKernel::KernelModule)) {
+	std::scoped_lock lifecycle(g_lifecycle_mutex);
+	g_test_load   = load;
+	g_test_unload = unload;
+}
+#endif
+
+static LibKernel::KernelModule LoadNative(const char* path) {
+#if defined(KYTY_SYSMODULE_TESTS)
+	if (g_test_load != nullptr) return g_test_load(path);
+#endif
+	return LibKernel::KernelLoadStartModule(path, 0, nullptr, 0, nullptr, nullptr);
+}
+
+static int UnloadNative(LibKernel::KernelModule handle) {
+#if defined(KYTY_SYSMODULE_TESTS)
+	if (g_test_unload != nullptr) return g_test_unload(handle);
+#endif
+	return LibKernel::KernelStopUnloadModule(handle, 0, nullptr, 0, nullptr, nullptr);
+}
+
 static int LoadModule(uint16_t id) {
-	std::scoped_lock lock(g_module_mutex);
-	if (const auto module = g_modules.find(id); module != g_modules.end()) {
-		++module->second.references;
-		return 0;
+	std::scoped_lock lifecycle(g_lifecycle_mutex);
+	{
+		std::scoped_lock lock(g_module_mutex);
+		if (const auto module = g_modules.find(id); module != g_modules.end()) {
+			if (module->second.state != ModuleState::Loaded) return SYSMODULE_ERROR_FATAL;
+			++module->second.references;
+			return 0;
+		}
+		g_modules.emplace(id, Module {});
 	}
 
 	LibKernel::KernelModule handle = -1;
 	for (const auto& module: g_native_modules) {
 		if (module.id != id) continue;
-		handle = LibKernel::KernelLoadStartModule(module.path, 0, nullptr, 0, nullptr, nullptr);
+		handle = LoadNative(module.path);
 		if (handle < 0) {
+			std::scoped_lock lock(g_module_mutex);
+			g_modules.erase(id);
 			return handle;
 		}
 		break;
 	}
-	g_modules.emplace(id, Module {1, handle});
+	std::scoped_lock lock(g_module_mutex);
+	g_modules.at(id) = Module {ModuleState::Loaded, 1, handle};
 	return 0;
 }
 
@@ -75,21 +116,27 @@ static KYTY_SYSV_ABI int SysmoduleUnloadModule(uint16_t id) {
 
 	LOGF("\t id = %d\n", static_cast<int>(id));
 
-	std::scoped_lock lock(g_module_mutex);
-	const auto       module = g_modules.find(id);
-	if (module == g_modules.end()) {
-		return SYSMODULE_ERROR_UNLOADED;
-	}
-	if (module->second.references == 1) {
-		if (module->second.handle >= 0 &&
-		    LibKernel::KernelStopUnloadModule(module->second.handle, 0, nullptr, 0, nullptr,
-		                                     nullptr) < 0) {
-			return SYSMODULE_ERROR_FATAL;
+	std::scoped_lock        lifecycle(g_lifecycle_mutex);
+	LibKernel::KernelModule handle = -1;
+	{
+		std::scoped_lock lock(g_module_mutex);
+		const auto       module = g_modules.find(id);
+		if (module == g_modules.end()) return SYSMODULE_ERROR_UNLOADED;
+		if (module->second.state != ModuleState::Loaded) return SYSMODULE_ERROR_FATAL;
+		if (module->second.references > 1) {
+			--module->second.references;
+			return 0;
 		}
-		g_modules.erase(id);
-	} else {
-		--module->second.references;
+		module->second.state = ModuleState::Unloading;
+		handle               = module->second.handle;
 	}
+	const bool       failed = handle >= 0 && UnloadNative(handle) < 0;
+	std::scoped_lock lock(g_module_mutex);
+	if (failed) {
+		g_modules.at(id).state = ModuleState::Loaded;
+		return SYSMODULE_ERROR_FATAL;
+	}
+	g_modules.erase(id);
 	return 0;
 }
 
@@ -114,7 +161,10 @@ static KYTY_SYSV_ABI int SysmoduleIsLoaded(uint16_t id) {
 	LOGF("\t id = %d\n", static_cast<int>(id));
 
 	std::scoped_lock lock(g_module_mutex);
-	return g_modules.contains(id) ? 0 : SYSMODULE_ERROR_UNLOADED;
+	const auto       module = g_modules.find(id);
+	return module != g_modules.end() && module->second.state == ModuleState::Loaded
+	           ? 0
+	           : SYSMODULE_ERROR_UNLOADED;
 }
 
 } // namespace Sysmodule
