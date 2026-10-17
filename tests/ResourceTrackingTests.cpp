@@ -2770,6 +2770,177 @@ ResourcePlan ConditionalBufferPlan(ConditionalBufferUse use) {
   return ExtractResourcePlan(fixture.program);
 }
 
+void TestEmptyBufferNormalization() {
+  struct Mapping {
+    uint64_t base = 0x10004u;
+    uint64_t size = 4u;
+    uint32_t probes = 0;
+  } mapping;
+  for (const bool formatted : {false, true}) {
+    for (const bool written : {false, true}) {
+      Fixture fixture;
+      const auto handle = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                           fixture.UserData(2), fixture.UserData(3)}, 4);
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Buffer;
+      memory.formatted = formatted;
+      if (written) {
+        fixture.Emit(ValueOpcode::StoreBufferU32,
+                     {handle, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+                     fixture.AddMemory(memory, 4));
+      } else {
+        fixture.Emit(ValueOpcode::LoadBufferU32,
+                     {handle, Value(0u), Value(0u), Value(0u), Value(true)},
+                     fixture.AddMemory(memory, 4));
+      }
+      fixture.PlanAndTrack();
+      const auto plan = ExtractResourcePlan(fixture.program);
+      std::array<uint32_t, 4> data{};
+      SrtRuntime runtime{.user_data = data, .userdata = &mapping,
+          .buffer_base_mapped = [](void* context, uint64_t base, uint64_t size) {
+            auto& mapping = *static_cast<Mapping*>(context);
+            ++mapping.probes;
+            // Like renderer clamping, any mapped prefix is usable, even for a spanning V#.
+            return size != 0u && base >= mapping.base && base - mapping.base < mapping.size;
+          }};
+      ResourceSnapshot snapshot;
+      ResourceSpecialization specialization;
+      const auto materialize = [&] {
+        Check(MaterializeResources(plan, runtime, snapshot, specialization),
+              "empty-buffer normalization failed to materialize");
+      };
+      const auto is_null = [&] {
+        return std::ranges::all_of(snapshot.buffers[0].dwords,
+                                   [](uint32_t word) { return word == 0u; });
+      };
+      materialize();
+      const auto null_specialization = specialization;
+      for (uint32_t garbage = 1; garbage <= 16; ++garbage) {
+        data = {0xff000000u + garbage * 4u, (garbage * 13u) << 16u, garbage,
+                Libs::Graphics::DstSel(4, 5, 6, 7) | (garbage << 12u) |
+                (1u << 23u) | (1u << 24u)};
+        materialize();
+        Check(is_null() && specialization == null_specialization,
+              "unmapped garbage created a new specialization or retained descriptor bits");
+      }
+      data = {0x10004u, 16u << 16u, 0x100u,
+              Libs::Graphics::DstSel(4, 5, 6, 7) |
+              (static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 12u) |
+              (1u << 23u) | (1u << 24u)};
+      const auto valid = data;
+      mapping.base = data[0];
+      mapping.size = 4u;
+      materialize();
+      const auto valid_specialization = specialization;
+      Check(!is_null() && std::equal(data.begin(), data.end(), snapshot.buffers[0].dwords.begin()) &&
+                specialization != null_specialization,
+            "garbage-to-valid descriptor refresh lost bits or its normal specialization");
+      mapping.size = 0u;
+      materialize();
+      Check(is_null() && specialization == null_specialization,
+            "unmapping a previously valid base reused a stale positive mapping verdict");
+      mapping.size = 4u;
+      materialize();
+      Check(specialization == valid_specialization &&
+                std::equal(valid.begin(), valid.end(), snapshot.buffers[0].dwords.begin()),
+            "remapping unchanged descriptor words did not restore its descriptor and specialization");
+      data[0] -= 4u; // Same 64 KiB block as the mapped address, but outside its mapping.
+      materialize();
+      Check(is_null(), "a nearby mapped address incorrectly validated an unmapped base");
+      data = valid;
+      data[0] = 0u;
+      materialize();
+      Check(is_null() && specialization == null_specialization,
+            "zero-base buffer retained specialization bits");
+      data = valid;
+      data[2] = 0u;
+      materialize();
+      Check(is_null() && specialization == null_specialization,
+            "zero-record buffer retained specialization bits");
+      data = valid;
+      data[0] = 0x10003u; // Low, unaligned base is valid when its own byte is mapped.
+      data[1] = 0u;
+      data[2] = UINT32_MAX;
+      data[3] |= 3u << 28u;
+      mapping.base = data[0];
+      materialize();
+      Check(!is_null() && std::equal(data.begin(), data.end(), snapshot.buffers[0].dwords.begin()),
+            "mapped raw/sentinel-range descriptor was normalized or changed");
+      runtime.buffer_base_mapped = nullptr;
+      data = valid;
+      data[0] = 0xff000000u;
+      materialize();
+      Check(!is_null() && specialization == valid_specialization,
+            "disabled mapping normalization changed descriptor behavior");
+    }
+  }
+  Check(mapping.probes != 0u, "mapping truth was never queried");
+}
+
+void TestEmptyBufferFormattedFill() {
+  namespace Prospero = Libs::Graphics::Prospero;
+  for (const auto format : {Prospero::BufferFormat::k32_32_32_32Float,
+                             Prospero::BufferFormat::k32_32_32_32UInt,
+                             Prospero::BufferFormat::k8_8_8_8UNorm}) {
+    Fixture fixture;
+    const auto buffer = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                         fixture.UserData(2), fixture.UserData(3)});
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    memory.formatted = true;
+    fixture.Emit(ValueOpcode::LoadBufferU32x4,
+                 {buffer, Value(0u), Value(0u), Value(0u), Value(true)},
+                 fixture.AddMemory(memory, 4));
+    fixture.PlanAndTrack();
+    const auto plan = ExtractResourcePlan(fixture.program);
+    std::array<uint32_t, 4> data{0x1000u, 16u << 16u, 4u,
+        (static_cast<uint32_t>(format) << 12u) | Libs::Graphics::DstSel(1, 4, 1, 0)};
+    bool mapped = true;
+    SrtRuntime runtime{.user_data = data, .userdata = &mapped,
+        .buffer_base_mapped = [](void* state, uint64_t, uint64_t) {
+          return *static_cast<bool*>(state);
+        }};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const auto materialize = [&] {
+      Check(MaterializeResources(plan, runtime, snapshot, specialization),
+            "formatted fill descriptor did not materialize");
+    };
+    materialize();
+    const auto mapped_specialization = specialization;
+    mapped = false;
+    materialize();
+    const auto empty_specialization = specialization;
+    const auto& fill = specialization.buffers[0];
+    Check(fill.zero_stride_oob && fill.packed_stride == 0u &&
+              fill.descriptor_swizzle == Libs::Graphics::DstSel(1, 0, 1, 0) &&
+              fill.descriptor_format == (format == Prospero::BufferFormat::k32_32_32_32UInt
+                  ? Prospero::BufferFormat::k32UInt : Prospero::BufferFormat::k32Float) &&
+              std::ranges::all_of(snapshot.buffers[0].dwords,
+                                   [](uint32_t word) { return word == 0u; }),
+          "empty buffer lost float/integer constant-one channel fills or kept address metadata");
+    data[0] += 0x300u;
+    data[1] ^= (3u << 30u) | (24u << 16u);
+    data[3] |= 1u << 23u;
+    materialize();
+    Check(specialization == empty_specialization,
+          "irrelevant garbage addressing bits changed canonical empty-buffer fills");
+    data[0] = 0x1000u;
+    data[1] = 16u << 16u;
+    data[3] &= ~(1u << 23u);
+    mapped = true;
+    materialize();
+    Check(specialization == mapped_specialization &&
+              std::equal(data.begin(), data.end(), snapshot.buffers[0].dwords.begin()),
+          "remapping formatted buffers did not restore descriptor bits and specialization");
+    data[3] |= 1u << 30u; // Invalid V# type keeps its architectural null behavior.
+    materialize();
+    Check(specialization.buffers[0].descriptor_swizzle == 0u &&
+              specialization.buffers[0].descriptor_format == Prospero::BufferFormat::kInvalid,
+          "invalid descriptor type retained formatted constant fills");
+  }
+}
+
 void TestConditionalBufferMaterialization() {
   auto plan = ConditionalBufferPlan(ConditionalBufferUse::Optional);
   // GTA III leaves packet words in s[12:15] when its scalar control word is zero.
@@ -3369,6 +3540,8 @@ int main() {
     Run("DMA address materialization", TestDmaAddressMaterialization);
     Run("dynamic FLAT address", TestDynamicFlatAddressesUseDma);
     Run("buffer swizzle specialization", TestBufferSwizzleSpecialization);
+    Run("empty buffer normalization", TestEmptyBufferNormalization);
+    Run("empty buffer formatted fills", TestEmptyBufferFormattedFill);
     Run("conditional buffer materialization", TestConditionalBufferMaterialization);
     Run("conservative buffer reachability", TestConservativeBufferReachability);
     Run("conditional indirect image", TestConditionalIndirectImageMaterialization);

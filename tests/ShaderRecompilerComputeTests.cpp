@@ -1862,6 +1862,7 @@ struct TestCase {
   std::vector<u32> expected_gds;
   std::vector<std::pair<std::string, size_t>> decoded_counts;
   std::vector<std::pair<std::string, size_t>> ir_counts;
+  bool normalize_empty_buffers = false;
   u32 expected_mip_descriptors = 0;
   std::optional<std::vector<u32>> expected_buffer_resources;
 };
@@ -2297,6 +2298,8 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
       .shader_base = reinterpret_cast<uint64_t>(test.code.data()),
       .read_memory = ReadTestMemory,
       .userdata = const_cast<std::vector<u32> *>(&test.initial),
+      .buffer_base_mapped = test.normalize_empty_buffers
+          ? +[](void*, uint64_t address, uint64_t) { return address == 0x1000u; } : nullptr,
   };
   Require(test.name, "resource materialization",
           ShaderRecompiler::IR::MaterializeResources(
@@ -43960,6 +43963,18 @@ TestCase BufferZeroStrideOobFormatsAndWidths() {
   return test;
 }
 
+TestCase EmptyBufferMappingFormattedFills(bool zero_stride) {
+  auto test = BufferZeroStrideOobFormatsAndWidths();
+  test.name = zero_stride ? "EmptyBufferMappingZeroStrideFormattedFills"
+                          : "EmptyBufferMappingFormattedFills";
+  test.normalize_empty_buffers = true;
+  test.user_data[0] = 0x1000u; // The harness output is mapped; both source descriptors are empty.
+  if (!zero_stride) {
+    test.user_data[5] = test.user_data[9] = 16u << 16u;
+  }
+  return test;
+}
+
 TestCase TBufferLoadVariants() {
   using O = ShaderOpcode;
 
@@ -50606,6 +50621,8 @@ std::vector<TestCase> MakeCases() {
   AddCase([] { return TBufferCapturedZeroStrideOob(true); });
   AddCase([] { return TBufferCapturedZeroStrideOob(false, true); });
   AddCase(BufferZeroStrideOobFormatsAndWidths);
+  cases.push_back(EmptyBufferMappingFormattedFills(false));
+  cases.push_back(EmptyBufferMappingFormattedFills(true));
   AddCase(TBufferLoadFormatXyzwSnapshotsOverlappingAddress);
   AddCase(TBufferLoadFormatXyzwPackedSnapshotsOverlappingAddress);
   AddCase(TBufferLoadFormatX8UintZeroExtendsByte);
@@ -56320,6 +56337,12 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--unmapped-buffer-null-only") == 0) {
     WaveClusterTests::CheckUnmappedBufferNull();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--empty-buffer-fill-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, EmptyBufferMappingFormattedFills(false));
+    RunCase(&vulkan, EmptyBufferMappingFormattedFills(true));
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--graphics-add-tid-only") == 0) {

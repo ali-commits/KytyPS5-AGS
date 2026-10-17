@@ -1473,6 +1473,12 @@ void TestSpirvRequirementsAnalysis() {
             !add_tid_requirements.subgroup_shuffle,
         "buffer ADD_TID requested the wrong subgroup contract");
 
+  for (const auto stage : {ShaderType::Vertex, ShaderType::Pixel}) {
+    add_tid.stage = stage;
+    Check(ShaderRecompiler::Spirv::Emitter::AnalyzeProgramRequirements(add_tid).subgroup_local_invocation_id,
+          "graphics ADD_TID lost its guest wave lane requirement");
+  }
+
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
   ExpectFatal(
       [&] {
@@ -1482,10 +1488,10 @@ void TestSpirvRequirementsAnalysis() {
       "invalid buffer requirement metadata did not terminate analysis");
   ExpectFatal(
       [&] {
-        add_tid.stage = ShaderType::Vertex;
+        add_tid.stage = ShaderType::TessellationControl;
         ShaderRecompiler::Spirv::Emitter::AnalyzeProgramRequirements(add_tid);
       },
-      "graphics buffer ADD_TID did not terminate requirements analysis");
+      "hull buffer ADD_TID did not terminate requirements analysis");
 #endif
 
   Program empty;
