@@ -1363,6 +1363,13 @@ static void IndirectArgumentsBarrier(const CommandBuffer& buffer, const CommandS
 	    vk::PipelineStageFlagBits::eDrawIndirect, {}, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
+// Count commands where they are emitted, so preparation reuse and fallback paths
+// cannot omit or duplicate a draw. GPU indirect arguments have no CPU-known instance count.
+static void CountEmittedDraw(uint64_t instances = 0) {
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, instances);
+}
+
 static void EmitIndirectDraw(const CommandSink& vk_buffer, const DrawIndirectSource& source,
                              const PreparedIndirectBuffers& prepared) {
 	if (source.count_addr != 0) {
@@ -1381,6 +1388,7 @@ static void EmitIndirectDraw(const CommandSink& vk_buffer, const DrawIndirectSou
 		vk_buffer.drawIndirect(prepared.args, prepared.args_offset, source.max_count,
 		                       source.stride);
 	}
+	CountEmittedDraw();
 }
 
 static uint64_t VertexBufferDescriptorSize(const ShaderVertexInputBuffer& buffer,
@@ -3045,6 +3053,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, const CommandSink& vk
 				vk_buffer.draw(draw.index_count, draw.instance_count, emit.first_vertex,
 				               emit.first_instance);
 			}
+			CountEmittedDraw(draw.instance_count);
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
@@ -3056,6 +3065,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, const CommandSink& vk
 					vk_buffer.draw(4, draw.instance_count, i + emit.first_vertex,
 					               emit.first_instance);
 				}
+				CountEmittedDraw(draw.instance_count);
 			}
 			break;
 		default: EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
@@ -3983,6 +3993,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			                        0, mesh_draw_dwords * sizeof(uint32_t), draw_data);
 			vk_buffer.drawMeshTasksIndirectEXT(mesh_slot.buffer, mesh_slot.CommandOffset(record), 1,
 			                                   MeshIndirect::CommandDwords * 4u);
+			CountEmittedDraw();
 		}
 	} else if (mesh_active) {
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
@@ -4016,8 +4027,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 					                        vk::ShaderStageFlagBits::eMeshEXT |
 					                            vk::ShaderStageFlagBits::eFragment,
 					                        0, mesh_draw_dwords * sizeof(uint32_t), draw_data);
-					vk_buffer.drawMeshTasksEXT(
-					    groups, std::min(instances_per_dispatch, draw.instance_count - base), 1);
+					const auto instances =
+					    std::min(instances_per_dispatch, draw.instance_count - base);
+					vk_buffer.drawMeshTasksEXT(groups, instances, 1);
+					CountEmittedDraw(instances);
 				}
 			}
 		}
@@ -4070,9 +4083,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (occlusion_draw_rows && HangTrace::Enabled() &&
 		    m_context.GetOcclusionCounter().Active()) {
 			HangTrace::RecordOcclusion(event);
-			Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
-			Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances,
-			                           draw.instance_count);
 		}
 	}
 

@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/hostException.h"
 #include "common/liveSwitch.h"
@@ -996,6 +997,28 @@ struct RenderExecutorTestAccess {
 };
 
 namespace {
+
+struct DebugCounterScope {
+  bool previous = Common::DebugCounters::Enabled();
+  DebugCounterScope() { Common::DebugCounters::SetEnabled(true); }
+  ~DebugCounterScope() { Common::DebugCounters::SetEnabled(previous); }
+};
+
+struct DrawCounterSnapshot {
+  uint64_t draws =
+      Common::DebugCounters::Get(Common::DebugCounters::Counter::Draws);
+  uint64_t instances =
+      Common::DebugCounters::Get(Common::DebugCounters::Counter::DrawInstances);
+  bool Delta(uint64_t expected_draws, uint64_t expected_instances) const {
+    return Common::DebugCounters::Get(Common::DebugCounters::Counter::Draws) -
+                   draws ==
+               expected_draws &&
+           Common::DebugCounters::Get(
+               Common::DebugCounters::Counter::DrawInstances) -
+                   instances ==
+               expected_instances;
+  }
+};
 
 using u32 = uint32_t;
 using BindingType = TextureCache::BindingType;
@@ -17766,6 +17789,7 @@ public:
     context.InitializeGpu(nullptr);
     LibKernel::Memory::InstallGpuResources(&context);
     context.GetGpu().SendCommandSync([&] {
+      const DebugCounterScope count_draws;
       GraphicsInitJmpTables();
       CommandProcessor processor(context, 0);
       processor.Reset();
@@ -17840,6 +17864,16 @@ public:
       const auto serial_fast_before =
           context.GetPipelineCache().GetFastFirstTotals();
       clear();
+      const DrawCounterSnapshot no_work_counters;
+      RenderExecutorTestAccess::DrawAuto(
+          executor, scheduler.Current(),
+          {.vertex_count = 0, .instance_count = 1});
+      RenderExecutorTestAccess::DrawAuto(
+          executor, scheduler.Current(),
+          {.vertex_count = 3, .instance_count = 0});
+      Require(name, "empty draw counters", no_work_counters.Delta(0, 0),
+              "empty draws affected performance counters");
+      const DrawCounterSnapshot serial_counters;
       shaders.SetPsShaderBase(pixel_addresses[0]);
       RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
                                          {.vertex_count = 3, .instance_count = 1});
@@ -17854,6 +17888,9 @@ public:
                                          {.vertex_count = 3, .instance_count = 1});
       const auto serial = read();
       check("serial draws", serial);
+      Require(name, "direct draw counters", serial_counters.Delta(2, 2),
+              "normal direct draws were not counted exactly once without "
+              "occlusion tracing");
       const auto *combined = std::getenv("KYTY_PIPELINE_PREFETCH_FAST_FIRST");
       const auto *journal = std::getenv("KYTY_PIPELINE_JOURNAL");
       if (combined != nullptr && std::strcmp(combined, "1") == 0 &&
@@ -17904,6 +17941,7 @@ public:
                     std::to_string(commits) + " of each in inline mode and no mismatch");
       };
       const auto bindings_before = binding_counts();
+      const DrawCounterSnapshot prepared_counters;
 
       // The same draws as a command stream (the programs are published now).
       clear();
@@ -17930,7 +17968,9 @@ public:
       Require(name, "serial and command-processor pixels", processed == serial,
               "the command processor's draws differ from the serial draws");
       check_bindings("binding plans", bindings_before);
-
+      Require(name, "prepared draw counters", prepared_counters.Delta(2, 2),
+              "prepared commits or their fallbacks lost or duplicated draw "
+              "counters");
 
       const auto mode = DrawPrep::GetMode();
       if (mode != DrawPrep::Mode::Off) {
@@ -18277,6 +18317,31 @@ public:
         registers.SetPsInControl(0x8000);
       }
       RenderExecutorTestAccess::ResetBindings(executor);
+      if (m_draw_indirect_first_instance) {
+        const auto previous_native =
+            m_runtime_context.draw_indirect_first_instance_enabled;
+        m_runtime_context.draw_indirect_first_instance_enabled = true;
+        const std::array<u32, 4> arguments{3, 7, 0, 0};
+        constexpr uint64_t arguments_offset = 0x8000;
+        std::memcpy(memory + arguments_offset, arguments.data(),
+                    sizeof(arguments));
+        const DrawCounterSnapshot indirect_counters;
+        const DrawIndirectSource source{
+            .args_addr = base + arguments_offset, .stride = 16, .max_count = 1};
+        Require(name, "native indirect draw",
+                RenderExecutorTestAccess::DrawIndirectNative(
+                    executor, scheduler.Current(), source),
+                "simple native indirect draw fell back");
+        RenderExecutorTestAccess::ResetBindings(executor);
+        m_runtime_context.draw_indirect_first_instance_enabled =
+            previous_native;
+        Require(name, "native indirect draw counters",
+                indirect_counters.Delta(1, 0),
+                "native indirect command was not counted once or invented "
+                "CPU-unknown instance counts");
+        scheduler.Finish();
+      }
+
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
     });
@@ -18774,6 +18839,7 @@ public:
     uint64_t reused = 0;
     uint64_t partial = 0;
     context.GetGpu().SendCommandSync([&] {
+      const DebugCounterScope count_draws;
       GraphicsInitJmpTables();
       CommandProcessor processor(context, 0);
       processor.Reset();
@@ -18853,6 +18919,7 @@ public:
 
       // Serial reference with texture A: never a run (these draws are no engine commits).
       clear();
+      const DrawCounterSnapshot serial_counters;
       for (u32 k = 0; k < 2 * draws_per_stream; k++) {
         if (k == draws_per_stream) {
           rewrite(0);
@@ -18868,6 +18935,9 @@ public:
                                            {.vertex_count = 3, .instance_count = 1});
       }
       const auto serial = read();
+      Require(name, "serial run draw counters",
+              serial_counters.Delta(2 * draws_per_stream, 2 * draws_per_stream),
+              "serial draws lost or duplicated performance counters");
       const auto expect = [](u32 texel, u32 component) {
         return static_cast<float>((texel >> (8u * component)) & 0xffu) / 255.0f;
       };
@@ -18910,10 +18980,15 @@ public:
       const auto reused_before = totals.acquire_reused.load();
       const auto partial_before = totals.partial_pushes.load();
       const auto depth_excluded_before = totals.depth_promotions_excluded.load();
+      const DrawCounterSnapshot run_counters;
       clear();
       stream(0);
       rewrite(1);
       stream(draws_per_stream);
+      Require(name, "continued run draw counters",
+              run_counters.Delta(2 * draws_per_stream, 2 * draws_per_stream),
+              "continued, verified or late-fallback draws lost or duplicated "
+              "performance counters");
       continued = totals.continued.load() - continued_before;
       late = totals.late_fallbacks.load() - late_before;
       mismatches = totals.verify_mismatches.load() - mismatches_before;
@@ -57576,6 +57651,12 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--draw-prep-code-cert-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckDrawPrepCertifiedShaderHash();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--draw-counters-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDrawPrepEngineDraw();
+    vulkan.CheckDrawRun();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-prep-engine-only") == 0) {
