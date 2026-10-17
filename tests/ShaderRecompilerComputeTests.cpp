@@ -5,6 +5,7 @@
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
 #include "common/rendererBatch.h"
+#include "common/skipInvalid.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
 #include "gpu_dcc_shaders/gpu_dcc_occlusion_batch_spv.h"
@@ -24661,14 +24662,33 @@ public:
       mipped_storage_resource.mip_mode =
           ShaderRecompiler::IR::ImageMipMode::Dynamic;
       mipped_storage_resource.mip_count = 3;
+      auto linear_view = overwide_mipped_storage_descriptor;
+      linear_view.dwords[3] &= ~(0x1fu << 20u);
+      if (Common::SkipInvalidEnabled()) {
+        // The native runtime drops a view that would change the physical layout.
+        // Check its actual null storage binding, rather than accepting any return.
+        const auto invalid = RenderExecutorTestAccess::ResolveTexture(
+            executor, mipped_storage_resource, linear_view);
+        const auto expected_null = RenderExecutorTestAccess::ResolveTexture(
+            executor, mipped_storage_resource, null_descriptor);
+        const auto &image = texture_cache.GetImage(invalid.image_id);
+        Require(name, "invalid physical mip layout binds null storage",
+                invalid.desc.type == BindingType::Storage &&
+                    invalid.desc.info.data.Empty() &&
+                    invalid.image_id == expected_null.image_id &&
+                    image.info.data.Empty() && !image.binding.is_bound &&
+                    !image.binding.is_target &&
+                    !TextureCacheTestAccess::PendingDownload(texture_cache,
+                                                           invalid.image_id),
+                "invalid mip view retained guest storage or scheduled a guest readback");
+      } else {
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
-      ExpectFatal("MipViewPhysicalLayoutChange", [&] {
-        auto linear_view = overwide_mipped_storage_descriptor;
-        linear_view.dwords[3] &= ~(0x1fu << 20u);
-        (void)RenderExecutorTestAccess::ResolveTexture(executor, mipped_storage_resource,
-                                                       linear_view);
-      });
+        ExpectFatal("MipViewPhysicalLayoutChange", [&] {
+          (void)RenderExecutorTestAccess::ResolveTexture(
+              executor, mipped_storage_resource, linear_view);
+        });
 #endif
+      }
       auto sampled_overwide_resource = storage_resource;
       sampled_overwide_resource.resource_class =
           ShaderRecompiler::IR::ImageResourceClass::Sampled;
@@ -57185,11 +57205,6 @@ int main(int argc, char **argv) {
     vulkan.CheckDepthFeedbackKeep();
     return 0;
   }
-  if (argc == 2 && std::strcmp(argv[1], "--upload-dma-only") == 0) {
-    VulkanHarness vulkan;
-    vulkan.CheckUploadDma();
-    return 0;
-  }
   if (argc == 2 && std::strcmp(argv[1], "--depth-layout-stable-only") == 0) {
     CheckDepthStableLayoutRules();
     VulkanHarness vulkan;
@@ -57197,6 +57212,11 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
+  if (argc == 2 && std::strcmp(argv[1], "--upload-dma-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckUploadDma();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--tiler-image-bench") == 0) {
     VulkanHarness vulkan;
     vulkan.BenchTilerImageDirect();
