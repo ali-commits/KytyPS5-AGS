@@ -57300,6 +57300,23 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, VectorFloatSpecialOps());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--specialization-plan-lifetime-only") == 0) {
+    // Specialization replaces zero-stride reads by constants. Their saved planning
+    // expressions must remain alive until the EXEC-select pass has inspected them.
+    // CompileCase also verifies cloned translations and persistent-plan round trips.
+    for (uint32_t iteration = 0; iteration < 16u; ++iteration) {
+      for (const auto test : {TBufferCapturedZeroStrideOob(),
+                              TBufferCapturedZeroStrideOob(true),
+                              TBufferCapturedZeroStrideOob(false, true),
+                              BufferZeroStrideOobFormatsAndWidths(),
+                              EmptyBufferMappingFormattedFills(false),
+                              EmptyBufferMappingFormattedFills(true)}) {
+        (void)CompileCase(test);
+      }
+    }
+    std::puts("[host]    SpecializationPlanningLifetime   ok");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--zero-stride-oob-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, TBufferCapturedZeroStrideOob());

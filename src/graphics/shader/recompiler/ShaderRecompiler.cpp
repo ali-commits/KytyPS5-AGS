@@ -1,10 +1,9 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
-#include "graphics/shader/recompiler/CodegenOptions.h"
-#include "graphics/shader/recompiler/Tessellation.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
+#include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -68,7 +67,8 @@ const char* StageName(ShaderType stage) {
 	}
 }
 
-void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg, const char* phase) {
+void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg,
+                           const char* phase) {
 	const auto* block        = cfg.FindBlock(cfg.failure_block);
 	const auto  start        = block != nullptr ? block->start_pc : UINT32_MAX;
 	const auto  end          = block != nullptr ? block->end_pc : UINT32_MAX;
@@ -107,14 +107,7 @@ void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg,
 	}
 }
 
-enum class EmbeddedFetchValueType {
-	Unknown,
-	Constant,
-	AttribTable,
-	Attrib,
-	BufferTable,
-	Buffer
-};
+enum class EmbeddedFetchValueType { Unknown, Constant, AttribTable, Attrib, BufferTable, Buffer };
 
 struct EmbeddedFetchSgprInfo {
 	EmbeddedFetchValueType type      = EmbeddedFetchValueType::Unknown;
@@ -241,11 +234,11 @@ int BufferTableAttribFromOffset(uint32_t raw_offset, int dword) {
 	return static_cast<int>((raw_offset + static_cast<uint32_t>(dword) * 4u) / 16u);
 }
 
-Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
-    const Decoder::Program& decoded, const ShaderVertexInputInfo* input_info,
-    uint32_t user_data_base, uint32_t user_data_count, uint32_t wave_size) {
-	const uint32_t    vertex_index_reg   = input_info->logical_stage == ShaderType::Local ? 2u : 5u;
-	const uint32_t    instance_index_reg = input_info->logical_stage == ShaderType::Local ? 5u : 8u;
+Frontend::EmbeddedFetchPlan
+DetectEmbeddedVertexFetch(const Decoder::Program& decoded, const ShaderVertexInputInfo* input_info,
+                          uint32_t user_data_base, uint32_t user_data_count, uint32_t wave_size) {
+	const uint32_t vertex_index_reg   = input_info->logical_stage == ShaderType::Local ? 2u : 5u;
+	const uint32_t instance_index_reg = input_info->logical_stage == ShaderType::Local ? 5u : 8u;
 	Frontend::EmbeddedFetchPlan data;
 	data.loads.reserve(input_info->resources_num);
 	int32_t vertex_offset_candidate   = -1;
@@ -258,14 +251,13 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 	const int buffer_reg = input_info->fetch_buffer_reg + shift_regs;
 
 	std::array<EmbeddedFetchSgprInfo, 108> sgprs {};
-	std::array<bool, 256>                 vgpr_is_index {};
+	std::array<bool, 256>                  vgpr_is_index {};
 	EmbeddedFetchVectorLanes               vector_lanes;
-	const bool                             track_vector_lanes =
-	    std::none_of(decoded.instructions.begin(), decoded.instructions.end(),
-	                 [](const auto& inst) {
-		                 return Decoder::IsDirectBranch(inst.opcode) ||
-		                        inst.opcode == Decoder::Opcode::S_SETPC_B64;
-	                 });
+	const bool                             track_vector_lanes = std::none_of(
+	    decoded.instructions.begin(), decoded.instructions.end(), [](const auto& inst) {
+		    return Decoder::IsDirectBranch(inst.opcode) ||
+		           inst.opcode == Decoder::Opcode::S_SETPC_B64;
+	    });
 
 	if (attrib_reg >= 0 && attrib_reg < static_cast<int>(sgprs.size())) {
 		sgprs[attrib_reg].type = EmbeddedFetchValueType::AttribTable;
@@ -303,10 +295,10 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 		if (data.loads.empty() && index_offset_add) {
 			const auto reg = DecodedSgprReg(inst.src0);
 			if (reg >= user_data_base && reg - user_data_base < user_data_count) {
-				auto& candidate = vertex_index_accumulator ? vertex_offset_candidate
-				                                           : instance_offset_candidate;
-				auto& conflict  = vertex_index_accumulator ? vertex_offset_conflict
-				                                           : instance_offset_conflict;
+				auto& candidate =
+				    vertex_index_accumulator ? vertex_offset_candidate : instance_offset_candidate;
+				auto& conflict =
+				    vertex_index_accumulator ? vertex_offset_conflict : instance_offset_conflict;
 				if (candidate >= 0 && candidate != static_cast<int32_t>(reg)) {
 					conflict = true;
 				} else {
@@ -378,9 +370,9 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 							const int  index       = static_cast<int>(raw_offset / 4u);
 							for (uint32_t i = 0;
 							     i < DecodedDstSize(inst) && register_id + i < sgprs.size(); i++) {
-								auto& dst        = sgprs[register_id + i];
-								dst.type         = EmbeddedFetchValueType::Attrib;
-								dst.attrib_id    = index + static_cast<int>(i);
+								auto& dst     = sgprs[register_id + i];
+								dst.type      = EmbeddedFetchValueType::Attrib;
+								dst.attrib_id = index + static_cast<int>(i);
 							}
 						} else {
 							ClearEmbeddedFetchSgprs(sgprs, inst.dst, DecodedDstSize(inst));
@@ -406,9 +398,9 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 						           (inst.offset & 0x3u) == 0) {
 							for (uint32_t i = 0;
 							     i < DecodedDstSize(inst) && register_id + i < sgprs.size(); i++) {
-								auto& dst        = sgprs[register_id + i];
-								dst.type         = EmbeddedFetchValueType::Buffer;
-								dst.attrib_id    = sgprs[DecodedSgprReg(inst.src1)].attrib_id;
+								auto& dst     = sgprs[register_id + i];
+								dst.type      = EmbeddedFetchValueType::Buffer;
+								dst.attrib_id = sgprs[DecodedSgprReg(inst.src1)].attrib_id;
 							}
 						} else {
 							ClearEmbeddedFetchSgprs(sgprs, inst.dst, DecodedDstSize(inst));
@@ -453,8 +445,8 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 					}
 				} else if (IsEmbeddedFetchBufferLoad(inst)) {
 					if (IsDecodedVgpr(inst.src0) && inst.src0.reg < vgpr_is_index.size() &&
-					    vgpr_is_index[inst.src0.reg] &&
-					    IsDecodedSgpr(inst.src1) && DecodedSgprReg(inst.src1) < sgprs.size() &&
+					    vgpr_is_index[inst.src0.reg] && IsDecodedSgpr(inst.src1) &&
+					    DecodedSgprReg(inst.src1) < sgprs.size() &&
 					    sgprs[DecodedSgprReg(inst.src1)].type == EmbeddedFetchValueType::Buffer) {
 						const auto& buffer = sgprs[DecodedSgprReg(inst.src1)];
 						if (data.loads.empty()) {
@@ -465,10 +457,10 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 								data.instance_offset_sgpr = instance_offset_candidate;
 							}
 						}
-						auto& load        = data.loads.emplace_back();
-						load.pc           = inst.pc;
-						load.attrib_id    = buffer.attrib_id;
-						load.components   = DecodedDstSize(inst);
+						auto& load      = data.loads.emplace_back();
+						load.pc         = inst.pc;
+						load.attrib_id  = buffer.attrib_id;
+						load.components = DecodedDstSize(inst);
 					}
 				}
 				break;
@@ -477,8 +469,7 @@ Frontend::EmbeddedFetchPlan DetectEmbeddedVertexFetch(
 			vector_lanes.clear();
 		} else if (inst.opcode != Decoder::Opcode::V_WRITELANE_B32 && IsDecodedVgpr(inst.dst)) {
 			for (uint32_t i = 0;
-			     i < EmbeddedFetchDstSize(inst) && inst.dst.reg + i < vgpr_is_index.size();
-			     i++) {
+			     i < EmbeddedFetchDstSize(inst) && inst.dst.reg + i < vgpr_is_index.size(); i++) {
 				ClearEmbeddedFetchVectorLanes(&vector_lanes, inst.dst.reg + i);
 			}
 		}
@@ -501,9 +492,9 @@ void NoteBvhInstructions(const CompileOptions& options, Decoder::Program& decode
 		count++;
 		first_pc = std::min(first_pc, inst.pc);
 		if (!decode_bvh && inst.opcode != Decoder::Opcode::UNSUPPORTED) {
-			Decoder::SetUnsupported(
-			    inst, Decoder::Family::MIMG, inst.opcode_id,
-			    "BVH ray intersection is disabled (KYTY_RT_SOFTWARE=1 or KYTY_RT_STUB=1 enables it)");
+			Decoder::SetUnsupported(inst, Decoder::Family::MIMG, inst.opcode_id,
+			                        "BVH ray intersection is disabled (KYTY_RT_SOFTWARE=1 or "
+			                        "KYTY_RT_STUB=1 enables it)");
 		}
 	}
 	if (count == 0 || !decode_bvh) {
@@ -556,7 +547,8 @@ Decoder::Program DecodeFusedProgram(std::span<const uint32_t> front, std::span<c
 // a descriptor it computes at runtime that has no BDA path (see TrackResources; without the switch
 // its flat SRT slots fail to evaluate and its dispatches or draws are dropped just the same), or an
 // S_SWAPPC_B64 call (without the switch, the CFG build exits).
-static void NoteSkippedProgram(const CompileOptions& options, uint32_t pc, std::string_view reason) {
+static void NoteSkippedProgram(const CompileOptions& options, uint32_t pc,
+                               std::string_view reason) {
 	static std::mutex                   mutex;
 	static std::unordered_set<uint64_t> logged;
 	{
@@ -565,10 +557,11 @@ static void NoteSkippedProgram(const CompileOptions& options, uint32_t pc, std::
 			return;
 		}
 	}
-	Log::WriteToConsoleAndLog(fmt::format(
-	    "KYTY_SRT_VARIANT_READS: {} shader 0x{:016x} {} (pc=0x{:08x}); its dispatches and draws are "
-	    "skipped.\n",
-	    StageName(options.stage), options.shader_hash, reason, pc));
+	Log::WriteToConsoleAndLog(fmt::format("KYTY_SRT_VARIANT_READS: {} shader 0x{:016x} {} "
+	                                      "(pc=0x{:08x}); its dispatches and draws are "
+	                                      "skipped.\n",
+	                                      StageName(options.stage), options.shader_hash, reason,
+	                                      pc));
 }
 
 // S_SWAPPC_B64 with a destination: a call through a function pointer (the NULL-destination jump
@@ -588,12 +581,13 @@ static bool IsUnsupportedCall(const Decoder::Instruction& inst) {
 // else (another write, a branch or branch target on the way, an odd or non-user pair) leaves the
 // call `unresolved`: its callee is unknown.
 static std::vector<CallTarget> FindCallTargets(const Decoder::Program& decoded,
-                                               const CompileOptions& options, uint32_t& unresolved) {
-	unresolved             = 0;
-	const auto& insts      = decoded.instructions;
-	const auto  user_sgpr  = [&](uint32_t reg) {
-        return reg >= options.user_data_base &&
-               reg - options.user_data_base < options.user_data.size();
+                                               const CompileOptions&   options,
+                                               uint32_t&               unresolved) {
+	unresolved            = 0;
+	const auto& insts     = decoded.instructions;
+	const auto  user_sgpr = [&](uint32_t reg) {
+		return reg >= options.user_data_base &&
+		       reg - options.user_data_base < options.user_data.size();
 	};
 	// The SGPRs an instruction writes: its destination's width follows from the opcode (64-bit
 	// scalar ops and lane masks write a pair, SMEM loads their dword count); a second destination
@@ -644,7 +638,8 @@ static std::vector<CallTarget> FindCallTargets(const Decoder::Program& decoded,
 			entry_end = i;
 			break;
 		}
-		if (Decoder::IsDirectBranch(insts[i].opcode) || insts[i].opcode == Decoder::Opcode::S_SETPC_B64) {
+		if (Decoder::IsDirectBranch(insts[i].opcode) ||
+		    insts[i].opcode == Decoder::Opcode::S_SETPC_B64) {
 			entry_end = i + 1;
 			break;
 		}
@@ -672,7 +667,7 @@ static std::vector<CallTarget> FindCallTargets(const Decoder::Program& decoded,
 		size_t     copies[2]   = {call, call};                        // where each half is read
 		bool       ok          = target < 104u && (target & 1u) == 0u;
 		bool       reached_top = true;
-		bool crossed = false; // straight-line code ended before both halves were found
+		bool       crossed     = false; // straight-line code ended before both halves were found
 		for (size_t i = call; ok && i-- > 0;) {
 			const auto& inst = insts[i];
 			// Earlier calls count as writing only their return pair: the builders reload their
@@ -743,8 +738,10 @@ static std::vector<CallTarget> FindCallTargets(const Decoder::Program& decoded,
 			unresolved++;
 			continue;
 		}
-		const auto low  = static_cast<uint64_t>(options.user_data[halves[0] - options.user_data_base]);
-		const auto high = static_cast<uint64_t>(options.user_data[halves[1] - options.user_data_base]);
+		const auto low =
+		    static_cast<uint64_t>(options.user_data[halves[0] - options.user_data_base]);
+		const auto high =
+		    static_cast<uint64_t>(options.user_data[halves[1] - options.user_data_base]);
 		const auto address = (low | (high << 32u)) & 0x0000ffffffffffffull;
 		if (std::ranges::none_of(targets, [&](const CallTarget& known) {
 			    return known.user_sgpr == halves[0] && known.return_sgpr == return_sgpr;
@@ -793,7 +790,7 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 
 	// IMAGE_BVH*_INTERSECT_RAY is translated only when a BVH mode is on (KYTY_RT_SOFTWARE or
 	// KYTY_RT_STUB).
-	const bool decode_bvh = GetCodegenOptions().rt_software || GetCodegenOptions().rt_stub;
+	const bool       decode_bvh = GetCodegenOptions().rt_software || GetCodegenOptions().rt_stub;
 	Decoder::Program decoded;
 	std::vector<uint32_t> joined_code;
 	if (!options.back_code.empty()) {
@@ -898,13 +895,13 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		}
 	}
 	Frontend::TranslateOptions translate_options {
-	    .stage            = options.stage,
-	    .wave_size        = options.wave_size,
-	    .shader_hash      = options.shader_hash,
-	    .user_data_base   = options.user_data_base,
-	    .user_data_count  = static_cast<uint32_t>(options.user_data.size()),
-	    .input_info       = options.input_info,
-	    .embedded_fetch   = embedded_fetch.loads.empty() ? nullptr : &embedded_fetch,
+	    .stage           = options.stage,
+	    .wave_size       = options.wave_size,
+	    .shader_hash     = options.shader_hash,
+	    .user_data_base  = options.user_data_base,
+	    .user_data_count = static_cast<uint32_t>(options.user_data.size()),
+	    .input_info      = options.input_info,
+	    .embedded_fetch  = embedded_fetch.loads.empty() ? nullptr : &embedded_fetch,
 	};
 	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram\n",
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash);
@@ -974,7 +971,8 @@ static void NoteBvhKernelModule(const IR::Program& ir, const std::vector<uint32_
 	static std::unordered_set<uint64_t> noted;
 	{
 		std::scoped_lock lock(mutex);
-		if (!noted.insert(ir.shader_hash ^ (static_cast<uint64_t>(ir.stage) << 56) ^ spirv.size()).second) {
+		if (!noted.insert(ir.shader_hash ^ (static_cast<uint64_t>(ir.stage) << 56) ^ spirv.size())
+		         .second) {
 			return;
 		}
 	}
@@ -985,9 +983,9 @@ static void NoteBvhKernelModule(const IR::Program& ir, const std::vector<uint32_
 	if (dump_dir == nullptr || dump_dir[0] == '\0') {
 		return;
 	}
-	const auto path = std::string(dump_dir) +
-	                  fmt::format("/rt_{}_{:016x}_{}.spv", StageName(ir.stage), ir.shader_hash,
-	                              spirv.size());
+	const auto path =
+	    std::string(dump_dir) +
+	    fmt::format("/rt_{}_{:016x}_{}.spv", StageName(ir.stage), ir.shader_hash, spirv.size());
 	if (std::FILE* file = std::fopen(path.c_str(), "wb"); file != nullptr) {
 		std::fwrite(spirv.data(), sizeof(uint32_t), spirv.size(), file);
 		std::fclose(file);
@@ -1008,20 +1006,21 @@ static void NoteBvhKernelModule(const IR::Program& ir, const std::vector<uint32_
 
 CompileResult CompileProgram(TranslateResult translated, const CompileOptions& options,
                              const IR::ResourceSpecialization& specialization,
-                             uint32_t push_data_start_dword) {
+                             uint32_t                          push_data_start_dword) {
 	EXIT_IF(translated.skip_dispatch);
 	const auto emit_begin = std::chrono::steady_clock::now();
-	auto& ir = translated.program;
+	auto&      ir         = translated.program;
 	IR::ApplyResourceSpecialization(ir, specialization);
-	IR::RemoveIdentities(ir.blocks);
-	IR::EliminateDeadCode(ir.blocks);
-
+	// Specialization can turn instructions referenced by descriptor/evaluation plans into
+	// identities. Inspect those external roots while their instructions are still alive.
 	if (GetCodegenOptions().exec_selects) {
 		// One lane per host invocation: the emitter branches per invocation (see BranchCondition).
 		const bool per_invocation =
 		    ShaderLanesPerInvocation(ir.stage, ir.wave_size, options.input_info) == 1u;
 		(void)IR::EliminateExecSelects(ir, per_invocation);
 	}
+	IR::RemoveIdentities(ir.blocks);
+	IR::EliminateDeadCode(ir.blocks);
 
 	// Copy the export at its original control-flow/EXEC site, not an interface placeholder.
 	// Iterate only original instructions: aliases are never recursively copied.
@@ -1032,20 +1031,21 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 				for (auto it = block->begin(); it != block->end();) {
 					auto& inst = *it++;
 					if (inst.GetOpcode() != IR::ValueOpcode::SetAttribute) continue;
-					const auto flags = inst.Flags<IR::ExportFlags>();
+					const auto flags  = inst.Flags<IR::ExportFlags>();
 					const auto source = ir.export_info[flags.index];
 					if (source.kind != IR::ExportTargetKind::Parameter) continue;
 					for (uint32_t destination = 0; destination < 32u; ++destination) {
 						if ((vertex.param_alias_mask & (1u << destination)) == 0 ||
-						    vertex.param_alias_source[destination] != source.index) continue;
-						auto alias = source;
-						alias.index = destination;
-						alias.target = 0x20u + destination;
-						auto alias_flags = flags;
+						    vertex.param_alias_source[destination] != source.index)
+							continue;
+						auto alias        = source;
+						alias.index       = destination;
+						alias.target      = 0x20u + destination;
+						auto alias_flags  = flags;
 						alias_flags.index = static_cast<uint32_t>(ir.export_info.size());
 						ir.export_info.push_back(alias);
 						auto copy = block->PrependNewInst(it, IR::ValueOpcode::SetAttribute,
-						                                 {inst.Arg(0), inst.Arg(1)});
+						                                  {inst.Arg(0), inst.Arg(1)});
 						copy->SetFlags(alias_flags);
 					}
 					// Spare destinations are not sources of any active PS input.
