@@ -329,6 +329,8 @@ std::atomic<int> starts{0};
 std::atomic<int> stops{0};
 std::atomic<bool> release_start{true};
 std::promise<void>* entered_start = nullptr;
+std::atomic<bool> release_stop{true};
+std::promise<void>* entered_stop = nullptr;
 bool fail_start = false;
 bool fail_stop = false;
 constexpr int unloaded = static_cast<int>(0x805a1001u);
@@ -344,6 +346,19 @@ void CheckReentry() {
         "native entry point can load and release a dependency");
 }
 
+void CheckHelperThreadDependency() {
+  auto helper = std::async(std::launch::async, [] {
+    Check(is_loaded(0x115) == unloaded,
+          "helper query observes a transitioning native module without waiting");
+    Check(load(0x113) == OK && is_loaded(0x113) == OK && unload(0x113) == OK &&
+              is_loaded(0x113) == unloaded,
+          "helper loads, queries and unloads a different dependency during a native callback");
+  });
+  Check(helper.wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+        "native callback can join a dependency helper without a global lifecycle deadlock");
+  helper.get();
+}
+
 int32_t Start(const char* path) {
   Check(std::string_view(path) == "/app0/sce_module/libSceNpCppWebApi.prx",
         "native module path is preserved");
@@ -351,13 +366,17 @@ int32_t Start(const char* path) {
   if (entered_start != nullptr) entered_start->set_value();
   release_start.wait(false);
   CheckReentry();
+  CheckHelperThreadDependency();
   return fail_start ? Libs::LibKernel::KERNEL_ERROR_ENOENT : handle;
 }
 
 int Stop(int32_t value) {
   Check(value == handle, "native stop receives the loaded handle");
   stops.fetch_add(1);
+  if (entered_stop != nullptr) entered_stop->set_value();
+  release_stop.wait(false);
   CheckReentry();
+  CheckHelperThreadDependency();
   return fail_stop ? Libs::LibKernel::KERNEL_ERROR_EBUSY : OK;
 }
 } // namespace NativeModuleCallbacks
@@ -455,6 +474,52 @@ void TestSysmoduleReferences() {
   fail_stop = false;
   Check(unload(0x115) == OK && is_loaded(0x115) == unloaded,
         "failed native stop permits a later retry");
+  for (const bool stop_fails : {false, true}) {
+    Check(load(0x115) == OK, "load before a coordinated stop");
+    const auto starts_before = starts.load();
+    std::promise<void> entered_stop_signal;
+    auto entered_stop_future = entered_stop_signal.get_future();
+    entered_stop = &entered_stop_signal;
+    release_stop.store(false);
+    fail_stop = stop_fails;
+    auto stopping = std::async(std::launch::async, [=] { return unload(0x115); });
+    Check(entered_stop_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+          "coordinated native stop begins");
+    Check(is_loaded(0x115) == unloaded,
+          "query reports unloading while its callback is still running");
+    auto dependent = std::async(std::launch::async, [=] {
+      return load(0xb4) == OK && is_loaded(0xb4) == OK && unload(0xb4) == OK;
+    });
+    Check(dependent.wait_for(std::chrono::seconds(2)) == std::future_status::ready &&
+              dependent.get(),
+          "different module progresses while a native stop is paused");
+    std::promise<void> queued_load;
+    auto queued_load_future = queued_load.get_future();
+    auto reloading = std::async(std::launch::async, [&] {
+      queued_load.set_value();
+      return load(0x115);
+    });
+    Check(queued_load_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready &&
+              reloading.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout,
+          "a same-ID load waits for the in-progress stop");
+    release_stop.store(true);
+    release_stop.notify_all();
+    Check(stopping.wait_for(std::chrono::seconds(2)) == std::future_status::ready &&
+              stopping.get() == (stop_fails ? fatal : OK),
+          "coordinated stop returns its lifecycle result");
+    entered_stop = nullptr;
+    Check(reloading.wait_for(std::chrono::seconds(2)) == std::future_status::ready &&
+              reloading.get() == OK && is_loaded(0x115) == OK &&
+              starts.load() == starts_before + (stop_fails ? 0 : 1),
+          "waiting load starts once after stop or retains the failed-stop reference");
+    fail_stop = false;
+    if (stop_fails) {
+      Check(unload(0x115) == OK && is_loaded(0x115) == OK,
+            "failed stop and waiting load preserve both references");
+    }
+    Check(unload(0x115) == OK && is_loaded(0x115) == unloaded,
+          "last coordinated reference unloads exactly once");
+  }
   Libs::Sysmodule::TestSetNativeModuleCallbacks(nullptr, nullptr);
 }
 

@@ -7,7 +7,9 @@
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"
 
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 namespace Libs {
@@ -35,13 +37,13 @@ struct Module {
 	ModuleState             state      = ModuleState::Loading;
 	uint32_t                references = 0;
 	LibKernel::KernelModule handle     = -1;
+	std::thread::id         owner;
 };
 
-// Lifecycle calls execute guest entry points, which may load dependencies. Serialize
-// lifecycle operations across threads while allowing same-thread dependency loads;
-// the explicit state rejects recursion into the module currently starting/stopping.
-static std::recursive_mutex                 g_lifecycle_mutex;
+// Protect only per-module state. Guest start/stop callbacks can join helper threads
+// loading different dependencies, so no lifecycle lock may span either callback.
 static std::mutex                           g_module_mutex;
+static std::condition_variable              g_module_changed;
 static std::unordered_map<uint16_t, Module> g_modules;
 
 #if defined(KYTY_SYSMODULE_TESTS)
@@ -50,7 +52,7 @@ static int (*g_test_unload)(LibKernel::KernelModule)       = nullptr;
 
 void TestSetNativeModuleCallbacks(LibKernel::KernelModule (*load)(const char*),
                                   int (*unload)(LibKernel::KernelModule)) {
-	std::scoped_lock lifecycle(g_lifecycle_mutex);
+	std::scoped_lock lock(g_module_mutex);
 	g_test_load   = load;
 	g_test_unload = unload;
 }
@@ -58,44 +60,67 @@ void TestSetNativeModuleCallbacks(LibKernel::KernelModule (*load)(const char*),
 
 static LibKernel::KernelModule LoadNative(const char* path) {
 #if defined(KYTY_SYSMODULE_TESTS)
-	if (g_test_load != nullptr) return g_test_load(path);
+	decltype(g_test_load) callback;
+	{
+		std::scoped_lock lock(g_module_mutex);
+		callback = g_test_load;
+	}
+	if (callback != nullptr) return callback(path);
 #endif
 	return LibKernel::KernelLoadStartModule(path, 0, nullptr, 0, nullptr, nullptr);
 }
 
 static int UnloadNative(LibKernel::KernelModule handle) {
 #if defined(KYTY_SYSMODULE_TESTS)
-	if (g_test_unload != nullptr) return g_test_unload(handle);
+	decltype(g_test_unload) callback;
+	{
+		std::scoped_lock lock(g_module_mutex);
+		callback = g_test_unload;
+	}
+	if (callback != nullptr) return callback(handle);
 #endif
 	return LibKernel::KernelStopUnloadModule(handle, 0, nullptr, 0, nullptr, nullptr);
 }
 
 static int LoadModule(uint16_t id) {
-	std::scoped_lock lifecycle(g_lifecycle_mutex);
 	{
-		std::scoped_lock lock(g_module_mutex);
-		if (const auto module = g_modules.find(id); module != g_modules.end()) {
-			if (module->second.state != ModuleState::Loaded) return SYSMODULE_ERROR_FATAL;
-			++module->second.references;
-			return 0;
+		std::unique_lock lock(g_module_mutex);
+		for (;;) {
+			const auto module = g_modules.find(id);
+			if (module == g_modules.end()) {
+				g_modules.emplace(id,
+				                  Module {ModuleState::Loading, 0, -1, std::this_thread::get_id()});
+				break;
+			}
+			if (module->second.state == ModuleState::Loaded) {
+				++module->second.references;
+				return 0;
+			}
+			if (module->second.owner == std::this_thread::get_id()) return SYSMODULE_ERROR_FATAL;
+			// Re-find after waking: another module's callback can rehash the map,
+			// and this transition can either complete or roll its entry back.
+			g_module_changed.wait(lock);
 		}
-		g_modules.emplace(id, Module {});
 	}
 
 	LibKernel::KernelModule handle = -1;
+	bool                    failed = false;
 	for (const auto& module: g_native_modules) {
 		if (module.id != id) continue;
 		handle = LoadNative(module.path);
-		if (handle < 0) {
-			std::scoped_lock lock(g_module_mutex);
-			g_modules.erase(id);
-			return handle;
-		}
+		failed = handle < 0;
 		break;
 	}
-	std::scoped_lock lock(g_module_mutex);
-	g_modules.at(id) = Module {ModuleState::Loaded, 1, handle};
-	return 0;
+	{
+		std::scoped_lock lock(g_module_mutex);
+		if (failed) {
+			g_modules.erase(id);
+		} else {
+			g_modules.at(id) = Module {ModuleState::Loaded, 1, handle, {}};
+		}
+	}
+	g_module_changed.notify_all();
+	return failed ? handle : 0;
 }
 
 static KYTY_SYSV_ABI int SysmoduleGetModuleInfoForUnwind(uint64_t addr, int flags,
@@ -116,28 +141,37 @@ static KYTY_SYSV_ABI int SysmoduleUnloadModule(uint16_t id) {
 
 	LOGF("\t id = %d\n", static_cast<int>(id));
 
-	std::scoped_lock        lifecycle(g_lifecycle_mutex);
 	LibKernel::KernelModule handle = -1;
 	{
-		std::scoped_lock lock(g_module_mutex);
-		const auto       module = g_modules.find(id);
-		if (module == g_modules.end()) return SYSMODULE_ERROR_UNLOADED;
-		if (module->second.state != ModuleState::Loaded) return SYSMODULE_ERROR_FATAL;
-		if (module->second.references > 1) {
-			--module->second.references;
-			return 0;
+		std::unique_lock lock(g_module_mutex);
+		for (;;) {
+			const auto module = g_modules.find(id);
+			if (module == g_modules.end()) return SYSMODULE_ERROR_UNLOADED;
+			if (module->second.state == ModuleState::Loaded) {
+				if (module->second.references > 1) {
+					--module->second.references;
+					return 0;
+				}
+				module->second.state = ModuleState::Unloading;
+				module->second.owner = std::this_thread::get_id();
+				handle               = module->second.handle;
+				break;
+			}
+			if (module->second.owner == std::this_thread::get_id()) return SYSMODULE_ERROR_FATAL;
+			g_module_changed.wait(lock);
 		}
-		module->second.state = ModuleState::Unloading;
-		handle               = module->second.handle;
 	}
-	const bool       failed = handle >= 0 && UnloadNative(handle) < 0;
-	std::scoped_lock lock(g_module_mutex);
-	if (failed) {
-		g_modules.at(id).state = ModuleState::Loaded;
-		return SYSMODULE_ERROR_FATAL;
+	const bool failed = handle >= 0 && UnloadNative(handle) < 0;
+	{
+		std::scoped_lock lock(g_module_mutex);
+		if (failed) {
+			g_modules.at(id) = Module {ModuleState::Loaded, 1, handle, {}};
+		} else {
+			g_modules.erase(id);
+		}
 	}
-	g_modules.erase(id);
-	return 0;
+	g_module_changed.notify_all();
+	return failed ? SYSMODULE_ERROR_FATAL : 0;
 }
 
 static KYTY_SYSV_ABI int SysmoduleLoadModuleInternalWithArg(uint16_t id, int arg1, int arg2,
