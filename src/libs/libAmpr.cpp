@@ -53,10 +53,10 @@ public:
 	                            uint64_t argument2 = 0) {
 		m_enabled = Profiler::BeginLoadingAprSubmission(&m_record);
 		if (m_enabled) {
-			m_record.api_kind = kind;
+			m_record.api_kind       = kind;
 			m_record.command_buffer = command_buffer;
-			m_record.argument1 = argument;
-			m_record.argument2 = argument2;
+			m_record.argument1      = argument;
+			m_record.argument2      = argument2;
 			m_record.result_address = result_address;
 			m_record.out_id_address = out_id_address;
 		}
@@ -65,16 +65,17 @@ public:
 		if (m_enabled) Profiler::RecordLoadingAprSubmission(m_record);
 	}
 	Profiler::LoadingAprSubmission* Get() { return m_enabled ? &m_record : nullptr; }
-	int Return(int result) {
+	int                             Return(int result) {
 		if (m_enabled) m_record.api_kernel_result = static_cast<uint32_t>(result);
 		return result;
 	}
 	void SetId(uint32_t id) {
 		if (m_enabled) m_record.submission_id = id;
 	}
+
 private:
 	Profiler::LoadingAprSubmission m_record {};
-	bool m_enabled = false;
+	bool                           m_enabled = false;
 };
 
 struct SubmissionState {
@@ -250,6 +251,17 @@ static int GetHostPathStat(const std::string& host_path, LibKernel::FileSystem::
 	return OK;
 }
 
+// Mounted add-on content invalidates negative lookups without replacing valid path identities.
+void InvalidateFailedResolves() {
+	std::scoped_lock lock(g_mutex);
+	for (auto it = g_resolved_paths.begin(); it != g_resolved_paths.end();) {
+		if (it->second.result != OK)
+			it = g_resolved_paths.erase(it);
+		else
+			++it;
+	}
+}
+
 static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) {
 	if (guest_path == nullptr || guest_path[0] == '\0') {
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -288,7 +300,8 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 			if (!inserted) {
 				info = it->second;
 			} else if (info.result == OK) {
-				// Allocate once under the cache lock (upstream e43aadf75 adds the exhaustion check).
+				// Allocate once under the cache lock (upstream e43aadf75 adds the exhaustion
+				// check).
 				if (!AprShared::UseHashedFileIds()) {
 					if (AprShared::g_next_file_id == 0xffffffffu) {
 						info.result = it->second.result = LibKernel::KERNEL_ERROR_ENFILE;
@@ -297,7 +310,8 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 					}
 				}
 				if (info.result == OK) {
-					RegisterHostPathLocked(info.file_id, info.host_path, info.file_size, info.is_dir);
+					RegisterHostPathLocked(info.file_id, info.host_path, info.file_size,
+					                       info.is_dir);
 				}
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 				log_missing = true;
@@ -333,7 +347,8 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 }
 
 static int ResolvePathsCommon(const char* const* path_list, uint32_t count, uint32_t* ids,
-                              uint64_t* sizes, uint32_t* error_index, const char* prefix, int* results) {
+                              uint64_t* sizes, uint32_t* error_index, const char* prefix,
+                              int* results) {
 	if (path_list == nullptr || count == 0 || count > 1024 ||
 	    (ids == nullptr && sizes == nullptr && results == nullptr)) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -363,8 +378,8 @@ static int ResolvePathsCommon(const char* const* path_list, uint32_t count, uint
 
 	char prefix_buf[1024] {};
 	if (prefix != nullptr) {
-		const int result = ReadGuestCString(reinterpret_cast<uint64_t>(prefix), prefix_buf,
-		                                   sizeof(prefix_buf));
+		const int result =
+		    ReadGuestCString(reinterpret_cast<uint64_t>(prefix), prefix_buf, sizeof(prefix_buf));
 		if (result != OK) {
 			return result;
 		}
@@ -375,8 +390,9 @@ static int ResolvePathsCommon(const char* const* path_list, uint32_t count, uint
 		char resolved_path[1024] {};
 		// Concatenate the prefix literally, including an empty prefix.
 		std::memcpy(resolved_path, prefix_buf, prefix_size);
-		int result = ReadGuestCString(reinterpret_cast<uint64_t>(path_list[i]),
-		                             resolved_path + prefix_size, sizeof(resolved_path) - prefix_size);
+		int result =
+		    ReadGuestCString(reinterpret_cast<uint64_t>(path_list[i]), resolved_path + prefix_size,
+		                     sizeof(resolved_path) - prefix_size);
 		if (result == OK) {
 			result = ResolveOnePath(resolved_path, ids != nullptr ? &ids[i] : nullptr,
 			                        sizes != nullptr ? &sizes[i] : nullptr);
@@ -457,7 +473,7 @@ static int WriteResult(void* result, int32_t execution_result = 0, uint32_t erro
 
 namespace LibAmpr::Ampr {
 static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_result,
-                                   uint32_t* error_offset,
+                                   uint32_t*                       error_offset,
                                    Profiler::LoadingAprSubmission* diagnostic = nullptr);
 }
 
@@ -478,8 +494,8 @@ static int KernelSyscallResult(int result) {
 	return -1;
 }
 
-static int KYTY_SYSV_ABI ResolveFilepathsToIds(const char* const* path_list, uint32_t count, uint32_t* ids,
-                                               uint32_t* error_index) {
+static int KYTY_SYSV_ABI ResolveFilepathsToIds(const char* const* path_list, uint32_t count,
+                                               uint32_t* ids, uint32_t* error_index) {
 	PRINT_NAME();
 
 	return KernelSyscallResult(AprShared::ResolvePathsCommon(path_list, count, ids, nullptr,
@@ -539,16 +555,17 @@ static int KYTY_SYSV_ABI GetFileSize(uint32_t file_id, uint64_t* size) {
 	return OK;
 }
 
-static int KYTY_SYSV_ABI ResolveFilepathsToIdsAndFileSizes(const char* const* path_list, uint32_t count,
-                                                           uint32_t* ids, uint64_t* sizes,
-                                                           uint32_t* error_index) {
+static int KYTY_SYSV_ABI ResolveFilepathsToIdsAndFileSizes(const char* const* path_list,
+                                                           uint32_t count, uint32_t* ids,
+                                                           uint64_t* sizes, uint32_t* error_index) {
 	PRINT_NAME();
 
 	return KernelSyscallResult(
 	    AprShared::ResolvePathsCommon(path_list, count, ids, sizes, error_index, nullptr, nullptr));
 }
 
-static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* path_list,
+static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIds(const char*        prefix,
+                                                         const char* const* path_list,
                                                          uint32_t count, uint32_t* ids,
                                                          uint32_t* error_index) {
 	PRINT_NAME();
@@ -557,15 +574,15 @@ static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIds(const char* prefix, con
 	                                                         error_index, prefix, nullptr));
 }
 
-static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix,
+static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIdsAndFileSizes(const char*        prefix,
                                                                      const char* const* path_list,
                                                                      uint32_t count, uint32_t* ids,
                                                                      uint64_t* sizes,
                                                                      uint32_t* error_index) {
 	PRINT_NAME();
 
-	return KernelSyscallResult(AprShared::ResolvePathsCommon(path_list, count, ids, sizes,
-	                                                         error_index, prefix, nullptr));
+	return KernelSyscallResult(
+	    AprShared::ResolvePathsCommon(path_list, count, ids, sizes, error_index, prefix, nullptr));
 }
 
 static int KYTY_SYSV_ABI ResolveFilepathsToIdsForEach(const char* const* path_list, uint32_t count,
@@ -585,26 +602,26 @@ static int KYTY_SYSV_ABI ResolveFilepathsToIdsAndFileSizesForEach(const char* co
 	    AprShared::ResolvePathsCommon(path_list, count, ids, sizes, nullptr, nullptr, results));
 }
 
-static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIdsForEach(const char* prefix,
+static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIdsForEach(const char*        prefix,
                                                                 const char* const* path_list,
                                                                 uint32_t count, uint32_t* ids,
                                                                 int* results) {
 	PRINT_NAME();
 
-	return KernelSyscallResult(AprShared::ResolvePathsCommon(path_list, count, ids, nullptr,
-	                                                         nullptr, prefix, results));
+	return KernelSyscallResult(
+	    AprShared::ResolvePathsCommon(path_list, count, ids, nullptr, nullptr, prefix, results));
 }
 
 static int KYTY_SYSV_ABI ResolveFilepathsWithPrefixToIdsAndFileSizesForEach(
-    const char* prefix, const char* const* path_list, uint32_t count, uint32_t* ids, uint64_t* sizes,
-    int* results) {
+    const char* prefix, const char* const* path_list, uint32_t count, uint32_t* ids,
+    uint64_t* sizes, int* results) {
 	PRINT_NAME();
 
 	return KernelSyscallResult(
 	    AprShared::ResolvePathsCommon(path_list, count, ids, sizes, nullptr, prefix, results));
 }
 
-static int KYTY_SYSV_ABI SubmitCommandBufferAndGetResult(void*     command_buffer, uint64_t argument,
+static int KYTY_SYSV_ABI SubmitCommandBufferAndGetResult(void* command_buffer, uint64_t argument,
                                                          void*     result,
                                                          uint32_t* out_submission_id) {
 	PRINT_NAME();
@@ -625,9 +642,8 @@ static int KYTY_SYSV_ABI SubmitCommandBufferAndGetResult(void*     command_buffe
 
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
-	auto submit_result = LibAmpr::Ampr::ExecuteAprCommandBuffer(command_buffer_addr,
-	                                                            &execution_result, &error_offset,
-	                                                            diagnostic.Get());
+	auto     submit_result    = LibAmpr::Ampr::ExecuteAprCommandBuffer(
+	    command_buffer_addr, &execution_result, &error_offset, diagnostic.Get());
 	if (submit_result != OK) {
 		return KernelSyscallResult(diagnostic.Return(submit_result));
 	}
@@ -647,8 +663,8 @@ static int KYTY_SYSV_ABI SubmitCommandBuffer(void* command_buffer, uint64_t argu
 	PRINT_NAME();
 	HangTrace::SetGuestCaller(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprSubmitPlain);
-	AprShared::LoadingSubmissionDiagnostic diagnostic(
-	    0, reinterpret_cast<uint64_t>(command_buffer), argument);
+	AprShared::LoadingSubmissionDiagnostic diagnostic(0, reinterpret_cast<uint64_t>(command_buffer),
+	                                                  argument);
 
 	if (command_buffer == nullptr) {
 		return KernelSyscallResult(diagnostic.Return(LibKernel::KERNEL_ERROR_EINVAL));
@@ -657,10 +673,11 @@ static int KYTY_SYSV_ABI SubmitCommandBuffer(void* command_buffer, uint64_t argu
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
 	return KernelSyscallResult(diagnostic.Return(LibAmpr::Ampr::ExecuteAprCommandBuffer(
-	    reinterpret_cast<uint64_t>(command_buffer), &execution_result, &error_offset, diagnostic.Get())));
+	    reinterpret_cast<uint64_t>(command_buffer), &execution_result, &error_offset,
+	    diagnostic.Get())));
 }
 
-static int KYTY_SYSV_ABI SubmitCommandBufferAndGetId(void*     command_buffer, uint64_t argument,
+static int KYTY_SYSV_ABI SubmitCommandBufferAndGetId(void* command_buffer, uint64_t argument,
                                                      uint32_t* out_submission_id) {
 	PRINT_NAME();
 	HangTrace::SetGuestCaller(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
@@ -679,9 +696,8 @@ static int KYTY_SYSV_ABI SubmitCommandBufferAndGetId(void*     command_buffer, u
 
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
-	auto submit_result = LibAmpr::Ampr::ExecuteAprCommandBuffer(command_buffer_addr,
-	                                                            &execution_result, &error_offset,
-	                                                            diagnostic.Get());
+	auto     submit_result    = LibAmpr::Ampr::ExecuteAprCommandBuffer(
+	    command_buffer_addr, &execution_result, &error_offset, diagnostic.Get());
 	if (submit_result != OK) {
 		return KernelSyscallResult(diagnostic.Return(submit_result));
 	}
@@ -797,11 +813,11 @@ struct CommandBufferState {
 	bool     buffer_validated = false;
 	// Diagnostic identity only. Mutated under the existing command-buffer mutex;
 	// these values never participate in command execution or guest-visible state.
-	uint64_t diagnostic_generation = 0;
-	uint64_t diagnostic_append_serial = 0;
-	uint64_t diagnostic_submits = 0;
+	uint64_t diagnostic_generation         = 0;
+	uint64_t diagnostic_append_serial      = 0;
+	uint64_t diagnostic_submits            = 0;
 	uint64_t diagnostic_last_submit_serial = 0;
-	uint64_t diagnostic_unchanged_submits = 0;
+	uint64_t diagnostic_unchanged_submits  = 0;
 	struct ReadFileCommand {
 		uint64_t record_offset = 0;
 		uint32_t file_id       = 0;
@@ -1007,9 +1023,9 @@ static bool LoadCommandBufferStateFromGuest(uint64_t command_buffer, CommandBuff
 	loaded.size = ReadCommandBufferUnchecked<uint32_t>(command_buffer + COMMAND_BUFFER_SIZE_OFFSET);
 	loaded.write_offset =
 	    ReadCommandBufferUnchecked<uint32_t>(command_buffer + COMMAND_BUFFER_OFFSET_OFFSET);
-	loaded.header_validated = true;
+	loaded.header_validated      = true;
 	loaded.diagnostic_generation = NewDiagnosticGeneration();
-	*state                  = loaded;
+	*state                       = loaded;
 	return true;
 }
 
@@ -1138,17 +1154,17 @@ static bool WriteCommandBufferPointers(uint64_t command_buffer, uint64_t buffer,
 	                            static_cast<uint32_t>(write_offset));
 
 	std::scoped_lock lock(g_command_buffer_mutex);
-	auto&            state = g_command_buffers[command_buffer];
-	state.buffer           = buffer;
-	state.size             = size;
-	state.write_offset     = write_offset;
-	state.header_validated = true;
-	state.buffer_validated = false;
-	state.diagnostic_generation = NewDiagnosticGeneration();
-	state.diagnostic_append_serial = 0;
-	state.diagnostic_submits = 0;
+	auto&            state              = g_command_buffers[command_buffer];
+	state.buffer                        = buffer;
+	state.size                          = size;
+	state.write_offset                  = write_offset;
+	state.header_validated              = true;
+	state.buffer_validated              = false;
+	state.diagnostic_generation         = NewDiagnosticGeneration();
+	state.diagnostic_append_serial      = 0;
+	state.diagnostic_submits            = 0;
 	state.diagnostic_last_submit_serial = 0;
-	state.diagnostic_unchanged_submits = 0;
+	state.diagnostic_unchanged_submits  = 0;
 	state.read_file_commands.clear();
 	state.kernel_event_commands.clear();
 	state.write_address_commands.clear();
@@ -1163,8 +1179,8 @@ static bool WriteCommandBufferPointers(uint64_t command_buffer, uint64_t buffer,
 }
 
 static bool TryGetCommandBufferState(uint64_t command_buffer, CommandBufferState* out,
-                                    bool for_submission = false,
-                                    Profiler::LoadingAprSubmission* diagnostic = nullptr) {
+                                     bool                            for_submission = false,
+                                     Profiler::LoadingAprSubmission* diagnostic     = nullptr) {
 	if (out == nullptr) {
 		return false;
 	}
@@ -1177,11 +1193,11 @@ static bool TryGetCommandBufferState(uint64_t command_buffer, CommandBufferState
 		++state.diagnostic_submits;
 		state.diagnostic_last_submit_serial = state.diagnostic_append_serial;
 		if (diagnostic != nullptr) {
-			diagnostic->resolved_object = object;
-			diagnostic->generation = state.diagnostic_generation;
-			diagnostic->append_serial = state.diagnostic_append_serial;
+			diagnostic->resolved_object       = object;
+			diagnostic->generation            = state.diagnostic_generation;
+			diagnostic->append_serial         = state.diagnostic_append_serial;
 			diagnostic->submits_in_generation = state.diagnostic_submits;
-			diagnostic->unchanged_submits = state.diagnostic_unchanged_submits;
+			diagnostic->unchanged_submits     = state.diagnostic_unchanged_submits;
 		}
 	};
 
@@ -1449,10 +1465,10 @@ static bool WaitBounded(Satisfied&& satisfied, uint64_t* waited_us) {
 		return true;
 	}
 
-	const auto        start    = Clock::now();
-	const auto        deadline = start + AMPR_WAIT_TIMEOUT;
-	Clock::duration   slice    = AMPR_WAIT_FIRST_SLICE;
-	bool              ok       = false;
+	const auto      start    = Clock::now();
+	const auto      deadline = start + AMPR_WAIT_TIMEOUT;
+	Clock::duration slice    = AMPR_WAIT_FIRST_SLICE;
+	bool            ok       = false;
 	for (;;) {
 		const auto now = Clock::now();
 		if (now >= deadline) {
@@ -1475,8 +1491,9 @@ static bool WaitBounded(Satisfied&& satisfied, uint64_t* waited_us) {
 	return ok;
 }
 
-static void ReportWaitTimeout(uint64_t command_buffer, const CommandBufferState::SyncCommand& command,
-                              uint64_t observed, uint64_t waited_us) {
+static void ReportWaitTimeout(uint64_t                               command_buffer,
+                              const CommandBufferState::SyncCommand& command, uint64_t observed,
+                              uint64_t waited_us) {
 	const auto count = g_sync_wait_timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
 	if (count > 16 && (count & 255u) != 0) {
 		return;
@@ -1495,19 +1512,20 @@ static void ReportWaitTimeout(uint64_t command_buffer, const CommandBufferState:
 		     " ref=0x%016" PRIx64 " observed=0x%016" PRIx64 "\n",
 		     waited_us, count, command_buffer, command.record_offset,
 		     static_cast<uint32_t>(command.counter_index), static_cast<uint32_t>(command.access),
-		     static_cast<uint32_t>(command.op), static_cast<uint32_t>(command.mask_op), command.mask,
-		     command.value, observed);
+		     static_cast<uint32_t>(command.op), static_cast<uint32_t>(command.mask_op),
+		     command.mask, command.value, observed);
 	}
 }
 
 // Executes one counter/timestamp/wait record. Returns OK or the execution error
 // to report for this record.
-static int ExecuteSyncCommand(uint64_t command_buffer, const CommandBufferState::SyncCommand& command) {
+static int ExecuteSyncCommand(uint64_t                               command_buffer,
+                              const CommandBufferState::SyncCommand& command) {
 	using Kind = CommandBufferState::SyncKind;
 
 	CounterBank::Lane lane {};
-	const bool        uses_counter = command.kind != Kind::WaitOnAddress &&
-	                          command.kind != Kind::WriteAddressFromTimeCounter;
+	const bool        uses_counter =
+	    command.kind != Kind::WaitOnAddress && command.kind != Kind::WriteAddressFromTimeCounter;
 	if (uses_counter && !CounterBank::DecodeLane(command.counter_index, command.access, &lane)) {
 		// Validated when the record was appended; unreachable unless state is corrupt.
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -1525,10 +1543,11 @@ static int ExecuteSyncCommand(uint64_t command_buffer, const CommandBufferState:
 			                           ? LibKernel::KernelGetProcessTimeCounter()
 			                           : ReadCounter(lane);
 			if (!AprShared::WriteGuest(command.address, value)) {
-				LOGF("\tAMPR submit write-address-from-counter failed: kind=%u address=0x%016" PRIx64
-				     " index=%u\n",
-				     static_cast<uint32_t>(command.kind), command.address,
-				     static_cast<uint32_t>(command.counter_index));
+				LOGF(
+				    "\tAMPR submit write-address-from-counter failed: kind=%u address=0x%016" PRIx64
+				    " index=%u\n",
+				    static_cast<uint32_t>(command.kind), command.address,
+				    static_cast<uint32_t>(command.counter_index));
 				return LibKernel::KERNEL_ERROR_EFAULT;
 			}
 			NotifySyncWaiters();
@@ -1538,14 +1557,15 @@ static int ExecuteSyncCommand(uint64_t command_buffer, const CommandBufferState:
 		case Kind::WaitOnCounter: {
 			HangWatchdog::Scope scope("ampr-counter", command.counter_index, command.value, 0,
 			                          command.mask, command.op);
-			uint64_t   observed  = 0;
-			const auto satisfied = [&]() {
+			uint64_t            observed  = 0;
+			const auto          satisfied = [&]() {
 				observed = ReadCounter(lane);
 				scope.Observed(observed);
 				if (command.mask_op == CounterBank::MASK_AND) {
 					observed &= command.mask;
 				}
-				return CounterBank::CompareSatisfied(observed, command.value, command.op, lane.bytes);
+				return CounterBank::CompareSatisfied(observed, command.value, command.op,
+				                                     lane.bytes);
 			};
 			uint64_t waited_us = 0;
 			if (!WaitBounded(satisfied, &waited_us)) {
@@ -1557,9 +1577,9 @@ static int ExecuteSyncCommand(uint64_t command_buffer, const CommandBufferState:
 		case Kind::WaitOnAddress: {
 			HangWatchdog::Scope scope("ampr-address", command.address, command.value, 0, 0,
 			                          command.op);
-			uint64_t   observed  = 0;
-			bool       readable  = true;
-			const auto satisfied = [&]() {
+			uint64_t            observed  = 0;
+			bool                readable  = true;
+			const auto          satisfied = [&]() {
 				if (!ReadGuestWaitValue(command.address, &observed)) {
 					readable = false;
 					return true;
@@ -1693,7 +1713,7 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
                                uint64_t destination, uint64_t size, uint64_t* bytes_read);
 
 static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_result,
-                                   uint32_t* error_offset,
+                                   uint32_t*                       error_offset,
                                    Profiler::LoadingAprSubmission* diagnostic) {
 	Profiler::ScopedLoadingOperation loading(Profiler::LoadingOperation::AprSubmit);
 	if (diagnostic != nullptr) diagnostic->execution_observed = 1;
@@ -1702,7 +1722,7 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 			diagnostic->submit_result = static_cast<uint32_t>(result);
 			if (execution_result != nullptr && error_offset != nullptr) {
 				diagnostic->execution_result = static_cast<uint32_t>(*execution_result);
-				diagnostic->error_offset = *error_offset;
+				diagnostic->error_offset     = *error_offset;
 			}
 		}
 		return result;
@@ -1722,22 +1742,24 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 	}
 	if (diagnostic != nullptr) {
 		diagnostic->cached_buffer = state.buffer;
-		diagnostic->cached_size = state.size;
+		diagnostic->cached_size   = state.size;
 		diagnostic->cached_offset = state.write_offset;
 		std::array<uint32_t, COMMAND_BUFFER_SIZE / sizeof(uint32_t)> header {};
 		// Observe the resolved object's backing without unprotecting pages, invoking
 		// fault service, or dereferencing a raw submitted command-stream pointer.
 		// This is a nontransactional diagnostic snapshot, not a coherence decision.
-		if (LibKernel::Memory::TryReadBacking(diagnostic->resolved_object, header.data(), sizeof(header))) {
-			diagnostic->header_valid = 1;
-			diagnostic->header_type = header[0];
-			diagnostic->header_offset = header[1];
+		if (LibKernel::Memory::TryReadBacking(diagnostic->resolved_object, header.data(),
+		                                      sizeof(header))) {
+			diagnostic->header_valid    = 1;
+			diagnostic->header_type     = header[0];
+			diagnostic->header_offset   = header[1];
 			diagnostic->header_commands = header[2];
-			diagnostic->header_size = header[3];
-			diagnostic->header_buffer = uint64_t {header[4]} | (uint64_t {header[5]} << 32u);
-			diagnostic->header_mismatch = (diagnostic->header_buffer != state.buffer ? 1u : 0u) |
-			                              (diagnostic->header_size != state.size ? 2u : 0u) |
-			                              (diagnostic->header_offset != state.write_offset ? 4u : 0u);
+			diagnostic->header_size     = header[3];
+			diagnostic->header_buffer   = uint64_t {header[4]} | (uint64_t {header[5]} << 32u);
+			diagnostic->header_mismatch =
+			    (diagnostic->header_buffer != state.buffer ? 1u : 0u) |
+			    (diagnostic->header_size != state.size ? 2u : 0u) |
+			    (diagnostic->header_offset != state.write_offset ? 4u : 0u);
 		}
 	}
 
@@ -1792,8 +1814,8 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 		return a.record_offset < b.record_offset;
 	});
 	if (diagnostic != nullptr) {
-		uint64_t signature = 14695981039346656037ull;
-		const auto hash = [&](uint64_t value) {
+		uint64_t   signature = 14695981039346656037ull;
+		const auto hash      = [&](uint64_t value) {
 			for (unsigned byte = 0; byte < 8; ++byte) {
 				signature ^= (value >> (byte * 8u)) & 0xffu;
 				signature *= 1099511628211ull;
@@ -1806,32 +1828,42 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 				case CommandKind::ReadFile: {
 					const auto& command = state.read_file_commands[entry.index];
 					if (diagnostic->read_count++ == 0) {
-						diagnostic->first_read_id = command.file_id;
+						diagnostic->first_read_id          = command.file_id;
 						diagnostic->first_read_destination = command.destination;
-						diagnostic->first_read_size = command.size;
-						diagnostic->first_read_offset = command.file_offset;
+						diagnostic->first_read_size        = command.size;
+						diagnostic->first_read_offset      = command.file_offset;
 					}
-					hash(command.file_id); hash(command.destination); hash(command.size); hash(command.file_offset);
+					hash(command.file_id);
+					hash(command.destination);
+					hash(command.size);
+					hash(command.file_offset);
 					break;
 				}
 				case CommandKind::KernelEvent: {
 					++diagnostic->event_count;
 					const auto& command = state.kernel_event_commands[entry.index];
-					hash(command.eq); hash(static_cast<uint32_t>(command.id)); hash(command.data);
+					hash(command.eq);
+					hash(static_cast<uint32_t>(command.id));
+					hash(command.data);
 					break;
 				}
 				case CommandKind::WriteAddress: {
 					++diagnostic->write_count;
 					const auto& command = state.write_address_commands[entry.index];
-					hash(command.address); hash(command.value);
+					hash(command.address);
+					hash(command.value);
 					break;
 				}
 				case CommandKind::AmmMap: {
 					++diagnostic->map_count;
 					const auto& command = state.amm_map_commands[entry.index];
-					hash(static_cast<uint32_t>(command.kind)); hash(command.va); hash(command.dmem_offset);
-					hash(command.size); hash(static_cast<uint32_t>(command.type));
-					hash(static_cast<uint32_t>(command.prot)); hash(command.gpu_mask_id);
+					hash(static_cast<uint32_t>(command.kind));
+					hash(command.va);
+					hash(command.dmem_offset);
+					hash(command.size);
+					hash(static_cast<uint32_t>(command.type));
+					hash(static_cast<uint32_t>(command.prot));
+					hash(command.gpu_mask_id);
 					break;
 				}
 				case CommandKind::Sync: {
@@ -1844,7 +1876,9 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 					hash(static_cast<uint32_t>(command.kind));
 					hash(command.counter_index | (uint32_t {command.access} << 8u) |
 					     (uint32_t {command.op} << 16u) | (uint32_t {command.mask_op} << 24u));
-					hash(command.value); hash(command.mask); hash(command.address);
+					hash(command.value);
+					hash(command.mask);
+					hash(command.address);
 					break;
 				}
 			}
@@ -2558,7 +2592,8 @@ static const char* SyncKindName(CommandBufferState::SyncKind kind) {
 		case CommandBufferState::SyncKind::WriteCounter: return "WriteCounter";
 		case CommandBufferState::SyncKind::WaitOnCounter: return "WaitOnCounter";
 		case CommandBufferState::SyncKind::WaitOnAddress: return "WaitOnAddress";
-		case CommandBufferState::SyncKind::WriteAddressFromCounter: return "WriteAddressFromCounter";
+		case CommandBufferState::SyncKind::WriteAddressFromCounter:
+			return "WriteAddressFromCounter";
 		case CommandBufferState::SyncKind::WriteAddressFromCounterPair:
 			return "WriteAddressFromCounterPair";
 		case CommandBufferState::SyncKind::WriteAddressFromTimeCounter:
@@ -2599,7 +2634,8 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnAddress(void*              command_b
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	if (!CounterBank::IsValidCompare(compare)) {
-		return AppendUnsupportedSyncCommand(command_buffer, true, "WaitOnAddress", 0, 0, compare, 0);
+		return AppendUnsupportedSyncCommand(command_buffer, true, "WaitOnAddress", 0, 0, compare,
+		                                    0);
 	}
 
 	CommandBufferState::SyncCommand command {};
@@ -2660,9 +2696,9 @@ static int AppendWriteCounterCommand(void* command_buffer, const char* name, uin
 // the Pair form writes counter N in the low word and counter N+1 in the high word;
 // the time-counter form writes the process time counter at execution time.
 static int AppendWriteAddressFromSyncCommand(void* command_buffer, const char* name,
-                                             volatile uint64_t* address,
+                                             volatile uint64_t*           address,
                                              CommandBufferState::SyncKind kind,
-                                             uint8_t counter_index) {
+                                             uint8_t                      counter_index) {
 	if (command_buffer == nullptr || address == nullptr) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -2721,10 +2757,10 @@ static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t
 // Takes effect after every earlier record in the buffer has completed, which is
 // what the synchronous executor does for every record (see the execution-model
 // note above ExecuteSyncCommand).
-static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void*    command_buffer,
-                                                               uint8_t  counter_index,
-                                                               uint8_t  access, uint64_t value,
-                                                               uint8_t  op) {
+static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void*   command_buffer,
+                                                               uint8_t counter_index,
+                                                               uint8_t access, uint64_t value,
+                                                               uint8_t op) {
 	PRINT_NAME();
 
 	return AppendWriteCounterCommand(command_buffer, "WriteCounterOnCompletion", counter_index,
@@ -3142,7 +3178,7 @@ static int KYTY_SYSV_ABI AmmSetPageTablePoolOccupancyNotificationThreshold(uint3
 }
 
 static int KYTY_SYSV_ABI AmmSubmitCommandBuffer(void* command_buffer_base, uint32_t argument1,
-                                               uint32_t argument2) {
+                                                uint32_t argument2) {
 	PRINT_NAME();
 	HangTrace::SetGuestCaller(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprSubmitPlain);
@@ -3155,12 +3191,14 @@ static int KYTY_SYSV_ABI AmmSubmitCommandBuffer(void* command_buffer_base, uint3
 
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
-	return diagnostic.Return(ExecuteAprCommandBuffer(reinterpret_cast<uint64_t>(command_buffer_base),
-	                                                &execution_result, &error_offset, diagnostic.Get()));
+	return diagnostic.Return(
+	    ExecuteAprCommandBuffer(reinterpret_cast<uint64_t>(command_buffer_base), &execution_result,
+	                            &error_offset, diagnostic.Get()));
 }
 
-static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetId(void* command_buffer_base, uint32_t argument1,
-                                                        uint32_t argument2, uint32_t* out_submission_id) {
+static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetId(void*    command_buffer_base,
+                                                        uint32_t argument1, uint32_t argument2,
+                                                        uint32_t* out_submission_id) {
 	PRINT_NAME();
 	HangTrace::SetGuestCaller(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprSubmitAndGetId);
@@ -3178,8 +3216,8 @@ static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetId(void* command_buffer_bas
 
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
-	auto     submit_result =
-	    ExecuteAprCommandBuffer(command_buffer_addr, &execution_result, &error_offset, diagnostic.Get());
+	auto     submit_result    = ExecuteAprCommandBuffer(command_buffer_addr, &execution_result,
+	                                                    &error_offset, diagnostic.Get());
 	if (submit_result != OK) {
 		return diagnostic.Return(submit_result);
 	}
@@ -3192,15 +3230,17 @@ static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetId(void* command_buffer_bas
 	return diagnostic.Return(OK);
 }
 
-static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetResult(void* command_buffer_base, uint32_t argument1,
-                                                            uint32_t argument2, void* result,
+static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetResult(void*    command_buffer_base,
+                                                            uint32_t argument1, uint32_t argument2,
+                                                            void*     result,
                                                             uint32_t* out_submission_id) {
 	PRINT_NAME();
 	HangTrace::SetGuestCaller(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprSubmitAndGetResult);
 	AprShared::LoadingSubmissionDiagnostic diagnostic(
-	    4, reinterpret_cast<uint64_t>(command_buffer_base), argument1, reinterpret_cast<uint64_t>(result),
-	    reinterpret_cast<uint64_t>(out_submission_id), argument2);
+	    4, reinterpret_cast<uint64_t>(command_buffer_base), argument1,
+	    reinterpret_cast<uint64_t>(result), reinterpret_cast<uint64_t>(out_submission_id),
+	    argument2);
 
 	if (command_buffer_base == nullptr) {
 		return diagnostic.Return(LibKernel::KERNEL_ERROR_EINVAL);
@@ -3213,8 +3253,8 @@ static int KYTY_SYSV_ABI AmmSubmitCommandBufferAndGetResult(void* command_buffer
 
 	int32_t  execution_result = OK;
 	uint32_t error_offset     = 0;
-	auto     submit_result =
-	    ExecuteAprCommandBuffer(command_buffer_addr, &execution_result, &error_offset, diagnostic.Get());
+	auto     submit_result    = ExecuteAprCommandBuffer(command_buffer_addr, &execution_result,
+	                                                    &error_offset, diagnostic.Get());
 	if (submit_result != OK) {
 		return diagnostic.Return(submit_result);
 	}

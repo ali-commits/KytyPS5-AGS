@@ -41,8 +41,8 @@ enum class SpecialFile {
 class MountPoints {
 public:
 	struct MountPair {
-		std::filesystem::path dir;
-		std::string           point;
+		std::filesystem::path                  dir;
+		std::string                            point;
 		std::shared_ptr<Common::ArchiveReader> archive;
 	};
 
@@ -62,20 +62,20 @@ private:
 };
 
 struct File {
-	Common::File                        f;
-	std::string                         name;
-	std::filesystem::path               real_name;
-	std::atomic_bool                    opened;
-	std::atomic_bool                    directory;
-	std::atomic_bool                    readable;
-	std::atomic_bool                    writable;
-	std::atomic_bool                    append;
-	std::atomic_bool                    sync_writes;
-	std::atomic_bool                    close_on_exec;
-	SpecialFile                         special;
-	Common::Mutex                       mutex;
-	std::vector<uint8_t>                dirents;
-	uint64_t                            dents_offset;
+	Common::File          f;
+	std::string           name;
+	std::filesystem::path real_name;
+	std::atomic_bool      opened;
+	std::atomic_bool      directory;
+	std::atomic_bool      readable;
+	std::atomic_bool      writable;
+	std::atomic_bool      append;
+	std::atomic_bool      sync_writes;
+	std::atomic_bool      close_on_exec;
+	SpecialFile           special;
+	Common::Mutex         mutex;
+	std::vector<uint8_t>  dirents;
+	uint64_t              dents_offset;
 };
 
 class FileDescriptors {
@@ -257,13 +257,13 @@ void FileDescriptors::CloseAll() {
 void MountPoints::Mount(const std::filesystem::path& folder, const std::string& point) {
 	Common::LockGuard lock(m_mutex);
 
-	auto point_str  = Common::FixDirectorySlash(point);
+	auto point_str = Common::FixDirectorySlash(point);
 
 	Umount(point_str);
 
 	MountPair p;
-	p.dir   = folder;
-	p.point = point_str;
+	p.dir     = folder;
+	p.point   = point_str;
 	p.archive = Common::OpenArchive(folder);
 
 	m_mount_pairs.push_back(std::move(p));
@@ -276,7 +276,8 @@ void MountPoints::Umount(const std::string& folder_or_point) {
 
 	const auto it = std::find_if(
 	    m_mount_pairs.begin(), m_mount_pairs.end(), [&folder_or_point_str](const MountPair& p) {
-		    return Common::FixDirectorySlash(Common::PathToGenericString(p.dir)) == folder_or_point_str ||
+		    return Common::FixDirectorySlash(Common::PathToGenericString(p.dir)) ==
+		               folder_or_point_str ||
 		           p.point == folder_or_point_str;
 	    });
 	if (it != m_mount_pairs.end()) {
@@ -338,14 +339,20 @@ static bool HasWindowsForbiddenFilenameCharacter(const std::string& relative_pat
 std::filesystem::path MountPoints::ResolvePath(const std::string& mounted_name) {
 	Common::LockGuard lock(m_mutex);
 
+	// Guests join mount points and names with extra slashes (e.g. "/addcont0//file").
+	std::string normalized = Common::FixFilenameSlash(mounted_name);
+	normalized.erase(std::unique(normalized.begin(), normalized.end(),
+	                             [](char a, char b) { return a == '/' && b == '/'; }),
+	                 normalized.end());
+
 	// Match the entire guest path so a mount root works with or without a trailing slash.
-	const auto mounted_path = Common::FixDirectorySlash(mounted_name);
+	const auto mounted_path = Common::FixDirectorySlash(normalized);
 	const auto it           = std::find_if(
 	    m_mount_pairs.begin(), m_mount_pairs.end(),
 	    [&mounted_path](const MountPair& p) { return mounted_path.starts_with(p.point); });
 	if (it != m_mount_pairs.end()) {
-		const auto& p = *it;
-		auto rel_path = Common::RemoveFirst(Common::FixFilenameSlash(mounted_name), p.point.size());
+		const auto& p        = *it;
+		auto        rel_path = Common::RemoveFirst(normalized, p.point.size());
 		while (rel_path.starts_with('/')) {
 			rel_path = Common::RemoveFirst(rel_path, 1);
 		}
@@ -485,8 +492,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 		return KERNEL_ERROR_EACCES;
 	}
 
-	const auto info = Common::File::GetInfo(file->real_name);
-	const bool dir_exist = info && !info->is_file;
+	const auto info       = Common::File::GetInfo(file->real_name);
+	const bool dir_exist  = info && !info->is_file;
 	const bool file_exist = info && info->is_file;
 
 	// A missing path opened without O_CREAT is ENOENT
@@ -602,7 +609,7 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
 
 	switch (command) {
 		case 1: return file->close_on_exec.load(std::memory_order_relaxed); // F_GETFD
-		case 2: // F_SETFD, FD_CLOEXEC
+		case 2:                                                             // F_SETFD, FD_CLOEXEC
 			file->close_on_exec.store((arg & 1) != 0, std::memory_order_relaxed);
 			return OK;
 		default: return KERNEL_ERROR_EINVAL;
