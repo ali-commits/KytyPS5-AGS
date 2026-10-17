@@ -134,13 +134,13 @@ EMIT_NATIVE(LogicalNot, OpLogicalNot, U1, uint32_t)
 template <spv::Op opcode>
 uint32_t EmitFloatCompare32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	// SPIR-V's DenormFlushToZero mode does not require comparison operands to flush.
-	const bool flush = inst.Flags<IR::FPCompareFlags>().flush_input_denorms;
+	const bool flush   = inst.Flags<IR::FPCompareFlags>().flush_input_denorms;
 	const auto operand = [&](size_t index) {
 		const auto value = inst.Arg(index);
 		if (flush && value.IsImmediate()) {
 			const auto bits = std::bit_cast<uint32_t>(value.F32Value());
-			return ConstantF32(ctx.state, (bits & 0x7fffffffu) < 0x00800000u
-			                                  ? bits & 0x80000000u : bits);
+			return ConstantF32(ctx.state,
+			                   (bits & 0x7fffffffu) < 0x00800000u ? bits & 0x80000000u : bits);
 		}
 		const auto id = ctx.Arg(inst, index);
 		return flush ? EmitFlushF32DenormToSignedZero(ctx.state, id) : id;
@@ -151,17 +151,18 @@ inline constexpr auto EmitFPOrdEqual32 = EmitFloatCompare32<spv::OpFOrdEqual>;
 EMIT_NATIVE(FPOrdEqual64, OpFOrdEqual, U1, uint32_t, uint32_t)
 EMIT_NATIVE(FPOrdLessThanEqual64, OpFOrdLessThanEqual, U1, uint32_t, uint32_t)
 EMIT_NATIVE(FPOrdGreaterThanEqual64, OpFOrdGreaterThanEqual, U1, uint32_t, uint32_t)
-inline constexpr auto EmitFPUnordEqual32 = EmitFloatCompare32<spv::OpFUnordEqual>;
-inline constexpr auto EmitFPOrdNotEqual32 = EmitFloatCompare32<spv::OpFOrdNotEqual>;
-inline constexpr auto EmitFPUnordNotEqual32 = EmitFloatCompare32<spv::OpFUnordNotEqual>;
-inline constexpr auto EmitFPOrdLessThan32 = EmitFloatCompare32<spv::OpFOrdLessThan>;
-inline constexpr auto EmitFPUnordLessThan32 = EmitFloatCompare32<spv::OpFUnordLessThan>;
-inline constexpr auto EmitFPOrdGreaterThan32 = EmitFloatCompare32<spv::OpFOrdGreaterThan>;
-inline constexpr auto EmitFPUnordGreaterThan32 = EmitFloatCompare32<spv::OpFUnordGreaterThan>;
-inline constexpr auto EmitFPOrdLessThanEqual32 = EmitFloatCompare32<spv::OpFOrdLessThanEqual>;
-inline constexpr auto EmitFPUnordLessThanEqual32 = EmitFloatCompare32<spv::OpFUnordLessThanEqual>;
+inline constexpr auto EmitFPUnordEqual32          = EmitFloatCompare32<spv::OpFUnordEqual>;
+inline constexpr auto EmitFPOrdNotEqual32         = EmitFloatCompare32<spv::OpFOrdNotEqual>;
+inline constexpr auto EmitFPUnordNotEqual32       = EmitFloatCompare32<spv::OpFUnordNotEqual>;
+inline constexpr auto EmitFPOrdLessThan32         = EmitFloatCompare32<spv::OpFOrdLessThan>;
+inline constexpr auto EmitFPUnordLessThan32       = EmitFloatCompare32<spv::OpFUnordLessThan>;
+inline constexpr auto EmitFPOrdGreaterThan32      = EmitFloatCompare32<spv::OpFOrdGreaterThan>;
+inline constexpr auto EmitFPUnordGreaterThan32    = EmitFloatCompare32<spv::OpFUnordGreaterThan>;
+inline constexpr auto EmitFPOrdLessThanEqual32    = EmitFloatCompare32<spv::OpFOrdLessThanEqual>;
+inline constexpr auto EmitFPUnordLessThanEqual32  = EmitFloatCompare32<spv::OpFUnordLessThanEqual>;
 inline constexpr auto EmitFPOrdGreaterThanEqual32 = EmitFloatCompare32<spv::OpFOrdGreaterThanEqual>;
-inline constexpr auto EmitFPUnordGreaterThanEqual32 = EmitFloatCompare32<spv::OpFUnordGreaterThanEqual>;
+inline constexpr auto EmitFPUnordGreaterThanEqual32 =
+    EmitFloatCompare32<spv::OpFUnordGreaterThanEqual>;
 uint32_t              EmitFPIsNan32(EmitterState& state, uint32_t arg0);
 inline constexpr auto EmitFPCmpClass32 = EmitClassMaskF32;
 inline constexpr auto EmitFPCmpClass16 = EmitClassMaskF16;
@@ -172,12 +173,12 @@ EMIT_NATIVE(FPAdd64, OpFAdd, F64, uint32_t, uint32_t)
 EMIT_NATIVE(FPMul64, OpFMul, F64, uint32_t, uint32_t)
 inline constexpr auto EmitFPFma64 =
     EmitGlsl<GLSLstd450Fma, IR::Type::F64, uint32_t, uint32_t, uint32_t>;
-uint32_t              EmitFPRecip64(EmitterState& state, uint32_t arg0);
+uint32_t EmitFPRecip64(EmitterState& state, uint32_t arg0);
 // V_FMA_F32/V_FMAC_F32/V_FMAMK_F32/V_FMAAK_F32 (fused). Upstream d8be245c2 also decorates the
 // GLSL Fma NoContraction; the decoration does not change a fused result, so it is left out here.
 inline constexpr auto EmitFPFma32 =
     EmitGlsl<GLSLstd450Fma, IR::Type::F32, uint32_t, uint32_t, uint32_t>;
-uint32_t              EmitFPMad32(ValueEmitContext& ctx, const IR::Inst& inst);
+uint32_t EmitFPMad32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t EmitFPMin32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1);
 uint32_t EmitFPMax32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1);
 uint32_t EmitFPMinTri32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1, IR::Value arg2);
@@ -265,12 +266,12 @@ uint32_t              EmitPermuteU32(ValueEmitContext& ctx, const IR::Inst& inst
 uint32_t              EmitBpermuteU32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst);
 void                  EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst);
-inline constexpr auto EmitLoadAddressU8         = EmitLoadMemory;
-inline constexpr auto EmitLoadAddressU16        = EmitLoadMemory;
-inline constexpr auto EmitLoadAddressU32        = EmitLoadMemory;
-inline constexpr auto EmitStoreAddressU8        = EmitStoreMemory;
-inline constexpr auto EmitStoreAddressU16       = EmitStoreMemory;
-inline constexpr auto EmitStoreAddressU32       = EmitStoreMemory;
+inline constexpr auto EmitLoadAddressU8   = EmitLoadMemory;
+inline constexpr auto EmitLoadAddressU16  = EmitLoadMemory;
+inline constexpr auto EmitLoadAddressU32  = EmitLoadMemory;
+inline constexpr auto EmitStoreAddressU8  = EmitStoreMemory;
+inline constexpr auto EmitStoreAddressU16 = EmitStoreMemory;
+inline constexpr auto EmitStoreAddressU32 = EmitStoreMemory;
 // IMAGE_BVH*_INTERSECT_RAY software lowering and stub (spirvEmitterRayTracing.cpp).
 uint32_t              EmitBvhIntersectRay(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitBvhIntersectRayStub(EmitterState& state, uint32_t node_lo);
@@ -335,6 +336,7 @@ inline constexpr auto EmitSharedAtomicDec32     = EmitAtomicIncDec;
 inline constexpr auto EmitSharedAtomicSMin32    = EmitAtomic32;
 inline constexpr auto EmitSharedAtomicUMin32    = EmitAtomic32;
 inline constexpr auto EmitSharedAtomicSMax32    = EmitAtomic32;
+inline constexpr auto EmitSharedAtomicCmpSwap32 = EmitAtomic32;
 inline constexpr auto EmitSharedAtomicUMax32    = EmitAtomic32;
 inline constexpr auto EmitSharedAtomicAnd32     = EmitAtomic32;
 inline constexpr auto EmitSharedAtomicOr32      = EmitAtomic32;

@@ -194,6 +194,7 @@ SharedAccess SharedAccessOf(ValueOpcode opcode) {
 		case ValueOpcode::SharedAtomicUMin32:
 		case ValueOpcode::SharedAtomicSMax32:
 		case ValueOpcode::SharedAtomicUMax32:
+		case ValueOpcode::SharedAtomicCmpSwap32:
 		case ValueOpcode::SharedAtomicAnd32:
 		case ValueOpcode::SharedAtomicOr32:
 		case ValueOpcode::SharedAtomicOr64:

@@ -77,8 +77,8 @@ std::string FormatMemory(const Instruction& inst) {
 	                    inst.offset, inst.secondary_offset, inst.data_dwords, inst.data_bits,
 	                    inst.data_format, inst.number_format, inst.data_signed ? 1u : 0u,
 	                    inst.typed ? 1u : 0u, inst.formatted ? 1u : 0u, inst.memory_segment,
-	                    inst.glc ? 1u : 0u, inst.dlc ? 1u : 0u, inst.slc ? 1u : 0u, inst.idxen ? 1u : 0u,
-	                    inst.offen ? 1u : 0u);
+	                    inst.glc ? 1u : 0u, inst.dlc ? 1u : 0u, inst.slc ? 1u : 0u,
+	                    inst.idxen ? 1u : 0u, inst.offen ? 1u : 0u);
 	if (inst.tfe) {
 		text += " tfe=1";
 	}
@@ -271,7 +271,7 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 		case 127u: operand.kind = OperandKind::ExecHi; return;
 		case 239u: operand.kind = OperandKind::PopsExitingWaveId; return;
 		case 248u:
-			operand.kind      = OperandKind::FloatInlineConstant;
+			operand.kind  = OperandKind::FloatInlineConstant;
 			operand.value = std::bit_cast<uint32_t>(0.15915494309189535f);
 			return;
 		case 251u: operand.kind = OperandKind::VccZ; return;
@@ -422,7 +422,7 @@ bool IsBvhIntersect(const Instruction& inst) {
 void DecodeProgram(std::span<const uint32_t> code, Program& program, bool decode_bvh) {
 	program.instructions.clear();
 	program.instructions.reserve(code.size());
-	program.code = code;
+	program.code    = code;
 	program.has_bvh = false;
 
 	std::vector<bool> branch_targets;
@@ -615,9 +615,10 @@ std::string InstructionToString(const Instruction& inst) {
 			                                               inst.branch_target));
 		case Opcode::S_SUBVECTOR_LOOP_BEGIN:
 		case Opcode::S_SUBVECTOR_LOOP_END:
-			return WithUnsupportedReason(inst, fmt::format(
-			    "0x{:08x}: {} {}, 0x{:08x}", inst.pc, magic_enum::enum_name(inst.opcode),
-			    OperandToString(inst.dst), inst.branch_target));
+			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: {} {}, 0x{:08x}", inst.pc,
+			                                               magic_enum::enum_name(inst.opcode),
+			                                               OperandToString(inst.dst),
+			                                               inst.branch_target));
 		case Opcode::EXP: return WithUnsupportedReason(inst, FormatExp(inst));
 		case Opcode::IMAGE_SAMPLE:
 		case Opcode::IMAGE_STORE:
@@ -650,7 +651,8 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::IMAGE_GATHER4_C_LZ_O:
 		case Opcode::IMAGE_GATHER4H:
 		case Opcode::IMAGE_BVH_INTERSECT_RAY:
-		case Opcode::IMAGE_BVH64_INTERSECT_RAY: return WithUnsupportedReason(inst, FormatMimg(inst));
+		case Opcode::IMAGE_BVH64_INTERSECT_RAY:
+			return WithUnsupportedReason(inst, FormatMimg(inst));
 		case Opcode::S_LOAD_DWORD:
 		case Opcode::S_LOAD_DWORDX2:
 		case Opcode::S_LOAD_DWORDX4:
@@ -751,6 +753,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::DS_MIN_RTN_U32:
 		case Opcode::DS_MAX_U32:
 		case Opcode::DS_MAX_RTN_U32:
+		case Opcode::DS_CMPST_RTN_B32:
 		case Opcode::DS_AND_B32:
 		case Opcode::DS_AND_RTN_B32:
 		case Opcode::DS_OR_B32:

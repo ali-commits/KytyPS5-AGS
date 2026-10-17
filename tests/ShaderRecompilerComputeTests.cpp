@@ -32848,6 +32848,7 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::FLAT_STORE_DWORDX4:
   case Opcode::DS_ADD_U32:
   case Opcode::DS_ADD_U64:
+  case Opcode::DS_CMPST_RTN_B32:
   case Opcode::DS_ADD_RTN_U32:
   case Opcode::DS_SUB_U32:
   case Opcode::DS_SUB_RTN_U32:
@@ -45628,6 +45629,60 @@ TestCase DsAtomic64Bounds(bool add) {
   return test;
 }
 
+TestCase DsCompareStoreReturn32() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "DsCompareStoreReturn32";
+  auto &code = test.code;
+  const auto result = [&](u32 reg, u32 value) {
+    AppendStoreVgpr(&code, reg, static_cast<u32>(test.expected.size()));
+    test.expected.push_back(value);
+  };
+  struct Case { u32 before, compare, replacement; };
+  constexpr std::array cases{Case{0x12345678u, 0x12345678u, 0x9abcdef0u},
+                             Case{0x12345678u, 0x9abcdef0u, 0x12345678u},
+                             Case{0x80000000u, 0u, 0x7fffffffu},
+                             Case{UINT32_MAX, UINT32_MAX, 0u}};
+  AppendVMovU32(&code, 7, 0);
+  for (const auto &item : cases) {
+    AppendVMovLiteral(&code, 2, item.before);
+    code.push_back(EncodeDs0(0x0d, 8));
+    code.push_back(EncodeDs1(0, 2, 7));
+    AppendVMovLiteral(&code, 5, item.compare);
+    AppendVMovLiteral(&code, 19, item.replacement);
+    AppendVMovU32(&code, 4, 8);
+    // CS04b812daaacd532f pc 0x3e8: DATA compares, DATA2 replaces, VDst aliases ADDR.
+    code.insert(code.end(), {0xd8c00000u, 0x04130504u});
+    result(4, item.before);
+    code.push_back(EncodeDs0(0x36, 8));
+    code.push_back(EncodeDs1(8, 0, 7));
+    result(8, item.before == item.compare ? item.replacement : item.before);
+  }
+  AppendVMovU32(&code, 5, 0);
+  AppendVMovU32(&code, 4, 12); // Past the three LDS DWORDs.
+  code.insert(code.end(), {0xd8c00000u, 0x04130504u});
+  result(4, 0);
+  AppendVMovLiteral(&code, 2, 0x12345678u);
+  code.push_back(EncodeDs0(0x0d, 8));
+  code.push_back(EncodeDs1(0, 2, 7));
+  AppendVMovLiteral(&code, 5, 0x12345678u);
+  AppendVMovU32(&code, 4, 8);
+  code.push_back(EncodeSMovB32(126, InlineU32(0)));
+  code.insert(code.end(), {0xd8c00000u, 0x04130504u});
+  code.push_back(EncodeSMovB32(126, InlineU32(1)));
+  result(4, 8); // An inactive lane keeps its destination and leaves memory alone.
+  code.push_back(EncodeDs0(0x36, 8));
+  code.push_back(EncodeDs1(8, 0, 7));
+  result(8, 0x12345678u);
+  AppendEnd(&code);
+  test.compute_info.lds_size_dwords = 3;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::DS_WRITE_B32, O::DS_CMPST_RTN_B32,
+                  O::DS_READ_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpAtomicCompareExchange %uint"};
+  test.forbidden_spirv = {"OpLoopMerge"};
+  return test;
+}
+
 TestCase DsAtomic64Contention(bool add, u32 wave_size) {
   using O = ShaderOpcode;
   TestCase test;
@@ -50617,6 +50672,7 @@ std::vector<TestCase> MakeCases() {
     cases.push_back(DsMaskedOrContention(wave_size));
   }
   AddCase(DsAtomicReturnVariants);
+  AddCase(DsCompareStoreReturn32);
   for (bool add : {false, true}) {
     cases.push_back(DsAtomic64Bounds(add));
     for (u32 wave_size : {32, 64}) {
@@ -56320,7 +56376,7 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, DsWideLdsPartialBounds());
     RunCase(&vulkan, DsAtomic64Bounds(false));
     RunCase(&vulkan, DsAtomic64Bounds(true));
-    for (auto test : {DsWideLdsPartialBounds(), DsAtomic64Bounds(false), DsAtomic64Bounds(true)}) {
+    for (auto test : {DsWideLdsPartialBounds(), DsAtomic64Bounds(false), DsAtomic64Bounds(true), DsCompareStoreReturn32()}) {
       test.compute_info.lds_storage = true;
       std::erase(test.required_spirv, "WorkgroupMemoryExplicitLayoutKHR");
       test.required_spirv.push_back("StorageBuffer");

@@ -611,6 +611,7 @@ enum class Opcode {
 	DS_MIN_RTN_U32,
 	DS_MAX_U32,
 	DS_MAX_RTN_U32,
+	DS_CMPST_RTN_B32,
 	DS_AND_B32,
 	DS_AND_RTN_B32,
 	DS_OR_B32,
@@ -833,9 +834,9 @@ struct Instruction {
 	bool           image_r128                                   = false;
 	// Texel-fail (TFE) and LOD-warning (LWE) enables. Either one makes a fetch return one
 	// status dword in the VGPR right after the data dwords.
-	bool           tfe                                          = false;
-	bool           lwe                                          = false;
-	uint32_t       branch_target                                = 0;
+	bool     tfe           = false;
+	bool     lwe           = false;
+	uint32_t branch_target = 0;
 	struct {
 		uint32_t target = 0;
 		uint32_t en     = 0;
@@ -849,20 +850,20 @@ struct Instruction {
 struct Program {
 	std::span<const uint32_t> code;
 	std::vector<Instruction>  instructions;
-	bool                     has_bvh = false;
+	bool                      has_bvh = false;
 };
 
 // Code spans are trusted to contain complete instructions, valid branch targets, and 32-bit PCs.
 Family GetInstructionFamily(uint32_t word);
 // The output object must be freshly initialized.
-void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);
+void    DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);
 Program DecodeFrontProgram(std::span<const uint32_t> front);
 // decode_bvh=false stops at the first IMAGE_BVH*_INTERSECT_RAY, marks it unsupported and sets
 // has_bvh (the shader's dispatches are then skipped); true decodes it like any other instruction.
 void DecodeProgram(std::span<const uint32_t> code, Program& program, bool decode_bvh = false);
 [[nodiscard]] bool IsBvhIntersect(const Instruction& inst);
-bool IsConditionalBranch(Opcode opcode);
-bool IsDirectBranch(Opcode opcode);
+bool               IsConditionalBranch(Opcode opcode);
+bool               IsDirectBranch(Opcode opcode);
 
 void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand);
 void DecodeScalarDestination(uint32_t code, uint32_t pc, Operand& operand);
