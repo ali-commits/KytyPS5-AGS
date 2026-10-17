@@ -94,6 +94,8 @@ static void PrintUsage() {
 	::printf("%s\n", GetBuildString().c_str());
 	::printf("kyty_emulator --game <dir|elf|zar> [options]\n\n");
 	::printf("Options:\n");
+	::printf("  --keyboard-player <0-4>             Keyboard player; 0 shares player 1.\n");
+	::printf("  --perf-overlay <true|false>         Show performance panel.\n");
 	::printf("  --game <dir|elf|zar>                 Game directory, ELF, or ZArchive to load.\n");
 	::printf("  --game-patch <json>                  ETAHen cheat file.\n");
 	::printf("  --addcont-dir <dir>                  Add-ons (DLC) folder (default: none).\n");
