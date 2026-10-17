@@ -28,6 +28,7 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.audio_main_volume > MAX_AUDIO_VOLUME || cfg.audio_music_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_pad_speaker_main_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_objects_volume > MAX_AUDIO_VOLUME);
+	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
 	*g_config = cfg;
 }
@@ -86,6 +87,27 @@ uint32_t GetAudioObjectsVolume() {
 
 bool AudioObjectsEnabled() {
 	return g_config->audio_objects_enabled;
+}
+
+uint32_t GetKeyboardPlayer() {
+	return g_config->keyboard_player;
+}
+
+int32_t GetPlayerUserId(int player) {
+	return g_config->user_id + player * PLAYER_USER_ID_STEP;
+}
+
+int GetPlayerFromUserId(int32_t user_id) {
+	for (int player = 0; player < MAX_PLAYERS; player++) {
+		if (user_id == GetPlayerUserId(player)) {
+			return player;
+		}
+	}
+	return -1;
+}
+
+bool IsGuestUserId(int32_t user_id) {
+	return GetPlayerFromUserId(user_id) > 0;
 }
 
 PresentMode GetPresentMode() {

@@ -246,6 +246,7 @@ static void ListInit(QComboBox* combo, T value) {
 void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->lineEdit_user_name->setMaxLength(static_cast<int>(Config::MAX_USER_NAME_LENGTH));
 	m_ui->lineEdit_user_name->setText(info.user_name);
+	m_ui->spinBox_user_id->setMaximum(Config::MAX_USER_ID);
 	m_ui->spinBox_user_id->setValue(info.user_id);
 	UpdateControllerColorButton(m_ui->button_controller_color, info.controller.color);
 	m_ui->slider_controller_vibration->setValue(info.controller.vibration_intensity);
@@ -257,6 +258,14 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->slider_audio_objects->setEnabled(info.audio_mix.objects_enabled);
 	m_ui->label_audio_objects_value->setEnabled(info.audio_mix.objects_enabled);
 	m_ui->checkBox_gpu_occlusion->setChecked(info.gpu_occlusion_accurate);
+	auto* keyboard_player = m_ui->comboBox_keyboard_player;
+	keyboard_player->clear();
+	keyboard_player->addItem(tr("Shared with player 1 (default)"), 0);
+	for (int player = 1; player <= Config::MAX_PLAYERS; player++) {
+		keyboard_player->addItem(tr("Player %1").arg(player), player);
+	}
+	keyboard_player->setCurrentIndex(
+	    qMax(0, keyboard_player->findData(info.controller.keyboard_player)));
 	auto* microphone = m_ui->comboBox_audio_input_device;
 	microphone->clear();
 	microphone->addItem(tr("None"), QString {});
@@ -511,8 +520,9 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 		for (const auto& mix: AudioMixSliders(ui)) {
 			info.audio_mix.*mix.field = mix.slider->value();
 		}
-		info.audio_mix.objects_enabled = ui.checkBox_audio_objects->isChecked();
-		info.gpu_occlusion_accurate    = ui.checkBox_gpu_occlusion->isChecked();
+		info.audio_mix.objects_enabled  = ui.checkBox_audio_objects->isChecked();
+		info.gpu_occlusion_accurate     = ui.checkBox_gpu_occlusion->isChecked();
+		info.controller.keyboard_player = ui.comboBox_keyboard_player->currentData().toInt();
 	}
 	info.screen_resolution =
 	    TextToEnum<Configuration::Resolution>(ui.comboBox_screen_resolution->currentText());

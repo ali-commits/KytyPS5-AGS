@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,10 +41,16 @@ constexpr uint32_t    MAX_AUDIO_VOLUME         = 200;
 // is turned down (30% = -10.5 dB) when no DualSense plays it.
 constexpr uint32_t DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME = 30;
 
+constexpr int     MAX_PLAYERS         = 4;
+constexpr int32_t PLAYER_USER_ID_STEP = 0x100;
+constexpr int32_t MAX_USER_ID =
+    std::numeric_limits<int32_t>::max() - (MAX_PLAYERS - 1) * PLAYER_USER_ID_STEP;
+
 constexpr bool IsConfiguredUserIdValid(int32_t user_id) {
 	constexpr int32_t USER_ID_EVERYONE = 0xfe;
 	constexpr int32_t USER_ID_SYSTEM   = 0xff;
-	return user_id >= 0 && user_id != USER_ID_EVERYONE && user_id != USER_ID_SYSTEM;
+	return user_id >= 0 && user_id <= MAX_USER_ID && user_id != USER_ID_EVERYONE &&
+	       user_id != USER_ID_SYSTEM;
 }
 
 struct ConfigOptions {
@@ -86,6 +93,7 @@ struct ConfigOptions {
 	std::filesystem::path  printf_output_file              = "_kyty.txt";
 	bool                   profiler_enabled                = false;
 	bool                   spirv_debug_printf_enabled      = false;
+	uint32_t               keyboard_player                 = 0;
 	bool                   gpu_assisted_validation_enabled = false;
 	bool                   renderdoc_enabled               = false;
 	bool                   readback_linear_images          = false;
@@ -128,6 +136,11 @@ bool                                  IsNetworkConnected();
 uint32_t                              GetVblankFrequency();
 uint32_t                              GetConsoleLanguage();
 bool                                  VulkanValidationEnabled();
+
+uint32_t GetKeyboardPlayer();
+int32_t  GetPlayerUserId(int player);
+int      GetPlayerFromUserId(int32_t user_id);
+bool     IsGuestUserId(int32_t user_id);
 
 bool                   ShaderValidationEnabled();
 ShaderOptimizationType GetShaderOptimizationType();

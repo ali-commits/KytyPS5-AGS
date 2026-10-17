@@ -31,6 +31,7 @@ QStringList BuildEmulatorArgs(const Configuration& info) {
 	}
 	args << "--controller-volume" << QString::number(info.controller.speaker_volume);
 	args << "--controller-vibration" << QString::number(info.controller.vibration_intensity);
+	args << "--keyboard-player" << QString::number(info.controller.keyboard_player);
 	args << "--audio-master-volume" << QString::number(info.audio_mix.master);
 	args << "--audio-main-volume" << QString::number(info.audio_mix.main);
 	args << "--audio-music-volume" << QString::number(info.audio_mix.music);
