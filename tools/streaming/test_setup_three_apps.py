@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Hardware-free trust-boundary tests for one-time device provisioning."""
 import http.server
+import argparse
+import contextlib
+import io
 import json
 from pathlib import Path
 import ssl
@@ -8,8 +11,9 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
-from setup_three_apps import management_request, private_json, public_der
+from setup_three_apps import management_request, private_json, provision, public_der
 
 
 class SetupTrustTests(unittest.TestCase):
@@ -108,6 +112,54 @@ class SetupTrustTests(unittest.TestCase):
         for invalid in (certificate * 2, 'PRIVATE KEY', 'x' * 16385, None):
             with self.assertRaises(ValueError):
                 public_der(invalid)
+
+    def provision_with_certificate_reads(self, contents):
+        """Keep provisioning and TLS real; replace only the physical ADB boundary."""
+        reads = iter(contents)
+        adb = self.root / 'adb-fixture'
+        apk = self.root / 'app-fixture.apk'
+        adb.touch()
+        apk.touch()
+        args = argparse.Namespace(host='192.168.1.3', http_port=self.server.server_port - 1,
+            adb=adb, phone_apk=apk, tv_apk=apk, profile=self.root, check_only=False,
+            phone='fixture-phone', skip_tv=True, name='Test phone')
+
+        def fake_adb(arguments, *, input_bytes=None, timeout=30, required=True):
+            command = [str(argument) for argument in arguments]
+            self.assertEqual(command[:3], [str(adb), '-s', 'fixture-phone'])
+            if command[3:] == ['exec-out', 'run-as', 'io.kyty.controller.debug',
+                                  'cat', 'files/client-certificate.pem']:
+                return subprocess.CompletedProcess(command, 0, next(reads), b'')
+            allowed = (['get-state'], ['install', '-r', '-t', str(apk)],
+                ['shell', 'am', 'start', '-W', '-n',
+                    'io.kyty.controller.debug/io.kyty.controller.ControllerActivity'],
+                ['shell', 'run-as', 'io.kyty.controller.debug', 'tee', 'files/host.properties'],
+                ['shell', 'run-as', 'io.kyty.controller.debug', 'chmod', '600', 'files/host.properties'],
+                ['shell', 'am', 'force-stop', 'io.kyty.controller.debug'])
+            self.assertIn(command[3:], allowed)
+            return subprocess.CompletedProcess(command, 0, b'', b'')
+
+        with patch('setup_three_apps.run', side_effect=fake_adb), \
+                patch('setup_three_apps.time.sleep'), contextlib.redirect_stdout(io.StringIO()):
+            provision(args)
+
+    def test_first_start_waits_for_complete_public_certificate_before_registration(self):
+        certificate = (self.root / 'other-cert.pem').read_bytes()
+        partial = certificate[:len(certificate) // 2]
+        self.provision_with_certificate_reads([b'', partial, certificate])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.requests[0][0], '/api/kyty/companion/phones')
+        self.assertEqual(self.requests[0][2],
+            {'name': 'Test phone', 'certificate_pem': certificate.decode()})
+
+    def test_incomplete_or_invalid_public_certificate_never_registers(self):
+        certificate = (self.root / 'other-cert.pem').read_bytes()
+        for invalid in (b'', certificate[:len(certificate) // 2], certificate * 2,
+                        b'PRIVATE KEY', b'\xff'):
+            with self.subTest(content=invalid[:32]):
+                with self.assertRaisesRegex(RuntimeError, 'complete public certificate'):
+                    self.provision_with_certificate_reads([invalid] * 30)
+                self.assertEqual(self.requests, [])
 
 
 if __name__ == '__main__':

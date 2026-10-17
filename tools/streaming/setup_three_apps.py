@@ -109,13 +109,18 @@ def provision(args):
         result = run([args.adb, '-s', args.phone, 'exec-out', 'run-as', PHONE_PACKAGE,
                       'cat', 'files/client-certificate.pem'], required=False, timeout=5)
         if result.returncode == 0:
-            candidate = result.stdout.decode()
-            public_der(candidate)
-            pem = candidate
-            break
+            try:
+                candidate = result.stdout.decode()
+                public_der(candidate)
+            except ValueError:
+                # First start can expose the file before its public PEM write completes.
+                pass
+            else:
+                pem = candidate
+                break
         time.sleep(0.25)
     if pem is None:
-        raise RuntimeError('Phone has not created its public certificate; reopen Kyty Controller and retry')
+        raise RuntimeError('Phone has not created a complete public certificate; reopen Kyty Controller and retry')
     registration = management_request(args.profile, args.http_port + 1, 'POST',
         '/api/kyty/companion/phones', {'name': args.name, 'certificate_pem': pem})
     pin = hashlib.sha256(public_der((args.profile / 'host-cert.pem').read_text())).hexdigest()
