@@ -67,6 +67,18 @@ QString Value(const QStringList& args, const QString& flag) {
     const auto i = args.indexOf(flag);
     return i >= 0 && i + 1 < args.size() ? args.at(i + 1) : QString {};
 }
+bool Capture(QWidget& widget, const QString& suffix = {}) {
+    const auto requested = qEnvironmentVariable("KYTY_PRESERVATION_SCREENSHOT");
+    if (requested.isEmpty()) return true;
+    const QFileInfo base(requested);
+    const auto path = suffix.isEmpty() ? requested : base.dir().filePath(base.completeBaseName() + suffix + ".png");
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) return false;
+    widget.adjustSize();
+    widget.resize(widget.size().expandedTo(QSize(1100, 900)));
+    widget.show();
+    QApplication::processEvents();
+    return widget.grab().save(path, "PNG");
+}
 constexpr std::array<const char*, 5> Sliders {
     "slider_audio_master", "slider_audio_main", "slider_audio_music",
     "slider_audio_pad_speaker", "slider_audio_objects"};
@@ -129,6 +141,8 @@ private slots:
                                 "slider_controller_volume", "slider_controller_vibration",
                                 "button_controller_color"})
             QVERIFY2(dialog.findChild<QWidget*>(name), name);
+        tabs->setCurrentWidget(tabs->findChild<QWidget*>("settings_tab"));
+        QVERIFY(Capture(dialog));
     }
 
     void globalDialogEditsPersistAndPerGameResetCannotClobberThem() {
@@ -189,6 +203,50 @@ private slots:
         }
     }
 
+    void newSettingEditsPersistAlongsideGlobalAudio() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        Configuration info;
+        SetLevels(info);
+        EditDialog dialog(info);
+        dialog.SetGlobalSettings({});
+        for (const auto* name: {"checkBox_hdr", "checkBox_perf_overlay", "checkBox_network_connected"}) {
+            auto* box = dialog.findChild<QCheckBox*>(name);
+            QVERIFY2(box, name);
+            box->setChecked(true);
+        }
+        auto* keyboard = dialog.findChild<QComboBox*>("comboBox_keyboard_player");
+        QVERIFY(keyboard);
+        const auto player = keyboard->findData(3);
+        QVERIFY(player >= 0);
+        keyboard->setCurrentIndex(player);
+        dialog.save();
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QSettings file(temp.filePath("new-settings.ini"), QSettings::IniFormat);
+        info.WriteSettings(&file);
+        info.controller.WriteSettings(&file);
+        info.WriteGlobalOnlySettings(&file);
+        for (const auto* key: {"hdr_enabled", "perf_overlay_enabled", "network_connected"})
+            QCOMPARE(file.value(key).toBool(), true);
+        QCOMPARE(file.value("controller_keyboard_player").toInt(), 3);
+        for (int i = 0; i < 5; ++i) QCOMPARE(file.value(AudioKeys[i]).toInt(), Levels[i]);
+        Configuration reloaded;
+        reloaded.ReadSettings(&file);
+        reloaded.controller.ReadSettings(&file);
+        reloaded.ReadGlobalOnlySettings(&file);
+        const auto args = BuildEmulatorArgs(reloaded);
+        QVERIFY(args.contains("--hdr"));
+        QCOMPARE(Value(args, "--perf-overlay"), "true");
+        QCOMPARE(Value(args, "--network-connected"), "true");
+        QCOMPARE(Value(args, "--keyboard-player"), "3");
+        QCOMPARE(Value(args, "--audio-music-volume"), "137");
+        EditDialog per_game(reloaded);
+        QVERIFY(!per_game.findChild<QComboBox*>("comboBox_keyboard_player")->isVisibleTo(&per_game));
+        per_game.clear();
+        per_game.save();
+        QCOMPARE(Value(BuildEmulatorArgs(reloaded), "--keyboard-player"), "3");
+    }
+
     void libraryAndStreamingCatalogUseTheSameInheritedAudioAndCheatArguments() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
@@ -207,19 +265,25 @@ private slots:
         {
             QSettings file("Kyty.ini", QSettings::IniFormat);
             file.setValue("Launcher/game_dirs", QStringList {temp.filePath("games")});
+            file.setValue("Launcher/addons_dir", temp.filePath("Additional Content"));
             file.beginGroup("GlobalConfiguration");
             global.WriteSettings(&file);
             global.controller.WriteSettings(&file);
             global.WriteGlobalOnlySettings(&file);
+            file.setValue("controller_keyboard_player", 3);
             file.endGroup();
             file.beginWriteArray("GameConfigurations");
             file.setArrayIndex(0);
             Configuration custom;
             custom.game_path = game;
             custom.screen_resolution = Configuration::Resolution::R1920X1080;
+            custom.audio_input_device = "Unavailable fixture microphone";
             custom.audio_mix.master = 1; // A stale per-game global key must be ignored.
             custom.WriteSettings(&file);
             custom.WriteGlobalOnlySettings(&file);
+            file.setValue("hdr_enabled", true);
+            file.setValue("perf_overlay_enabled", true);
+            file.setValue("network_connected", true);
             file.endArray();
         }
         const auto patch = Cheats::PlanPath("PPSA99998");
@@ -247,6 +311,12 @@ private slots:
         QCOMPARE(Value(local_args, "--gpu-occlusion"), "on");
         QCOMPARE(Value(local_args, "--controller-volume"), "67");
         QCOMPARE(Value(local_args, "--controller-vibration"), "83");
+        QCOMPARE(Value(local_args, "--mic"), "Unavailable fixture microphone");
+        QVERIFY(local_args.contains("--hdr"));
+        QCOMPARE(Value(local_args, "--perf-overlay"), "true");
+        QCOMPARE(Value(local_args, "--network-connected"), "true");
+        QCOMPARE(Value(local_args, "--keyboard-player"), "3");
+        QCOMPARE(Value(local_args, "--addcont-dir"), temp.filePath("Additional Content"));
         QCOMPARE(local_args.count("--keymap"), 2);
         QCOMPARE(Value(local_args, "--game-patch"), patch);
         const auto manifest = StreamingCatalog::Manifest(catalog, "/private/socket", "private-sink", "/private/lock", "1080p", 60, false);
@@ -273,6 +343,14 @@ private slots:
                 stream_tab |= tabs->tabText(i) == "Streaming";
             }
         QVERIFY(library_tab && stream_tab);
+        if (!qEnvironmentVariableIsEmpty("KYTY_PRESERVATION_SCREENSHOT")) {
+            auto* tabs = qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
+            QVERIFY(tabs);
+            tabs->setCurrentIndex(0);
+            QVERIFY(Capture(dialog, "-library"));
+            tabs->setCurrentWidget(streaming);
+            QVERIFY(Capture(dialog, "-streaming"));
+        }
         for (const auto* name: {"streamBackendPath", "streamStart", "streamStop", "streamPair", "streamPin",
                                "streamClients", "streamUnpair", "streamPort", "streamControllerAudio",
                                "streamControllerAudioPort", "streamControllerAudioReceivers", "streamLocalAudio"})
