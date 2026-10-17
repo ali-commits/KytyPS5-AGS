@@ -38859,6 +38859,34 @@ TestCase VectorFloatSpecialOps() {
            O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+void CheckHdrVideoOutFormats() {
+  for (const auto& policy : VIDEO_OUT_FORMAT_POLICIES) {
+    VideoOutPixelFormatInfo decoded;
+    Require("HdrVideoOutFormats", "format round trip",
+            DecodeVideoOutPixelFormat(policy.pixel_format, decoded) &&
+                decoded.format == policy.info.format &&
+                decoded.guest_format == policy.info.guest_format &&
+                decoded.bytes_per_element == policy.info.bytes_per_element &&
+                decoded.bgra16 == policy.info.bgra16,
+            "adding HDR changed an existing native video-out format");
+    if (IsHdrVideoOutPixelFormat(policy.pixel_format)) {
+      Require("HdrVideoOutFormats", "PQ output packing",
+              IsHdrSwapchainFormat(decoded.format) && decoded.bytes_per_element == 4u &&
+                  decoded.guest_format == Prospero::BufferFormat::k10_10_10_2UNorm,
+              "HDR/PQ formats did not retain their 10-bit channel packing");
+    }
+  }
+  Require("HdrVideoOutFormats", "PQ identification",
+          IsHdrVideoOutPixelFormat(VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ) &&
+              IsHdrVideoOutPixelFormat(VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ) &&
+              !IsHdrVideoOutPixelFormat(0x8100000022000000ull) &&
+              !IsHdrVideoOutPixelFormat(0x8000000022000000ull) &&
+              !IsHdrSwapchainFormat(vk::Format::eR8G8B8A8Unorm) &&
+              !IsHdrSwapchainFormat(vk::Format::eR16G16B16A16Sfloat),
+          "SDR or linear formats were incorrectly classified as HDR10/PQ");
+  std::printf("[host]    %-32s ok\n", "HdrVideoOutFormats");
+}
+
 TestCase PackedNormNanToZero() {
   using O = ShaderOpcode;
   std::vector<u32> code;
@@ -56440,6 +56468,10 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--unmapped-buffer-null-only") == 0) {
     WaveClusterTests::CheckUnmappedBufferNull();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--hdr-video-out-formats-only") == 0) {
+    CheckHdrVideoOutFormats();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--packed-norm-nan-only") == 0) {
