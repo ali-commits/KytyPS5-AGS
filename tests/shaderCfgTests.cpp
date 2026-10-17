@@ -1892,46 +1892,50 @@ void TestNativeStoreCompletion() {
           "standalone store completion lacks GroupNonUniform capability");
 
     // Captured 5b10:0x2464 drains node stores before the next parent atomic.
-    const std::array publication = {
-        EncodeVop1(0x01, 1, 129),
-        EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(1, 0, 0),
-        0xbbfd0000u,
-        EncodeMubuf0(0x32, 4, false, true), EncodeMubuf1(1, 0, 0),
-        EncodeSopp(0x01),
-    };
-    const auto result = RecompileForTest(publication, options);
-    CheckSpirvBinaryValidates(result.spirv);
-    const auto store = result.ir_dump.find("StoreBufferU32");
-    const auto completion = result.ir_dump.find("StoreCompletion");
-    const auto atomic = result.ir_dump.find("BufferAtomicIAdd32");
-    Check(store < completion && completion < atomic && atomic != std::string::npos,
-          "store completion moved outside its native publication order");
-    const auto source = DisassembleSpirvBinary(result.spirv);
-    const auto barrier = source.find("OpControlBarrier %uint_3 %uint_1 %uint_2116");
-    Check(barrier != std::string::npos &&
-              source.find("OpStore") < barrier &&
-              barrier < source.find("OpAtomicIAdd") &&
-              source.find("OpControlBarrier", barrier + 1) == std::string::npos,
-          "store completion must synchronize the subgroup once after both wave halves");
+    // Partial and register-based waits conservatively drain every store too.
+    for (const uint32_t wait_word :
+         {0xbbfd0000u, EncodeSopk(0x17, 125, 1), register_wait[0]}) {
+      const std::array publication = {
+          EncodeVop1(0x01, 1, 129),
+          EncodeMubuf0(0x1c, 0, false),
+          EncodeMubuf1(1, 0, 0),
+          wait_word,
+          EncodeMubuf0(0x32, 4, false, true),
+          EncodeMubuf1(1, 0, 0),
+          EncodeSopp(0x01),
+      };
+      const auto result = RecompileForTest(publication, options);
+      CheckSpirvBinaryValidates(result.spirv);
+      const auto store = result.ir_dump.find("StoreBufferU32");
+      const auto completion = result.ir_dump.find("StoreCompletion");
+      const auto atomic = result.ir_dump.find("BufferAtomicIAdd32");
+      Check(CountSourceOccurrences(result.ir_dump, "StoreCompletion") == 1u &&
+                store < completion && completion < atomic &&
+                atomic != std::string::npos,
+            "store completion moved outside its native publication order");
+      const auto source = DisassembleSpirvBinary(result.spirv);
+      const auto barrier =
+          source.find("OpControlBarrier %uint_3 %uint_1 %uint_2116");
+      Check(barrier != std::string::npos && source.find("OpStore") < barrier &&
+                source.find("OpAtomicIAdd") != std::string::npos &&
+                barrier < source.find("OpAtomicIAdd") &&
+                source.find("OpControlBarrier", barrier + 1) ==
+                    std::string::npos,
+            "store completion must synchronize the subgroup once after both "
+            "wave halves");
+    }
   }
 
   const std::array no_store_wait = {
       EncodeSopk(0x17, 125, 0xffff), // Effective VSCNT 63 waits for nothing.
-      EncodeSopk(0x18, 125, 0), EncodeSopk(0x19, 125, 0),
-      EncodeSopk(0x1a, 125, 0), EncodeSopp(0x01),
+      EncodeSopk(0x18, 125, 0),      EncodeSopk(0x19, 125, 0),
+      EncodeSopk(0x1a, 125, 0),      EncodeSopp(0x01),
   };
   const auto no_wait = RecompileForTest(no_store_wait, options);
   const auto source = DisassembleSpirvBinary(no_wait.spirv);
   Check(source.find("OpControlBarrier") == std::string::npos &&
             source.find("OpMemoryBarrier") == std::string::npos,
         "other wait counters or VSCNT 63 became a store completion barrier");
-#ifndef _WIN32
-  for (const uint32_t word : {EncodeSopk(0x17, 125, 1), register_wait[0]}) {
-    const std::array unsupported = {word, EncodeSopp(0x01)};
-    ExpectFatal([&] { (void)RecompileForTest(unsupported, options); },
-                "unsupported partial or register-based store wait was dropped");
-  }
-#endif
 }
 
 void TestSopkCompareImmediateExtension() {
