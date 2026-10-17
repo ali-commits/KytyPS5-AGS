@@ -25,12 +25,12 @@ enum class ImageMetadataKind : uint8_t { None, Htile, Dcc };
 
 struct ImageMetadataInfo {
 	GuestRange          range;
-	ImageMetadataKind   kind               = ImageMetadataKind::None;
-	uint32_t            control            = 0;
+	ImageMetadataKind   kind                     = ImageMetadataKind::None;
+	uint32_t            control                  = 0;
 	uint32_t            dcc_clear_word           = 0;
 	uint32_t            dcc_clear_word1          = 0; // CB_COLORn_CLEAR_WORD1 (texel bits 32..63)
-	VideoOutCompression compression        = VideoOutCompression::Uncompressed;
-	bool                stencil_compressed = false;
+	VideoOutCompression compression              = VideoOutCompression::Uncompressed;
+	bool                stencil_compressed       = false;
 	bool                dcc_clear_register_valid = false;
 	bool                dcc_alpha_msb            = true;
 };
@@ -50,8 +50,8 @@ struct ImageSubresourceRange {
 };
 
 struct ImageMipInfo {
-	uint64_t offset                                 = 0;
-	uint64_t size                                   = 0;
+	uint64_t offset = 0;
+	uint64_t size   = 0;
 	// Padded dimensions in storage elements (compressed blocks for BC formats).
 	uint32_t pitch                                  = 0;
 	uint32_t height                                 = 0;
@@ -78,8 +78,7 @@ struct ImageInfo {
 	[[nodiscard]] ColorTransform GetColorTransform() const noexcept {
 		if (bgra16) return ColorTransform::SwapBgra16;
 		switch (guest_format) {
-			case Prospero::BufferFormat::k10_11_11Float:
-				return ColorTransform::Reverse10_11_11;
+			case Prospero::BufferFormat::k10_11_11Float: return ColorTransform::Reverse10_11_11;
 			default: return ColorTransform::None;
 		}
 	}
@@ -119,12 +118,12 @@ struct ImageInfo {
 		return -1;
 	}
 	[[nodiscard]] int32_t SliceOf(const ImageInfo& container, int32_t mip) const noexcept {
-		if (!IsCompatible(container) || tile_mode != container.tile_mode || type != container.type ||
-		    IsVolume() || resources.levels != 1 || resources.layers == 0 ||
-		    container.resources.layers == 0 || mip < 0 ||
+		if (!IsCompatible(container) || tile_mode != container.tile_mode ||
+		    type != container.type || IsVolume() || resources.levels != 1 ||
+		    resources.layers == 0 || container.resources.layers == 0 || mip < 0 ||
 		    static_cast<uint32_t>(mip) >= container.resources.levels ||
-		    container.resources.levels > container.mip_layout.size() ||
-		    !data.Valid() || !container.data.Valid() || data.address < container.data.address ||
+		    container.resources.levels > container.mip_layout.size() || !data.Valid() ||
+		    !container.data.Valid() || data.address < container.data.address ||
 		    data.End() > container.data.End()) {
 			return -1;
 		}
@@ -344,8 +343,17 @@ struct VideoOutFormatPolicy {
 };
 
 inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ = 0x8100070422000000ull;
+inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ = 0x8100070400000000ull;
 
-inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {{
+[[nodiscard]] constexpr bool IsHdrVideoOutPixelFormat(uint64_t format) {
+	switch (format) {
+		case VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ:
+		case VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ: return true;
+		default: return false;
+	}
+}
+
+inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {{
     {0x8000000022000000ull,
      {vk::Format::eR8G8B8A8Srgb, Prospero::BufferFormat::k8_8_8_8Srgb, 4, false}},
     {0x8000000000000000ull,
@@ -356,6 +364,8 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
      {vk::Format::eA2R10G10B10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
     {VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ,
      {vk::Format::eA2B10G10R10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
+    {VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ,
+     {vk::Format::eA2R10G10B10UnormPack32, Prospero::BufferFormat::k10_10_10_2UNorm, 4, false}},
     {0xc001000622000000ull,
      {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, false}},
     {0xc001000600000000ull,
@@ -394,7 +404,7 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 		return encoded <= 0.04045f ? encoded / 12.92f : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
 	};
 	const auto float16 = [](uint32_t value) {
-		const auto sign = (value & 0x8000u) << 16u;
+		const auto sign     = (value & 0x8000u) << 16u;
 		const auto exponent = (value >> 10u) & 0x1fu;
 		const auto mantissa = value & 0x3ffu;
 		if (exponent == 0) {
@@ -405,9 +415,7 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 		                            (mantissa << 13u));
 	};
 	switch (format) {
-		case vk::Format::eR16G16Sfloat:
-			next.float32[1] = float16(packed >> 16u);
-			[[fallthrough]];
+		case vk::Format::eR16G16Sfloat: next.float32[1] = float16(packed >> 16u); [[fallthrough]];
 		case vk::Format::eR16Sfloat: next.float32[0] = float16(packed); break;
 		case vk::Format::eR16G16Unorm:
 			next.float32[1] = static_cast<float>(packed >> 16u) / 65535.0f;
@@ -505,19 +513,23 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 	};
 	const std::array<uint32_t, 4> halves {word0 & 0xffffu, word0 >> 16u, word1 & 0xffffu,
 	                                      word1 >> 16u};
-	vk::ClearColorValue next {};
+	vk::ClearColorValue           next {};
 	switch (format) {
 		case vk::Format::eR16G16B16A16Sfloat:
-			for (uint32_t i = 0; i < 4; i++) next.float32[i] = half_to_float(halves[i]);
+			for (uint32_t i = 0; i < 4; i++)
+				next.float32[i] = half_to_float(halves[i]);
 			break;
 		case vk::Format::eR16G16B16A16Unorm:
-			for (uint32_t i = 0; i < 4; i++) next.float32[i] = static_cast<float>(halves[i]) / 65535.0f;
+			for (uint32_t i = 0; i < 4; i++)
+				next.float32[i] = static_cast<float>(halves[i]) / 65535.0f;
 			break;
 		case vk::Format::eR16G16B16A16Uint:
-			for (uint32_t i = 0; i < 4; i++) next.uint32[i] = halves[i];
+			for (uint32_t i = 0; i < 4; i++)
+				next.uint32[i] = halves[i];
 			break;
 		case vk::Format::eR16G16B16A16Sint:
-			for (uint32_t i = 0; i < 4; i++) next.int32[i] = static_cast<int16_t>(halves[i]);
+			for (uint32_t i = 0; i < 4; i++)
+				next.int32[i] = static_cast<int16_t>(halves[i]);
 			break;
 		case vk::Format::eR32G32Sfloat:
 			next.float32[0] = std::bit_cast<float>(word0);
@@ -542,12 +554,16 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 					next.float32[0] = half_to_float(halves[0]);
 					next.float32[1] = half_to_float(halves[1]);
 					break;
-				case vk::Format::eR16Unorm: next.float32[0] = static_cast<float>(halves[0]) / 65535.0f; break;
+				case vk::Format::eR16Unorm:
+					next.float32[0] = static_cast<float>(halves[0]) / 65535.0f;
+					break;
 				case vk::Format::eR16G16Unorm:
 					next.float32[0] = static_cast<float>(halves[0]) / 65535.0f;
 					next.float32[1] = static_cast<float>(halves[1]) / 65535.0f;
 					break;
-				case vk::Format::eR8Unorm: next.float32[0] = static_cast<float>(word0 & 0xffu) / 255.0f; break;
+				case vk::Format::eR8Unorm:
+					next.float32[0] = static_cast<float>(word0 & 0xffu) / 255.0f;
+					break;
 				case vk::Format::eR8G8Unorm:
 					next.float32[0] = static_cast<float>(word0 & 0xffu) / 255.0f;
 					next.float32[1] = static_cast<float>((word0 >> 8u) & 0xffu) / 255.0f;
@@ -561,8 +577,11 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 							return mantissa != 0 ? std::numeric_limits<float>::quiet_NaN()
 							                     : std::numeric_limits<float>::infinity();
 						}
-						const auto m = static_cast<float>(mantissa) / static_cast<float>(1u << mantissa_bits);
-						return exponent == 0 ? std::ldexp(m, -14) : std::ldexp(1.0f + m, static_cast<int>(exponent) - 15);
+						const auto m =
+						    static_cast<float>(mantissa) / static_cast<float>(1u << mantissa_bits);
+						return exponent == 0
+						           ? std::ldexp(m, -14)
+						           : std::ldexp(1.0f + m, static_cast<int>(exponent) - 15);
 					};
 					next.float32[0] = unsigned_small_float(word0 & 0x7ffu, 6);
 					next.float32[1] = unsigned_small_float((word0 >> 11u) & 0x7ffu, 6);
@@ -605,9 +624,9 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 	const auto half = [](uint32_t bits) {
 		const uint32_t exponent = (bits >> 10u) & 0x1fu;
 		const uint32_t mantissa = bits & 0x3ffu;
-		const float    value    = std::ldexp(
-            static_cast<float>(exponent != 0 ? mantissa | 0x400u : mantissa),
-            static_cast<int>(std::max(exponent, 1u)) - 25);
+		const float    value =
+		    std::ldexp(static_cast<float>(exponent != 0 ? mantissa | 0x400u : mantissa),
+		               static_cast<int>(std::max(exponent, 1u)) - 25);
 		return (bits & 0x8000u) != 0 ? -value : value;
 	};
 	switch (format) {
@@ -615,7 +634,8 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 			if ((word & 0x7c00u) == 0x7c00u || (word & 0x7c000000u) == 0x7c000000u) {
 				return false;
 			}
-			clear.float32 = std::array {half(word), half(word >> 16u), half(word), half(word >> 16u)};
+			clear.float32 =
+			    std::array {half(word), half(word >> 16u), half(word), half(word >> 16u)};
 			return true;
 		case vk::Format::eR16G16B16A16Uint:
 			clear.uint32 = std::array {word & 0xffffu, word >> 16u, word & 0xffffu, word >> 16u};

@@ -5,8 +5,8 @@
 #include "common/common.h"
 #include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
-#include "common/logging/log.h"
 #include "common/hangTrace.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -46,31 +46,31 @@ LIB_NAME("VideoOut", "VideoOut");
 
 namespace EventQueue = LibKernel::EventQueue;
 
-constexpr int      VIDEO_OUT_EVENT_FLIP                                 = 0;
-constexpr int      VIDEO_OUT_EVENT_VBLANK                               = 1;
-constexpr int      VIDEO_OUT_EVENT_PRE_VBLANK_START                     = 2;
-constexpr int      VIDEO_OUT_EVENT_SET_MODE                             = 8;
-constexpr int      VIDEO_OUT_TRUE                                       = 1;
-constexpr int      VIDEO_OUT_FALSE                                      = 0;
-constexpr int      VIDEO_OUT_BUS_TYPE_MAIN                              = 0;
-constexpr int      VIDEO_OUT_BUS_TYPE_OVERLAY                           = 1;
-constexpr int      VIDEO_OUT_BUS_TYPE_SUB                               = 2;
-constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC                            = 1;
-constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC_MULTI                      = 4;
-constexpr int      VIDEO_OUT_FLIP_MODE_SLAVE                            = 8;
-constexpr int      VIDEO_OUT_FLIP_MODE_MASTER                           = 9;
-constexpr int      VIDEO_OUT_BUFFER_INDEX_BLACK                         = -2;
-constexpr int      VIDEO_OUT_BUFFER_INDEX_BLANK                         = -1;
-constexpr int      VIDEO_OUT_BUFFER_NUM_MAX                             = 16;
-constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY                        = 16;
-constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX                   = 4;
-constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_DEFAULT                        = 0x0000000000000001ULL;
-constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ                       = 0x000000000000000FULL;
-constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ                       = 3;
-constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ                      = 13;
-constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED     = 0;
-constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED       = 1;
-constexpr uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY = 8;
+constexpr int      VIDEO_OUT_EVENT_FLIP                                  = 0;
+constexpr int      VIDEO_OUT_EVENT_VBLANK                                = 1;
+constexpr int      VIDEO_OUT_EVENT_PRE_VBLANK_START                      = 2;
+constexpr int      VIDEO_OUT_EVENT_SET_MODE                              = 8;
+constexpr int      VIDEO_OUT_TRUE                                        = 1;
+constexpr int      VIDEO_OUT_FALSE                                       = 0;
+constexpr int      VIDEO_OUT_BUS_TYPE_MAIN                               = 0;
+constexpr int      VIDEO_OUT_BUS_TYPE_OVERLAY                            = 1;
+constexpr int      VIDEO_OUT_BUS_TYPE_SUB                                = 2;
+constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC                             = 1;
+constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC_MULTI                       = 4;
+constexpr int      VIDEO_OUT_FLIP_MODE_SLAVE                             = 8;
+constexpr int      VIDEO_OUT_FLIP_MODE_MASTER                            = 9;
+constexpr int      VIDEO_OUT_BUFFER_INDEX_BLACK                          = -2;
+constexpr int      VIDEO_OUT_BUFFER_INDEX_BLANK                          = -1;
+constexpr int      VIDEO_OUT_BUFFER_NUM_MAX                              = 16;
+constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY                         = 16;
+constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX                    = 4;
+constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_DEFAULT                         = 0x0000000000000001ULL;
+constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ                        = 0x000000000000000FULL;
+constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ                        = 3;
+constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ                       = 13;
+constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED      = 0;
+constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED        = 1;
+constexpr uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY  = 8;
 constexpr uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED = 32;
 
 enum class VideoOutEventKind : uintptr_t {
@@ -279,6 +279,7 @@ public:
 	void                     Init(uint32_t width, uint32_t height);
 	FlipQueue&               GetFlipQueue() { return m_flip_queue; }
 	Graphics::RenderContext& Renderer() const noexcept { return m_renderer; }
+	bool IsHdrSupported() const noexcept { return m_presenter.IsHdrSupported(); }
 
 	void VblankBegin();
 	void VblankEnd();
@@ -554,14 +555,6 @@ Graphics::ImageInfo BufferAttributeGroup::ImageInfo(const VideoOutBuffer& buffer
 	if (!Graphics::DecodeVideoOutPixelFormat(attribute.pixel_format, pixel_format)) {
 		EXIT("unsupported video-out pixel format: 0x%016" PRIx64 "\n", attribute.pixel_format);
 	}
-	if (attribute.pixel_format == Graphics::VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ) {
-		static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-		if (!warned.test_and_set(std::memory_order_relaxed)) {
-			Log::WriteToConsoleAndLog(fmt::format(
-			    "Warning: HDR-to-SDR conversion is not implemented; displaying PQ video-out "
-			    "pixels unchanged (format=0x{:016x}).\n", attribute.pixel_format));
-		}
-	}
 	const auto tile_mode = Graphics::Prospero::TileMode::kRenderTarget;
 	const auto pitch =
 	    Graphics::TileGetTexturePitch(pixel_format.guest_format, attribute.width, tile_mode);
@@ -703,7 +696,7 @@ bool VideoOutDriver::Impl::Close(int handle) {
 	VideoOutEventQueues pre_vblank_events;
 	VideoOutEventQueues vblank_events;
 	VideoOutEventQueues output_mode_events;
-	VideoOutConfig* master = nullptr;
+	VideoOutConfig*     master = nullptr;
 	{
 		Common::LockGuard config_lock(config.mutex);
 		if (config.closing) {
@@ -722,9 +715,9 @@ bool VideoOutDriver::Impl::Close(int handle) {
 			vblank_events      = std::move(config.events->vblank);
 			output_mode_events = std::move(config.events->output_mode);
 		}
-		config.flip_rate   = 0;
-		master             = config.master;
-		config.master      = nullptr;
+		config.flip_rate = 0;
+		master           = config.master;
+		config.master    = nullptr;
 
 		for (const auto& buffer: config.buffers) {
 			if (buffer.Occupied() &&
@@ -786,9 +779,9 @@ bool VideoOutDriver::Impl::IsOpened(int handle) {
 
 int VideoOutDriver::Impl::SetFlipMaster(int slave_handle, int master_handle) {
 	Common::LockGuard lock(m_mutex);
-	if (slave_handle <= 0 || slave_handle >= VIDEO_OUT_NUM_MAX ||
-	    master_handle <= 0 || master_handle >= VIDEO_OUT_NUM_MAX ||
-	    !m_video_out_ctx[slave_handle].opened || !m_video_out_ctx[master_handle].opened) {
+	if (slave_handle <= 0 || slave_handle >= VIDEO_OUT_NUM_MAX || master_handle <= 0 ||
+	    master_handle >= VIDEO_OUT_NUM_MAX || !m_video_out_ctx[slave_handle].opened ||
+	    !m_video_out_ctx[master_handle].opened) {
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 	auto& slave  = m_video_out_ctx[slave_handle];
@@ -1077,35 +1070,34 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 
 	const bool          special = IsSpecialBufferIndex(index);
 	Graphics::ImageInfo source_info;
-	uint32_t            width   = 0;
-	uint32_t            height  = 0;
-	bool                current = false;
+	uint32_t            width               = 0;
+	uint32_t            height              = 0;
+	bool                current             = false;
 	bool                premultiplied_alpha = false;
+	bool                hdr                 = false;
 	{
 		Common::LockGuard lock(cfg->mutex);
 		current = cfg->opened && !cfg->closing && cfg->generation == generation;
-		if (current) {
-			if (special) {
-				width  = cfg->width;
-				height = cfg->height;
-			} else {
-				const auto& surface = cfg->buffers[index];
-				if (!surface.Occupied()) {
-					EXIT("cannot prepare flip from an unregistered surface, id=%" PRIu64
-					     " index=%d\n",
-					     request_id, index);
-				}
-				if (surface.group_index >= VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX ||
-				    !cfg->groups[surface.group_index].occupied) {
-					EXIT("video-out surface references an unavailable attribute group, id=%" PRIu64
-					     " index=%d group=%d\n",
-					     request_id, index, surface.group_index);
-				}
-				source_info = cfg->groups[surface.group_index].ImageInfo(surface);
-				premultiplied_alpha =
-				    (cfg->groups[surface.group_index].attribute.option &
-				     VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED) != 0;
+		if (current && special) {
+			width  = cfg->width;
+			height = cfg->height;
+		} else if (current) {
+			const auto& surface = cfg->buffers[index];
+			if (!surface.Occupied()) {
+				EXIT("cannot prepare flip from an unregistered surface, id=%" PRIu64 " index=%d\n",
+				     request_id, index);
 			}
+			if (surface.group_index >= VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX ||
+			    !cfg->groups[surface.group_index].occupied) {
+				EXIT("video-out surface references an unavailable attribute group, id=%" PRIu64
+				     " index=%d group=%d\n",
+				     request_id, index, surface.group_index);
+			}
+			const auto& group   = cfg->groups[surface.group_index];
+			source_info         = group.ImageInfo(surface);
+			hdr                 = Graphics::IsHdrVideoOutPixelFormat(group.attribute.pixel_format);
+			premultiplied_alpha = (group.attribute.option &
+			                       VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED) != 0;
 		}
 	}
 	if (!current) {
@@ -1118,12 +1110,18 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		}
 		return;
 	}
+	static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+	if (hdr && !m_presenter.IsHdrSupported() && !warned.test_and_set(std::memory_order_relaxed)) {
+		Log::WriteToConsoleAndLog(
+		    "Warning: HDR output is unavailable; HDR-to-SDR conversion is not implemented, "
+		    "displaying PQ video-out pixels unchanged.\n");
+	}
 	Graphics::Presenter::Frame* frame = nullptr;
 	if (special) {
 		frame = &m_presenter.PrepareBlankFrame(width, height, index == VIDEO_OUT_BUFFER_INDEX_BLACK,
 		                                       &buffer);
 	} else {
-		frame = &m_presenter.PrepareFrame(buffer, source_info);
+		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr);
 	}
 
 	Common::LockGuard lock(m_mutex);
@@ -1143,7 +1141,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	    prepared->frame != nullptr) {
 		EXIT("video-out request changed while recording, id=%" PRIu64 "\n", request_id);
 	}
-	prepared->frame = frame;
+	prepared->frame               = frame;
 	prepared->premultiplied_alpha = premultiplied_alpha;
 }
 
@@ -1178,7 +1176,7 @@ void FlipQueue::Complete(uint64_t request_id) {
 
 void FlipQueue::WaitForSubmitSlot(VideoOutConfig& cfg) {
 	Common::LockGuard lock(m_mutex);
-	auto belongs_to_port = [&cfg](const auto& request) { return request.cfg == &cfg; };
+	auto              belongs_to_port = [&cfg](const auto& request) { return request.cfg == &cfg; };
 	while (std::count_if(m_requests.begin(), m_requests.end(), belongs_to_port) +
 	           std::count_if(m_cpu_requests.begin(), m_cpu_requests.end(), belongs_to_port) >=
 	       VIDEO_OUT_FLIP_QUEUE_CAPACITY) {
@@ -1218,7 +1216,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	}
 	EXIT_IF(m_processing);
 	const auto owner = std::find_if(m_requests.begin(), m_requests.end(),
-	                               [](const auto& r) { return r.group == r.id; });
+	                                [](const auto& r) { return r.group == r.id; });
 	if (owner == m_requests.end()) {
 		m_mutex.Unlock();
 		return false;
@@ -1233,11 +1231,11 @@ bool FlipQueue::Flip(uint32_t micros) {
 		return false;
 	}
 	std::array<Request, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> requests {};
-	size_t count = 0;
+	size_t                                                            count = 0;
 	for (auto& request: m_requests) {
 		if (request.group == group) {
 			EXIT_IF(count == requests.size());
-			request.state = RequestState::Presenting;
+			request.state     = RequestState::Presenting;
 			requests[count++] = request;
 		}
 	}
@@ -1247,7 +1245,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	// Lock each port in bus order, then present and complete the whole group at one Vblank.
 	std::sort(requests.begin(), requests.begin() + count,
 	          [](const auto& a, const auto& b) { return a.cfg->bus < b.cfg->bus; });
-	bool due = true;
+	bool                                                                                 due = true;
 	std::array<Graphics::Presenter::Layer, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> layers {};
 	for (size_t i = 0; i < count; i++) {
 		auto& r = requests[i];
@@ -1333,7 +1331,7 @@ KYTY_SYSV_ABI int VideoOutSetFlipMaster(int slave_handle, int master_handle) {
 }
 
 KYTY_SYSV_ABI void VideoOutAddBufferAttributeOption(VideoOutBufferAttribute2* attribute,
-                                                   uint64_t option) {
+                                                    uint64_t                  option) {
 	PRINT_NAME();
 	EXIT_IF(attribute == nullptr);
 	attribute->option |= option;
@@ -1835,11 +1833,14 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 
 	int32_t attribute3 = 0;
 	Loader::SystemContentParamSfoGetInt("ATTRIBUTE3", &attribute3);
+	int32_t    attribute   = 0;
+	const bool hdr_allowed = !Loader::SystemContentParamSfoGetInt("ATTRIBUTE", &attribute) ||
+	                         (attribute & 0x20000000) != 0;
 	ctx->mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
 	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
-	status->dynamicRange = 1;
+	status->dynamicRange = hdr_allowed && DriverState().IsHdrSupported() ? 2u : 1u;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
 	         ? VIDEO_OUT_REFRESH_RATE_119_88HZ

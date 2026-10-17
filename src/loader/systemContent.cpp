@@ -164,6 +164,8 @@ void Psf::OpenJson(const std::filesystem::path& file_name) {
 	add_string_param("contentId", "CONTENT_ID");
 	add_string_param("contentVersion", "APP_VER");
 	add_string_param("appVersion", "APP_VER");
+	AddParamInt("ATTRIBUTE", 0);
+	add_int_param("attribute", "ATTRIBUTE");
 	add_int_param("attribute3", "ATTRIBUTE3");
 	add_int_param("userDefinedParam1", "USER_DEFINED_PARAM_1");
 	add_int_param("userDefinedParam2", "USER_DEFINED_PARAM_2");
@@ -649,19 +651,19 @@ uint64_t SystemContentGetFlexibleMemorySize() {
 }
 
 bool SystemContentGetIconPath(std::filesystem::path* path) {
-    if (path == nullptr) {
-        return false;
-    }
+	if (path == nullptr) {
+		return false;
+	}
 
-    auto* sc = Common::Singleton<SystemContent>::Instance();
+	auto* sc = Common::Singleton<SystemContent>::Instance();
 
-    if (sc->icon_path.empty()) {
-        return false;
-    }
+	if (sc->icon_path.empty()) {
+		return false;
+	}
 
-    *path = sc->icon_path;
+	*path = sc->icon_path;
 
-    return true;
+	return true;
 }
 
 bool SystemContentGetChunksNum(uint32_t* num) {

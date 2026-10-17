@@ -42,6 +42,8 @@ struct Presenter::Frame {
 	vk::ImageView view         = nullptr;
 	uint64_t      present_tick = 0;
 	bool          busy         = false;
+	bool          hdr          = false;
+	bool          blank        = false;
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
@@ -289,8 +291,15 @@ public:
 	}
 	[[nodiscard]] vk::Format Format() const noexcept { return m_format; }
 	[[nodiscard]] bool       IsMinimized() const noexcept { return m_minimized; }
+	[[nodiscard]] bool       IsHdrSupported() const noexcept { return m_hdr_supported.load(); }
+	bool                     SetHdr(bool hdr) {
+		const bool changed = m_hdr_active != (hdr && IsHdrSupported());
+		m_hdr_requested    = hdr;
+		return changed;
+	}
 
 private:
+	vk::SurfaceFormatKHR SelectFormat();
 	/// Destroys the swapchain Vulkan objects and resets all members.
 	void Destroy();
 	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer);
@@ -298,6 +307,9 @@ private:
 	WindowContext&   m_window;
 	vk::SwapchainKHR m_handle = nullptr;
 	vk::Format       m_format = vk::Format::eUndefined;
+	std::atomic_bool m_hdr_supported {false};
+	bool             m_hdr_requested = false;
+	bool             m_hdr_active    = false;
 	vk::Extent2D     m_extent {};
 	// Drawable pixel size observed when this swapchain was created.
 	vk::Extent2D m_window_extent {};
@@ -375,6 +387,17 @@ public:
 	}
 	bool Capture(const std::array<Presenter::Layer, 2>& layers) {
 		if (m_transport == nullptr) return false;
+		// No PQ-to-SDR conversion exists in the native capture protocol. HDR is never
+		// advertised while exporting; reject games that force a PQ source regardless.
+		if (std::ranges::any_of(layers, [](const auto& layer) {
+			    return layer.frame != nullptr && layer.frame->hdr;
+		    })) {
+			static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+			if (!warned.test_and_set(std::memory_order_relaxed))
+				LOGF("Streaming: forced HDR/PQ source cannot be exported through the SDR capture "
+				     "pool\n");
+			return false;
+		}
 		if (layers[0].frame == nullptr && layers[1].frame == nullptr && !m_stream_only)
 			return false;
 		const auto generation = m_transport->Generation();
@@ -567,6 +590,40 @@ struct Presenter::Impl {
 /// Sets m_minimized and returns early when the window or surface extent is zero.
 /// Sets m_surface_extent_zero when the early return is due to a zero surface/drawable extent
 /// and WindowContext::minimized is false, so NeedsResize() can poll instead of spinning.
+vk::SurfaceFormatKHR Swapchain::SelectFormat() {
+	const auto& formats    = m_window.surface_capabilities.formats;
+	auto&       graphics   = m_window.graphic_ctx;
+	const auto  hdr_format = std::ranges::find_if(formats, [&](const auto& candidate) {
+		return candidate.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT &&
+		       IsHdrSwapchainFormat(candidate.format) &&
+		       static_cast<bool>(
+		           graphics.GetFormatProperties(candidate.format).optimalTilingFeatures &
+		           vk::FormatFeatureFlagBits::eBlitDst);
+	});
+	m_hdr_supported        = Config::HdrEnabled() && hdr_format != formats.end();
+	m_hdr_active           = m_hdr_requested && IsHdrSupported();
+	if (m_hdr_active) {
+		return *hdr_format;
+	}
+	if (Config::HdrEnabled() && !IsHdrSupported()) {
+		LOGF("HDR10 surface unavailable; using SDR output\n");
+	}
+	if (formats.size() == 1 && formats.front().format == vk::Format::eUndefined) {
+		return {vk::Format::eR8G8B8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
+	}
+	for (const auto& candidate: formats) {
+		if (candidate.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
+			continue;
+		}
+		switch (candidate.format) {
+			case vk::Format::eB8G8R8A8Unorm:
+			case vk::Format::eR8G8B8A8Unorm: return candidate;
+			default: break;
+		}
+	}
+	EXIT("no supported UNORM swapchain format\n");
+}
+
 void Swapchain::Create() {
 	auto& graphics = m_window.graphic_ctx;
 	EXIT_IF(graphics.device == nullptr);
@@ -576,18 +633,7 @@ void Swapchain::Create() {
 	const auto& surface = m_window.surface_capabilities;
 	EXIT_NOT_IMPLEMENTED(surface.formats.empty());
 
-	vk::SurfaceFormatKHR format {vk::Format::eR8G8B8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
-	if (surface.formats.size() != 1 || surface.formats.front().format != vk::Format::eUndefined) {
-		const auto it = std::find_if(surface.formats.begin(), surface.formats.end(),
-		                             [](const vk::SurfaceFormatKHR& candidate) {
-			                             return candidate.format == vk::Format::eB8G8R8A8Unorm ||
-			                                    candidate.format == vk::Format::eR8G8B8A8Unorm;
-		                             });
-		if (it == surface.formats.end()) {
-			EXIT("no supported UNORM swapchain format\n");
-		}
-		format = *it;
-	}
+	const auto format             = SelectFormat();
 	m_format                      = format.format;
 	const auto swapchain_features = graphics.GetFormatProperties(m_format).optimalTilingFeatures;
 	if (!static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eBlitDst)) {
@@ -682,6 +728,7 @@ void Swapchain::Create() {
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
 	                     "vkCreateSwapchainKHR");
 	EXIT_IF(m_handle == nullptr);
+	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
 
 	m_images = EnumerateVulkan<vk::Image>(
 	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* images) {
@@ -1167,9 +1214,11 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
 	write.pImageInfo      = &image;
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
-	const uint32_t premultiplied = layer.premultiplied_alpha;
-	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
-	                      sizeof(premultiplied), &premultiplied);
+	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) | (m_hdr_active ? 2u : 0u) |
+	                       (frame.hdr ? 4u : 0u) |
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(flags),
+	                      &flags);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
 	vk::RenderingAttachmentInfo attachment {};
 	attachment.imageView   = m_image_views[m_image_index];
@@ -1203,7 +1252,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	const vk::Extent2D source_extent =
 	    source != nullptr ? vk::Extent2D {source->image.extent.width, source->image.extent.height}
 	                      : vk::Extent2D {};
-	const bool filtered = source != nullptr && PresentBoxDownscaleEnabled() &&
+	const bool filtered = source != nullptr && !source->hdr && PresentBoxDownscaleEnabled() &&
 	                      PresentNeedsFilter(source_extent, m_extent);
 	if (filtered) {
 		if (source->view == nullptr) {
@@ -1401,7 +1450,7 @@ static bool PresentUnlocked() {
 
 Presenter::~Presenter() = default;
 
-Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info) {
+Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
 	auto frame_format = info.pixel_format;
@@ -1410,7 +1459,9 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
 		default: break;
 	}
-	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
+	auto* frame  = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
+	frame->hdr   = hdr;
+	frame->blank = false;
 	RenderLockGuard render_lock(m_impl->renderer.GetMutex());
 	auto&           image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
@@ -1427,6 +1478,8 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	KYTY_PROFILER_FUNCTION();
 	auto  format = m_impl->frames.GetFormat();
 	auto* frame  = m_impl->frames.Acquire({width, height}, format);
+	frame->hdr   = false;
+	frame->blank = true;
 	// Into the GPU thread's command buffer (its flip) under the renderer's lock; the present
 	// thread's blank frame (no producer) uses only the presenter's scheduler and frame.
 	std::optional<RenderLockGuard> render_lock;
@@ -1458,6 +1511,12 @@ bool Presenter::PresentLastFrame() {
 
 bool Presenter::IsGuestPaused() const noexcept {
 	return m_impl->window.loop.paused.load(std::memory_order_acquire);
+}
+
+bool Presenter::IsHdrSupported() const noexcept {
+	// The native export protocol and GPU pool carry SDR only. Do not advertise HDR
+	// while a streaming exporter is installed, including local-window capture.
+	return m_impl->stream_export == nullptr && m_impl->swapchain.IsHdrSupported();
 }
 
 bool Presenter::NeedsSystemOverlayRefresh() const noexcept {
@@ -1512,8 +1571,12 @@ void Presenter::Impl::Present() {
 			presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		return;
 	}
+	// Blank flips retain the current color space; real main-bus frames select it.
+	const auto* main_frame = layers[0].frame;
+	const bool  hdr_changed =
+	    main_frame != nullptr && !main_frame->blank && swapchain.SetHdr(main_frame->hdr);
 	// Some window systems keep presenting an old swapchain after a resize.
-	if (swapchain.NeedsResize()) {
+	if (hdr_changed || swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	if (swapchain.IsMinimized()) {
