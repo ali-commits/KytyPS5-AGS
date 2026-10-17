@@ -1283,6 +1283,7 @@ if(BUILD_TESTING)
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --wave32-clusters-only)
 	add_test(NAME hdr_video_out_formats COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --hdr-video-out-formats-only)
 	add_test(NAME shader_packed_norm_nan COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --packed-norm-nan-only)
+	add_test(NAME robust_buffer_loads COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --robust-buffer-loads-only)
 	add_test(NAME specialization_plan_lifetime COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --specialization-plan-lifetime-only)
 	add_test(NAME shader_empty_buffer_fills COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --empty-buffer-fill-only)
 	add_test(NAME wave32_clusters_shader_cases

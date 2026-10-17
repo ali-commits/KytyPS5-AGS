@@ -57903,6 +57903,11 @@ int main(int argc, char **argv) {
     BdaWriteTests::RunAll(&vulkan);
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--robust-buffer-loads-only") == 0) {
+    VulkanHarness vulkan;
+    CodegenTests::CheckRobustBufferLoads(&vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--codegen-only") == 0) {
     VulkanHarness vulkan;
     CodegenTests::RunAll(&vulkan);

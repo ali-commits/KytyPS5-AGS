@@ -1053,9 +1053,8 @@ void CheckLodStatsPlainVariant() {
               plain.size());
 }
 
-// Buffer and scalar-buffer loads that straddle the end of a descriptor range whose size is not a
-// multiple of 4 bytes, with the shader's dword bounds check and with the device's
-// robustBufferAccess2 check. Out-of-range dwords (any byte past the range) must read 0.
+// Compare explicit and device bounds checks on the same whole-dword binding used by the
+// renderer, then check native byte/halfword accesses against a separate odd-sized binding.
 void CheckRobustBufferLoads(VulkanHarness *vulkan) {
   constexpr const char *name = "CodegenRobustBufferLoads";
   using O = ShaderOpcode;
@@ -1112,40 +1111,47 @@ void CheckRobustBufferLoads(VulkanHarness *vulkan) {
                   O::BUFFER_LOAD_DWORDX4, O::S_BUFFER_LOAD_DWORDX4, O::S_BUFFER_LOAD_DWORD,
                   O::S_WAITCNT, O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
 
-  // Reference: a dword reads its data when all four bytes are inside the range, else 0.
-  const auto dword = [&](u32 index) -> u32 {
-    return 4u * index + 4u <= RangeBytes && index < test.initial.size() ? test.initial[index]
-                                                                          : 0u;
-  };
-  const auto sub = [&](u32 byte, u32 bits, bool sign) -> u32 {
-    const auto word = dword(byte / 4u) >> ((byte % 4u) * 8u);
-    const auto mask = bits == 8u ? 0xffu : 0xffffu;
-    auto value = word & mask;
-    if (sign && (value & (1u << (bits - 1u))) != 0u) {
-      value |= ~mask;
+  const auto reference = [&](u32 range_bytes) {
+    // Bounds are in native element widths: an in-range halfword or byte can remain
+    // readable when the surrounding DWORD crosses the end of the binding.
+    const auto dword = [&](u32 index) -> u32 {
+      return 4u * index + 4u <= range_bytes && index < test.initial.size() ? test.initial[index]
+                                                                            : 0u;
+    };
+    const auto sub = [&](u32 byte, u32 bits, bool sign) -> u32 {
+      if (byte + bits / 8u > range_bytes || byte / 4u >= test.initial.size()) return 0u;
+      const auto word = test.initial[byte / 4u] >> ((byte % 4u) * 8u);
+      const auto mask = bits == 8u ? 0xffu : 0xffffu;
+      auto value = word & mask;
+      if (sign && (value & (1u << (bits - 1u))) != 0u) {
+        value |= ~mask;
+      }
+      return value;
+    };
+    std::vector<u32> expected(Data, 0u);
+    for (u32 lane = 0; lane < Lanes; lane++) {
+      const std::array<u32, 15> values = {
+          dword(Data + 4u + lane),
+          sub(4u * (Data + 6u) + 2u * lane, 16, false),
+          sub(4u * (Data + 5u) + 2u + 2u * lane, 16, true),
+          sub(4u * (Data + 8u) - 6u + lane, 8, false),
+          sub(4u * (Data + 8u) - 6u + lane, 8, true),
+          dword(Data + 2u + lane),
+          dword(Data + 3u + lane),
+          dword(Data + 4u + lane),
+          dword(Data + 5u + lane),
+          dword(Data + 6u),
+          dword(Data + 7u),
+          dword(Data + 8u),
+          dword(Data + 9u),
+          dword(Data + 8u),
+          dword(Data + 7u)};
+      std::copy(values.begin(), values.end(), expected.begin() + lane * PerLane);
     }
-    return value;
+    return expected;
   };
-  std::vector<u32> expected(Data, 0u);
-  for (u32 lane = 0; lane < Lanes; lane++) {
-    const std::array<u32, 15> values = {
-        dword(Data + 4u + lane),
-        sub(4u * (Data + 6u) + 2u * lane, 16, false),
-        sub(4u * (Data + 5u) + 2u + 2u * lane, 16, true),
-        sub(4u * (Data + 8u) - 6u + lane, 8, false),
-        sub(4u * (Data + 8u) - 6u + lane, 8, true),
-        dword(Data + 2u + lane),
-        dword(Data + 3u + lane),
-        dword(Data + 4u + lane),
-        dword(Data + 5u + lane),
-        dword(Data + 6u),
-        dword(Data + 7u),
-        dword(Data + 8u),
-        dword(Data + 9u),
-        dword(Data + 8u),
-        dword(Data + 7u)};
-    std::copy(values.begin(), values.end(), expected.begin() + lane * PerLane);
-  }
+  constexpr u32 RoundedRangeBytes = RangeBytes & ~3u;
+  const auto expected = reference(RoundedRangeBytes);
   CodegenOptions device = GetCodegenOptions();
   device.robust_buffer_loads = true;
   CodegenOptions shader = device;
@@ -1155,21 +1161,34 @@ void CheckRobustBufferLoads(VulkanHarness *vulkan) {
   std::vector<u32> device_words;
   std::vector<u32> shader_words;
   {
-    // The host binds storage buffers in whole dwords (descriptors.cpp NativeStorageBuffer):
-    // NVIDIA returns data for a dword only partly inside the range despite reporting a 1-byte
-    // robustness alignment. The shader-checked run keeps the odd range to show that rounding
-    // down changes nothing for the shader's own checks.
+    // NativeStorageBuffer binds whole DWORDs because NVIDIA can return data for a
+    // partial DWORD. Both equivalence runs must use that same binding: native u8/u16
+    // views can read bytes that a u32 view excludes from an odd-sized binding.
     auto device_test = test;
-    device_test.storage_buffer_range_bytes = RangeBytes & ~3u;
+    device_test.storage_buffer_range_bytes = RoundedRangeBytes;
     ScopedCodegenOptions scope(device);
     device_words = RunCollect(vulkan, device_test, Data, &device_spirv);
   }
   {
+    auto shader_test = test;
+    shader_test.storage_buffer_range_bytes = RoundedRangeBytes;
     ScopedCodegenOptions scope(shader);
-    shader_words = RunCollect(vulkan, test, Data, &shader_spirv);
+    shader_words = RunCollect(vulkan, shader_test, Data, &shader_spirv);
   }
   RequireEqualWords(name, "shader-checked loads", expected, shader_words);
   RequireEqualWords(name, "device-checked loads", expected, device_words);
+  {
+    ScopedCodegenOptions scope(shader);
+    const auto odd_words = RunCollect(vulkan, test, Data);
+    const auto odd_expected = reference(RangeBytes);
+    Require(name, "odd-range boundary fixture",
+            expected[4u * PerLane + 1u] == 0u &&
+                odd_expected[4u * PerLane + 1u] == (test.initial[Data + 8u] & 0xffffu) &&
+                odd_expected[6u * PerLane + 3u] == (test.initial[Data + 8u] & 0xffu) &&
+                odd_expected[8u * PerLane + 3u] == 0u,
+            "the odd binding no longer exercises in-range and out-of-range native subword loads");
+    RequireEqualWords(name, "odd-range native-width loads", odd_expected, odd_words);
+  }
   std::printf("[codegen] %-32s ok (OpArrayLength %zu -> %zu, OpBranchConditional %zu -> %zu)\n",
               name, CountSpirv(shader_spirv, "OpArrayLength"),
               CountSpirv(device_spirv, "OpArrayLength"),
