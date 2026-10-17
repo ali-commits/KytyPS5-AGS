@@ -10,12 +10,14 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(present_mode);
 	KYTY_CFG_SET(gpu_index);
 	KYTY_CFG_SET(fullscreen_enabled);
+	KYTY_CFG_SET(hdr_enabled);
 	KYTY_CFG_SET(hide_cursor_enabled);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
 	KYTY_CFG_SET(tessellation_enabled);
 	KYTY_CFG_SET(trophy_enabled);
 	KYTY_CFG_SET(skip_notice_screen);
+	KYTY_CFG_SET(network_connected);
 	KYTY_CFG_SET(vblank_frequency);
 	KYTY_CFG_SET(console_language);
 	KYTY_CFG_SET(vulkan_validation_enabled);
@@ -55,12 +57,14 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 		present_mode = PresentMode::Mailbox;
 	}
 	KYTY_CFG_GET(fullscreen_enabled);
+	KYTY_CFG_GET(hdr_enabled);
 	KYTY_CFG_GET(hide_cursor_enabled);
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
 	KYTY_CFG_GET(tessellation_enabled);
-	trophy_enabled   = s.value("trophy_enabled", trophy_enabled).toBool();
+	trophy_enabled = s.value("trophy_enabled", trophy_enabled).toBool();
 	KYTY_CFG_GET(skip_notice_screen);
+	KYTY_CFG_GET(network_connected);
 	vblank_frequency = s.value("vblank_frequency", vblank_frequency).toInt();
 	console_language = s.value("console_language", console_language).toInt();
 	if (console_language < 0 || console_language > MAX_CONSOLE_LANGUAGE) {
@@ -79,7 +83,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(renderdoc_enabled);
 	// "auto" (on unless the CPU is an AMD), "on" or "off". Before "auto", only amd_cpu_enabled was
 	// saved, and false for everyone who never touched it: true stays on, false becomes auto.
-	amd_cpu_mode = s.contains("amd_cpu_mode")              ? s.value("amd_cpu_mode").toString()
+	amd_cpu_mode = s.contains("amd_cpu_mode")                   ? s.value("amd_cpu_mode").toString()
 	               : s.value("amd_cpu_enabled", false).toBool() ? QStringLiteral("on")
 	                                                            : QStringLiteral("auto");
 	if (amd_cpu_mode != QStringLiteral("on") && amd_cpu_mode != QStringLiteral("off")) {
@@ -123,9 +127,11 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	// Exports from launchers before amd_cpu_mode carry amd_cpu_enabled ("true" / "false").
 	QJsonObject settings = imported_settings;
 	if (settings.contains(QStringLiteral("amd_cpu_enabled"))) {
-		const bool on = settings.take(QStringLiteral("amd_cpu_enabled")).toString() == QStringLiteral("true");
+		const bool on =
+		    settings.take(QStringLiteral("amd_cpu_enabled")).toString() == QStringLiteral("true");
 		if (!settings.contains(QStringLiteral("amd_cpu_mode"))) {
-			settings.insert(QStringLiteral("amd_cpu_mode"), on ? QStringLiteral("on") : QStringLiteral("auto"));
+			settings.insert(QStringLiteral("amd_cpu_mode"),
+			                on ? QStringLiteral("on") : QStringLiteral("auto"));
 		}
 	}
 	auto values = GameSettings();

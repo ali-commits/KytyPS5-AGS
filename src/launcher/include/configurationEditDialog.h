@@ -29,7 +29,7 @@ public:
 	static void WriteSettings(QSettings& s);
 	static void ReadSettings(QSettings& s);
 
-	void                      SetGlobalSettings(const QStringList& dirs, const QString& addons_dir);
+	void SetGlobalSettings(const QStringList& dirs, const QString& addons_dir = {});
 	[[nodiscard]] QString     GetAddonsDirectory() const;
 	[[nodiscard]] QStringList GetGameDirectories() const;
 

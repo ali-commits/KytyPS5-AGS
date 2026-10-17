@@ -3,8 +3,8 @@
 
 #include "common/common.h"
 
-#include <cstddef>
 #include <array>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -27,14 +27,14 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
-using Keymap = std::vector<std::string>;
+using Keymap          = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
-constexpr uint32_t DEFAULT_CONSOLE_LANGUAGE = 1;
-constexpr uint32_t MAX_CONSOLE_LANGUAGE     = 29;
-constexpr std::size_t MAX_USER_NAME_LENGTH = 16;
-constexpr int32_t DEFAULT_USER_ID           = 1000;
-constexpr uint32_t MAX_AUDIO_VOLUME         = 200;
+constexpr uint32_t    DEFAULT_CONSOLE_LANGUAGE = 1;
+constexpr uint32_t    MAX_CONSOLE_LANGUAGE     = 29;
+constexpr std::size_t MAX_USER_NAME_LENGTH     = 16;
+constexpr int32_t     DEFAULT_USER_ID          = 1000;
+constexpr uint32_t    MAX_AUDIO_VOLUME         = 200;
 // Astro Bot sends a lot of its sound to the DualSense speaker (PADSPK); played on the main output
 // it measured up to ~19 dB above the main mix (2026-10-06). The console speaker is small, so it
 // is turned down (30% = -10.5 dB) when no DualSense plays it.
@@ -47,51 +47,53 @@ constexpr bool IsConfiguredUserIdValid(int32_t user_id) {
 }
 
 struct ConfigOptions {
-	uint32_t               screen_width                = 1280;
-	uint32_t               screen_height               = 720;
-	std::string            user_name                   = "Kyty";
-	int32_t                user_id                     = DEFAULT_USER_ID;
-	std::string            audio_input_device;
+	uint32_t                       screen_width  = 1280;
+	uint32_t                       screen_height = 720;
+	std::string                    user_name     = "Kyty";
+	int32_t                        user_id       = DEFAULT_USER_ID;
+	std::string                    audio_input_device;
 	std::optional<ControllerColor> controller_color;
-	uint32_t               controller_speaker_volume      = 50;
-	uint32_t               controller_vibration_intensity = 100;
+	uint32_t                       controller_speaker_volume      = 50;
+	uint32_t                       controller_vibration_intensity = 100;
 	// Host mix levels in percent (0-200, 100 = unity); see libs/audioMix.h.
-	uint32_t               audio_master_volume            = 100;
-	uint32_t               audio_main_volume              = 100;
-	uint32_t               audio_music_volume             = 100;
-	uint32_t               audio_pad_speaker_main_volume  = DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME;
+	uint32_t audio_master_volume           = 100;
+	uint32_t audio_main_volume             = 100;
+	uint32_t audio_music_volume            = 100;
+	uint32_t audio_pad_speaker_main_volume = DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME;
 	// AudioOut2 3D object ports, mixed into the main bed (main and master apply on top).
-	uint32_t               audio_objects_volume           = 100;
-	bool                   audio_objects_enabled          = true;
-	PresentMode            present_mode                = PresentMode::Mailbox;
-	int32_t                gpu_index                   = -1;
-	bool                   fullscreen_enabled          = false;
-	bool                   hide_cursor_enabled         = false;
-	bool                   vr_enabled                  = false;
-	bool                   amd_cpu_enabled             = false;
+	uint32_t               audio_objects_volume  = 100;
+	bool                   audio_objects_enabled = true;
+	PresentMode            present_mode          = PresentMode::Mailbox;
+	int32_t                gpu_index             = -1;
+	bool                   fullscreen_enabled    = false;
+	bool                   hdr_enabled           = false;
+	bool                   hide_cursor_enabled   = false;
+	bool                   vr_enabled            = false;
+	bool                   amd_cpu_enabled       = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
-	uint32_t               vblank_frequency            = 60;
-	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
-	bool                   vulkan_validation_enabled   = false;
-	bool                   shader_validation_enabled   = false;
-	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
-	LogDirection           shader_log_direction        = LogDirection::Silent;
-	std::filesystem::path  shader_log_folder           = "_Shaders";
-	bool                   command_buffer_dump_enabled = false;
-	std::filesystem::path  command_buffer_dump_folder  = "_Buffers";
-	bool                   graphics_debug_dump_enabled = false;
-	LogDirection           printf_direction            = LogDirection::Silent;
-	std::filesystem::path  printf_output_file          = "_kyty.txt";
-	bool                   profiler_enabled            = false;
-	bool                   spirv_debug_printf_enabled  = false;
+	bool                   network_connected               = false;
+	uint32_t               vblank_frequency                = 60;
+	uint32_t               console_language                = DEFAULT_CONSOLE_LANGUAGE;
+	bool                   vulkan_validation_enabled       = false;
+	bool                   shader_validation_enabled       = false;
+	ShaderOptimizationType shader_optimization_type        = ShaderOptimizationType::None;
+	LogDirection           shader_log_direction            = LogDirection::Silent;
+	std::filesystem::path  shader_log_folder               = "_Shaders";
+	bool                   command_buffer_dump_enabled     = false;
+	std::filesystem::path  command_buffer_dump_folder      = "_Buffers";
+	bool                   graphics_debug_dump_enabled     = false;
+	LogDirection           printf_direction                = LogDirection::Silent;
+	std::filesystem::path  printf_output_file              = "_kyty.txt";
+	bool                   profiler_enabled                = false;
+	bool                   spirv_debug_printf_enabled      = false;
 	bool                   gpu_assisted_validation_enabled = false;
-	bool                   renderdoc_enabled           = false;
-	bool                   readback_linear_images      = false;
-	bool                   sync_raw_image_buffers      = false;
-	bool                   tessellation_enabled        = false;
-	bool                   trophy_enabled              = true;
-	bool                   playgo_hack_enabled         = false;
-	bool                   skip_notice_screen          = false;
+	bool                   renderdoc_enabled               = false;
+	bool                   readback_linear_images          = false;
+	bool                   sync_raw_image_buffers          = false;
+	bool                   tessellation_enabled            = false;
+	bool                   trophy_enabled                  = true;
+	bool                   playgo_hack_enabled             = false;
+	bool                   skip_notice_screen              = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -100,30 +102,32 @@ struct ConfigOptions {
 
 void Load(const ConfigOptions& cfg);
 
-uint32_t GetScreenWidth();
-uint32_t GetScreenHeight();
-const std::string& GetUserName();
-int32_t  GetUserId();
-const std::string& GetAudioInputDevice();
+uint32_t                              GetScreenWidth();
+uint32_t                              GetScreenHeight();
+const std::string&                    GetUserName();
+int32_t                               GetUserId();
+const std::string&                    GetAudioInputDevice();
 const std::optional<ControllerColor>& GetControllerColor();
-uint32_t GetControllerSpeakerVolume();
-uint32_t GetControllerVibrationIntensity();
-uint32_t GetAudioMasterVolume();
-uint32_t GetAudioMainVolume();
-uint32_t GetAudioMusicVolume();
-uint32_t GetAudioPadSpeakerOnMainVolume();
-uint32_t GetAudioObjectsVolume();
-bool     AudioObjectsEnabled();
-PresentMode GetPresentMode();
-int32_t GetGpuIndex();
-bool     FullscreenEnabled();
-bool     HideCursorEnabled();
-bool     VrEnabled();
-bool     AmdCpuEnabled();
-const std::string& GetAmdCpuDecision();
-uint32_t GetVblankFrequency();
-uint32_t GetConsoleLanguage();
-bool     VulkanValidationEnabled();
+uint32_t                              GetControllerSpeakerVolume();
+uint32_t                              GetControllerVibrationIntensity();
+uint32_t                              GetAudioMasterVolume();
+uint32_t                              GetAudioMainVolume();
+uint32_t                              GetAudioMusicVolume();
+uint32_t                              GetAudioPadSpeakerOnMainVolume();
+uint32_t                              GetAudioObjectsVolume();
+bool                                  AudioObjectsEnabled();
+PresentMode                           GetPresentMode();
+int32_t                               GetGpuIndex();
+bool                                  FullscreenEnabled();
+bool                                  HdrEnabled();
+bool                                  HideCursorEnabled();
+bool                                  VrEnabled();
+bool                                  AmdCpuEnabled();
+const std::string&                    GetAmdCpuDecision();
+bool                                  IsNetworkConnected();
+uint32_t                              GetVblankFrequency();
+uint32_t                              GetConsoleLanguage();
+bool                                  VulkanValidationEnabled();
 
 bool                   ShaderValidationEnabled();
 ShaderOptimizationType GetShaderOptimizationType();

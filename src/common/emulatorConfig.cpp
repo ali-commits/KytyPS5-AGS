@@ -24,8 +24,8 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(cfg.user_name.empty() || cfg.user_name.size() > MAX_USER_NAME_LENGTH);
 	EXIT_IF(!IsConfiguredUserIdValid(cfg.user_id));
 	EXIT_IF(cfg.controller_speaker_volume > 100 || cfg.controller_vibration_intensity > 100);
-	EXIT_IF(cfg.audio_master_volume > MAX_AUDIO_VOLUME || cfg.audio_main_volume > MAX_AUDIO_VOLUME ||
-	        cfg.audio_music_volume > MAX_AUDIO_VOLUME ||
+	EXIT_IF(cfg.audio_master_volume > MAX_AUDIO_VOLUME ||
+	        cfg.audio_main_volume > MAX_AUDIO_VOLUME || cfg.audio_music_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_pad_speaker_main_volume > MAX_AUDIO_VOLUME ||
 	        cfg.audio_objects_volume > MAX_AUDIO_VOLUME);
 
@@ -100,6 +100,10 @@ bool FullscreenEnabled() {
 	return g_config->fullscreen_enabled;
 }
 
+bool HdrEnabled() {
+	return g_config->hdr_enabled;
+}
+
 bool HideCursorEnabled() {
 	return g_config->hide_cursor_enabled;
 }
@@ -126,6 +130,10 @@ uint32_t GetConsoleLanguage() {
 
 bool VulkanValidationEnabled() {
 	return g_config->vulkan_validation_enabled;
+}
+
+bool IsNetworkConnected() {
+	return g_config->network_connected;
 }
 
 bool ShaderValidationEnabled() {

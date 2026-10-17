@@ -42,6 +42,9 @@
 #include <windows.h>
 #endif
 #if defined(__linux__)
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -1376,6 +1379,84 @@ void CheckSocketReceiveBuffer(int reader, int writer) {
 }
 #endif
 
+#if defined(__linux__)
+void KYTY_SYSV_ABI RecordNetCtlEvent(int event, void* arg) {
+  auto& events = *static_cast<std::array<int, 2>*>(arg);
+  ++events[0];
+  events[1] = event;
+}
+
+void TestNetCtlHostIpv4() {
+  using namespace Libs::Network::NetCtl;
+  ifaddrs* interfaces = nullptr;
+  Check(getifaddrs(&interfaces) == 0, "enumerate host IPv4 addresses");
+  std::vector<uint32_t> host_addresses;
+  for (auto* interface = interfaces; interface != nullptr; interface = interface->ifa_next) {
+    if (interface->ifa_addr == nullptr || interface->ifa_addr->sa_family != AF_INET ||
+        (interface->ifa_flags & IFF_UP) == 0 || (interface->ifa_flags & IFF_RUNNING) == 0 ||
+        (interface->ifa_flags & IFF_LOOPBACK) != 0) {
+      continue;
+    }
+    const auto address = reinterpret_cast<const sockaddr_in*>(interface->ifa_addr)->sin_addr;
+    if (address.s_addr != 0 && (ntohl(address.s_addr) >> 24) != 127) {
+      host_addresses.push_back(address.s_addr);
+    }
+  }
+  freeifaddrs(interfaces);
+
+  Config::ConfigOptions options;
+  options.printf_direction = Config::LogDirection::Silent;
+  Check(!options.network_connected, "host networking requires explicit opt-in");
+  alignas(uint32_t) std::array<char, 256> storage {};
+  auto* info = reinterpret_cast<NetCtlInfo*>(storage.data());
+  constexpr int NotConnected = static_cast<int>(0x80412108u);
+  Check(NetCtlGetInfo(14, nullptr) == static_cast<int>(0x80412107u) &&
+            NetCtlGetInfo(0, info) == static_cast<int>(0x80412106u) &&
+            NetCtlGetInfo(22, info) == static_cast<int>(0x80412106u),
+        "NetCtl reports invalid output addresses and information codes");
+  for (bool enabled : {false, true}) {
+    options.network_connected = enabled;
+    Config::Load(options);
+    Check(NetCtlInit() == OK, "initialize NetCtl for selected network mode");
+    const bool connected = enabled && !host_addresses.empty();
+    int state = -1;
+    Check(NetCtlGetState(&state) == OK && state == (connected ? 3 : 0),
+          "NetCtl IPv4 state matches opt-in and host connectivity");
+    Check(NetCtlGetStateV6(&state) == OK && state == 0,
+          "IPv4 connectivity does not advertise IPv6 support");
+
+    Check(NetCtlGetInfo(14, info) == (connected ? OK : NotConnected),
+          "NetCtl IPv4 query respects network mode and host state");
+    in_addr address {};
+    if (connected) {
+      Check(inet_pton(AF_INET, storage.data(), &address) == 1 &&
+                std::find(host_addresses.begin(), host_addresses.end(), address.s_addr) !=
+                    host_addresses.end(),
+            "NetCtl reports an IPv4 address assigned to an active host interface");
+    }
+    Check(NetCtlGetInfo(15, info) == (connected ? OK : NotConnected) &&
+              (!connected || inet_pton(AF_INET, storage.data(), &address) == 1),
+          "NetCtl returns the active IPv4 netmask only in connected mode");
+    const int gateway_result = NetCtlGetInfo(16, info);
+    Check(gateway_result == NotConnected ||
+              (connected && gateway_result == OK &&
+               inet_pton(AF_INET, storage.data(), &address) == 1),
+          "NetCtl reports a valid IPv4 gateway or its absence");
+
+    std::array<int, 2> events {};
+    int callback_id = -1;
+    Check(NetCtlRegisterCallback(RecordNetCtlEvent, &events, &callback_id) == OK &&
+              NetCtlCheckCallback() == OK && events[0] == 1 &&
+              events[1] == (connected ? 3 : 1) && NetCtlCheckCallback() == OK && events[0] == 1,
+          "NetCtl delivers the matching connection event once while state is unchanged");
+    Check(NetCtlUnregisterCallback(callback_id) == OK, "release NetCtl callback");
+    NetCtlTerm();
+  }
+  options.network_connected = false;
+  Config::Load(options);
+}
+#endif
+
 void CheckEtherAddressFormatting() {
   Loader::SymbolDatabase symbols;
   Libs::LibNet::InitNet_1_Net(&symbols);
@@ -1740,6 +1821,9 @@ int main(int, char**) {
   FileSystem::Shutdown();
   CheckSocketWakeup();
   CheckEtherAddressFormatting();
+#if defined(__linux__)
+  TestNetCtlHostIpv4();
+#endif
   TestNpWebApi2Memory();
   graphics.reset();
   subsystems.Destroy();
