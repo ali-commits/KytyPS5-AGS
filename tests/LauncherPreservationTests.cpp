@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -139,8 +140,12 @@ private slots:
         for (const auto* name: {"checkBox_hdr", "checkBox_perf_overlay", "checkBox_network_connected",
                                 "comboBox_keyboard_player", "comboBox_audio_input_device",
                                 "slider_controller_volume", "slider_controller_vibration",
-                                "button_controller_color"})
+                                "button_controller_color"}) {
             QVERIFY2(dialog.findChild<QWidget*>(name), name);
+            // uic renames duplicate controls with a numeric suffix; users must see one control.
+            const QRegularExpression same_control("^" + QRegularExpression::escape(name) + "[0-9]*$");
+            QVERIFY2(dialog.findChildren<QWidget*>(same_control).size() == 1, name);
+        }
         tabs->setCurrentWidget(tabs->findChild<QWidget*>("settings_tab"));
         QVERIFY(Capture(dialog));
     }
@@ -227,7 +232,7 @@ private slots:
         info.controller.WriteSettings(&file);
         info.WriteGlobalOnlySettings(&file);
         for (const auto* key: {"hdr_enabled", "perf_overlay_enabled", "network_connected"})
-            QCOMPARE(file.value(key).toBool(), true);
+            QVERIFY2(file.value(key).toBool(), key);
         QCOMPARE(file.value("controller_keyboard_player").toInt(), 3);
         for (int i = 0; i < 5; ++i) QCOMPARE(file.value(AudioKeys[i]).toInt(), Levels[i]);
         Configuration reloaded;

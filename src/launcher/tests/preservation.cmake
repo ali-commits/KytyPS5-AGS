@@ -21,7 +21,11 @@ else()
         message(FATAL_ERROR "Set KYTY_LAUNCHER_WARM_BUILD to an existing native build for preservation tests")
     endif()
     target_include_directories(launcher_preservation_tests PRIVATE "${KYTY_LAUNCHER_WARM_BUILD}"
-        "${KYTY_LAUNCHER_WARM_BUILD}/../../3rdparty/Vulkan-Headers/include")
+        "${KYTY_LAUNCHER_WARM_BUILD}/../../3rdparty/Vulkan-Headers/include"
+        "${KYTY_LAUNCHER_WARM_BUILD}/../../3rdparty/nlohmann_json/include")
+    if(EXISTS "${preservation_root}/src/common/additionalContent.cpp")
+        target_sources(launcher_preservation_tests PRIVATE "${preservation_root}/src/common/additionalContent.cpp")
+    endif()
     target_link_libraries(launcher_preservation_tests PRIVATE
         "${KYTY_LAUNCHER_WARM_BUILD}/common/libcommon.a"
         "${KYTY_LAUNCHER_WARM_BUILD}/3rdparty/tracy/libTracyClient.a"
