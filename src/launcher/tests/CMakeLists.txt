@@ -17,3 +17,8 @@ set_target_properties(kyty_stream_launch PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${
 target_compile_definitions(launcher_streaming_tests PRIVATE KYTY_LAUNCHER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/LauncherStreamingFixtures.py")
 
 add_dependencies(launcher_streaming_tests kyty_stream_launch)
+
+if(KYTY_LAUNCHER_WARM_BUILD)
+    find_package(SDL3 CONFIG REQUIRED)
+    include(preservation.cmake)
+endif()
