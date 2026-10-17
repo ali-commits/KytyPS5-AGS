@@ -335,6 +335,9 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	const auto& sc          = hw.GetStencilControl();
 	const auto& sm          = hw.GetStencilMask();
 	const bool  has_stencil = z.stencil_info.format != Prospero::StencilFormat::kInvalid;
+	// Acquisition recomputes load clears from the image's current metadata. Resolution must
+	// start without those per-acquisition decisions, including on description memo hits.
+	r.load_clear_aspects = {};
 	// KYTY_RENDER_STATE_FAST reset: the draw state's entry is not value-initialised before the
 	// draw. The paths without a target do it here; the one with a target assigns every field
 	// (SameRenderDepthInfo names them all), the stencil states included.
