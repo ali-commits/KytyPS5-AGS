@@ -1655,12 +1655,19 @@ void TestFixedNoOverwriteRejectsReservedRange() {
 void TestDirectMapQueryOffsetAndPartialMunmap() {
 	const char* test = "DirectMapQueryOffsetAndPartialMunmap";
 
+	const auto debug_before = Libs::LibKernel::Memory::GetDebugStats();
 	int64_t phys_addr = 0;
 	CheckOk(test,
 	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
 	            SceKernelDirectMemoryStart, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
 	            SceKernelPageSize * 4, SceKernelPageSize, SceKernelMtypeC, &phys_addr),
 	        "KernelAllocateDirectMemory");
+
+	const auto debug_allocated = Libs::LibKernel::Memory::GetDebugStats();
+	Check(test, debug_allocated.direct_allocated == debug_before.direct_allocated + SceKernelPageSize * 4 &&
+	                debug_allocated.pooled_allocated == debug_before.pooled_allocated &&
+	                debug_allocated.automatic_allocated == 0,
+	      "performance stats misclassified a direct allocation");
 
 	void* addr = nullptr;
 	CheckOk(test,
@@ -3169,6 +3176,7 @@ void TestMemoryPoolAlignmentContracts() {
 void TestProsperoSampleMemoryPoolExpandCommit() {
 	const char* test = "ProsperoSampleMemoryPoolExpandCommit";
 
+	const auto debug_before = Libs::LibKernel::Memory::GetDebugStats();
 	int64_t pool_offset = -1;
 	CheckFailed(test,
 	            Libs::LibKernel::Memory::KernelMemoryPoolExpand(
@@ -3195,6 +3203,12 @@ void TestProsperoSampleMemoryPoolExpandCommit() {
 	      pool_offset >= 0 &&
 	          (static_cast<uint64_t>(pool_offset) & (SceKernelMemoryPoolAlignment - 1u)) == 0,
 	      "expanded physical range is not 64 KiB aligned");
+	const auto debug_expanded = Libs::LibKernel::Memory::GetDebugStats();
+	Check(test, debug_expanded.pooled_allocated == debug_before.pooled_allocated + SceKernelMemoryPoolExpandLen &&
+	                debug_expanded.direct_allocated == debug_before.direct_allocated &&
+	                debug_expanded.automatic_allocated == 0,
+	      "performance stats misclassified a pool expansion");
+
 	void* direct_alias = nullptr;
 	CheckFailed(test,
 	            Libs::LibKernel::Memory::KernelMapDirectMemory(

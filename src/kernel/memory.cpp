@@ -5093,17 +5093,12 @@ DebugStats GetDebugStats() {
 	if (g_physical_memory != nullptr) {
 		Common::LockGuard lock(g_physical_memory->GetMutex());
 		for (const auto& [start, block]: g_physical_memory->GetPhysicalBlocks()) {
-			switch (block.kind) {
-				case PhysicalMemory::AllocationKind::Direct:
-					stats.direct_allocated += block.size;
-					break;
-				case PhysicalMemory::AllocationKind::Pooled:
-					stats.pooled_allocated += block.size;
-					break;
-				case PhysicalMemory::AllocationKind::Automatic:
-					stats.automatic_allocated += block.size;
-					break;
+			if (block.pool_expansion) {
+				stats.pooled_allocated += block.size;
+			} else {
+				stats.direct_allocated += block.size;
 			}
+			// This fork has no automatic-allocation category; the default stays zero.
 		}
 		for (const auto& mapping: g_physical_memory->GetMappings()) {
 			stats.direct_mapped += mapping.map_size;
