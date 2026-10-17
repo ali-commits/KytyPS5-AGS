@@ -6,7 +6,9 @@
 #include "common/localization.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
+#include "gpu_blit_shaders/gpu_imgui_hdr_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/presentationPolicy.h"
 #include "imgui.h"
@@ -740,9 +742,10 @@ SystemOverlayVisualState GetSystemOverlayVisualState() noexcept {
 	const bool trophy_active = g_trophy_notification_active.load(std::memory_order_acquire);
 	const auto cursor        = GetHostInputTouchPadVisualState();
 	return {core.active || dialog.active || system.active || trophy_active ||
-	            (cursor.enabled && cursor.cursor_visible),
+	            (cursor.enabled && cursor.cursor_visible) || PerformanceOverlayEnabled(),
 	        core.revision + dialog.revision + system.revision + (trophy_active ? 1u : 0u) +
-	            static_cast<decltype(core.revision)>(cursor.revision)};
+	            static_cast<decltype(core.revision)>(cursor.revision) +
+	            PerformanceOverlayRevision()};
 }
 
 bool ProcessSystemOverlayInput(const SDL_Event& event) {
@@ -1097,6 +1100,11 @@ struct SystemOverlay::Impl {
 		info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount    = 1;
 		info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &color_format;
 		info.CheckVkResultFn = CheckVulkanResult;
+		if (IsHdrSwapchainFormat(format)) {
+			info.CustomShaderFragCreateInfo.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+			info.CustomShaderFragCreateInfo.codeSize = sizeof(GPU_IMGUI_HDR_SPV);
+			info.CustomShaderFragCreateInfo.pCode    = GPU_IMGUI_HDR_SPV;
+		}
 		EXIT_IF(!ImGui_ImplVulkan_Init(&info));
 		vulkan_initialized = true;
 	}
@@ -1633,7 +1641,7 @@ struct SystemOverlay::Impl {
 		}
 	}
 
-	void DrawTrophyNotification(vk::Extent2D frame_extent, Clock::time_point now) {
+	void DrawTrophyNotification(vk::Extent2D frame_extent, Clock::time_point now, float min_top) {
 		std::erase_if(retired_trophy_images, [](const auto& texture) {
 			if (texture->Status != ImTextureStatus_Destroyed) {
 				return false;
@@ -1701,7 +1709,7 @@ struct SystemOverlay::Impl {
 		const float  alpha    = std::min(fade_in, fade_out);
 		const float  slide    = (1.0f - fade_in) * (width + 24.0f);
 		const ImVec2 top_left {static_cast<float>(frame_extent.width) - 32.0f - width + slide,
-		                       32.0f};
+		                       std::max(32.0f, min_top + 12.0f)};
 		const ImVec2 bottom_right {top_left.x + width, top_left.y + height};
 		auto*        draw = ImGui::GetForegroundDrawList();
 		const auto   fade = [alpha](int r, int g, int b, int a) {
@@ -1769,7 +1777,7 @@ struct SystemOverlay::Impl {
 		const bool      has_overlay = GetOverlaySnapshot(&snapshot);
 		const auto      now         = Clock::now();
 		if (!has_overlay && !g_trophy_notification_active.load(std::memory_order_acquire) &&
-		    !GetHostInputTouchPadVisualState().enabled) {
+		    !GetHostInputTouchPadVisualState().enabled && !PerformanceOverlayEnabled()) {
 			return false;
 		}
 		const auto prepared_session = snapshot.session;
@@ -1800,6 +1808,7 @@ struct SystemOverlay::Impl {
 		last_frame     = now;
 		ImGui_ImplVulkan_NewFrame();
 		ImGui::NewFrame();
+		const float performance_bottom = DrawPerformanceOverlay(graphics, frame_extent);
 		GetOverlaySnapshot(&snapshot);
 		if (snapshot.session != prepared_session) {
 			ImGui::EndFrame();
@@ -1812,7 +1821,7 @@ struct SystemOverlay::Impl {
 				DrawIme(snapshot.ime, frame_extent);
 			}
 		}
-		DrawTrophyNotification(frame_extent, now);
+		DrawTrophyNotification(frame_extent, now, performance_bottom);
 		DrawTouchPadCursor(GetHostInputTouchPadVisualState());
 		ImGui::Render();
 		extent = frame_extent;

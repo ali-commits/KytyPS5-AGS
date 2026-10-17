@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hangTrace.h"
@@ -4069,6 +4070,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (occlusion_draw_rows && HangTrace::Enabled() &&
 		    m_context.GetOcclusionCounter().Active()) {
 			HangTrace::RecordOcclusion(event);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances,
+			                           draw.instance_count);
 		}
 	}
 

@@ -1,6 +1,7 @@
 #include "libs/audio.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
@@ -799,6 +800,9 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 			queued = SDL_GetAudioStreamQueued(port->stream);
 		}
 		if (queued < static_cast<int>(prepared_size)) {
+			if (port->queue_primed) {
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::AudioUnderruns);
+			}
 			port->queue_primed = false;
 		}
 		// Below target by more than a block: the device is consuming faster than the sample clock

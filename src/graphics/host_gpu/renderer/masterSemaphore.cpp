@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/hangWatchdog.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -40,16 +41,19 @@ void MasterSemaphore::Refresh() {
 	HangWatchdog::Scope query("master-counter-query",
 	                          reinterpret_cast<uint64_t>(static_cast<VkSemaphore>(m_semaphore)),
 	                          HangWatchdog::Enabled() ? CurrentTick() : 0);
-	uint64_t   counter = 0;
-	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
+	uint64_t            counter = 0;
+	const auto          result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
 	if (result != vk::Result::eSuccess) {
 		HangWatchdog::Scope error("master-counter-error",
 		                          reinterpret_cast<uint64_t>(static_cast<VkSemaphore>(m_semaphore)),
 		                          CurrentTick(),
 		                          static_cast<uint64_t>(static_cast<int64_t>(result)));
-		if (result == vk::Result::eErrorDeviceLost) DumpDeviceLossDiagnostics(m_graphics, CurrentTick());
-		EXIT("MasterSemaphore: counter query failed: %s (submission tick %" PRIu64 ", gpu tick %" PRIu64 ")\n",
-		     vk::to_string(result).c_str(), CurrentTick(), m_gpu_tick.load(std::memory_order_acquire));
+		if (result == vk::Result::eErrorDeviceLost)
+			DumpDeviceLossDiagnostics(m_graphics, CurrentTick());
+		EXIT("MasterSemaphore: counter query failed: %s (submission tick %" PRIu64
+		     ", gpu tick %" PRIu64 ")\n",
+		     vk::to_string(result).c_str(), CurrentTick(),
+		     m_gpu_tick.load(std::memory_order_acquire));
 	}
 
 	auto known = m_gpu_tick.load(std::memory_order_acquire);
@@ -58,9 +62,10 @@ void MasterSemaphore::Refresh() {
 	                                         std::memory_order_relaxed)) {
 	}
 	if (HangWatchdog::Enabled()) {
-		HangWatchdog::UpdateTimeline(
-		    m_watchdog_timeline, CurrentTick(), counter,
-		    m_submission_progress ? m_submission_progress->dispatched_tick.load() : CurrentTick() - 1);
+		HangWatchdog::UpdateTimeline(m_watchdog_timeline, CurrentTick(), counter,
+		                             m_submission_progress
+		                                 ? m_submission_progress->dispatched_tick.load()
+		                                 : CurrentTick() - 1);
 	}
 }
 
@@ -69,7 +74,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 		return;
 	}
 	// KYTY_CP_GAP_STATS (GPU thread only): readback drains, occlusion publication, the rest.
-	const auto      reason = Profiler::CurrentGpuWaitReason();
+	const auto          reason = Profiler::CurrentGpuWaitReason();
 	const CpGaps::Scope gap(reason == Profiler::FrameWait::GpuWaitDrain ? CpGaps::Cat::GpuWaitDrain
 	                        : reason == Profiler::FrameWait::GpuWaitOcclusion
 	                            ? CpGaps::Cat::GpuWaitOcclusion
@@ -108,6 +113,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	                         reinterpret_cast<uint64_t>(static_cast<VkSemaphore>(m_semaphore)),
 	                         tick, HangWatchdog::Enabled() ? KnownGpuTick() : 0, 0,
 	                         HangWatchdog::Enabled() ? CurrentTick() : 0);
+	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
+	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	if (result != vk::Result::eSuccess) {
 		HangWatchdog::Scope error("master-wait-error",

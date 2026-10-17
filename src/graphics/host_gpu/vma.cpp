@@ -77,7 +77,8 @@ uint64_t RetiredImageByteLimit(const GraphicContext& graphics) {
 size_t RetiredImageCountLimit() {
 	static const size_t limit = [] {
 		const auto* value = std::getenv("KYTY_NATIVE_IMAGE_POOL_COUNT");
-		return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t {1024};
+		return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10))
+		                        : size_t {1024};
 	}();
 	return limit;
 }
@@ -149,10 +150,10 @@ void DestroyNativeImage(VmaAllocator allocator, vk::Image image, VmaAllocation a
 // KYTY_VMA_BUDGET_CACHE_MS=N (default 0 = off): VMA fetches the memory budget from the driver
 // (vkGetPhysicalDeviceMemoryProperties2 with VkPhysicalDeviceMemoryBudgetPropertiesEXT) again once
 // 30 allocations or frees have passed since its last fetch, and buffer/image churn passes that many
-// times a second. With N > 0 the allocator's fetch is answered from a driver fetch younger than N ms,
-// each heap's usage moved by the device memory VMA allocated and freed since (VMA's device memory
-// callbacks), which is how VMA itself estimates usage between its fetches. Only other processes'
-// usage and the driver's budget are then up to N ms old.
+// times a second. With N > 0 the allocator's fetch is answered from a driver fetch younger than N
+// ms, each heap's usage moved by the device memory VMA allocated and freed since (VMA's device
+// memory callbacks), which is how VMA itself estimates usage between its fetches. Only other
+// processes' usage and the driver's budget are then up to N ms old.
 struct BudgetCache {
 	std::mutex                                            mutex;
 	PFN_vkGetPhysicalDeviceMemoryProperties2              fetch = nullptr;
@@ -179,13 +180,14 @@ uint32_t BudgetCacheIntervalMs() {
 	return ms;
 }
 
-void VKAPI_PTR BudgetCountAllocation(VmaAllocator /*allocator*/, uint32_t memory_type,
-                                     VkDeviceMemory /*memory*/, VkDeviceSize size, void* /*user_data*/) {
+void VKAPI_PTR BudgetCountAllocation(VmaAllocator /*allocator*/, uint32_t    memory_type,
+                                     VkDeviceMemory /*memory*/, VkDeviceSize size,
+                                     void* /*user_data*/) {
 	g_budget_cache.allocated[g_budget_cache.type_heap[memory_type]].fetch_add(
 	    static_cast<int64_t>(size), std::memory_order_relaxed);
 }
 
-void VKAPI_PTR BudgetCountFree(VmaAllocator /*allocator*/, uint32_t memory_type,
+void VKAPI_PTR BudgetCountFree(VmaAllocator /*allocator*/, uint32_t    memory_type,
                                VkDeviceMemory /*memory*/, VkDeviceSize size, void* /*user_data*/) {
 	g_budget_cache.allocated[g_budget_cache.type_heap[memory_type]].fetch_sub(
 	    static_cast<int64_t>(size), std::memory_order_relaxed);
@@ -219,7 +221,7 @@ void VKAPI_PTR CachedMemoryProperties2(VkPhysicalDevice                   physic
 	for (uint32_t heap = 0; heap < VK_MAX_MEMORY_HEAPS; heap++) {
 		const auto delta =
 		    cache.allocated[heap].load(std::memory_order_relaxed) - cache.allocated_at_fetch[heap];
-		const auto usage = static_cast<int64_t>(cache.usage[heap]) + delta;
+		const auto usage         = static_cast<int64_t>(cache.usage[heap]) + delta;
 		budget->heapUsage[heap]  = static_cast<VkDeviceSize>(std::max<int64_t>(usage, 0));
 		budget->heapBudget[heap] = cache.budget[heap];
 	}
@@ -241,7 +243,7 @@ bool GraphicContext::CreateAllocator() {
 	info.device           = device;
 	info.pVulkanFunctions = &functions;
 	info.vulkanApiVersion = VULKAN_TARGET_API_VERSION;
-	info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	info.flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	VmaDeviceMemoryCallbacks memory_callbacks {};
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
@@ -251,26 +253,26 @@ bool GraphicContext::CreateAllocator() {
 			    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
 			        static_cast<VkInstance>(instance), "vkGetPhysicalDeviceMemoryProperties2"));
 			if (cache.fetch != nullptr) {
-				cache.interval = std::chrono::milliseconds(interval_ms);
-				cache.valid    = false;
+				cache.interval        = std::chrono::milliseconds(interval_ms);
+				cache.valid           = false;
 				const auto properties = physical_device.getMemoryProperties();
 				for (uint32_t type = 0; type < properties.memoryTypeCount; type++) {
 					cache.type_heap[type] = properties.memoryTypes[type].heapIndex;
 				}
 				functions.vkGetPhysicalDeviceMemoryProperties2KHR = CachedMemoryProperties2;
-				memory_callbacks.pfnAllocate = BudgetCountAllocation;
-				memory_callbacks.pfnFree     = BudgetCountFree;
-				info.pDeviceMemoryCallbacks  = &memory_callbacks;
+				memory_callbacks.pfnAllocate                      = BudgetCountAllocation;
+				memory_callbacks.pfnFree                          = BudgetCountFree;
+				info.pDeviceMemoryCallbacks                       = &memory_callbacks;
 				LOGF("VMA budget cache: driver budget fetched at most every %u ms "
 				     "(KYTY_VMA_BUDGET_CACHE_MS)\n",
 				     interval_ms);
 			}
 		}
 	}
-	// KYTY_VRAM_LIMIT_MB=<n> (test tool, from chenxiao07/KytyPS5 05e64602f): every device-local heap
-	// as on a GPU with n MiB of video memory (VMA's heap size limit): its budget, the cache thresholds
-	// derived from the budget, and allocations past it failing. Code that reads the driver's heap
-	// sizes directly still sees the real ones.
+	// KYTY_VRAM_LIMIT_MB=<n> (test tool, from chenxiao07/KytyPS5 05e64602f): every device-local
+	// heap as on a GPU with n MiB of video memory (VMA's heap size limit): its budget, the cache
+	// thresholds derived from the budget, and allocations past it failing. Code that reads the
+	// driver's heap sizes directly still sees the real ones.
 	std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_limits {};
 	if (const char* text = std::getenv("KYTY_VRAM_LIMIT_MB"); text != nullptr) {
 		const uint64_t limit_mb = std::strtoull(text, nullptr, 10);
@@ -279,12 +281,14 @@ bool GraphicContext::CreateAllocator() {
 			const auto properties = physical_device.getMemoryProperties();
 			for (uint32_t heap = 0; heap < properties.memoryHeapCount; heap++) {
 				if (properties.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
-					heap_limits[heap] = std::min<VkDeviceSize>(limit_mb << 20u,
-					                                           properties.memoryHeaps[heap].size);
+					heap_limits[heap] =
+					    std::min<VkDeviceSize>(limit_mb << 20u, properties.memoryHeaps[heap].size);
 				}
 			}
 			info.pHeapSizeLimit = heap_limits.data();
-			std::fprintf(stderr, "KYTY_VRAM_LIMIT_MB: device-local heaps limited to %" PRIu64 " MiB\n", limit_mb);
+			std::fprintf(stderr,
+			             "KYTY_VRAM_LIMIT_MB: device-local heaps limited to %" PRIu64 " MiB\n",
+			             limit_mb);
 		}
 	}
 
@@ -330,17 +334,18 @@ bool GraphicContext::SparseImageSupported(const vk::ImageCreateInfo& info) {
 		}
 	}
 	vk::ImageFormatProperties properties {};
-	bool supported = physical_device.getImageFormatProperties(info.format, info.imageType, info.tiling,
-	                                                          info.usage, info.flags, &properties) ==
-	                     vk::Result::eSuccess &&
-	                 properties.maxMipLevels >= info.mipLevels;
+	bool                      supported = physical_device.getImageFormatProperties(
+	                                          info.format, info.imageType, info.tiling, info.usage, info.flags,
+	                                          &properties) == vk::Result::eSuccess &&
+	                                      properties.maxMipLevels >= info.mipLevels;
 	if (supported) {
 		uint32_t count = 0;
 		physical_device.getSparseImageFormatProperties(info.format, info.imageType, info.samples,
 		                                               info.usage, info.tiling, &count, nullptr);
 		std::vector<vk::SparseImageFormatProperties> formats(count);
 		physical_device.getSparseImageFormatProperties(info.format, info.imageType, info.samples,
-		                                               info.usage, info.tiling, &count, formats.data());
+		                                               info.usage, info.tiling, &count,
+		                                               formats.data());
 		supported = std::any_of(formats.begin(), formats.end(), [](const auto& format) {
 			return static_cast<bool>(format.aspectMask & vk::ImageAspectFlagBits::eColor);
 		});
@@ -360,7 +365,8 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 		return false;
 	}
 	auto sparse_info = info;
-	sparse_info.flags |= vk::ImageCreateFlagBits::eSparseBinding | vk::ImageCreateFlagBits::eSparseResidency;
+	sparse_info.flags |=
+	    vk::ImageCreateFlagBits::eSparseBinding | vk::ImageCreateFlagBits::eSparseResidency;
 	if (!SparseImageSupported(sparse_info)) {
 		return false;
 	}
@@ -374,9 +380,11 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 	device.getImageSparseMemoryRequirements(native, &count, nullptr);
 	std::vector<vk::SparseImageMemoryRequirements> sparse_requirements(count);
 	device.getImageSparseMemoryRequirements(native, &count, sparse_requirements.data());
-	const auto color = std::find_if(sparse_requirements.begin(), sparse_requirements.end(), [](const auto& entry) {
-		return static_cast<bool>(entry.formatProperties.aspectMask & vk::ImageAspectFlagBits::eColor);
-	});
+	const auto color =
+	    std::find_if(sparse_requirements.begin(), sparse_requirements.end(), [](const auto& entry) {
+		    return static_cast<bool>(entry.formatProperties.aspectMask &
+		                             vk::ImageAspectFlagBits::eColor);
+	    });
 	if (color == sparse_requirements.end() || requirements.alignment == 0 ||
 	    color->formatProperties.imageGranularity.width == 0 ||
 	    color->formatProperties.imageGranularity.height == 0 ||
@@ -392,18 +400,18 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 	state->tail_offset      = color->imageMipTailOffset;
 	state->tail_size        = color->imageMipTailSize;
 
-	image.image            = native;
-	image.allocation       = nullptr;
-	image.sparse           = std::move(state);
-	image.format           = sparse_info.format;
-	image.image_type       = sparse_info.imageType;
-	image.extent           = sparse_info.extent;
-	image.layers           = sparse_info.arrayLayers;
-	image.mip_levels       = sparse_info.mipLevels;
-	image.samples          = static_cast<uint32_t>(sparse_info.samples);
-	image.usage            = sparse_info.usage;
-	image.flags            = sparse_info.flags;
-	image.state            = {.layout = sparse_info.initialLayout};
+	image.image      = native;
+	image.allocation = nullptr;
+	image.sparse     = std::move(state);
+	image.format     = sparse_info.format;
+	image.image_type = sparse_info.imageType;
+	image.extent     = sparse_info.extent;
+	image.layers     = sparse_info.arrayLayers;
+	image.mip_levels = sparse_info.mipLevels;
+	image.samples    = static_cast<uint32_t>(sparse_info.samples);
+	image.usage      = sparse_info.usage;
+	image.flags      = sparse_info.flags;
+	image.state      = {.layout = sparse_info.initialLayout};
 	image.subresource_states.clear();
 	image.pool_eligible    = false;
 	image.pool_create_info = vk::ImageCreateInfo {};
@@ -411,8 +419,8 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 	if (HangTrace::Enabled()) {
 		HangTrace::RecordNativeImage(true, false, static_cast<uint32_t>(sparse_info.format),
 		                             sparse_info.extent.width, sparse_info.extent.height,
-		                             sparse_info.mipLevels, static_cast<uint32_t>(sparse_info.usage),
-		                             image.sparse->bytes);
+		                             sparse_info.mipLevels,
+		                             static_cast<uint32_t>(sparse_info.usage), image.sparse->bytes);
 	}
 	return true;
 }
@@ -430,14 +438,15 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 	const auto tail_first = std::min(state.tail_first, levels);
 	const bool need_tail  = !state.tail_bound && state.tail_size != 0 && tail_first < levels;
 	std::vector<vk::SparseImageMemoryBind> level_binds;
-	uint64_t                               bytes = 0;
-	const auto level_bytes = [&](uint32_t level) {
+	uint64_t                               bytes       = 0;
+	const auto                             level_bytes = [&](uint32_t level) {
 		const auto width  = std::max(image.extent.width >> level, 1u);
 		const auto height = std::max(image.extent.height >> level, 1u);
 		const auto depth  = std::max(image.extent.depth >> level, 1u);
-		const auto blocks = uint64_t {(width + state.granularity.width - 1) / state.granularity.width} *
-		                    ((height + state.granularity.height - 1) / state.granularity.height) *
-		                    ((depth + state.granularity.depth - 1) / state.granularity.depth);
+		const auto blocks =
+		    uint64_t {(width + state.granularity.width - 1) / state.granularity.width} *
+		    ((height + state.granularity.height - 1) / state.granularity.height) *
+		    ((depth + state.granularity.depth - 1) / state.granularity.depth);
 		return blocks * state.block_size;
 	};
 	for (uint32_t level = first; level < std::min(end, tail_first); ++level) {
@@ -454,11 +463,11 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 	requirements.alignment      = state.block_size;
 	requirements.memoryTypeBits = state.memory_type_bits;
 	VmaAllocationCreateInfo create {};
-	create.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	create.requiredFlags         = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	VmaAllocation     allocation = nullptr;
 	VmaAllocationInfo info {};
-	RequireVulkanSuccess(static_cast<vk::Result>(
-	                         vmaAllocateMemory(allocator, &requirements, &create, &allocation, &info)),
+	RequireVulkanSuccess(static_cast<vk::Result>(vmaAllocateMemory(allocator, &requirements,
+	                                                               &create, &allocation, &info)),
 	                     "allocate sparse image memory");
 	EXIT_IF(info.offset % state.block_size != 0);
 	uint64_t offset = info.offset;
@@ -467,8 +476,8 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 		bind.subresource  = vk::ImageSubresource {vk::ImageAspectFlagBits::eColor, level, 0};
 		bind.offset       = vk::Offset3D {0, 0, 0};
 		bind.extent       = vk::Extent3D {std::max(image.extent.width >> level, 1u),
-                                    std::max(image.extent.height >> level, 1u),
-                                    std::max(image.extent.depth >> level, 1u)};
+		                                  std::max(image.extent.height >> level, 1u),
+		                                  std::max(image.extent.depth >> level, 1u)};
 		bind.memory       = info.deviceMemory;
 		bind.memoryOffset = offset;
 		level_binds.push_back(bind);
@@ -481,8 +490,8 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 		tail_bind.memory         = info.deviceMemory;
 		tail_bind.memoryOffset   = offset;
 	}
-	vk::SparseImageMemoryBindInfo       level_info {image.image, static_cast<uint32_t>(level_binds.size()),
-                                                  level_binds.data()};
+	vk::SparseImageMemoryBindInfo level_info {
+	    image.image, static_cast<uint32_t>(level_binds.size()), level_binds.data()};
 	vk::SparseImageOpaqueMemoryBindInfo tail_info {image.image, 1, &tail_bind};
 	vk::BindSparseInfo                  bind_info {};
 	bind_info.imageBindCount       = level_binds.empty() ? 0u : 1u;
@@ -594,29 +603,31 @@ void GraphicContext::ReportVramStats() {
 	vmaCalculateStatistics(allocator, &total);
 	for (uint32_t heap = 0; heap < properties.memoryHeapCount; heap++) {
 		const bool  local = static_cast<bool>(properties.memoryHeaps[heap].flags &
-                                             vk::MemoryHeapFlagBits::eDeviceLocal);
+		                                      vk::MemoryHeapFlagBits::eDeviceLocal);
 		const auto& stats = total.memoryHeap[heap].statistics;
 		const auto  usage = static_cast<uint64_t>(budgets[heap].usage);
 		const auto  block = static_cast<uint64_t>(stats.blockBytes);
-		VramStats::Line("heap %u %s size=%.0f: usage=%.1f budget=%.1f | VMA blocks=%.1f (%u) "
-		                "allocations=%.1f (%u) slack=%.1f | outside VMA=%.1f MiB",
-		                heap, local ? "device" : "system",
-		                ToMiB(static_cast<uint64_t>(properties.memoryHeaps[heap].size)), ToMiB(usage),
-		                ToMiB(static_cast<uint64_t>(budgets[heap].budget)), ToMiB(block), stats.blockCount,
-		                ToMiB(static_cast<uint64_t>(stats.allocationBytes)), stats.allocationCount,
-		                ToMiB(block - std::min(block, static_cast<uint64_t>(stats.allocationBytes))),
-		                ToMiB(usage - std::min(usage, block)));
+		VramStats::Line(
+		    "heap %u %s size=%.0f: usage=%.1f budget=%.1f | VMA blocks=%.1f (%u) "
+		    "allocations=%.1f (%u) slack=%.1f | outside VMA=%.1f MiB",
+		    heap, local ? "device" : "system",
+		    ToMiB(static_cast<uint64_t>(properties.memoryHeaps[heap].size)), ToMiB(usage),
+		    ToMiB(static_cast<uint64_t>(budgets[heap].budget)), ToMiB(block), stats.blockCount,
+		    ToMiB(static_cast<uint64_t>(stats.allocationBytes)), stats.allocationCount,
+		    ToMiB(block - std::min(block, static_cast<uint64_t>(stats.allocationBytes))),
+		    ToMiB(usage - std::min(usage, block)));
 	}
 	for (uint32_t type = 0; type < properties.memoryTypeCount; type++) {
 		const auto& stats = total.memoryType[type].statistics;
 		if (stats.blockCount == 0) {
 			continue;
 		}
-		VramStats::Line("type %u (heap %u, flags 0x%x): VMA blocks=%.1f (%u) allocations=%.1f (%u) MiB",
-		                type, properties.memoryTypes[type].heapIndex,
-		                static_cast<uint32_t>(properties.memoryTypes[type].propertyFlags),
-		                ToMiB(static_cast<uint64_t>(stats.blockBytes)), stats.blockCount,
-		                ToMiB(static_cast<uint64_t>(stats.allocationBytes)), stats.allocationCount);
+		VramStats::Line(
+		    "type %u (heap %u, flags 0x%x): VMA blocks=%.1f (%u) allocations=%.1f (%u) MiB", type,
+		    properties.memoryTypes[type].heapIndex,
+		    static_cast<uint32_t>(properties.memoryTypes[type].propertyFlags),
+		    ToMiB(static_cast<uint64_t>(stats.blockBytes)), stats.blockCount,
+		    ToMiB(static_cast<uint64_t>(stats.allocationBytes)), stats.allocationCount);
 	}
 	std::string kinds;
 	for (size_t index = 0; index < static_cast<size_t>(VramStats::Kind::Count); index++) {
@@ -644,12 +655,13 @@ void GraphicContext::ReportVramStats() {
 	                ToMiB(GetDeviceMemoryUsage()), ToMiB(GetTotalMemoryBudget()));
 	// The driver's local memory (outside VMA) follows the largest per-invocation footprint.
 	const auto function_storage = VramStats::FunctionStorageMax();
-	VramStats::Line("Function-storage arrays: largest per invocation %llu bytes declared, %llu bytes given to "
-	                "the driver (%llu modules with such arrays; KYTY_FUNCTION_ARRAY_SHRINK %s)",
-	                static_cast<unsigned long long>(function_storage.declared),
-	                static_cast<unsigned long long>(function_storage.created),
-	                static_cast<unsigned long long>(function_storage.modules),
-	                function_storage.created < function_storage.declared ? "shrank them" : "off or no effect");
+	VramStats::Line(
+	    "Function-storage arrays: largest per invocation %llu bytes declared, %llu bytes given to "
+	    "the driver (%llu modules with such arrays; KYTY_FUNCTION_ARRAY_SHRINK %s)",
+	    static_cast<unsigned long long>(function_storage.declared),
+	    static_cast<unsigned long long>(function_storage.created),
+	    static_cast<unsigned long long>(function_storage.modules),
+	    function_storage.created < function_storage.declared ? "shrank them" : "off or no effect");
 }
 
 uint64_t GraphicContext::GetDeviceMemoryUsage() const {
@@ -670,6 +682,24 @@ uint64_t GraphicContext::GetDeviceMemoryUsage() const {
 		}
 	}
 	return usage;
+}
+
+uint32_t GraphicContext::GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> heaps) const {
+	if (allocator == nullptr) {
+		return 0;
+	}
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+	vmaGetHeapBudgets(allocator, budgets);
+	const auto count = physical_device_memory_properties.memoryHeapCount;
+	for (uint32_t heap = 0; heap < count; heap++) {
+		const auto& properties = physical_device_memory_properties.memoryHeaps[heap];
+		heaps[heap] = {.usage        = budgets[heap].usage,
+		               .budget       = budgets[heap].budget,
+		               .allocations  = budgets[heap].statistics.allocationCount,
+		               .device_local = static_cast<bool>(properties.flags &
+		                                                 vk::MemoryHeapFlagBits::eDeviceLocal)};
+	}
+	return count;
 }
 
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
@@ -719,32 +749,34 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		for (size_t i = m_retired_images.size(); i > 0; --i) {
 			const auto& retired = m_retired_images[i - 1];
 			if (retired.create == image_info) {
-				image.image = retired.image;
+				image.image      = retired.image;
 				image.allocation = retired.allocation;
 				EXIT_IF(retired.bytes > m_retired_image_bytes);
 				m_retired_image_bytes -= retired.bytes;
 				Profiler::CountFrameEvent(Profiler::FrameEvent::NativeImagePoolRemovedBytes,
 				                          retired.bytes);
-				m_retired_images.erase(m_retired_images.begin() + static_cast<std::ptrdiff_t>(i - 1));
+				m_retired_images.erase(m_retired_images.begin() +
+				                       static_cast<std::ptrdiff_t>(i - 1));
 				break;
 			}
 		}
-		Profiler::CountFrameEvent(image.image != nullptr ? Profiler::FrameEvent::NativeImagePoolHits
-		                                                 : Profiler::FrameEvent::NativeImagePoolMisses);
+		Profiler::CountFrameEvent(image.image != nullptr
+		                              ? Profiler::FrameEvent::NativeImagePoolHits
+		                              : Profiler::FrameEvent::NativeImagePoolMisses);
 	}
 	const bool pool_hit = image.image != nullptr;
 	if (image.image == nullptr) {
 		VmaAllocationCreateInfo alloc_info {};
 		alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		auto allocate = [&] {
+		auto allocate            = [&] {
 			Profiler::ScopedFrameWait timing(Profiler::FrameWait::NativeImageCreate);
-			vk::Image::CType native_image = VK_NULL_HANDLE;
-			VmaAllocation allocation = nullptr;
-			const auto result = static_cast<vk::Result>(vmaCreateImage(
+			vk::Image::CType          native_image = VK_NULL_HANDLE;
+			VmaAllocation             allocation   = nullptr;
+			const auto                result       = static_cast<vk::Result>(vmaCreateImage(
 			    allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 			    &alloc_info, &native_image, &allocation, nullptr));
 			if (result == vk::Result::eSuccess) {
-				image.image = native_image;
+				image.image      = native_image;
 				image.allocation = allocation;
 			}
 			return result;
@@ -764,13 +796,15 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			result                    = allocate();
 			static std::atomic<uint32_t> reported {0};
 			if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
-				std::fprintf(stderr, "Vulkan: video memory full, %s: %ux%ux%u format=%d layers=%u levels=%u "
-				     "(KYTY_IMAGE_SYSMEM_FALLBACK)\n",
-				     result == vk::Result::eSuccess ? "an image is in system memory"
-				                                    : "an image could not be created",
-				     image_info.extent.width, image_info.extent.height, image_info.extent.depth,
-				     static_cast<int>(image_info.format), image_info.arrayLayers,
-				     image_info.mipLevels);
+				std::fprintf(
+				    stderr,
+				    "Vulkan: video memory full, %s: %ux%ux%u format=%d layers=%u levels=%u "
+				    "(KYTY_IMAGE_SYSMEM_FALLBACK)\n",
+				    result == vk::Result::eSuccess ? "an image is in system memory"
+				                                   : "an image could not be created",
+				    image_info.extent.width, image_info.extent.height, image_info.extent.depth,
+				    static_cast<int>(image_info.format), image_info.arrayLayers,
+				    image_info.mipLevels);
 				LogMemoryBudget();
 			}
 		}
@@ -804,7 +838,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	image.flags      = image_info.flags;
 	image.state      = {.layout = image_info.initialLayout};
 	image.subresource_states.clear();
-	image.pool_eligible = recycle;
+	image.pool_eligible    = recycle;
 	image.pool_create_info = recycle ? image_info : vk::ImageCreateInfo {};
 
 	return true;
@@ -865,9 +899,8 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 			const auto count_limit = RetiredImageCountLimit();
 			if (bytes <= byte_limit && count_limit != 0) {
 				std::scoped_lock lock(m_retired_image_mutex);
-				while (!m_retired_images.empty() &&
-				       (m_retired_images.size() >= count_limit ||
-				        bytes > byte_limit - m_retired_image_bytes)) {
+				while (!m_retired_images.empty() && (m_retired_images.size() >= count_limit ||
+				                                     bytes > byte_limit - m_retired_image_bytes)) {
 					const auto oldest = m_retired_images.front();
 					DestroyNativeImage(allocator, oldest.image, oldest.allocation);
 					m_retired_image_bytes -= oldest.bytes;
@@ -875,8 +908,8 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 					                          oldest.bytes);
 					m_retired_images.erase(m_retired_images.begin());
 				}
-				m_retired_images.push_back({image.pool_create_info, image.image, image.allocation, bytes,
-				                            std::chrono::steady_clock::now()});
+				m_retired_images.push_back({image.pool_create_info, image.image, image.allocation,
+				                            bytes, std::chrono::steady_clock::now()});
 				m_retired_image_bytes += bytes;
 				Profiler::CountFrameEvent(Profiler::FrameEvent::NativeImagePoolRetires);
 				Profiler::CountFrameEvent(Profiler::FrameEvent::NativeImagePoolAddedBytes, bytes);
@@ -887,8 +920,8 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	if (!retained) {
 		DestroyNativeImage(allocator, image.image, image.allocation);
 	}
-	image.image      = nullptr;
-	image.allocation = nullptr;
+	image.image         = nullptr;
+	image.allocation    = nullptr;
 	image.pool_eligible = false;
 }
 

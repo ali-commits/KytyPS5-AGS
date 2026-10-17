@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/crashContext.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hangTrace.h"
@@ -140,9 +141,9 @@ struct StubbedImportRecord {
 // Each thunk passes its record's address: records never move, so a stub call reads its record
 // without touching the vector (which grows while modules load).
 static std::vector<std::unique_ptr<StubbedImportRecord>> g_stubbed_imports;
-static std::vector<uint64_t>            g_unresolved_stub_thunk_pages;
-static uint64_t                         g_unresolved_stub_thunk_offset = 0;
-static constexpr uint64_t               UNRESOLVED_STUB_PAGE_SIZE      = 4096;
+static std::vector<uint64_t>                             g_unresolved_stub_thunk_pages;
+static uint64_t                                          g_unresolved_stub_thunk_offset = 0;
+static constexpr uint64_t                                UNRESOLVED_STUB_PAGE_SIZE      = 4096;
 
 static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_address);
 
@@ -171,13 +172,13 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_address) {
 	g_unresolved_stub_thunk_offset += thunk_size;
 
 	uint8_t bytes[thunk_size] = {
-	    0x48, 0x83, 0xec, 0x08,               // sub rsp, 8
-	    0x48, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, // mov rdi, record_address
-	    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, UnresolvedImportStub
-	    0xff, 0xd0,                           // call rax
-	    0x48, 0x83, 0xc4, 0x08,               // add rsp, 8
-	    0x0f, 0x57, 0xc0,                     // xorps xmm0, xmm0
-	    0xc3,                                 // ret
+	    0x48, 0x83, 0xec, 0x08,                   // sub rsp, 8
+	    0x48, 0xbf, 0,    0,    0, 0, 0, 0, 0, 0, // mov rdi, record_address
+	    0x48, 0xb8, 0,    0,    0, 0, 0, 0, 0, 0, // mov rax, UnresolvedImportStub
+	    0xff, 0xd0,                               // call rax
+	    0x48, 0x83, 0xc4, 0x08,                   // add rsp, 8
+	    0x0f, 0x57, 0xc0,                         // xorps xmm0, xmm0
+	    0xc3,                                     // ret
 	};
 	const auto target = reinterpret_cast<uint64_t>(UnresolvedImportStub);
 	std::memcpy(bytes + 6, &record_address, sizeof(record_address));
@@ -213,7 +214,8 @@ static uint64_t GetCountingImportThunk(uint64_t target, const RelocationInfo& ri
 	}
 
 	constexpr uint64_t thunk_size = 32;
-	if (g_count_thunk_pages.empty() || g_count_thunk_offset + thunk_size > UNRESOLVED_STUB_PAGE_SIZE) {
+	if (g_count_thunk_pages.empty() ||
+	    g_count_thunk_offset + thunk_size > UNRESOLVED_STUB_PAGE_SIZE) {
 		auto page = Libs::LibKernel::Memory::AllocateRuntimeMemory(
 		    0, UNRESOLVED_STUB_PAGE_SIZE, Common::VirtualMemory::Mode::ExecuteReadWrite,
 		    "hang_trace_import_thunk");
@@ -226,7 +228,7 @@ static uint64_t GetCountingImportThunk(uint64_t target, const RelocationInfo& ri
 	auto* code = reinterpret_cast<uint8_t*>(g_count_thunk_pages.back() + g_count_thunk_offset);
 	g_count_thunk_offset += thunk_size;
 
-	uint8_t    bytes[thunk_size];
+	uint8_t bytes[thunk_size];
 	std::memset(bytes, 0xcc, sizeof(bytes));
 	size_t     i      = 0;
 	const auto emit   = [&](uint8_t b) { bytes[i++] = b; };
@@ -279,6 +281,7 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 // Returns 0 (rax and xmm0, see the thunk). Reported per import: its first call, then its call
 // count at powers of ten from 1,000 (UnresolvedImportLog).
 static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_address) {
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
 	auto*      record = reinterpret_cast<StubbedImportRecord*>(record_address);
 	const auto call   = record->calls.fetch_add(1, std::memory_order_relaxed) + 1;
 	if (UnresolvedImportLog::ReportFirst(call)) {
@@ -772,7 +775,8 @@ static bool TryHandleGuestAccessFault(const Common::HostException::ExceptionInfo
 	}
 	// The faulting instruction runs again when this handler returns (KYTY_READBACK_SIDE_WRITES).
 	const Libs::Graphics::FaultCost::RetriedFaultScope retried;
-	const bool handled = Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
+	const bool                                         handled =
+	    Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
 	if (HangTrace::Enabled()) {
 		HangTrace::ClearFaultContext();
 	}
@@ -791,15 +795,18 @@ static void ReportReciprocalSqrtTraps(double seconds, uint64_t frames) {
 	previous           = current;
 	const auto& bench  = Libs::Graphics::FaultCost::StartupBenchmark();
 	const auto  rate   = seconds > 0 ? static_cast<double>(traps) / seconds : 0.0;
-	std::printf("Kyty AMD instruction patch (Intel CPUs): last %.0f s: %.1f VRSQRTPS traps/frame (%.0f/s)", seconds,
-	            frames != 0 ? static_cast<double>(traps) / static_cast<double>(frames) : 0.0, rate);
+	std::printf(
+	    "Kyty AMD instruction patch (Intel CPUs): last %.0f s: %.1f VRSQRTPS traps/frame (%.0f/s)",
+	    seconds, frames != 0 ? static_cast<double>(traps) / static_cast<double>(frames) : 0.0,
+	    rate);
 	if (bench.valid) {
 		std::printf(", ~%.1f CPU cores busy trapping (%.2f us per trap round trip)",
 		            rate * (bench.fault_us - bench.fault_handler_us) / 1e6,
 		            bench.fault_us - bench.fault_handler_us);
 	}
 	if (ns != 0 && traps != 0) {
-		std::printf(", %.2f us emulation each", static_cast<double>(ns) / static_cast<double>(traps) / 1e3);
+		std::printf(", %.2f us emulation each",
+		            static_cast<double>(ns) / static_cast<double>(traps) / 1e3);
 	}
 	std::printf("\n");
 }
@@ -821,15 +828,15 @@ static std::string DescribeCodeAddress(uint64_t address) {
 	                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 	                       reinterpret_cast<LPCWSTR>(address), &module) != 0 &&
 	    module != nullptr) {
-		wchar_t     path[MAX_PATH] = {};
-		const DWORD length         = GetModuleFileNameW(module, path, MAX_PATH);
+		wchar_t           path[MAX_PATH] = {};
+		const DWORD       length         = GetModuleFileNameW(module, path, MAX_PATH);
 		std::wstring_view full(path, length);
 		const auto        slash = full.find_last_of(L"\\/");
 		const auto        name  = slash == std::wstring_view::npos ? full : full.substr(slash + 1);
-		char narrow[MAX_PATH * 3] = {};
-		const int bytes = WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()),
-		                                      narrow, static_cast<int>(sizeof(narrow) - 1), nullptr,
-		                                      nullptr);
+		char              narrow[MAX_PATH * 3] = {};
+		const int         bytes =
+		    WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), narrow,
+		                        static_cast<int>(sizeof(narrow) - 1), nullptr, nullptr);
 		return fmt::format("{}+0x{:x}", std::string_view(narrow, bytes > 0 ? bytes : 0),
 		                   address - reinterpret_cast<uint64_t>(module));
 	}
@@ -842,10 +849,12 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::EmulatedInstructions);
 		return true;
 	}
 
 	if (TryHandleGuestAccessFault(exception_info)) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 		return true;
 	}
 	if (info->type == Common::HostException::ExceptionType::AccessViolation &&
@@ -884,8 +893,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		       "rsi={:016x} rdi={:016x} rbp={:016x} rsp={:016x}\n"
 		       "r8 ={:016x} r9 ={:016x} r10={:016x} r11={:016x}\n"
 		       "r12={:016x} r13={:016x} r14={:016x} r15={:016x}\n",
-		       info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp, info->rsp,
-		       info->r8, info->r9, info->r10, info->r11, info->r12, info->r13, info->r14, info->r15);
+		       info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp,
+		       info->rsp, info->r8, info->r9, info->r10, info->r11, info->r12, info->r13, info->r14,
+		       info->r15);
 		if (IsReadableRange(info->exception_address - 48, 96)) {
 			const auto* code = reinterpret_cast<const uint8_t*>(info->exception_address - 48);
 			append("code (pc-48 .. pc+48, fault at byte 48):");
@@ -903,18 +913,18 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			append("\n");
 		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		// The faulting host call chain, unwound from the fault context, with each frame's module and
-		// offset (symbolize kyty_emulator.exe frames with llvm-symbolizer --obj=kyty_emulator.exe). A
-		// frame without unwind data (guest code) continues from the return address at RSP while that
-		// is readable.
+		// The faulting host call chain, unwound from the fault context, with each frame's module
+		// and offset (symbolize kyty_emulator.exe frames with llvm-symbolizer
+		// --obj=kyty_emulator.exe). A frame without unwind data (guest code) continues from the
+		// return address at RSP while that is readable.
 		if (info->native_context != nullptr) {
 			CONTEXT context = *static_cast<const CONTEXT*>(info->native_context);
 			append("host call chain:\n");
 			for (int frame = 0; frame < 32 && context.Rip != 0; frame++) {
 				append("  #{:02} 0x{:016x} {}\n", frame, static_cast<uint64_t>(context.Rip),
 				       DescribeCodeAddress(context.Rip));
-				DWORD64     image_base = 0;
-				auto*       function   = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+				DWORD64 image_base = 0;
+				auto*   function   = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
 				if (function == nullptr) {
 					if (!IsReadableRange(context.Rsp, sizeof(uint64_t))) {
 						break;
@@ -1111,10 +1121,10 @@ static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 	} else {
 		const bool weak = ri.bind == BindType::Weak || !program->fail_if_global_not_resolved;
 		if (!weak) {
-			LOGF("Stubbed: %s\n",
-			     fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr, ri.value, ri.name,
-			                 magic_enum::enum_name(ri.type), magic_enum::enum_name(ri.bind),
-			                 ri.dbg_name).c_str());
+			LOGF("Stubbed: %s\n", fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr,
+			                                  ri.value, ri.name, magic_enum::enum_name(ri.type),
+			                                  magic_enum::enum_name(ri.bind), ri.dbg_name)
+			                          .c_str());
 		}
 		if (ri.type == SymbolType::Object) {
 			value = g_invalid_memory;
@@ -1136,10 +1146,10 @@ static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 	if (program->dbg_print_reloc && patched && !ri.bind_self &&
 	    (ri.bind == BindType::Global || ri.bind == BindType::Weak ||
 	     ri.type == SymbolType::TlsModule)) {
-		LOGF("Relocate: %s\n",
-		     fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr, ri.value, ri.name,
-		                 magic_enum::enum_name(ri.type), magic_enum::enum_name(ri.bind),
-		                 ri.dbg_name).c_str());
+		LOGF("Relocate: %s\n", fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr,
+		                                   ri.value, ri.name, magic_enum::enum_name(ri.type),
+		                                   magic_enum::enum_name(ri.bind), ri.dbg_name)
+		                           .c_str());
 	}
 	return ri.resolved;
 }
@@ -1355,15 +1365,15 @@ void RuntimeLinker::UnloadProgram(Program* program) {
 
 	for (auto* importer: m_programs) {
 		const auto& info = *importer->dynamic_info;
-		const auto rela_count =
+		const auto  rela_count =
 		    static_cast<uint32_t>(info.rela_table_total_size / sizeof(Elf64_Rela));
 		ForEachRelocation(importer, [&](Elf64_Rela* r, uint32_t index, bool jmprela) {
 			const auto bit_index = (jmprela ? rela_count : 0) + index;
 			auto&      bits      = importer->rela_bits[bit_index >> 3u];
 			const auto mask      = 1u << (bit_index & 7u);
 			const auto type      = r->GetType();
-			if ((bits & mask) == 0 || (type != R_X86_64_64 && type != R_X86_64_GLOB_DAT &&
-			                           type != R_X86_64_JUMP_SLOT)) {
+			if ((bits & mask) == 0 ||
+			    (type != R_X86_64_64 && type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT)) {
 				return;
 			}
 			const auto& symbol = info.symbol_table[r->GetSymbol()];
@@ -1498,7 +1508,8 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 #endif
 
 	// The runtime automatically loads libc; other PRXs are requested by the application.
-	const auto libc_path = Libs::LibKernel::FileSystem::GetRealFilename("/app0/sce_module/libc.prx");
+	const auto libc_path =
+	    Libs::LibKernel::FileSystem::GetRealFilename("/app0/sce_module/libc.prx");
 	auto* libc = Common::File::IsFileExisting(libc_path) ? LoadProgram(libc_path) : nullptr;
 	RelocateAll();
 
@@ -1613,7 +1624,7 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 
 			if (rec == nullptr) {
 				for (auto* p: m_programs) {
-					const auto& libs = p->dynamic_info->export_libs;
+					const auto& libs    = p->dynamic_info->export_libs;
 					const auto& modules = p->dynamic_info->export_modules;
 					if (p->export_symbols == nullptr ||
 					    std::find(libs.begin(), libs.end(), *l) == libs.end() ||
@@ -1900,7 +1911,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 
 	uint64_t tls_handler_size = is_shared ? 0 : Jit::SafeCall::GetSize();
 	EXIT_IF(tls_handler_size > UINT64_MAX - program->base_size_aligned);
-	program->mapped_size = program->base_size_aligned + tls_handler_size;
+	program->mapped_size   = program->base_size_aligned + tls_handler_size;
 	const bool emulate_amd = Config::AmdCpuEnabled();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	const bool protect_memory_faults = Config::RedZoneProtectionEnabled();
@@ -2028,10 +2039,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		    !function_starts.empty();
 		const auto module_name = Common::PathToString(program->file_name.filename());
 		if (!have_function_starts) {
-			Log::WriteToConsoleAndLog(
-			    fmt::format("{}: {} not patched (function boundaries unavailable)\n",
-			                emulate_amd ? "AMD instruction patch for Intel CPUs" : "Guest red-zone protection",
-			                module_name));
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "{}: {} not patched (function boundaries unavailable)\n",
+			    emulate_amd ? "AMD instruction patch for Intel CPUs" : "Guest red-zone protection",
+			    module_name));
 		}
 		if (emulate_amd) {
 			X64InstructionEmulator::ConfigureReciprocalSqrtStats();
@@ -2049,8 +2060,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 				LOGF("Windows guest red-zone patching: %s, functions=%" PRIu64 ", red_zone=%" PRIu64
 				     ", memory=%" PRIu64 ", patched=%" PRIu64 ", short=%" PRIu64 ", stack=%" PRIu64
 				     ", control=%" PRIu64 ", unrelocatable=%" PRIu64 "\n",
-				     module_name.c_str(),
-				     result.function_count, result.red_zone_function_count,
+				     module_name.c_str(), result.function_count, result.red_zone_function_count,
 				     result.memory_instruction_count, result.patched_memory_instruction_count,
 				     result.short_memory_instruction_count,
 				     result.stack_dependent_memory_instruction_count,
@@ -2070,8 +2080,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 				if (!details.empty()) details += "; ";
 				details += fmt::format("{}: native={}, trapped={}, skipped={}", name, counts.native,
 				                       counts.trapped, counts.Skipped());
-				// Why sites have no native trampoline (the reasons add up to trapped + skipped, less
-				// INSERTQ/RDPID, which trap by design).
+				// Why sites have no native trampoline (the reasons add up to trapped + skipped,
+				// less INSERTQ/RDPID, which trap by design).
 				std::string reasons;
 				for (size_t i = 0; i < PatchRejectionCount; ++i) {
 					if (counts.rejected[i] != 0) {
@@ -2091,7 +2101,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			                      : skipped != 0     ? "partially patched"
 			                                         : "patched";
 			Log::WriteToConsoleAndLog(
-			    fmt::format("AMD instruction patch for Intel CPUs: {} {} ({})\n", module_name, status, details));
+			    fmt::format("AMD instruction patch for Intel CPUs: {} {} ({})\n", module_name,
+			                status, details));
 			if (totals.reciprocal_sqrt.found != 0) {
 				// The live log's VRSQRTPS trap rate: sites without a native trampoline still trap.
 				Libs::Graphics::FaultCost::SetPeriodicReporter(ReportReciprocalSqrtTraps);
@@ -2196,7 +2207,7 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 	GetDynValue(elf, &program->dynamic_info->rela_table_entry_size, DT_RELAENT);
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table_total_size % sizeof(Elf64_Rela) != 0 ||
 	                     program->dynamic_info->jmprela_table_size % sizeof(Elf64_Rela) != 0);
-	const auto rela_count = program->dynamic_info->rela_table_total_size / sizeof(Elf64_Rela);
+	const auto rela_count    = program->dynamic_info->rela_table_total_size / sizeof(Elf64_Rela);
 	const auto jmprela_count = program->dynamic_info->jmprela_table_size / sizeof(Elf64_Rela);
 	program->rela_bits.resize((rela_count + jmprela_count + 7u) / 8u);
 
@@ -2259,8 +2270,8 @@ void RuntimeLinker::Relocate(Program* program) {
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table == nullptr);
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table == nullptr);
 
-	const auto rela_count = static_cast<uint32_t>(
-	    program->dynamic_info->rela_table_total_size / sizeof(Elf64_Rela));
+	const auto rela_count =
+	    static_cast<uint32_t>(program->dynamic_info->rela_table_total_size / sizeof(Elf64_Rela));
 
 	ForEachRelocation(program, [&](Elf64_Rela* r, uint32_t index, bool jmprela) {
 		const auto bit_index = (jmprela ? rela_count : 0) + index;

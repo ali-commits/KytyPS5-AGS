@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/cpuPlacement.h"
+#include "common/debugCounters.h"
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
@@ -119,10 +120,10 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 }
 
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics, Role role)
-    : m_master(graphics,
-               role == Role::Guest && CommandRecorder::ConfiguredMode() != CommandRecorder::Mode::Off),
-      m_context(context), m_graphics(graphics),
-      m_command_pool(graphics, m_master), m_command(*this),
+    : m_master(graphics, role == Role::Guest &&
+                             CommandRecorder::ConfiguredMode() != CommandRecorder::Mode::Off),
+      m_context(context), m_graphics(graphics), m_command_pool(graphics, m_master),
+      m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
 	if (role == Role::Guest && GpuTiming::Enabled()) {
 		m_gpu_timing = std::make_unique<GpuTimestampRing>(graphics, GpuTimestampRing::GuestPairs);
@@ -310,9 +311,10 @@ bool CommandScheduler::PriorityDoneLocked(uint64_t tick) const noexcept {
 // operations are deletions, recycling and fault-buffer processing that nothing waits for; every
 // blocking pop, explicit wait and allocation path queries as before. Live switch
 // (common/liveSwitch.h): a parameter read at every pop.
-static Live::Switch g_pending_refresh_us("KYTY_PENDING_REFRESH_US", [](const char* value) -> int64_t {
-	return value == nullptr ? 0 : static_cast<int64_t>(std::strtoull(value, nullptr, 10));
-});
+static Live::Switch
+    g_pending_refresh_us("KYTY_PENDING_REFRESH_US", [](const char* value) -> int64_t {
+	    return value == nullptr ? 0 : static_cast<int64_t>(std::strtoull(value, nullptr, 10));
+    });
 
 static uint64_t PendingRefreshIntervalNs() {
 	return static_cast<uint64_t>(g_pending_refresh_us.Get()) * 1000u;
@@ -330,7 +332,8 @@ void CommandScheduler::PopOperations(bool wait_for_priority) {
 		// ticks need no driver query; explicit waits and allocation paths still refresh.
 		if (first_tick >= CurrentTick()) return;
 		if (!m_master.IsFree(first_tick)) {
-			if (const auto interval = PendingRefreshIntervalNs(); interval != 0 && !wait_for_priority) {
+			if (const auto interval = PendingRefreshIntervalNs();
+			    interval != 0 && !wait_for_priority) {
 				// The operations are queued in tick order: with the first one not known complete,
 				// none is, until the next query.
 				const auto now = GpuTiming::NowNs();
@@ -398,7 +401,7 @@ void CommandScheduler::DeferOperation(Common::UniqueFunction<void>&& operation) 
 }
 
 void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& operation,
-                                             PriorityOperationKind kind) {
+                                              PriorityOperationKind          kind) {
 	CheckActive();
 	EXIT_IF(!operation);
 	std::unique_lock lock(m_operation_mutex);
@@ -534,10 +537,11 @@ void CommandScheduler::DrainPriorityOperations() {
 
 // KYTY_PRIORITY_WAIT_SPIN_US (default 0): WaitPriorityOperations spins this long before blocking.
 // Live switch (common/liveSwitch.h), read at each wait.
-static Live::Switch g_priority_wait_spin_us("KYTY_PRIORITY_WAIT_SPIN_US", [](const char* value) -> int64_t {
-	const auto us = value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
-	return static_cast<int64_t>(std::min<unsigned long long>(us, 100'000ull));
-});
+static Live::Switch
+    g_priority_wait_spin_us("KYTY_PRIORITY_WAIT_SPIN_US", [](const char* value) -> int64_t {
+	    const auto us = value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
+	    return static_cast<int64_t>(std::min<unsigned long long>(us, 100'000ull));
+    });
 
 static uint64_t PriorityWaitSpinNs() {
 	return static_cast<uint64_t>(g_priority_wait_spin_us.Get()) * 1000u;
@@ -591,7 +595,7 @@ void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {
 	HangWatchdog::Scope callback("priority-or-pending-callback", reinterpret_cast<uint64_t>(this));
-	auto* previous                = g_deferred_callback_scheduler;
+	auto*               previous  = g_deferred_callback_scheduler;
 	g_deferred_callback_scheduler = this;
 	operation();
 	g_deferred_callback_scheduler = previous;
@@ -694,11 +698,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 		// The caller holds m_operation_mutex across this and the submit tick transition.
 		const bool generic = m_diagnostic_generic_completion || force_completion ||
 		                     submit.num_wait_semaphores != 0 || submit.num_signal_semaphores != 0;
-		const auto kind = m_diagnostic_eop_completion
-		                      ? (generic ? Profiler::FrameEvent::SubmitBoundaryEopMixed
-		                                 : Profiler::FrameEvent::SubmitBoundaryEopOnly)
-		                      : (generic ? Profiler::FrameEvent::SubmitBoundaryGeneric
-		                                 : Profiler::FrameEvent::SubmitBoundaryUnprotected);
+		const auto kind    = m_diagnostic_eop_completion
+		                         ? (generic ? Profiler::FrameEvent::SubmitBoundaryEopMixed
+		                                    : Profiler::FrameEvent::SubmitBoundaryEopOnly)
+		                         : (generic ? Profiler::FrameEvent::SubmitBoundaryGeneric
+		                                    : Profiler::FrameEvent::SubmitBoundaryUnprotected);
 		Profiler::CountFrameEvent(kind);
 		m_diagnostic_eop_completion     = false;
 		m_diagnostic_generic_completion = false;
@@ -753,17 +757,17 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 
 	if (graphics.submission_queue.Enabled()) {
 		KYTY_PROFILER_DETAIL_BLOCK("CommandScheduler::QueueDispatch");
-		QueuedSubmission queued {.submit = submit,
-		                         .progress = m_master.GetSubmissionProgress(),
+		QueuedSubmission queued {.submit           = submit,
+		                         .progress         = m_master.GetSubmissionProgress(),
 		                         .master_semaphore = m_master.Handle(),
-		                         .command = buffer,
-		                         .debug_op = m_command.m_debug_op,
-		                         .debug_submit = m_command.m_debug_submit_id,
-		                         .debug_arg0 = m_command.m_debug_arg0,
-		                         .debug_arg1 = m_command.m_debug_arg1,
-		                         .debug_arg2 = m_command.m_debug_arg2,
-		                         .debug_arg3 = m_command.m_debug_arg3,
-		                         .debug_arg4 = m_command.m_debug_arg4};
+		                         .command          = buffer,
+		                         .debug_op         = m_command.m_debug_op,
+		                         .debug_submit     = m_command.m_debug_submit_id,
+		                         .debug_arg0       = m_command.m_debug_arg0,
+		                         .debug_arg1       = m_command.m_debug_arg1,
+		                         .debug_arg2       = m_command.m_debug_arg2,
+		                         .debug_arg3       = m_command.m_debug_arg3,
+		                         .debug_arg4       = m_command.m_debug_arg4};
 		{
 			// The callback runner may already have popped a callback. Record the
 			// boundary at registration, never by inspecting the callback queues here.
@@ -771,7 +775,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 			count_boundary();
 			queued.tick = m_master.NextTick();
 			queued.submit.AddSignal(m_master.Handle(), queued.tick);
-			queued.preserve_completion = force_completion || m_preserve_current_completion;
+			queued.preserve_completion    = force_completion || m_preserve_current_completion;
 			m_preserve_current_completion = false;
 		}
 		const auto tick = queued.tick;
@@ -827,6 +831,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool force_completion) {
 			result = graphics.queue.submit(1, &submit_info, nullptr);
 		}
 	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
 	if (result == vk::Result::eErrorDeviceLost) {
 		DumpDeviceLossDiagnostics(graphics, tick);

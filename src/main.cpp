@@ -122,62 +122,64 @@ static void PrintUsage() {
 	         "                                      the game sound. Default: 100.\n");
 	::printf("  --audio-objects <on|off>            Play 3D audio objects (off: dropped). Default: "
 	         "on.\n");
-	return false;
-}
-::printf("  --controller-vibration <0-100>      DualSense vibration intensity. Default: 100.\n");
-::printf("  --keyboard-player <0-4>             Keyboard player; 0 shares player 1 with the "
-         "gamepad. Default: 0.\n");
-::printf("  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
-::printf("  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
-::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
-::printf("  --hdr                                Enable HDR10 output when supported.\n");
-::printf("  --hide-cursor                        Hide the cursor after 2 s idle. Default: off.\n");
-::printf("  --vr                                 Enable the virtual VR headset.\n");
-::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
-         "AMD-only\n"
-         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS "
-         "results).\n"
-         "                                       Default: on unless the CPU is an AMD "
-         "(KYTY_AMD_CPU=\n"
-         "                                       1|0|auto overrides).\n");
-::printf("  --no-amd-cpu                         Turn Intel CPU compatibility off on a non-AMD "
-         "CPU.\n");
-::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
-::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
-::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
-::printf("  --network-connected <true|false>     Use the host local network (default: false).\n");
-::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
-         "                                       Implies --vulkan-validation; very slow.\n");
-::printf("  --shader-validation <true|false>     Enable shader validation.\n");
-::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
-::printf("  --gpu-occlusion <on|off>             Accurate GPU occlusion queries (on) or always "
-         "visible\n"
-         "                                       (off, faster). Overrides KYTY_GPU_OCCLUSION (the\n"
-         "                                       bundled preset: off).\n");
-::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
-::printf("  --shader-log-direction <value>       Silent, Console, or File.\n");
-::printf("  --shader-log-folder <path>           Shader log output folder.\n");
-::printf("  --command-buffer-dump <true|false>   Enable command buffer dumps.\n");
-::printf("  --command-buffer-dump-folder <path>  Command buffer dump folder.\n");
-::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
-::printf("  --printf-direction <value>           Silent, Console, or File.\n");
-::printf("  --printf-output-file <path>          Guest printf output file.\n");
-::printf("  --profile                            Enable the Tracy profiler.\n");
-::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
-::printf("  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
-::printf("  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. "
-         "Default: false.\n");
-::printf("  --trophy-notifications <true|false>   Show trophy unlock toasts and play their "
-         "sound.\n");
-::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
-::printf("  --skip-notice-screen <true|false>    Skip startup logos and notices in supported "
-         "games.\n"
-         "                                      Default: false.\n");
+	::printf(
+	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
+	::printf(
+	    "  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
+	::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
+	::printf("  --hdr                                Enable HDR10 output when supported.\n");
+	::printf(
+	    "  --hide-cursor                        Hide the cursor after 2 s idle. Default: off.\n");
+	::printf("  --vr                                 Enable the virtual VR headset.\n");
+	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
+	         "AMD-only\n"
+	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS "
+	         "results).\n"
+	         "                                       Default: on unless the CPU is an AMD "
+	         "(KYTY_AMD_CPU=\n"
+	         "                                       1|0|auto overrides).\n");
+	::printf("  --no-amd-cpu                         Turn Intel CPU compatibility off on a non-AMD "
+	         "CPU.\n");
+	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
+	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
+	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
+	::printf(
+	    "  --network-connected <true|false>     Use the host local network (default: false).\n");
+	::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
+	         "                                       Implies --vulkan-validation; very slow.\n");
+	::printf("  --shader-validation <true|false>     Enable shader validation.\n");
+	::printf(
+	    "  --tessellation                      Draw tessellation patches; skipped by default.\n");
+	::printf(
+	    "  --gpu-occlusion <on|off>             Accurate GPU occlusion queries (on) or always "
+	    "visible\n"
+	    "                                       (off, faster). Overrides KYTY_GPU_OCCLUSION (the\n"
+	    "                                       bundled preset: off).\n");
+	::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
+	::printf("  --shader-log-direction <value>       Silent, Console, or File.\n");
+	::printf("  --shader-log-folder <path>           Shader log output folder.\n");
+	::printf("  --command-buffer-dump <true|false>   Enable command buffer dumps.\n");
+	::printf("  --command-buffer-dump-folder <path>  Command buffer dump folder.\n");
+	::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
+	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
+	::printf("  --printf-output-file <path>          Guest printf output file.\n");
+	::printf("  --profile                            Enable the Tracy profiler.\n");
+	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
+	::printf(
+	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
+	::printf("  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. "
+	         "Default: false.\n");
+	::printf("  --trophy-notifications <true|false>   Show trophy unlock toasts and play their "
+	         "sound.\n");
+	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
+	::printf("  --skip-notice-screen <true|false>    Skip startup logos and notices in supported "
+	         "games.\n"
+	         "                                      Default: false.\n");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-::printf("  --redzone                            Protect the guest SysV red zone.\n");
+	::printf("  --redzone                            Protect the guest SysV red zone.\n");
 #endif
-::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
-::printf("  --rd                                 Enable RenderDoc capture.\n");
+	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
+	::printf("  --rd                                 Enable RenderDoc capture.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -604,6 +606,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--skip-notice-screen") {
 			if (!ParseBool(value, options.config.skip_notice_screen)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--perf-overlay") {
+			if (!ParseBool(value, options.config.perf_overlay_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

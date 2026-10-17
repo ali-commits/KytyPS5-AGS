@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/renderDoc.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
@@ -508,19 +509,37 @@ void WindowContext::ProcessDisplayEvent(const SDL_DisplayEvent& display) {
 void WindowContext::ProcessEvent(double time_s) {
 	auto& game  = loop;
 	auto* event = &game.event;
-	if ((event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
-	    event->key.key == SDLK_F7) {
-		if (event->type == SDL_EVENT_KEY_DOWN && event->key.repeat == 0) {
-			HostInputToggleMouseToJoystick();
+	if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+		const bool pressed = event->type == SDL_EVENT_KEY_DOWN && event->key.repeat == 0;
+		switch (event->key.key) {
+			case SDLK_F7:
+				if (pressed) {
+					HostInputToggleMouseToJoystick();
+				}
+				return;
+			case SDLK_F8:
+				if (pressed) {
+					Controller::CycleKeyboardPlayer();
+				}
+				return;
+#if defined(__APPLE__)
+			case SDLK_P:
+				if ((event->key.mod & SDL_KMOD_GUI) == 0) {
+					break;
+				}
+				[[fallthrough]];
+#endif
+			case SDLK_F2:
+				if (pressed) {
+					if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
+						TogglePerformanceOverlayDetails();
+					} else {
+						TogglePerformanceOverlay();
+					}
+				}
+				return;
+			default: break;
 		}
-		return;
-	}
-	if ((event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
-	    event->key.key == SDLK_F8) {
-		if (event->type == SDL_EVENT_KEY_DOWN && event->key.repeat == 0) {
-			Controller::CycleKeyboardPlayer();
-		}
-		return;
 	}
 	if (ProcessSystemOverlayInput(*event)) {
 		return;
