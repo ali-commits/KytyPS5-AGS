@@ -3820,7 +3820,7 @@ void TextureCache::MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
 	const auto  layers = desc.info.TransferLayers();
 	if (!range.Valid() || layers == 0 || range.size % layers != 0 ||
 	    (range.size / layers) % 4 != 0 || desc.info.resources.levels != 1 || desc.info.IsVolume() ||
-	    desc.info.samples != 1 || view.layer_count == 0 || metadata_base_layer >= layers ||
+	    view.layer_count == 0 || metadata_base_layer >= layers ||
 	    view.layer_count > layers - metadata_base_layer) {
 		Profiler::CountFrameEvent(Event::CmaskFastClearShape);
 		ClearTrace("CMASK", "shape", range.address, range.size, desc.info.data.address,
@@ -3902,7 +3902,7 @@ void TextureCache::MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
 			           metadata.address, metadata.size, desc.info.data.address, desc.info.data.size,
 			           desc.info.extent.width, desc.info.extent.height, value ? *value : 0u);
 			// 0xFFFFFFFF: every tile expanded (no pending clear). Anything else: some tiles are not
-			// fast-cleared (or the bytes encode nothing a single-sample surface uses).
+			// fast-cleared (or the bytes do not prove a uniform fast clear).
 			Profiler::CountFrameEvent(value && *value == UINT32_MAX
 			                              ? Event::CmaskFastClearExpanded
 			                              : Event::CmaskFastClearUnproven);
@@ -3969,7 +3969,7 @@ void TextureCache::MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
 		                          view.layer_count);
 		return;
 	}
-	// No native inspection: read the undecided slices back, as the DCC CPU fallback does.
+	// No native inspection (including MSAA): read undecided slices back, as the DCC fallback does.
 	for (uint32_t slice = 0; slice < view.layer_count; slice++) {
 		if (native[slice] == 0) {
 			continue;

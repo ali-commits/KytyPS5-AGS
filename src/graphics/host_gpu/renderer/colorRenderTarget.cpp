@@ -561,9 +561,10 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	// CMASK fast clears (CB_COLORn_INFO.FAST_CLEAR): a CMASK tile marked cleared reads as the
 	// CLEAR_WORD colour to the colour block and is written with it by the fast-clear eliminate.
 	// The host image holds expanded texels, so the texture cache applies a pending clear when the
-	// target is bound (TextureCache::MaterializeCmaskClear). Single-sample, single-mip 2D targets.
+	// target is bound (TextureCache::MaterializeCmaskClear). Single-mip 2D targets, including MSAA.
 	if (!has_dcc && CmaskFastClearEnabled() && rt.info.cmask_fast_clear_enable &&
-	    rt.cmask.addr != 0 && tile && !texture_tile && !volume && samples == 1 && levels == 1) {
+	    rt.cmask.addr != 0 && tile && !texture_tile && !volume && levels == 1 &&
+	    !rt.attrib3.write_vrs_rate_hint_to_cmask) {
 		TileSizeAlign cmask_size {};
 		if (TileGetCmaskSize(width, height, view.image_layers, cmask_size)) {
 			desc.cmask.range       = {rt.cmask.addr, cmask_size.size};

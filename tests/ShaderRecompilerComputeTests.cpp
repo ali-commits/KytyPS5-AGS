@@ -17170,22 +17170,36 @@ public:
                                  vk::Extent3D extent = {1, 1, 1}, uint32_t layer = 0,
                                  uint32_t mip = 0) {
     auto &scheduler = context.GetCommandScheduler();
-    auto &image = context.GetTextureCache().GetImage(id);
-    const auto bytes = image.info.bytes_per_block * extent.width *
+    auto *image = &context.GetTextureCache().GetImage(id);
+    std::unique_ptr<Libs::Graphics::Image> resolved;
+    if (image->backing.samples > 1) {
+      auto info = image->info;
+      info.data = {};
+      info.metadata = {};
+      info.samples = 1;
+      info.resources = {1, 1};
+      info.extent.width = std::max(info.extent.width >> mip, 1u);
+      info.extent.height = std::max(info.extent.height >> mip, 1u);
+      resolved = std::make_unique<Libs::Graphics::Image>(m_runtime_context, scheduler, info);
+      resolved->Resolve(*image, {mip, 1, layer, 1}, {});
+      image = resolved.get();
+      layer = mip = 0;
+    }
+    const auto bytes = image->info.bytes_per_block * extent.width *
                        extent.height * extent.depth;
     auto probe = CreateHostBuffer(name, bytes,
                                  vk::BufferUsageFlagBits::eTransferDst, {});
     scheduler.Current().EndRendering();
-    image.Transit(vk::ImageLayout::eTransferSrcOptimal,
+    image->Transit(vk::ImageLayout::eTransferSrcOptimal,
                   vk::AccessFlagBits2::eTransferRead, {},
                   scheduler.Current().Handle());
     vk::BufferImageCopy copy{};
-    copy.imageSubresource = {image.info.IsDepth() ? vk::ImageAspectFlagBits::eDepth
+    copy.imageSubresource = {image->info.IsDepth() ? vk::ImageAspectFlagBits::eDepth
                                                 : vk::ImageAspectFlagBits::eColor, mip, layer, 1};
     copy.imageOffset = offset;
     copy.imageExtent = extent;
     scheduler.Current().Handle().copyImageToBuffer(
-        image.backing.image, vk::ImageLayout::eTransferSrcOptimal,
+        image->backing.image, vk::ImageLayout::eTransferSrcOptimal,
         probe.buffer, 1, &copy);
     vk::BufferMemoryBarrier barrier{};
     barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -20714,11 +20728,19 @@ public:
   // (GPU fill or CPU write) clears again. Astro Bot's foliage-interaction input (1024x1024
   // RGBA16F) is fast-cleared this way every frame; ignoring it left stale and NaN texels.
   void CheckRenderExecutorCmaskFastClear() {
-    constexpr const char *name = "RenderExecutorCmaskFastClear";
+    CheckRenderExecutorCmaskFastClearCase(0, false);
+    CheckRenderExecutorCmaskFastClearCase(2, false);
+    CheckRenderExecutorCmaskFastClearCase(2, true);
+  }
+
+  void CheckRenderExecutorCmaskFastClearCase(uint32_t samples_log2, bool fmask) {
+    const char *name = samples_log2 == 0 ? "RenderExecutorCmaskFastClear"
+        : fmask ? "CmaskFastClear4xFmaskArray" : "CmaskFastClear4xArray";
+    const uint32_t selected_layer = samples_log2 == 0 ? 0 : 1;
     constexpr uintptr_t base = 0x0000000206a00000ull;
-    constexpr uint64_t allocation_size = 0x200000;
+    constexpr uint64_t allocation_size = 0x1000000;
     constexpr uint64_t allocation_alignment = 0x10000;
-    constexpr uint64_t cmask_address = base + 0x100000;
+    constexpr uint64_t cmask_address = base + 0x800000;
     // (1.0, 2.0, -1.0, 0.5) as RGBA16F texel bits.
     constexpr uint32_t clear_word0 = 0x40003c00u;
     constexpr uint32_t clear_word1 = 0x3800bc00u;
@@ -20754,6 +20776,11 @@ public:
                 TileGetCmaskSize(1024, 1024, 1, cmask_size) && cmask_size.size == 0x2000 &&
                 TileGetCmaskSize(512, 256, 1, cmask_size),
             "unexpected CMASK footprint");
+    Require(name, "array CMASK size",
+            TileGetCmaskSize(512, 256, selected_layer + 1, cmask_size),
+            "array CMASK footprint is unavailable");
+    const auto slice_size = cmask_size.size / (selected_layer + 1);
+    const auto selected_cmask = cmask_address + slice_size * selected_layer;
 
     int64_t direct_offset = -1;
     Require(name, "direct allocation",
@@ -20784,10 +20811,16 @@ public:
         auto &scheduler = context.GetCommandScheduler();
         registers.SetColorBase(0, {.addr = base});
         registers.SetColorInfo(
-            0, {.cmask_fast_clear_enable = true,
+            0, {.fmask_compression_enable = fmask,
+                .cmask_fast_clear_enable = true,
                 .format = Prospero::ChannelLayout::k16_16_16_16,
                 .channel_type = Prospero::ChannelType::kFloat,
                 .channel_order = Prospero::ChannelOrder::kStandard});
+        registers.SetColorView(0, {.base_array_slice_index = selected_layer,
+                                   .last_array_slice_index = selected_layer});
+        registers.SetColorAttrib(0, {.num_samples = samples_log2,
+                                     .num_fragments = samples_log2});
+        registers.SetColorFmask(0, {.addr = fmask ? base + 0xc00000 : 0});
         registers.SetColorAttrib2(0, {.height = 255, .width = 511});
         registers.SetColorAttrib3(0,
                                   {.tile_mode = Prospero::TileMode::kRenderTarget,
@@ -20807,20 +20840,20 @@ public:
                                .num_thread_x = 64, .num_thread_y = 1, .num_thread_z = 1,
                                .wave_size = 64, .user_sgpr = 10, .tgid_x_en = true});
           const std::array<uint32_t, 10> user_data{
-              static_cast<uint32_t>(cmask_address),
-              static_cast<uint32_t>(cmask_address >> 32u) | (4u << 16u),
+              static_cast<uint32_t>(selected_cmask),
+              static_cast<uint32_t>(selected_cmask >> 32u) | (4u << 16u),
               count, 0x00014004u, value, 0, 0x200, 0, count, 1};
           for (uint32_t i = 0; i < user_data.size(); i++) {
             shaders.SetCsUserSgpr(i, user_data[i], HW::UserSgprType::Unknown);
           }
           executor.DispatchDirect(0, scheduler.Current(), (count + 63) / 64, 1, 1, 0x41u);
         };
-        const auto cmask_words = static_cast<uint32_t>(cmask_size.size / 4);
+        const auto cmask_words = static_cast<uint32_t>(slice_size / 4);
         const auto cmask_bytes = [&] {
-          context.GetBufferCache().ReadMemory(cmask_address, cmask_size.size, false);
-          std::vector<uint8_t> bytes(cmask_size.size);
+          context.GetBufferCache().ReadMemory(selected_cmask, slice_size, false);
+          std::vector<uint8_t> bytes(slice_size);
           Require(name, "CMASK readback",
-                  LibKernel::Memory::TryReadBacking(cmask_address, bytes.data(), bytes.size()),
+                  LibKernel::Memory::TryReadBacking(selected_cmask, bytes.data(), bytes.size()),
                   "CMASK bytes are unavailable");
           return bytes;
         };
@@ -20835,28 +20868,39 @@ public:
                                                              color, 0);
           (void)texture_cache.FindRenderTarget(color.image_id, color.desc);
         };
+        const auto read_selected = [&](vk::Offset3D offset = {}) {
+          return ReadCachedTexel(name, context, color.image_id, offset, {1, 1, 1},
+                                 selected_layer);
+        };
         const std::vector<u32> painted{0x00003c00u, 0x3c003c00u};
         const auto paint = [&] {
           vk::ClearValue clear{};
           clear.color.float32 = std::array{1.0f, 0.0f, 1.0f, 1.0f};
           TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), color.image_id,
-                                             {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+                                             {vk::ImageAspectFlagBits::eColor, 0, 1, selected_layer, 1},
                                              clear);
         };
 
         bind();
+        if (samples_log2 != 0) {
+          vk::ClearValue zero{};
+          TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), color.image_id,
+              {vk::ImageAspectFlagBits::eColor, 0, 1, 0, selected_layer + 1}, zero);
+          // An unbound slice has a pending clear too; only the selected slice may consume it.
+          WriteMetadata(context, cmask_address, slice_size, 0);
+        }
         Require(name, "expanded CMASK keeps contents",
                 color.image_id && color.desc.cmask.valid &&
                     color.desc.cmask.range.address == cmask_address &&
                     color.desc.cmask.range.size == cmask_size.size &&
-                    ReadCachedTexel(name, context, color.image_id) == std::vector<u32>{0, 0},
+                    read_selected() == std::vector<u32>{0, 0},
                 "a target whose CMASK marks no tile cleared was changed");
 
         fill_cmask(cmask_words, 0);
         bind();
         Require(name, "fast clear on bind",
-                ReadCachedTexel(name, context, color.image_id) == cleared_texel &&
-                    ReadCachedTexel(name, context, color.image_id, {511, 255, 0}) ==
+                read_selected() == cleared_texel &&
+                    read_selected({511, 255, 0}) ==
                         cleared_texel,
                 "a CMASK fast clear was not applied to the bound RGBA16F target");
         Require(name, "CMASK expanded after the clear", all_bytes(cmask_bytes(), 0xff),
@@ -20865,28 +20909,59 @@ public:
         paint();
         bind();
         Require(name, "rebinding keeps rendering",
-                ReadCachedTexel(name, context, color.image_id) == painted,
+                read_selected() == painted,
                 "rebinding after a consumed fast clear cleared the target again");
 
         fill_cmask(cmask_words - 1, 0);
         bind();
         Require(name, "partial CMASK clear keeps rendering",
-                ReadCachedTexel(name, context, color.image_id) == painted,
+                read_selected() == painted,
                 "a CMASK with tiles still expanded cleared the whole target");
 
         fill_cmask(cmask_words, 0);
         bind();
         Require(name, "complete refill clears",
-                ReadCachedTexel(name, context, color.image_id) == cleared_texel,
+                read_selected() == cleared_texel,
                 "completing the CMASK fast clear did not clear the target");
 
         paint();
-        WriteMetadata(context, cmask_address, cmask_size.size, 0);
+        WriteMetadata(context, selected_cmask, slice_size, 0);
         bind();
         Require(name, "CPU-written CMASK clear",
-                ReadCachedTexel(name, context, color.image_id) == cleared_texel &&
+                read_selected() == cleared_texel &&
                     all_bytes(cmask_bytes(), 0xff),
                 "a CMASK fast clear in guest memory was not applied or not consumed");
+
+        paint();
+        auto &buffer_cache = context.GetBufferCache();
+        (void)buffer_cache.ObtainBuffer(selected_cmask, slice_size, true);
+        buffer_cache.FillBuffer(selected_cmask, slice_size, 0, false);
+        Require(name, "recorded GPU fill",
+                buffer_cache.IsRegionGpuModified(selected_cmask, slice_size) &&
+                    buffer_cache.KnownFill(selected_cmask, slice_size) == 0u,
+                "CMASK fill did not retain its GPU ownership and uniform-fill proof");
+        bind();
+        Require(name, "GPU-known CMASK clear",
+                read_selected() == cleared_texel &&
+                    all_bytes(cmask_bytes(), 0xff),
+                "a proven GPU CMASK fill was not applied and consumed");
+
+        if (samples_log2 != 0) {
+          paint();
+          constexpr uint64_t copy_source = base + 0xe00000;
+          (void)buffer_cache.ObtainBuffer(copy_source, slice_size, true);
+          buffer_cache.FillBuffer(copy_source, slice_size, 0, false);
+          buffer_cache.CopyBuffer(selected_cmask, copy_source, slice_size, false, false);
+          Require(name, "unproven GPU metadata copy",
+                  buffer_cache.IsRegionGpuModified(selected_cmask, slice_size) &&
+                      !buffer_cache.KnownFill(selected_cmask, slice_size),
+                  "a GPU copy invented a uniform-fill certificate");
+          bind();
+          Require(name, "GPU-unknown CMASK clear readback",
+                  read_selected() == cleared_texel &&
+                      all_bytes(cmask_bytes(), 0xff),
+                  "uncertified GPU CMASK bytes were not inspected before materializing");
+        }
 
         // Sky Garden's water input: eliminate the clear, then sample without any intervening
         // render-target bind and without metadata in the sampled description. Dropping mode 2
@@ -20908,28 +20983,96 @@ public:
         const auto sampled_id = texture_cache.FindImage(sampled);
         (void)texture_cache.FindTexture(sampled_id, sampled);
         Require(name, "CMASK eliminate before metadata-free sample",
-                ReadCachedTexel(name, context, sampled_id) == cleared_texel &&
-                    ReadCachedTexel(name, context, sampled_id, {511, 255, 0}) == cleared_texel &&
+                ReadCachedTexel(name, context, sampled_id, {}, {1, 1, 1}, selected_layer) == cleared_texel &&
+                    ReadCachedTexel(name, context, sampled_id, {511, 255, 0}, {1, 1, 1}, selected_layer) == cleared_texel &&
                     all_bytes(cmask_bytes(), 0xff),
                 "the eliminate was dropped: the sampled image still contains stale texels");
         paint();
         bind();
         Require(name, "eliminated CMASK does not clear a later draw",
-                ReadCachedTexel(name, context, color.image_id) == painted,
+                read_selected() == painted,
                 "the already consumed eliminate cleared subsequent rendering");
+
+        registers.SetColorControl(eliminate_control);
+        RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
+                                           {.index_count = 3, .instance_count = 1});
+        Require(name, "repeated indexed FCE preserves rendering", read_selected() == painted,
+                "indexed FCE reapplied a consumed CMASK clear");
+        fill_cmask(cmask_words, 0);
+        RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
+                                           {.index_count = 3, .instance_count = 1});
+        Require(name, "indexed FCE consumes refill", read_selected() == cleared_texel &&
+                    all_bytes(cmask_bytes(), 0xff),
+                "indexed FCE failed to materialize a fresh CMASK clear");
+        registers.SetColorControl({});
 
         paint();
         registers.SetColorInfo(
             0, {.format = Prospero::ChannelLayout::k16_16_16_16,
                 .channel_type = Prospero::ChannelType::kFloat,
                 .channel_order = Prospero::ChannelOrder::kStandard});
-        WriteMetadata(context, cmask_address, cmask_size.size, 0);
+        WriteMetadata(context, selected_cmask, slice_size, 0);
         bind();
         Require(name, "FAST_CLEAR disabled",
                 !color.desc.cmask.valid &&
-                    ReadCachedTexel(name, context, color.image_id) == painted,
+                    read_selected() == painted,
                 "a target without CB_COLOR_INFO.FAST_CLEAR honoured its CMASK");
 
+        auto enabled_info = registers.GetRenderTarget(0).info;
+        enabled_info.cmask_fast_clear_enable = true;
+        registers.SetColorInfo(0, enabled_info);
+        auto attrib3 = registers.GetRenderTarget(0).attrib3;
+        attrib3.write_vrs_rate_hint_to_cmask = true;
+        registers.SetColorAttrib3(0, attrib3);
+        bind();
+        Require(name, "VRS CMASK is ineligible",
+                !color.desc.cmask.valid &&
+                    read_selected() == painted &&
+                    all_bytes(cmask_bytes(), 0),
+                "VRS rate-hint metadata was interpreted as a fast clear");
+        attrib3.write_vrs_rate_hint_to_cmask = false;
+        registers.SetColorAttrib3(0, attrib3);
+        auto alias = MakeLinearDesc(selected_cmask, 16 * 16 * 4,
+            vk::Format::eR8G8B8A8Unorm, Prospero::BufferFormat::k8_8_8_8UNorm,
+            Prospero::ImageType::kColor2D, {16, 16, 1}, 1, 4, 1);
+        const auto alias_id = texture_cache.FindImage(alias);
+        bind();
+        Require(name, "aliased CMASK is ineligible",
+                alias_id && color.desc.cmask.valid &&
+                    read_selected() == painted &&
+                    all_bytes(cmask_bytes(), 0),
+                "CMASK bytes covered by an image were consumed as metadata");
+        TextureCacheTestAccess::DeleteImage(texture_cache, alias_id);
+
+        if (samples_log2 != 0) {
+          // DCC takes precedence over CMASK; this port must not broaden its FCE eligibility.
+          constexpr uint64_t dcc_address = base + 0xa00000;
+          WriteMetadata(context, dcc_address, 0x2000, 0x40404040u);
+          enabled_info.dcc_compression_enable = true;
+          registers.SetColorInfo(0, enabled_info);
+          registers.SetColorDccAddr(0, {.addr = dcc_address});
+          registers.SetColorControl(eliminate_control);
+          RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+                                            {.vertex_count = 3, .instance_count = 1});
+          registers.SetColorControl({});
+          uint32_t dcc_key = 0;
+          Require(name, "MSAA DCC FCE remains ineligible",
+                  texture_cache.GetImage(color.image_id).info.metadata.kind != ImageMetadataKind::Dcc &&
+                      read_selected() == painted &&
+                      LibKernel::Memory::TryReadBacking(dcc_address, &dcc_key, sizeof(dcc_key)) &&
+                      dcc_key == 0x40404040u && all_bytes(cmask_bytes(), 0),
+                  "the CMASK port broadened DCC FCE or consumed the wrong metadata plane");
+        }
+
+        if (samples_log2 != 0) {
+          context.GetBufferCache().ReadMemory(cmask_address, slice_size, false);
+          std::vector<uint8_t> untouched(slice_size);
+          Require(name, "unselected slice preserved",
+                  LibKernel::Memory::TryReadBacking(cmask_address, untouched.data(), slice_size) &&
+                      all_bytes(untouched, 0) &&
+                      ReadCachedTexel(name, context, color.image_id) == std::vector<u32>{0, 0},
+                  "selected CMASK materialization changed an unbound slice");
+        }
         RenderExecutorTestAccess::ResetBindings(executor);
         context.UnmapMemory(base, allocation_size);
         scheduler.Finish();

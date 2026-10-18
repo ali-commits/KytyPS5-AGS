@@ -1207,11 +1207,12 @@ bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer,
 		const bool cmask = mode == static_cast<uint8_t>(CbColorMode::EliminateFastClear) &&
 		                   rt.info.cmask_fast_clear_enable && rt.cmask.addr != 0 &&
 		                   CmaskFastClearEnabled();
-		// Only the layouts ResolveRenderColorTarget supports with DCC: render-target tiled,
-		// single sample.
+		// CMASK also materializes multisampled targets; retain the single-sample DCC gate.
+		// ResolveRenderColorTarget validates the selected target's sample configuration.
 		const bool eligible   = materialize && (dcc || cmask) &&
 		                        rt.attrib3.tile_mode == Prospero::TileMode::kRenderTarget &&
-		                        rt.attrib.num_samples == 0 && rt.attrib.num_fragments == 0;
+		                        ((!dcc && cmask) ||
+		                         (rt.attrib.num_samples == 0 && rt.attrib.num_fragments == 0));
 		uint64_t   image_size = 0;
 		if (eligible) {
 			RenderColorInfo target {};
