@@ -160,7 +160,7 @@ private slots:
         const auto runner=bin+"/launcher_preservation_tests";
         QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(),runner));
         const auto emulator=bin+"/kyty_emulator";
-        const QByteArray version_stub = "#!/bin/sh\nif [ \"$#\" -ne 0 ]; then touch ../unexpected-game; exit 1; fi\nprintf 'UI fixture emulator\\nusage\\n'\n";
+        const QByteArray version_stub = "#!/bin/sh\nif [ \"$#\" -ne 0 ]; then touch unexpected-game; exit 1; fi\nprintf 'UI fixture emulator\\nusage\\n'\n";
         QVERIFY(Write(emulator,version_stub));
         QVERIFY(QFile::setPermissions(emulator,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
         const auto profile=temp.filePath("streaming"); QVERIFY(QDir().mkpath(profile));
@@ -367,6 +367,15 @@ private slots:
         tabs->setCurrentWidget(streaming);
         QVERIFY(title->Title().isEmpty());
         QVERIFY(Capture(dialog,"-streaming-current-ui"));
+        dialog.resize(1100,900);
+        dialog.show();
+        QLabel* version=nullptr;
+        for(auto* label:streaming->findChildren<QLabel*>())
+            if(label->text()=="Version checked when hosting starts") version=label;
+        QVERIFY(version);
+        QApplication::processEvents();
+        QVERIFY2(version->height()>=version->heightForWidth(version->width()),
+                 "The native form field clips its wrapped backend status text");
         tabs->setCurrentIndex(0);
         QVERIFY(!title->Title().isEmpty());
         auto* backend=dialog.findChild<StreamingBackend*>();

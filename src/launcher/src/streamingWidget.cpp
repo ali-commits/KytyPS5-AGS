@@ -54,8 +54,9 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	layout->addWidget(description);
 	auto* host      = new QGroupBox(tr("Host"), content);
 	auto* host_form = new QFormLayout(host);
-	auto* path_row  = new QHBoxLayout;
-	m_path          = new QLineEdit(settings.backend, host);
+	host_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	auto* path_row = new QHBoxLayout;
+	m_path         = new QLineEdit(settings.backend, host);
 	m_path->setObjectName("streamBackendPath");
 	path_row->addWidget(m_path);
 	m_browse = new QPushButton(tr("Browse…"), host);
