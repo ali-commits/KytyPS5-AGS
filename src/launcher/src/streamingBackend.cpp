@@ -497,7 +497,11 @@ void StreamingBackend::DrainOwnedGames() {
 		m_game_pidfds.insert(identity.pid, pidfd);
 		if (identity.executable != wrapper) m_game_preexec_pids.insert(identity.pid);
 		if (identity.pgid > 1 && identity.pgid != ::getpgrp()) m_game_groups.insert(identity.pgid);
-		StreamingProcess::Signal(pidfd, SIGTERM);
+		// A guardian broadcasts to the group once; ordinary wrappers forward a
+		// private request to it. Do not make a direct guardian request look like
+		// a SIGTERM already delivered to the whole game group.
+		const bool guardian = identity.executable == wrapper && identity.pid != identity.pgid;
+		StreamingProcess::Signal(pidfd, guardian ? SIGUSR1 : SIGTERM);
 	}
 	bool alive = false;
 	for (auto it = m_game_pidfds.begin(); it != m_game_pidfds.end(); ++it) {

@@ -39,6 +39,9 @@ int GuardianMain(int argc, char** argv) {
 	if (group < 2 || group != ::getpgrp() || group == ::getpid()) return 2;
 	std::signal(SIGTERM, OnSignal);
 	std::signal(SIGINT, OnSignal);
+	// SIGTERM/SIGINT reach the whole group. A private request lets this guardian
+	// be the sole broadcaster when only the wrapper or host has been stopped.
+	std::signal(SIGUSR1, [](int) { stop_requested = 2; });
 	if (::write(ready, "R", 1) != 1) return 2;
 	::close(ready);
 	while (!stop_requested && !StreamingProcess::Exited(host) && !StreamingProcess::Exited(owner)) {
@@ -47,7 +50,7 @@ int GuardianMain(int argc, char** argv) {
 	}
 	// This live guardian reserves the PGID until normal completion or one
 	// atomic group SIGKILL. It must exclude itself from the completion test.
-	::kill(-group, SIGTERM);
+	if (stop_requested != 1) ::kill(-group, SIGTERM);
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
 	while (StreamingProcess::GroupAlive(group, int(::getpid()))) {
 		if (std::chrono::steady_clock::now() >= deadline) {
@@ -216,6 +219,8 @@ int main(int argc, char** argv) {
 	StreamingProcess::Identity guardian_identity;
 	if (!StreamingProcess::ReadIdentity(int(guardian), &guardian_identity))
 		return fail("Game guardian exited before launch.");
+	const int guardian_pidfd = StreamingProcess::Open(guardian_identity);
+	if (guardian_pidfd < 0) return fail("Cannot retain game guardian identity.");
 	QJsonObject session {
 	    {"pid", qint64(::getpid())},
 	    {"pgid", qint64(::getpgrp())},
@@ -281,7 +286,7 @@ int main(int argc, char** argv) {
 		if (stop_requested && !stopping) {
 			stopping       = true;
 			stop_requested = 0;
-			::kill(-::getpgrp(), SIGTERM);
+			StreamingProcess::Signal(guardian_pidfd, SIGUSR1);
 			// Native teardown and the packaged guard's capture footer can take over three seconds.
 			QTimer::singleShot(6000, &child, [&] {
 				if (child.state() != QProcess::NotRunning) ::kill(-::getpgrp(), SIGKILL);
@@ -291,6 +296,7 @@ int main(int argc, char** argv) {
 	signal_timer.start();
 	child.start(program, arguments);
 	const int result = app.exec();
+	::close(guardian_pidfd);
 	::close(host_pidfd);
 	::close(lock);
 	return result;

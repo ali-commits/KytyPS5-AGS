@@ -1434,7 +1434,15 @@ while True: time.sleep(0.05)
 		QVERIFY(first.waitForFinished(5000));
 		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 	}
+	void launchWrapperAllowsGuardToFinishCaptureMetadata_data() {
+		QTest::addColumn<bool>("stop_group");
+		QTest::newRow("wrapper-stop") << false;
+#ifdef __linux__
+		QTest::newRow("whole-group-stop") << true;
+#endif
+	}
 	void launchWrapperAllowsGuardToFinishCaptureMetadata() {
+		QFETCH(bool, stop_group);
 		QTemporaryDir dir;
 		const auto    wrapper =
 		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
@@ -1442,9 +1450,12 @@ while True: time.sleep(0.05)
 		const auto guard = dir.filePath("guard.py");
 		const auto ended = dir.filePath("ended");
 		const auto ready = dir.filePath("guard-ready");
+		const auto stop_log = dir.filePath("guard-signals");
 		QVERIFY(Put(guard, R"PY(import pathlib, signal, sys, time
 
 def stop(signum, frame):
+    with pathlib.Path(sys.argv[3]).open("a") as log:
+        log.write("stop\n")
     time.sleep(3.5)
     pathlib.Path(sys.argv[1]).write_text("capture complete")
     sys.exit(0)
@@ -1456,7 +1467,7 @@ while True:
     time.sleep(0.05)
 )PY"));
 		const StreamingLaunchEntry game {
-		    "guard", "Astro", "/usr/bin/python3", {guard, ended, ready}, dir.path()};
+		    "guard", "Astro", "/usr/bin/python3", {guard, ended, ready, stop_log}, dir.path()};
 		auto manifest =
 		    StreamingCatalog::Manifest({game}, dir.filePath("frames.sock"), "Kyty_Private_Audio",
 		                               dir.filePath("game.lock"), "Native", 60);
@@ -1470,12 +1481,72 @@ while True:
 		launch.start(wrapper, {dir.filePath("launch.json"), "guard"});
 		QVERIFY(launch.waitForStarted(1000));
 		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(ready), 3000);
-		launch.terminate();
+#ifdef __linux__
+		if (stop_group) {
+			const auto pid = pid_t(launch.processId());
+			QVERIFY(pid > 1 && ::getpgid(pid) == pid);
+			QCOMPARE(::kill(-pid, SIGTERM), 0);
+		} else
+#endif
+			launch.terminate();
 		QVERIFY(launch.waitForFinished(7000));
 		QCOMPARE(Read(ended), QByteArray("capture complete"));
+		QCOMPARE(Read(stop_log), QByteArray("stop\n"));
 		QCOMPARE(launch.exitCode(), 0);
 		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 	}
+	void managedStopAllowsGuardToFinishCaptureMetadata() {
+#ifdef __linux__
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"host", "pactl"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QFile::setPermissions(dir.filePath(name),
+			                      QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		}
+		FixtureEnvironment environment(dir.path());
+		const auto guard = dir.filePath("guard.sh");
+		const auto ended = dir.filePath("ended");
+		const auto ready = dir.filePath("guard-ready");
+		const auto stop_log = dir.filePath("guard-stops");
+		// Use a different executable from the Python host fixture, matching the
+		// production host/guard distinction used by pre-exec process discovery.
+		QVERIFY(Put(guard, R"SH(stop() {
+    printf 'stop\n' >> "$3"
+    sleep 3.5
+    printf 'capture complete' > "$1"
+    exit 0
+}
+trap 'stop "$@"' TERM
+printf ready > "$2"
+while :; do sleep 0.05; done
+)SH"));
+		const auto wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		QVERIFY(Put(dir.filePath("launch-game.json"),
+		            QJsonDocument(QJsonObject {{"wrapper", wrapper}}).toJson()));
+		StreamingBackend backend(dir.filePath("profile"));
+		FixtureGameGroup cleanup;
+		backend.SetCatalog({{"supervised", "Game", "/usr/bin/bash", {guard, ended, ready, stop_log}, dir.path()}});
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port = FreeBasePort();
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 7000);
+		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(ready), 3000);
+		cleanup.pid = QString::fromUtf8(Read(dir.filePath("wrapper-pid"))).trimmed().toLongLong();
+		QVERIFY(cleanup.pid > 1);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 9000);
+		QCOMPARE(Read(ended), QByteArray("capture complete"));
+		QCOMPARE(Read(stop_log), QByteArray("stop\n"));
+		QVERIFY(!ProcessRunning(cleanup.pid));
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
+
 	void portPreflightDetectsConflict() {
 		const int base = FreeBasePort();
 		QVERIFY(base > 0);
