@@ -1,5 +1,6 @@
 
 find_package(Qt6 COMPONENTS Concurrent Network Widgets REQUIRED)
+add_subdirectory("${KYTY_SOURCE_DIR}/updater" "${CMAKE_CURRENT_BINARY_DIR}/updater")
 
 set(CMAKE_AUTOUIC_SEARCH_PATHS forms)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -20,7 +21,8 @@ add_executable(launcher WIN32
 )
 
 
-target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static kyty_git_version common)
+target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static
+	LibAtrac9 FFmpeg::ffmpeg kyty_git_version common)
 if(LINUX)
 	find_package(Qt6 COMPONENTS DBus REQUIRED)
 	target_link_libraries(launcher Qt6::DBus)
@@ -42,7 +44,13 @@ elseif(LINUX)
 	set_target_properties(launcher PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS}")
 endif()
 
-add_dependencies(launcher kyty_emulator)
+add_custom_target(stage_updater
+	COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:launcher>
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:kyty_updater>
+		$<TARGET_FILE_DIR:launcher>/$<TARGET_FILE_NAME:kyty_updater>
+	DEPENDS kyty_updater
+	VERBATIM)
+add_dependencies(launcher kyty_emulator stage_updater)
 
 if(KYTY_CLANG_CL)
 	add_custom_command(TARGET launcher POST_BUILD
@@ -69,7 +77,7 @@ if(WIN32)
 	)
 endif()
 
-set(launcher_name "launcher")
+set(launcher_name "kyty_launcher")
 if(APPLE)
 	set(launcher_name "KytyPS5")
 endif()
@@ -94,8 +102,19 @@ install(TARGETS launcher
 	BUNDLE DESTINATION .
 	RUNTIME DESTINATION .)
 
+if(NOT APPLE)
+	# Retain the entry point used by existing wrappers and older release archives.
+	install(CODE "
+		file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\"
+			TYPE PROGRAM RENAME \"launcher${CMAKE_EXECUTABLE_SUFFIX}\"
+			FILES \"\${CMAKE_INSTALL_PREFIX}/${launcher_name}${CMAKE_EXECUTABLE_SUFFIX}\")
+	")
+	install(TARGETS kyty_updater RUNTIME DESTINATION .)
+endif()
+
 if(APPLE)
 	install(TARGETS kyty_emulator DESTINATION "KytyPS5.app/Contents/MacOS")
+	install(TARGETS kyty_updater DESTINATION "KytyPS5.app/Contents/MacOS")
 	install(FILES "${KYTY_TROPHY_UNLOCK_SOUND}" DESTINATION "KytyPS5.app/Contents/Resources/assets/sounds")
 	install(DIRECTORY "${CMAKE_SOURCE_DIR}/assets/cursors" DESTINATION "KytyPS5.app/Contents/Resources/assets")
 	# Deploy and ad-hoc sign the Qt frameworks and plugins in the bundle.
@@ -180,9 +199,18 @@ elseif(LINUX)
 					TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN FILES \"\${kyty_dep}\")
 			endforeach()
 		")
-		install(CODE "
-			file(WRITE \"\${CMAKE_INSTALL_PREFIX}/qt.conf\" \"[Paths]\\nPlugins = plugins\\n\")
-		")
+		set(kyty_qt_plugin_paths "plugins")
+		# Qt 6.8+ accepts multiple plugin paths. Keep the bundled runtime portable,
+		# while allowing the local desktop's matching theme/style integration.
+		if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8 AND
+		   (IS_DIRECTORY "${kyty_qt_plugins_dir}/platformthemes" OR
+		    IS_DIRECTORY "${kyty_qt_plugins_dir}/styles"))
+			string(APPEND kyty_qt_plugin_paths ", \"${kyty_qt_plugins_dir}\"")
+		endif()
+		file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/deployment")
+		file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/deployment/qt.conf"
+			"[Paths]\nPlugins = ${kyty_qt_plugin_paths}\n")
+		install(FILES "${CMAKE_CURRENT_BINARY_DIR}/deployment/qt.conf" DESTINATION .)
 	else()
 		message(WARNING "Qt plugin directory not found; the installed launcher will need a system Qt")
 	endif()

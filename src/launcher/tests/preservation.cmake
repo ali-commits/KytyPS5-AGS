@@ -14,7 +14,8 @@ target_include_directories(launcher_preservation_tests PRIVATE
     "${preservation_launcher}/include" "${preservation_launcher}/src" "${preservation_root}/src")
 target_link_libraries(launcher_preservation_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static)
 if(TARGET common)
-    target_link_libraries(launcher_preservation_tests PRIVATE common kyty_git_version Vulkan::Headers)
+    target_link_libraries(launcher_preservation_tests PRIVATE common kyty_git_version Vulkan::Headers
+        LibAtrac9 FFmpeg::ffmpeg)
 else()
     # Optional standalone use reuses existing dependency bytes; it never configures/builds them.
     if(NOT KYTY_LAUNCHER_WARM_BUILD)
@@ -34,6 +35,25 @@ else()
         "${KYTY_LAUNCHER_WARM_BUILD}/3rdparty/fmt/libfmt.a"
         "${KYTY_LAUNCHER_WARM_BUILD}/3rdparty/libzarchive.a"
         "${KYTY_LAUNCHER_WARM_BUILD}/_deps/zstd-build/lib/libzstd.a" ${CMAKE_DL_LIBS})
+    # Reuse the exact FFmpeg package already used by the warm native build.
+    file(GLOB preservation_ffmpeg_headers
+        "${KYTY_LAUNCHER_WARM_BUILD}/externals/ffmpeg-*/include/libavcodec/avcodec.h")
+    list(LENGTH preservation_ffmpeg_headers preservation_ffmpeg_count)
+    if(NOT preservation_ffmpeg_count EQUAL 1)
+        message(FATAL_ERROR "The warm build must contain exactly one unpacked FFmpeg package")
+    endif()
+    list(GET preservation_ffmpeg_headers 0 preservation_ffmpeg_header)
+    get_filename_component(preservation_ffmpeg "${preservation_ffmpeg_header}/../../.." ABSOLUTE)
+    target_include_directories(launcher_preservation_tests PRIVATE
+        "${preservation_ffmpeg}/include" "${preservation_root}/3rdparty/LibAtrac9/C/src")
+    target_link_libraries(launcher_preservation_tests PRIVATE
+        "${KYTY_LAUNCHER_WARM_BUILD}/3rdparty/libLibAtrac9.a")
+    foreach(preservation_codec avformat avcodec swscale avutil avfilter swresample)
+        target_link_libraries(launcher_preservation_tests PRIVATE
+            "${preservation_ffmpeg}/lib/lib${preservation_codec}.a")
+    endforeach()
+    find_package(Threads REQUIRED)
+    target_link_libraries(launcher_preservation_tests PRIVATE m Threads::Threads)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(Qt6 REQUIRED COMPONENTS DBus)
