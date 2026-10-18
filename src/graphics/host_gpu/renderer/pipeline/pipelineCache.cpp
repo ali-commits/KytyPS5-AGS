@@ -4177,7 +4177,21 @@ struct PipelineCache::FastFirstState {
 	      drain_ms(FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_DRAIN_S", 5) * 1000ull),
 	      probe_supported(owner.m_graphics.pipeline_creation_cache_control_enabled),
 	      probe_all(FastFirstEnvU64("KYTY_PIPELINE_FAST_FIRST_PROBE", 0) != 0),
-	      reporter([this](std::stop_token stop) { Report(stop); }) {}
+	      reporter([this](std::stop_token stop) { Report(stop); }) {
+		// Keep reusable shader work between first-use state variants. A separate transient cache
+		// prevents unoptimized entries from entering the saved cache and its optimized probes.
+		const vk::PipelineCacheCreateInfo info {};
+		if (cache.m_graphics.device.createPipelineCache(&info, nullptr, &fast_cache) !=
+		    vk::Result::eSuccess) {
+			PipelineCacheLog(
+			    "Pipeline fast-first: transient cache unavailable; fast builds uncached");
+		}
+	}
+	~FastFirstState() {
+		Stop();
+		if (fast_cache != nullptr)
+			cache.m_graphics.device.destroyPipelineCache(fast_cache, nullptr);
+	}
 	FastFirstState(const FastFirstState&)            = delete;
 	FastFirstState& operator=(const FastFirstState&) = delete;
 
@@ -4255,8 +4269,7 @@ struct PipelineCache::FastFirstState {
 			counters.cap_fallbacks.fetch_add(1, std::memory_order_relaxed);
 			return plain();
 		}
-		// No driver cache: the unoptimized pipeline would otherwise be stored in it. The
-		// optimized build fills the cache.
+		// Use the transient cache: the optimized build alone fills the persistent cache.
 		auto fast_info = info;
 		fast_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
 		const auto                  outer = Common::CrashContext::Current();
@@ -4266,7 +4279,7 @@ struct PipelineCache::FastFirstState {
 		     outer.a, outer.b);
 		const auto begin = CompileClockNs();
 		const auto result =
-		    device.createGraphicsPipelines(nullptr, 1, &fast_info, nullptr, pipeline);
+		    device.createGraphicsPipelines(fast_cache, 1, &fast_info, nullptr, pipeline);
 		if (result != vk::Result::eSuccess || *pipeline == nullptr) {
 			scheduler.Release();
 			counters.fast_failed.fetch_add(1, std::memory_order_relaxed);
@@ -4326,7 +4339,7 @@ struct PipelineCache::FastFirstState {
 		Common::CrashContext::Scope note("compute pipeline unoptimized build (CS)", outer.a);
 		const auto                  begin = CompileClockNs();
 		const auto                  result =
-		    device.createComputePipelines(nullptr, 1, &fast_info, nullptr, pipeline);
+		    device.createComputePipelines(fast_cache, 1, &fast_info, nullptr, pipeline);
 		if (result != vk::Result::eSuccess || *pipeline == nullptr) {
 			scheduler.Release();
 			counters.fast_failed.fetch_add(1, std::memory_order_relaxed);
@@ -4427,6 +4440,7 @@ struct PipelineCache::FastFirstState {
 	}
 
 	PipelineCache&              cache;
+	vk::PipelineCache           fast_cache = nullptr; // shared by fast builds; never persisted
 	FastFirstCounters           counters;
 	FastFirstScheduler          scheduler;
 	const uint64_t              retire_age_ns;
@@ -4499,9 +4513,10 @@ std::atomic<uint64_t> g_pipeline_cache_instances {0};
 
 struct PipelineCache::PrefetchState {
 	struct Result {
-		std::unique_ptr<Pipeline> pipeline;
-		uint64_t                  compile_ns = 0;
-		GraphicsContent           content;
+		std::unique_ptr<Pipeline>    pipeline;
+		uint64_t                     compile_ns = 0;
+		GraphicsContent              content;
+		FastFirstState::GraphicsFast fast;
 	};
 	struct Pending {
 		std::future<Result> future;
@@ -4511,19 +4526,26 @@ struct PipelineCache::PrefetchState {
 	    : cache(owner), queue(threads, 128) {}
 	~PrefetchState() {
 		Stop();
-		for (auto& [key, job]: pending) {
-			(void)key;
-			if (!job.future.valid()) continue;
-			auto result = job.future.get();
-			cache.m_graphics.device.destroyPipeline(result.pipeline->pipeline, nullptr);
-			ReleasePipelineLayout(cache.m_graphics, result.pipeline->pipeline_layout,
-			                      result.pipeline->descriptor_set_layout);
-		}
 		PipelineCacheLog(
 		    "Pipeline prefetch: submitted {}, used {}, unused {}; worker compile {} ms, "
 		    "CP wait {} ms (worst {} ms), {} consumed pipelines journaled",
-		    submitted.load(), used.load(), pending.size(), compile_ns.load() / 1000000,
-		    wait_ns.load() / 1000000, max_wait_ns.load() / 1000000, journaled.load());
+		    submitted.load(), used.load(), submitted.load() - used.load(),
+		    compile_ns.load() / 1000000, wait_ns.load() / 1000000, max_wait_ns.load() / 1000000,
+		    journaled.load());
+	}
+	// A fast speculative build holds an optimizer slot until publication. Unused results and
+	// duplicate publication races must release it without scheduling an optimized build.
+	void Discard(Result& result) {
+		if (result.fast.snapshot != nullptr) {
+			cache.m_fast_first->scheduler.Release();
+			result.fast.snapshot.reset();
+		}
+		if (result.pipeline != nullptr) {
+			cache.m_graphics.device.destroyPipeline(result.pipeline->pipeline, nullptr);
+			ReleasePipelineLayout(cache.m_graphics, result.pipeline->pipeline_layout,
+			                      result.pipeline->descriptor_set_layout);
+			result.pipeline.reset();
+		}
 	}
 	void Stop() {
 		{
@@ -4531,6 +4553,18 @@ struct PipelineCache::PrefetchState {
 			stopped = true;
 		}
 		queue.Stop();
+		// Save stops the optimizer next. Release unconsumed reservations before its final report
+		// and before layouts and shader modules can be destroyed.
+		std::lock_guard lock(mutex);
+		for (auto it = pending.begin(); it != pending.end();) {
+			if (!it->second.future.valid()) {
+				++it; // A required lookup owns the result until Complete.
+				continue;
+			}
+			auto result = it->second.future.get();
+			Discard(result);
+			it = pending.erase(it);
+		}
 	}
 	void Request(const GraphicsPipelineKey& key, const ShaderVertexInputInfo& vertex,
 	             const ShaderPixelInputInfo* pixel, const GraphicsPrograms& programs) {
@@ -4544,10 +4578,17 @@ struct PipelineCache::PrefetchState {
 			    Profiler::SetThreadName("PipelineCompiler");
 			    Result                     result {std::make_unique<Pipeline>()};
 			    GraphicsPipelineCreateHook hook;
-			    if (cache.m_known != nullptr || cache.m_journal != nullptr) {
+			    const bool keyed = cache.m_known != nullptr || cache.m_journal != nullptr;
+			    const bool fast_first =
+			        cache.m_fast_first != nullptr && !cache.m_fast_first->scheduler.Stopped();
+			    if (keyed || fast_first) {
 				    hook = [&](const vk::GraphicsPipelineCreateInfo& info,
 				               std::span<const uint32_t> signature, vk::Pipeline* pipeline) {
-					    result.content    = DescribeGraphicsPipeline(info, signature);
+					    if (keyed) result.content = DescribeGraphicsPipeline(info, signature);
+					    if (fast_first) {
+						    return cache.m_fast_first->CreateGraphics(info, result.content,
+						                                              pipeline, result.fast);
+					    }
 					    const auto status = cache.m_graphics.device.createGraphicsPipelines(
 					        cache.m_driver_cache, 1, &info, nullptr, pipeline);
 					    if (status == vk::Result::eSuccess)
@@ -4555,6 +4596,9 @@ struct PipelineCache::PrefetchState {
 					    return status;
 				    };
 			    }
+			    Common::CrashContext::Scope note(
+			        "graphics pipeline prefetch build (VS, PS)", vertex.stage.program->shader_hash,
+			        pixel_copy ? pixel_copy->stage.program->shader_hash : 0);
 			    const auto begin = CompileClockNs();
 			    [&] {
 				    Common::DebugCounters::ScopedTimer timer(
@@ -4579,7 +4623,8 @@ struct PipelineCache::PrefetchState {
 			                              .pipeline_ns = result.compile_ns,
 			                              .total_ns    = result.compile_ns,
 			                              .detail      = "prefetch-worker"});
-			    cache.NotePipelineCreated(result.compile_ns);
+			    if (result.fast.snapshot == nullptr && !result.fast.cache_hit)
+				    cache.NotePipelineCreated(result.compile_ns);
 			    return result;
 		    });
 		auto       future = task->get_future();
@@ -5929,7 +5974,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 			                                                : "off");
 		}
 	}
-	// Opt-in: optimized exact-key look-ahead on workers, with fast-first retained for misses.
+	// Opt-in: exact-key look-ahead on workers, retaining the same fast-first build policy.
 	// No draw is omitted: GetGraphicsPipeline still waits for its actual pipeline.
 	const bool combined_prefetch = EnvU64("KYTY_PIPELINE_PREFETCH_FAST_FIRST", 0) == 1;
 	if ((g_pipeline_prefetch.On() || EnvU64("KYTY_PIPELINE_PREFETCH_POOL", 0) != 0) &&
@@ -5940,7 +5985,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		PipelineCacheLog(
 		    "Pipeline prefetch: {} compile workers; draws always wait for their exact pipeline{}",
 		    threads,
-		    m_fast_first != nullptr ? "; optimized look-ahead with fast-first fallback" : "");
+		    m_fast_first != nullptr ? "; fast-first look-ahead and background optimization" : "");
 	}
 	if (EnvU64("KYTY_PIPELINE_STATS", 0) != 0)
 		m_stats_reporter = std::make_unique<StatsReporter>(*this);
@@ -7549,9 +7594,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	Common::LockGuard lock(m_mutex);
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
 		if (ready.pipeline != nullptr) {
-			m_graphics.device.destroyPipeline(ready.pipeline->pipeline, nullptr);
-			ReleasePipelineLayout(m_graphics, ready.pipeline->pipeline_layout,
-			                      ready.pipeline->descriptor_set_layout);
+			m_prefetch->Discard(ready);
 			m_prefetch->Complete(key);
 		}
 		return remember(*iter->second);
@@ -7579,7 +7622,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	// fast-link it and hand back the create info for the background optimized compile.
 	GraphicsPipelineLibrary::Result library_result;
 	GraphicsPipelineCreateHook      library_hook;
-	FastFirstState::GraphicsFast    fast_result;
+	FastFirstState::GraphicsFast    fast_result = std::move(ready.fast);
 	GraphicsContent content = prefetched ? std::move(ready.content) : GraphicsContent {};
 	const bool      keyed   = m_known != nullptr || m_journal != nullptr;
 	if (m_fast_first != nullptr && !prefetched && !m_fast_first->scheduler.Stopped()) {
@@ -7670,12 +7713,12 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		totals.gfx_pipeline_ns.fetch_add(create_ns, std::memory_order_relaxed);
 	}
 	auto* made =
-	    prefetched || library_result.path == GraphicsPipelineLibrary::Path::Linked
-	        ? &totals.gfx_other
-	    : fast_result.cache_hit || library_result.path == GraphicsPipelineLibrary::Path::CacheHit
+	    fast_result.cache_hit || library_result.path == GraphicsPipelineLibrary::Path::CacheHit
 	        ? &totals.gfx_hit
 	    : built_fast ? &totals.gfx_fast
-	                 : &totals.gfx_full;
+	    : prefetched || library_result.path == GraphicsPipelineLibrary::Path::Linked
+	        ? &totals.gfx_other
+	        : &totals.gfx_full;
 	made->fetch_add(1, std::memory_order_relaxed);
 	totals.gfx_cp_ns.fetch_add(create_ns, std::memory_order_relaxed);
 	auto* origin_total = origin == HangTrace::PipelineOrigin::New ? &totals.gfx_new
@@ -7695,8 +7738,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		                          .detail      = detail});
 	}
 	AddCompileStall(create_ns);
-	// A fast build left the driver cache untouched; its optimized build notes the creation. A probe
-	// hit added nothing to it.
+	// A fast build left the persistent cache untouched; its optimized build notes the creation. A
+	// probe hit added nothing to it.
 	if (!prefetched && !built_fast && !fast_result.cache_hit) NotePipelineCreated(create_ns);
 	if (content.key != 0 && (m_journal != nullptr || m_journal_replay != nullptr)) {
 		NoteJournalPipeline(content.key, content.words, content.snapshot_words, content.identities,

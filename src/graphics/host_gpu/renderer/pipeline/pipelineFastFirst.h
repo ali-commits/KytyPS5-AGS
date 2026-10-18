@@ -24,18 +24,18 @@ namespace Libs::Graphics {
 // fast one for later draws. This header holds the Vulkan-free parts (scheduling, accounting,
 // retirement) so they can be tested without a device.
 //
-// Switches: KYTY_PIPELINE_FAST_FIRST=1 enables it (=nvidia: only on NVIDIA GPUs); KYTY_PIPELINE_FAST_FIRST_THREADS (default 2)
-// background compile threads; KYTY_PIPELINE_FAST_FIRST_MAX_PENDING (default 1024) cap on queued
-// plus running optimized compiles (beyond it a new pipeline is built optimized, synchronously, as
-// without the switch); KYTY_PIPELINE_FAST_FIRST_RETIRE_S (default 60, 0 = until exit) how long a
-// replaced pipeline handle stays alive for command buffers that may still use it;
-// KYTY_PIPELINE_FAST_FIRST_PROBE (default 0: a new pipeline is probed in the driver cache only when
-// its key is known to be there, KYTY_PIPELINE_KNOWN / KYTY_PIPELINE_JOURNAL, and otherwise built
-// fast and optimized later; 1 first probes every pipeline, which NVIDIA's own on-disk cache can
-// answer for pipelines this process never compiled, and a cold Sky Garden run then waited 1.38 s on
-// pipeline creation instead of 0.31 s);
-// KYTY_PIPELINE_FAST_FIRST_DRAIN_S (default 5) how long exit waits for queued optimized compiles
-// so the saved driver cache holds them.
+// Switches: KYTY_PIPELINE_FAST_FIRST=1 enables it (=nvidia: only on NVIDIA GPUs);
+// KYTY_PIPELINE_FAST_FIRST_THREADS (default 2) background compile threads;
+// KYTY_PIPELINE_FAST_FIRST_MAX_PENDING (default 1024) cap on queued plus running optimized compiles
+// (beyond it a new pipeline is built optimized, synchronously, as without the switch);
+// KYTY_PIPELINE_FAST_FIRST_RETIRE_S (default 60, 0 = until exit) how long a replaced pipeline
+// handle stays alive for command buffers that may still use it; KYTY_PIPELINE_FAST_FIRST_PROBE
+// (default 0: a new pipeline is probed in the driver cache only when its key is known to be there,
+// KYTY_PIPELINE_KNOWN / KYTY_PIPELINE_JOURNAL, and otherwise built fast and optimized later; 1
+// first probes every pipeline, which NVIDIA's own on-disk cache can answer for pipelines this
+// process never compiled, and a cold Sky Garden run then waited 1.38 s on pipeline creation instead
+// of 0.31 s); KYTY_PIPELINE_FAST_FIRST_DRAIN_S (default 5) how long exit waits for queued optimized
+// compiles so the saved driver cache holds them.
 
 [[nodiscard]] inline uint64_t FastFirstEnvU64(const char* name, uint64_t default_value) {
 	const char* text = std::getenv(name);
@@ -67,10 +67,11 @@ namespace Libs::Graphics {
 }
 
 struct FastFirstCounters {
-	std::atomic<uint64_t> graphics_fast {0};   // pipelines used unoptimized first
+	std::atomic<uint64_t> graphics_fast {0}; // pipelines used unoptimized first
 	std::atomic<uint64_t> compute_fast {0};
-	std::atomic<uint64_t> fast_ns {0};         // time the draws waited for the fast builds
-	std::atomic<uint64_t> cache_hits {0};      // already in the driver cache: built optimized, no compile
+	std::atomic<uint64_t> fast_ns {0}; // worker and draw-thread time spent on fast builds
+	std::atomic<uint64_t> cache_hits {
+	    0}; // already in the driver cache: built optimized, no compile
 	std::atomic<uint64_t> ineligible {0};      // built optimized as usual (tessellation, mesh, ...)
 	std::atomic<uint64_t> cap_fallbacks {0};   // built optimized as usual: background queue full
 	std::atomic<uint64_t> fast_failed {0};     // the fast build failed; built optimized as usual
@@ -78,12 +79,12 @@ struct FastFirstCounters {
 	std::atomic<uint64_t> swaps_dropped {0};   // optimized pipeline discarded (entry changed)
 	std::atomic<uint64_t> optimize_failed {0}; // the unoptimized pipeline stays
 	std::atomic<uint64_t> optimize_skipped {0}; // dropped at exit after the drain budget
-	std::atomic<uint64_t> optimize_ns {0};     // worker time spent on optimized compiles
-	std::atomic<uint64_t> saved_ns {0};        // sum of (optimized compile - fast build) per swap
+	std::atomic<uint64_t> optimize_ns {0};      // worker time spent on optimized compiles
+	std::atomic<uint64_t> saved_ns {0};         // sum of (optimized compile - fast build) per swap
 	std::atomic<uint64_t> handles_destroyed {0};
 	std::atomic<uint64_t> max_pending {0};
-	std::atomic<uint64_t> seen {0};            // every new pipeline that reached the fast-first path
-	std::atomic<uint64_t> probe_ns {0};        // time spent in driver-cache probes
+	std::atomic<uint64_t> seen {0};     // every new pipeline that reached the fast-first path
+	std::atomic<uint64_t> probe_ns {0}; // time spent in driver-cache probes
 };
 
 struct FastFirstSnapshot {
@@ -93,38 +94,54 @@ struct FastFirstSnapshot {
 	uint64_t pending = 0, max_pending = 0, seen = 0, probe_ns = 0;
 };
 
-[[nodiscard]] inline FastFirstSnapshot SnapshotFastFirst(const FastFirstCounters& c, uint64_t pending) {
-	const auto get = [](const std::atomic<uint64_t>& v) { return v.load(std::memory_order_relaxed); };
-	return {get(c.graphics_fast), get(c.compute_fast), get(c.fast_ns), get(c.cache_hits),
-	        get(c.ineligible), get(c.cap_fallbacks), get(c.fast_failed), get(c.swaps),
-	        get(c.swaps_dropped), get(c.optimize_failed), get(c.optimize_skipped),
-	        get(c.optimize_ns), get(c.saved_ns), get(c.handles_destroyed), pending,
-	        get(c.max_pending), get(c.seen), get(c.probe_ns)};
+[[nodiscard]] inline FastFirstSnapshot SnapshotFastFirst(const FastFirstCounters& c,
+                                                         uint64_t                 pending) {
+	const auto get = [](const std::atomic<uint64_t>& v) {
+		return v.load(std::memory_order_relaxed);
+	};
+	return {get(c.graphics_fast),
+	        get(c.compute_fast),
+	        get(c.fast_ns),
+	        get(c.cache_hits),
+	        get(c.ineligible),
+	        get(c.cap_fallbacks),
+	        get(c.fast_failed),
+	        get(c.swaps),
+	        get(c.swaps_dropped),
+	        get(c.optimize_failed),
+	        get(c.optimize_skipped),
+	        get(c.optimize_ns),
+	        get(c.saved_ns),
+	        get(c.handles_destroyed),
+	        pending,
+	        get(c.max_pending),
+	        get(c.seen),
+	        get(c.probe_ns)};
 }
 
 [[nodiscard]] inline std::string FormatFastFirst(const FastFirstSnapshot& s) {
 	char text[640];
-	std::snprintf(text, sizeof(text),
-	              "Pipeline fast-first: %llu fast builds (%llu graphics, %llu compute; draws waited "
-	              "%.1f ms), %llu optimized swaps (worker %.1f ms, estimated stall saved %.1f ms), "
-	              "%llu pending (peak %llu); %llu new pipelines seen; built optimized as usual: "
-	              "%llu driver-cache hits (probe %.1f ms), "
-	              "%llu ineligible, %llu queue full, %llu fast build failed; %llu optimized compiles "
-	              "failed, %llu dropped, %llu replaced handles destroyed",
-	              static_cast<unsigned long long>(s.graphics_fast + s.compute_fast),
-	              static_cast<unsigned long long>(s.graphics_fast),
-	              static_cast<unsigned long long>(s.compute_fast), static_cast<double>(s.fast_ns) / 1e6,
-	              static_cast<unsigned long long>(s.swaps), static_cast<double>(s.optimize_ns) / 1e6,
-	              static_cast<double>(s.saved_ns) / 1e6, static_cast<unsigned long long>(s.pending),
-	              static_cast<unsigned long long>(s.max_pending),
-	              static_cast<unsigned long long>(s.seen),
-	              static_cast<unsigned long long>(s.cache_hits), static_cast<double>(s.probe_ns) / 1e6,
-	              static_cast<unsigned long long>(s.ineligible),
-	              static_cast<unsigned long long>(s.cap_fallbacks),
-	              static_cast<unsigned long long>(s.fast_failed),
-	              static_cast<unsigned long long>(s.optimize_failed),
-	              static_cast<unsigned long long>(s.optimize_skipped),
-	              static_cast<unsigned long long>(s.handles_destroyed));
+	std::snprintf(
+	    text, sizeof(text),
+	    "Pipeline fast-first: %llu fast builds (%llu graphics, %llu compute; first builds "
+	    "%.1f ms), %llu optimized swaps (worker %.1f ms, estimated stall saved %.1f ms), "
+	    "%llu pending (peak %llu); %llu new pipelines seen; built optimized as usual: "
+	    "%llu driver-cache hits (probe %.1f ms), "
+	    "%llu ineligible, %llu queue full, %llu fast build failed; %llu optimized compiles "
+	    "failed, %llu dropped, %llu replaced handles destroyed",
+	    static_cast<unsigned long long>(s.graphics_fast + s.compute_fast),
+	    static_cast<unsigned long long>(s.graphics_fast),
+	    static_cast<unsigned long long>(s.compute_fast), static_cast<double>(s.fast_ns) / 1e6,
+	    static_cast<unsigned long long>(s.swaps), static_cast<double>(s.optimize_ns) / 1e6,
+	    static_cast<double>(s.saved_ns) / 1e6, static_cast<unsigned long long>(s.pending),
+	    static_cast<unsigned long long>(s.max_pending), static_cast<unsigned long long>(s.seen),
+	    static_cast<unsigned long long>(s.cache_hits), static_cast<double>(s.probe_ns) / 1e6,
+	    static_cast<unsigned long long>(s.ineligible),
+	    static_cast<unsigned long long>(s.cap_fallbacks),
+	    static_cast<unsigned long long>(s.fast_failed),
+	    static_cast<unsigned long long>(s.optimize_failed),
+	    static_cast<unsigned long long>(s.optimize_skipped),
+	    static_cast<unsigned long long>(s.handles_destroyed));
 	return text;
 }
 
@@ -171,7 +188,8 @@ public:
 	}
 	[[nodiscard]] std::vector<T> TakeAll() {
 		std::vector<T> out;
-		for (auto& item: m_items) out.push_back(std::move(item.first));
+		for (auto& item: m_items)
+			out.push_back(std::move(item.first));
 		m_items.clear();
 		return out;
 	}
@@ -199,8 +217,9 @@ public:
 		while (pending < m_cap) {
 			if (m_pending.compare_exchange_weak(pending, pending + 1, std::memory_order_acq_rel)) {
 				auto peak = m_peak.load(std::memory_order_relaxed);
-				while (pending + 1 > peak &&
-				       !m_peak.compare_exchange_weak(peak, pending + 1, std::memory_order_relaxed)) {}
+				while (pending + 1 > peak && !m_peak.compare_exchange_weak(
+				                                 peak, pending + 1, std::memory_order_relaxed)) {
+				}
 				return true;
 			}
 		}
@@ -211,15 +230,16 @@ public:
 	// Runs `task` on a worker for a slot taken with TryReserve. `skipped` runs instead when the
 	// drain deadline has passed. Returns false (slot released) once stopped.
 	bool Submit(std::function<void()> task, std::function<void()> skipped = {}) {
-		const bool accepted = m_queue.Submit([this, task = std::move(task), skipped = std::move(skipped)] {
-			if (m_dropping.load(std::memory_order_acquire) &&
-			    FastFirstNowNs() >= m_deadline_ns.load(std::memory_order_acquire)) {
-				if (skipped) skipped();
-			} else {
-				task();
-			}
-			Release();
-		});
+		const bool accepted =
+		    m_queue.Submit([this, task = std::move(task), skipped = std::move(skipped)] {
+			    if (m_dropping.load(std::memory_order_acquire) &&
+			        FastFirstNowNs() >= m_deadline_ns.load(std::memory_order_acquire)) {
+				    if (skipped) skipped();
+			    } else {
+				    task();
+			    }
+			    Release();
+		    });
 		if (!accepted) Release();
 		return accepted;
 	}
@@ -229,7 +249,8 @@ public:
 
 	void Stop(uint64_t drain_ms) {
 		if (!m_stopping.exchange(true, std::memory_order_acq_rel)) {
-			m_deadline_ns.store(FastFirstNowNs() + drain_ms * 1'000'000ull, std::memory_order_release);
+			m_deadline_ns.store(FastFirstNowNs() + drain_ms * 1'000'000ull,
+			                    std::memory_order_release);
 			m_dropping.store(true, std::memory_order_release);
 		}
 		m_queue.Stop();

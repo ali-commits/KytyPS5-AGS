@@ -18767,6 +18767,48 @@ public:
                     std::to_string(expected(DrawPrep::BindingPart::HwCheck)) + " and " +
                     std::to_string(expected(DrawPrep::BindingPart::Dynamic)));
       }
+      // A first visit with a different write mask needs new exact pipelines. An early hint
+      // must retain fast-first; it must not turn that first draw into an optimized build.
+      if (combined != nullptr && std::strcmp(combined, "1") == 0 &&
+          context.GetPipelineCache().PipelinePrefetchEnabled() &&
+          DrawPrep::GetMode() == DrawPrep::Mode::Inline) {
+        const auto predicted_before = context.GetPipelineCache().GetPrefetchTotals();
+        const auto fast_before = context.GetPipelineCache().GetFastFirstTotals();
+        registers.SetRenderTargetMask(0x7);
+        clear();
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+        {
+          Pm4Execution execution;
+          Require(name, "cold predicted draw stream",
+                  processor.Process(execution, stream) == Pm4ProcessResult::Complete,
+                  "the new pipeline's draw stream did not complete");
+        }
+        const auto pixels = read();
+        constexpr std::array<u32, 4> masked_expected{0x3e800000u, 0x3f000000u, 0u, 0u};
+        bool correct = pixels.size() == size_t{extent} * extent * 4u;
+        for (size_t i = 0; correct && i < pixels.size(); ++i) {
+          correct = pixels[i] == masked_expected[i % 4];
+        }
+        Require(name, "cold predicted draw pixels", correct,
+                "first-use pipelines lost a draw or ignored the new write mask");
+        const auto predicted_after = context.GetPipelineCache().GetPrefetchTotals();
+        const auto fast_after = context.GetPipelineCache().GetFastFirstTotals();
+        const auto consumed = predicted_after.used - predicted_before.used;
+        std::printf("[gpu]     cold predictions: %llu consumed, CP wait %.3f ms, %llu fast, %llu cache hits\n",
+                    static_cast<unsigned long long>(consumed),
+                    double(predicted_after.wait_ns - predicted_before.wait_ns) / 1e6,
+                    static_cast<unsigned long long>(fast_after.graphics_fast - fast_before.graphics_fast),
+                    static_cast<unsigned long long>(fast_after.cache_hits - fast_before.cache_hits));
+        Require(name, "cold predicted pipelines consumed", consumed > 0,
+                "the test did not exercise a first-use pipeline prediction");
+        Require(name, "cold predictions retain fast-first",
+                fast_after.graphics_fast - fast_before.graphics_fast +
+                    fast_after.cache_hits - fast_before.cache_hits >= consumed,
+                "a first-use prediction bypassed the fast build and made its draw wait "
+                "for optimized compilation");
+        registers.SetRenderTargetMask(0xf);
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+      }
       if (context.GetPipelineCache().PipelinePrefetchEnabled()) {
         Live::Testing::StageText("KYTY_PIPELINE_PREFETCH=0\nKYTY_PIPELINE_PREFETCH_PROGRAMS=0\n");
         Live::OnCpFlip();
@@ -18835,6 +18877,38 @@ public:
         scheduler.Finish();
       }
 
+      if (combined != nullptr && std::strcmp(combined, "1") == 0 &&
+          context.GetPipelineCache().PipelinePrefetchEnabled() &&
+          DrawPrep::GetMode() == DrawPrep::Mode::Inline) {
+        // A prediction can become obsolete before any draw consumes it. Save must join its
+        // build, destroy its pipeline and release its optimizer reservation without a swap.
+        auto &cache = context.GetPipelineCache();
+        DrawPrep::RegisterSnapshot unused_registers{registers, processor.GetUcfg(), shaders};
+        unused_registers.context.SetRenderTargetMask(0x1);
+        unused_registers.shaders.SetPsShaderBase(pixel_addresses[0]);
+        DrawPrep::PreparedDraw unused_prepared;
+        DrawPrep::Prepare(cache, unused_registers, true, true, unused_prepared);
+        Require(name, "unused prediction prepared", unused_prepared.ok,
+                "the unused prediction's shader inputs could not be prepared");
+        const DrawPrep::BindingPlanContext plan_context{
+            &cache, &context.GetSamplerCache(), &context.GetGraphics(), &executor.GetTextureMemo()};
+        DrawPrep::BindingPlan unused_plan;
+        const auto before = cache.GetPrefetchTotals();
+        const auto fast_before = cache.GetFastFirstTotals();
+        DrawPrep::PrefetchBindingPipeline(plan_context, unused_registers, nullptr, unused_prepared);
+        DrawPrep::ComputeBindingPlan(plan_context, unused_registers, nullptr, unused_prepared,
+                                     unused_plan);
+        Require(name, "unused prediction submitted", cache.GetPrefetchTotals().submitted > before.submitted,
+                "the test did not submit an unused first-use prediction");
+        cache.Save();
+        const auto after = cache.GetPrefetchTotals();
+        const auto fast_after = cache.GetFastFirstTotals();
+        Require(name, "unused prediction stayed unused", after.used == before.used,
+                "an unused prediction was published as a draw pipeline");
+        Require(name, "unused fast prediction released",
+                fast_after.graphics_fast > fast_before.graphics_fast && fast_after.pending == 0,
+                "the unused fast build leaked its optimizer reservation at shutdown");
+      }
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
     });
