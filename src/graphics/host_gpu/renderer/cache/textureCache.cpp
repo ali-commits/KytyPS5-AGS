@@ -59,17 +59,29 @@ namespace {
 
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 
-// Native depth imports supersede pending clears, including retained-alias copies.
+// Only fully imported depth slices supersede pending clears. Copies omit stencil,
+// so a shared compressed-stencil clear must remain pending.
 // The metadata map type is private to TextureCache; deduce it at these internal call sites.
-bool DiscardCopiedDepthClears(auto& metas, const ImageInfo& info) {
-	if (!info.IsDepth() || info.metadata.kind != ImageMetadataKind::Htile) return false;
+bool DiscardCopiedDepthClears(auto& metas, const Image& destination, const Image& source,
+                              uint32_t layer_limit = 32u) {
+	const auto& info = destination.info;
+	if (!info.IsDepth() || info.metadata.kind != ImageMetadataKind::Htile ||
+	    info.metadata.stencil_compressed || destination.backing.image_type != vk::ImageType::e2D ||
+	    source.backing.image_type != destination.backing.image_type ||
+	    source.backing.extent.width < destination.backing.extent.width ||
+	    source.backing.extent.height < destination.backing.extent.height ||
+	    source.backing.mip_levels == 0 || destination.backing.mip_levels == 0)
+		return false;
 	const auto metadata = metas.find(info.metadata.range.address);
 	if (metadata == metas.end() ||
 	    metadata->second.type != decltype(metadata->second.type)::HTile ||
 	    metadata->second.clear_mask == 0)
 		return false;
-	metadata->second.clear_mask = 0;
-	return true;
+	const auto layers = std::min({source.backing.layers, destination.backing.layers, layer_limit});
+	const uint32_t copied_mask = layers >= 32u ? UINT32_MAX : (uint32_t {1} << layers) - 1u;
+	const auto     previous    = metadata->second.clear_mask;
+	metadata->second.clear_mask &= ~copied_mask;
+	return previous != metadata->second.clear_mask;
 }
 
 // The DccImageState* cause in the DCC CPU fallback's stderr line.
@@ -2085,7 +2097,7 @@ bool TextureCache::CopyImage(ImageId destination_id, ImageId source_id, const ch
 	}
 	destination.ClearBufferModified();
 	if (destination.info.data.address == source.info.data.address &&
-	    DiscardCopiedDepthClears(m_surface_metas, destination.info)) {
+	    DiscardCopiedDepthClears(m_surface_metas, destination, source)) {
 		NoteSurfaceMetaChange();
 	}
 	// Copies never include a stencil aspect, so combined depth/stencil images never compare equal.
@@ -2250,7 +2262,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 			claim.ranges = &converted;
 		}
 		CommitGpuWrite(replacement, claim);
-		if (DiscardCopiedDepthClears(m_surface_metas, replacement.info)) NoteSurfaceMetaChange();
+		// ReinterpretColorAsMsDepth renders a single 2D view of layer zero.
+		if (DiscardCopiedDepthClears(m_surface_metas, replacement, cached, 1u))
+			NoteSurfaceMetaChange();
 	} else {
 		LOGF_COLOR(Log::Color::BrightYellow,
 		           "TextureCache: unsupported unequal-sample depth overlap copy (%u -> %u)\n",
@@ -4759,7 +4773,8 @@ void TextureCache::SyncAliasFromOwner(ImageId id) {
 				TrackImage(id);
 				CommitGpuWrite(image);
 				image.AdoptContentSerial(serial);
-				if (DiscardCopiedDepthClears(m_surface_metas, image.info)) NoteSurfaceMetaChange();
+				if (DiscardCopiedDepthClears(m_surface_metas, image, owner))
+					NoteSurfaceMetaChange();
 				Profiler::CountFrameEvent(Profiler::FrameEvent::AliasSyncSkips);
 				trace_sync("skip-same-contents", 0);
 				return;

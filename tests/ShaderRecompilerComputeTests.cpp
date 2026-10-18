@@ -12850,6 +12850,97 @@ public:
               !texture_cache.IsMeta(htile_depth.info.metadata.range.address),
               "unmapping guest HTile bytes retained their metadata registration");
 
+      // A genuinely smaller native source must not consume clears of
+      // destination slices that the import never writes (unlike the
+      // retained-layout prefix above).
+      {
+        auto partial_color = MakeLinearDesc(
+            base + 0x2c00000, htile_slice_size, vk::Format::eR32Sfloat,
+            Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+            {128, 128, 1}, 1, 4, 1);
+        const auto partial_color_id = texture_cache.FindImage(partial_color);
+        (void)texture_cache.FindTexture(partial_color_id, partial_color);
+        Require(name, "partial import source native layer count",
+                texture_cache.GetImage(partial_color_id).backing.layers == 1,
+                "partial-copy fixture retained a larger native source");
+        vk::ClearValue partial_clear{};
+        partial_clear.color.float32[0] = 0.25f;
+        TextureCacheTestAccess::ClearImage(
+            texture_cache, scheduler.Current(), partial_color_id,
+            {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, partial_clear);
+        auto partial_depth = MakeLinearDesc(
+            partial_color.info.data.address, 2 * htile_slice_size,
+            vk::Format::eD32Sfloat, Prospero::BufferFormat::k32Float,
+            Prospero::ImageType::kColor2D, {128, 128, 1}, 2, 4, 1);
+        partial_depth.type = BindingType::DepthTarget;
+        partial_depth.info.tile_mode = Prospero::TileMode::kDepth;
+        partial_depth.info.metadata.kind = ImageMetadataKind::Htile;
+        partial_depth.info.metadata.range = {base + 0x2d00000, 0x10000};
+        partial_depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+        partial_depth.view_info.usage =
+            vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        TextureCacheTestAccess::RegisterHtileMeta(
+            texture_cache, partial_depth.info.metadata.range.address);
+        Require(
+            name, "partial import pending HTile clear",
+            texture_cache.ClearMeta(partial_depth.info.metadata.range.address),
+            "partial import has no independent HTile state");
+        const auto partial_depth_id = texture_cache.FindImage(partial_depth);
+        Require(
+            name, "partial import copied only one native layer",
+            texture_cache.GetImage(partial_depth_id).backing.layers == 2 &&
+                !texture_cache.IsMetaCleared(
+                    partial_depth.info.metadata.range.address, 0) &&
+                texture_cache.IsMetaCleared(
+                    partial_depth.info.metadata.range.address, 1),
+            "depth import discarded the pending clear of an uncopied layer");
+        for (uint32_t layer = 0; layer < 2; ++layer) {
+          auto &executor = context.GetRenderExecutor();
+          RenderDepthInfo depth{};
+          depth.desc = partial_depth;
+          depth.desc.view_info.base_layer = layer;
+          depth.desc.view_info.layer_count = 1;
+          depth.image_id = partial_depth_id;
+          depth.depth_test_enable = true;
+          depth.depth_clear_value = 0.75f;
+          RenderExecutorTestAccess::BindRenderTarget(executor,
+                                                     partial_depth_id);
+          RenderColorInfo no_color{};
+          const auto rendering = RenderExecutorTestAccess::AcquireRenderTargets(
+              executor, scheduler.Current(), &no_color, 0, depth);
+          Require(
+              name, "partial import per-layer clear acquisition",
+              rendering.depth_stencil_attachment.depth_clear == (layer == 1),
+              "imported layer was cleared or untouched layer lost its clear");
+          scheduler.BeginRendering(rendering);
+          scheduler.EndRendering();
+          RenderExecutorTestAccess::ResetBindings(executor);
+        }
+        auto partial_readback =
+            CreateHostBuffer(name, 2 * sizeof(uint32_t),
+                             vk::BufferUsageFlagBits::eTransferDst, {});
+        const vk::BufferImageCopy partial_copy{
+            0, 0, 0, {vk::ImageAspectFlagBits::eDepth, 0, 0, 2}, {}, {1, 1, 1}};
+        texture_cache.GetImage(partial_depth_id)
+            .Download(std::span{&partial_copy, 1}, partial_readback.buffer, 0,
+                      partial_readback.size);
+        HostReadBarrier(partial_readback.buffer, partial_readback.size,
+                        vk::PipelineStageFlagBits::eTransfer,
+                        vk::AccessFlagBits::eTransferWrite);
+        scheduler.Finish();
+        Require(name, "partial import native depth contents",
+                ReadBuffer(name, partial_readback, 2) ==
+                    std::vector<uint32_t>{std::bit_cast<uint32_t>(0.25f),
+                                          std::bit_cast<uint32_t>(0.75f)},
+                "partial import lost copied depth or failed to clear an "
+                "untouched layer");
+        DestroyBuffer(&partial_readback);
+        texture_cache.UnmapMemory(partial_depth.info.data.address,
+                                  partial_depth.info.data.size);
+        texture_cache.UnmapMemory(partial_depth.info.metadata.range.address,
+                                  partial_depth.info.metadata.range.size);
+      }
+
       auto layered_stencil_desc = MakeLinearDesc(
           base + 0x27d4000, 6 * 4 * sizeof(float),
           vk::Format::eD32SfloatS8Uint, Prospero::BufferFormat::k32Float,
