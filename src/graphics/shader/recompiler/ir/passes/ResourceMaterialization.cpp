@@ -1279,6 +1279,17 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	    (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr)) {
 		return false;
 	}
+	// A trace can serve values without repeating their reads. Derive shortcut eligibility from
+	// the retained plan, rather than from this refresh's callbacks, to cover both paths equally.
+	snapshot.has_specialization_memory_reads =
+	    program.stage == ShaderType::Compute &&
+	    (program.requires_specialization_memory || !program.srt_reads.empty() ||
+	     std::ranges::any_of(program.value_storage, [](const auto& inst) {
+		     return inst.GetOpcode() == ValueOpcode::LoadAddressU8 ||
+		            inst.GetOpcode() == ValueOpcode::LoadAddressU16 ||
+		            inst.GetOpcode() == ValueOpcode::LoadAddressU32 ||
+		            inst.GetOpcode() == ValueOpcode::ReadConstBuffer;
+	     }));
 	const bool masked_image = std::ranges::any_of(program.info.images, [&](const auto& image) {
 		const auto* source = Source(program, image.source);
 		return source != nullptr && source->indirect_descriptor.has_value() &&
@@ -1523,6 +1534,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			field = "user_data";
 		else if (!(snapshot.uniform_fill == reference.uniform_fill))
 			field = "uniform_fill";
+		else if (snapshot.has_specialization_memory_reads !=
+		         reference.has_specialization_memory_reads)
+			field = "has_specialization_memory_reads";
 		else if (!(specialization == reference_specialization))
 			field = "specialization";
 		SrtTraceSession::NoteVerified(program, field);

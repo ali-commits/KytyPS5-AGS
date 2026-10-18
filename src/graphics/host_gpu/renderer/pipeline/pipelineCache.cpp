@@ -6621,7 +6621,8 @@ bool SameSnapshot(const ShaderRecompiler::IR::ResourceSnapshot& a,
                   const ShaderRecompiler::IR::ResourceSnapshot& b) {
 	return a.buffers == b.buffers && a.images == b.images && a.samplers == b.samplers &&
 	       a.flattened_srt == b.flattened_srt && a.user_data == b.user_data &&
-	       a.uniform_fill == b.uniform_fill;
+	       a.uniform_fill == b.uniform_fill &&
+	       a.has_specialization_memory_reads == b.has_specialization_memory_reads;
 }
 
 // The oracle prepares copies of the stage inputs serially and compares every output that the

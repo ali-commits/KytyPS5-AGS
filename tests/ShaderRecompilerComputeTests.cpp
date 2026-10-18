@@ -764,16 +764,16 @@ struct RenderExecutorTestAccess {
     return executor.m_set_reuse_fresh_mismatches;
   }
 
-  static bool TryConsumeComputeImageClear(RenderExecutor &executor,
+  static bool TryConsumeComputeFill(RenderExecutor &executor,
       const ShaderComputeInputInfo &input, CommandBuffer &command,
       uint32_t x, uint32_t y, uint32_t z, uint32_t mode) {
-    return executor.TryConsumeComputeImageClear(input, command, x, y, z, mode);
+    return executor.TryConsumeComputeFill(input, command, x, y, z, mode);
   }
 
-  static bool TryConsumeComputeMetaClear(RenderExecutor &executor,
+  static void UpdateComputeMetaClears(RenderExecutor &executor,
                                          const ShaderComputeInputInfo &input,
                                          const CommandBuffer &buffer) {
-    return executor.TryConsumeComputeMetaClear(input, buffer);
+    executor.UpdateComputeMetaClears(input, buffer);
   }
 
   static TextureBinding
@@ -2236,6 +2236,8 @@ public:
                 reloaded_resources.flattened_srt == resources.flattened_srt &&
                 reloaded_resources.user_data == resources.user_data &&
                 reloaded_resources.uniform_fill == resources.uniform_fill &&
+                reloaded_resources.has_specialization_memory_reads ==
+                    resources.has_specialization_memory_reads &&
                 reloaded_specialization == specialization,
             "the decoded plan materialized other resources or another specialization");
     std::vector<uint8_t> specialization_bytes;
@@ -10386,17 +10388,35 @@ public:
 
   void CheckComputeMetaClearClassification() {
     constexpr const char *name = "ComputeMetaClearClassification";
+    constexpr uintptr_t base = 0x0000000204200000ull;
+    constexpr uint64_t allocation_size = 0x10000;
     constexpr uint64_t read_only_meta = 0x0000000204201f00ull;
     constexpr uint64_t read_write_meta = 0x0000000204202000ull;
     constexpr uint64_t write_only_meta = 0x0000000204202100ull;
     EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "scratch allocation",
+            LibKernel::Memory::KernelAllocateDirectMemory(
+                0, LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "metadata scratch allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "scratch mapping",
+            LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_size) == 0 && mapped == reinterpret_cast<void *>(base),
+            "metadata scratch mapping failed");
+    std::memset(mapped, 0xa5, allocation_size);
     const auto context_owner = MakeRenderContext();
     auto &context = *context_owner;
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
     auto &scheduler = context.GetCommandScheduler();
     HW::Context registers{};
     HW::UserConfig user_config{};
     HW::Shader shaders{};
     scheduler.Begin(registers, user_config, shaders);
+    context.MapMemory(base, allocation_size);
     auto &texture_cache = context.GetTextureCache();
     TextureCacheTestAccess::RegisterHtileMeta(texture_cache, read_only_meta);
     TextureCacheTestAccess::RegisterHtileMeta(texture_cache, read_write_meta);
@@ -10455,12 +10475,10 @@ public:
     const auto read_only_input =
         MakeInput(read_only_meta, true, false, read_only_program,
                   read_only_snapshot);
-    const bool read_only_consumed =
-        RenderExecutorTestAccess::TryConsumeComputeMetaClear(
-            executor, read_only_input, command);
+    RenderExecutorTestAccess::UpdateComputeMetaClears(
+        executor, read_only_input, command);
     Require(name, "read-only dispatch preserved",
-            !read_only_consumed &&
-                !texture_cache.IsMetaCleared(read_only_meta, 0),
+            !texture_cache.IsMetaCleared(read_only_meta, 0),
             "a metadata read-only dispatch changed logical clear state");
 
     ShaderRecompiler::IR::CompiledShaderInfo read_write_program{};
@@ -10468,12 +10486,10 @@ public:
     const auto read_write_input =
         MakeInput(read_write_meta, true, true, read_write_program,
                   read_write_snapshot);
-    const bool read_write_consumed =
-        RenderExecutorTestAccess::TryConsumeComputeMetaClear(
-            executor, read_write_input, command);
+    RenderExecutorTestAccess::UpdateComputeMetaClears(
+        executor, read_write_input, command);
     Require(name, "read/write dispatch preserved",
-            !read_write_consumed &&
-                !texture_cache.IsMetaCleared(read_write_meta, 0),
+            !texture_cache.IsMetaCleared(read_write_meta, 0),
             "a metadata read/modify/write dispatch was replaced by a clear");
 
     ShaderRecompiler::IR::CompiledShaderInfo write_only_program{};
@@ -10481,15 +10497,200 @@ public:
     const auto write_only_input =
         MakeInput(write_only_meta, false, true, write_only_program,
                   write_only_snapshot);
-    const bool write_only_consumed =
-        RenderExecutorTestAccess::TryConsumeComputeMetaClear(
-            executor, write_only_input, command);
-    Require(name, "write-only fill consumed",
-            write_only_consumed &&
-                texture_cache.IsMetaCleared(write_only_meta, 0),
-            "a metadata write-only fill was not consumed as a clear");
-    scheduler.Finish();
-    std::printf("[host]    %-32s ok\n", name);
+    RenderExecutorTestAccess::UpdateComputeMetaClears(
+        executor, write_only_input, command);
+    Require(name, "write-only metadata clear state",
+            texture_cache.IsMetaCleared(write_only_meta, 0),
+            "a metadata write-only dispatch did not update logical clear state");
+    context.GetGpu().SendCommandSync([&] {
+      // A stale HTile registration must not consume arbitrary writes to reused scratch.
+      TextureCacheTestAccess::RegisterHtileMeta(texture_cache, write_only_meta);
+      std::vector<u32> code;
+      AppendVMovU32(&code, 1, 0);
+      for (const auto offset : {0u, 8u}) {
+        code.push_back(EncodeMubuf0(0x1cu, offset, false, false));
+        code.push_back(EncodeMubuf1(1, 0, 0));
+      }
+      AppendEnd(&code);
+      ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+          {.type = Prospero::ShaderBinaryType::kCs,
+           .code_size_bytes = static_cast<uint32_t>(code.size() * sizeof(u32))});
+      shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(code.data()),
+                           .num_thread_x = 1, .num_thread_y = 1, .num_thread_z = 1,
+                           .wave_size = 64, .user_sgpr = 4});
+      ShaderBufferResource descriptor{};
+      descriptor.UpdateAddress48(write_only_meta);
+      descriptor.fields[2] = 12;
+      descriptor.fields[3] = DstSel(4, 5, 6, 7) |
+          (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+      for (u32 i = 0; i < 4; i++) {
+        shaders.SetCsUserSgpr(i, descriptor.fields[i], HW::UserSgprType::Unknown);
+      }
+      executor.DispatchDirect(0, scheduler.Current(), 1, 1, 1, 0x41u);
+      std::array<u32, 4> actual{};
+      context.GetBufferCache().ReadMemory(write_only_meta, sizeof(actual));
+      Require(name, "metadata scratch stores and guards",
+              LibKernel::Memory::TryReadBacking(
+                  write_only_meta, actual.data(), sizeof(actual)) &&
+                  actual == std::array<u32, 4>{0, 0xa5a5a5a5u, 0, 0xa5a5a5a5u},
+              "metadata registration suppressed guest stores or erased adjacent data");
+      // Goat Simulator 3's immediate-zero fill (b0a34a6ed90ebace) has an exact
+      // one-dimensional dword footprint. A CPU-owned destination needs no readback.
+      static constexpr std::array<u32, 6> goat_fill{
+          0xd7460000u, 0x04010c04u, 0x7e020280u,
+          0xe0102000u, 0x80000100u, 0xbf810000u};
+      constexpr uint64_t fill_address = base + 0x5000;
+      constexpr uint64_t fill_size = 64 * sizeof(u32);
+      ShaderMapUserData(reinterpret_cast<uint64_t>(goat_fill.data()),
+          {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = sizeof(goat_fill)});
+      shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(goat_fill.data()),
+                           .num_thread_x = 64, .num_thread_y = 1, .num_thread_z = 1,
+                           .wave_size = 64, .user_sgpr = 4, .tgid_x_en = true});
+      descriptor.UpdateAddress48(fill_address);
+      descriptor.fields[1] |= 4u << 16u;
+      descriptor.fields[2] = 64;
+      descriptor.fields[3] = 0x00014004u;
+      for (u32 i = 0; i < 4; ++i) {
+        shaders.SetCsUserSgpr(i, descriptor.fields[i], HW::UserSgprType::Unknown);
+      }
+      auto &buffer_cache = context.GetBufferCache();
+      const auto backing_is = [&](u32 expected) {
+        std::array<u32, 64> words{};
+        return LibKernel::Memory::TryReadBacking(fill_address, words.data(), fill_size) &&
+            std::ranges::all_of(words, [&](u32 word) { return word == expected; });
+      };
+      for (u32 iteration = 0; iteration < 2; ++iteration) {
+        executor.DispatchDirect(0, scheduler.Current(), 1, 1, 1, 0x41u);
+        Require(name, "Goat immediate-zero CPU fill",
+                !buffer_cache.IsRegionGpuModified(fill_address, fill_size) && backing_is(0),
+                "Goat's proven fill lost its value or required GPU readback");
+      }
+
+      ShaderRecompiler::IR::ResourceSnapshot fill_snapshot;
+      ShaderRecompiler::IR::DescriptorValue fill_descriptor{};
+      fill_descriptor.dword_count = 4;
+      std::copy_n(descriptor.fields, 4, fill_descriptor.dwords.begin());
+      fill_snapshot.buffers.push_back(fill_descriptor);
+      fill_snapshot.uniform_fill = {
+          .kind = ShaderRecompiler::IR::UniformFillKind::Buffer,
+          .resource = 0, .group_stride = {64, 1, 1}, .words = 1, .value = 0x11223344u};
+      ShaderComputeInputInfo fill_input{};
+      fill_input.stage = {&write_only_program, &fill_snapshot};
+      fill_input.threads_num[0] = 64;
+      fill_input.threads_num[1] = 1;
+      fill_input.threads_num[2] = 1;
+      const auto consume = [&](u32 groups = 1) {
+        return RenderExecutorTestAccess::TryConsumeComputeFill(
+            executor, fill_input, scheduler.Current(), groups, 1, 1, 0x41u);
+      };
+      Require(name, "partial and excess fill dispatches", !consume(0) && !consume(2),
+              "incomplete or excessive dispatch coverage was consumed");
+      fill_snapshot.uniform_fill.kind = ShaderRecompiler::IR::UniformFillKind::None;
+      Require(name, "missing fill proof", !consume(), "an unproven shader was consumed");
+      fill_snapshot.uniform_fill.kind = ShaderRecompiler::IR::UniformFillKind::Buffer;
+      for (const auto words : {0u, 5u}) {
+        fill_snapshot.uniform_fill.words = words;
+        Require(name, "invalid fill width", !consume(), "an invalid fill width was consumed");
+      }
+      fill_snapshot.uniform_fill.words = 1;
+      fill_snapshot.uniform_fill.resource = 1;
+      Require(name, "invalid fill resource", !consume(), "an invalid resource was consumed");
+      fill_snapshot.uniform_fill.resource = 0;
+      const auto set_address = [&](uint64_t address) {
+        descriptor.UpdateAddress48(address);
+        std::copy_n(descriptor.fields, 4, fill_snapshot.buffers[0].dwords.begin());
+      };
+      set_address(fill_address + 1);
+      Require(name, "unaligned fill", !consume(), "an unaligned CPU fill was consumed");
+      set_address(base + allocation_size);
+      Require(name, "unmapped fill", !consume(), "an unmapped CPU fill was consumed");
+      set_address(fill_address);
+
+      ImageInfo partial_backing{};
+      partial_backing.data = {fill_address + fill_size / 2, fill_size / 2};
+      const auto image_id = TextureCacheTestAccess::InsertImage(texture_cache, partial_backing);
+      Require(name, "image-owned fill exclusion", !consume(),
+              "a partial image backing was overwritten by a buffer fill");
+      TextureCacheTestAccess::DeleteImage(texture_cache, image_id);
+
+      const std::array publication_ranges{GuestRange{fill_address, fill_size}};
+      const auto token = buffer_cache.BeginBackingPublication(
+          publication_ranges, scheduler.CurrentTick());
+      const bool pending_refused = !consume();
+      buffer_cache.EndBackingPublication(token);
+      Require(name, "pending publication fill exclusion", pending_refused && backing_is(0),
+              "a pending backing publication was bypassed by a compute fill");
+      BufferCacheTestAccess::AddGpuDirty(buffer_cache, fill_address, fill_size);
+      const bool untracked_refused = !consume();
+      BufferCacheTestAccess::SubtractGpuDirty(buffer_cache, fill_address, fill_size);
+      Require(name, "untracked GPU bytes fill exclusion", untracked_refused && backing_is(0),
+              "GPU-dirty bytes without tracker ownership were overwritten on the CPU");
+      Require(name, "mapped buffer fill", consume() && backing_is(0x11223344u),
+              "a mapped, aligned, non-image buffer fill was not consumed");
+
+      // Preserve queue ordering when a previous recorded writer already owns these bytes.
+      (void)buffer_cache.ObtainBuffer(fill_address, fill_size, true, false);
+      buffer_cache.FillBuffer(fill_address, fill_size, 0xaabbccddu, false);
+      fill_snapshot.uniform_fill.value = 0x55667788u;
+      Require(name, "GPU-owned buffer fill", consume() &&
+                  buffer_cache.HasGpuDirtyBytes(fill_address, fill_size),
+              "a proven fill discarded earlier GPU ownership");
+      fill_snapshot.uniform_fill.value = 0x99aabbccu;
+      Require(name, "repeated GPU buffer fill", consume(),
+              "a repeated proven fill was rejected");
+      buffer_cache.ReadMemory(fill_address, fill_size);
+      Require(name, "GPU buffer fill ordering", backing_is(0x99aabbccu),
+              "repeated fills did not preserve the last writer on the GPU timeline");
+      // A scalar read can produce a uniform value but still requires dispatch. Exercise
+      // the real caller gate, independently of the clear helper's direct proof tests.
+      constexpr uint64_t scalar_address = base + 0x7000;
+      constexpr u32 scalar_value = 0x13579bdfu;
+      std::memcpy(reinterpret_cast<void *>(scalar_address), &scalar_value, sizeof(scalar_value));
+      std::vector<u32> loaded_fill;
+      AppendVop3(&loaded_fill, 0x346u, 0, 8, InlineU32(6), Vgpr(0));
+      loaded_fill.push_back(EncodeSmem0(0x08u, 106, 2));
+      loaded_fill.push_back(EncodeSmem1(0, 125));
+      loaded_fill.push_back(EncodeVop1(0x01u, 1, 106));
+      loaded_fill.push_back(EncodeMubuf0(0x04u, 0, true, false));
+      loaded_fill.push_back(EncodeMubuf1(1, 0, 0));
+      AppendEnd(&loaded_fill);
+      ShaderMapUserData(reinterpret_cast<uint64_t>(loaded_fill.data()),
+          {.type = Prospero::ShaderBinaryType::kCs,
+           .code_size_bytes = static_cast<u32>(loaded_fill.size() * sizeof(u32))});
+      shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(loaded_fill.data()),
+                           .num_thread_x = 64, .num_thread_y = 1, .num_thread_z = 1,
+                           .wave_size = 64, .user_sgpr = 8, .tgid_x_en = true});
+      const std::array<u32, 8> loaded_userdata{
+          static_cast<u32>(fill_address), static_cast<u32>(fill_address >> 32) | (4u << 16),
+          64, 0x14204u,
+          static_cast<u32>(scalar_address), static_cast<u32>(scalar_address >> 32) | (4u << 16),
+          1, 0x14204u};
+      for (u32 i = 0; i < loaded_userdata.size(); ++i) {
+        shaders.SetCsUserSgpr(i, loaded_userdata[i], HW::UserSgprType::Unknown);
+      }
+      Require(name, "scalar fill starts CPU owned",
+              !buffer_cache.IsRegionGpuModified(fill_address, fill_size),
+              "the scalar fill fixture retained an earlier GPU writer");
+      executor.DispatchDirect(0, scheduler.Current(), 1, 1, 1, 0x41u);
+      Require(name, "scalar-memory fill executes native dispatch",
+              buffer_cache.HasGpuDirtyBytes(fill_address, fill_size) &&
+                  !buffer_cache.KnownFill(fill_address, fill_size).has_value(),
+              "a memory-dependent fill took the shortcut or recorded an unguarded known fill");
+      buffer_cache.ReadMemory(fill_address, fill_size);
+      Require(name, "scalar-memory native stores", backing_is(scalar_value),
+              "the native scalar-memory fill did not execute its guest stores");
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "scratch unmap",
+            LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "metadata scratch unmap failed");
+    Require(name, "scratch release",
+            LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "metadata scratch release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
   }
 
   void CheckImageExactBackingLookup() {
@@ -27209,9 +27410,9 @@ public:
           {vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1},
           stencil_initial);
       Require(name, "stencil fill coverage",
-          !RenderExecutorTestAccess::TryConsumeComputeImageClear(executor, stencil_compute,
+          !RenderExecutorTestAccess::TryConsumeComputeFill(executor, stencil_compute,
               scheduler.Current(), 0, 1, 1, 0x41u) &&
-          !RenderExecutorTestAccess::TryConsumeComputeImageClear(executor, stencil_compute,
+          !RenderExecutorTestAccess::TryConsumeComputeFill(executor, stencil_compute,
               scheduler.Current(), 2, 1, 1, 0x41u),
           "incomplete or excessive stencil dispatch was consumed");
       auto &stencil_source = stencil_snapshot.buffers[0];
@@ -27219,12 +27420,12 @@ public:
       stencil_source.dwords[0] = static_cast<uint32_t>(stencil_address);
       stencil_source.dwords[1] = static_cast<uint32_t>(stencil_address >> 32) | (4u << 16);
       Require(name, "stencil fill source alias",
-          !RenderExecutorTestAccess::TryConsumeComputeImageClear(executor, stencil_compute,
+          !RenderExecutorTestAccess::TryConsumeComputeFill(executor, stencil_compute,
               scheduler.Current(), 1, 1, 1, 0x41u),
           "an aliased scalar load was consumed as a uniform image clear");
       stencil_source = clean_source;
       Require(name, "stencil IMAGE_STORE clear",
-          RenderExecutorTestAccess::TryConsumeComputeImageClear(executor, stencil_compute,
+          RenderExecutorTestAccess::TryConsumeComputeFill(executor, stencil_compute,
               scheduler.Current(), 1, 1, 1, 0x41u),
           "captured clear attempted an unsupported depth/stencil storage binding");
       auto stencil_readback = CreateHostBuffer(name, 8,
@@ -51478,6 +51679,9 @@ void CheckPs5GameExampleImageClearRuntimeShape() {
 
   const auto code = MakeCode();
   auto positive = Compile(code);
+  Require("Ps5GameExampleImageClear", "immediate fill has no specialization reads",
+          !positive.has_specialization_memory_reads,
+          "a direct user-data fill was classified as memory dependent");
   auto runtime_resources = positive;
   compute.stage.resources = &runtime_resources;
   ShaderBufferResource descriptor{};
@@ -51600,6 +51804,9 @@ void CheckPs5GameExampleImageClearRuntimeShape() {
   AppendEnd(&scalar_code);
   clean_scalar = true;
   auto loaded = Compile(scalar_code);
+  Require("Ps5GameExampleImageClear", "memory-dependent fill guard",
+          loaded.has_specialization_memory_reads,
+          "a scalar-loaded fill lost its specialization-memory dependence");
   runtime_resources = loaded;
   Require("Ps5GameExampleImageClear", "scalar-loaded fill",
           ResolveComputeBufferFill(compute, 1, 1, 1, 0x41u, descriptor,

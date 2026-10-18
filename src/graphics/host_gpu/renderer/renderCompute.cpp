@@ -60,8 +60,8 @@ static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::Descriptor
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-                                                const CommandBuffer&          buffer) {
+void RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
+                                            const CommandBuffer&          buffer) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	if (resources.buffers.size() != program.info.buffers.size()) {
@@ -71,10 +71,9 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		const auto& resource   = program.info.buffers[i];
 		const auto  descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-		// A metadata resource that is also read is not proven to be a full overwrite. Execute it
-		// conservatively instead of replacing the dispatch with a coarse full-surface clear.
+		// Reads and transforms of metadata do not establish a clear state.
 		if ((!resource.written || resource.read) && cache.IsMeta(descriptor.Base48())) {
-			return false;
+			return;
 		}
 	}
 
@@ -84,13 +83,10 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 			if (resource.written) {
 				const auto descriptor =
 				    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-				if (cache.ClearMeta(descriptor.Base48())) {
-					return true;
-				}
+				(void)cache.ClearMeta(descriptor.Base48());
 			}
 		}
 	}
-	return false;
 }
 
 bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
@@ -99,7 +95,8 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
                               uint64_t& resolved_size) {
 	const auto& resources = *input.stage.resources;
 	const auto& fill      = resources.uniform_fill;
-	if (fill.kind != ShaderRecompiler::IR::UniformFillKind::Buffer) {
+	if (fill.kind != ShaderRecompiler::IR::UniformFillKind::Buffer || fill.words == 0 ||
+	    fill.words > 4 || fill.resource >= resources.buffers.size()) {
 		return false;
 	}
 	const auto element_size = fill.words * sizeof(uint32_t);
@@ -136,10 +133,9 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
-                                                 CommandBuffer& command, uint32_t group_x,
-                                                 uint32_t group_y, uint32_t group_z,
-                                                 uint32_t mode) {
+bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
+                                          CommandBuffer& command, uint32_t group_x,
+                                          uint32_t group_y, uint32_t group_z, uint32_t mode) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	const auto& fill      = resources.uniform_fill;
@@ -198,14 +194,29 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 	                              size)) {
 		return false;
 	}
-	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		return false;
+	const bool image_clear =
+	    cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear);
+	if (!image_clear) {
+		auto& buffers = m_context.GetBufferCache();
+		// Preserve native execution for partial/ambiguous image backings and for bytes whose
+		// pending publication can replace CPU backing. FillBuffer chooses CPU or GPU ordering
+		// from tracker ownership; early-released GPU bytes need the native path as well.
+		if ((descriptor.Base48() & 3u) != 0 ||
+		    !m_context.IsMapped(descriptor.Base48(), size) ||
+		    cache.IsRegionRegistered(descriptor.Base48(), size) ||
+		    buffers.HasPendingBackingPublication(descriptor.Base48(), size) ||
+		    (!buffers.IsRegionGpuModified(descriptor.Base48(), size) &&
+		     buffers.HasGpuDirtyBytes(descriptor.Base48(), size))) {
+			return false;
+		}
+		buffers.FillBuffer(descriptor.Base48(), size, packed_clear, false);
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
-		LOGF("GraphicsRenderDispatchDirect: compute image clear shader=0x%016" PRIx64
+		LOGF("GraphicsRenderDispatchDirect: compute %s shader=0x%016" PRIx64
 		     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-		     input.stage.program->shader_hash, descriptor.Base48(), size, packed_clear);
+		     image_clear ? "image clear" : "buffer fill", input.stage.program->shader_hash,
+		     descriptor.Base48(), size, packed_clear);
 	}
 	return true;
 }
@@ -395,14 +406,15 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
-	if (TryConsumeComputeMetaClear(input_info, buffer)) {
-		ResetBindings();
-		return;
-	}
-	if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-	                                thread_group_z, mode)) {
-		ResetBindings();
-		return;
+	// Cached metadata addresses can be reused as ordinary buffers. Updating their logical
+	// state must never suppress guest stores; only a proven fill may consume a dispatch.
+	if (!resources.has_specialization_memory_reads) {
+		UpdateComputeMetaClears(input_info, buffer);
+		if (TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
+		                          thread_group_z, mode)) {
+			ResetBindings();
+			return;
+		}
 	}
 
 	if (use_thread_dimensions) {
@@ -564,7 +576,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		uint64_t             known_size  = 0;
 		const auto           groups_x =
 		    use_thread_dimensions ? input_info.dispatch_threads_num[0] : thread_group_x;
-		if (ResolveComputeBufferFill(
+		if (!resources.has_specialization_memory_reads && ResolveComputeBufferFill(
 		        input_info, groups_x,
 		        use_thread_dimensions ? input_info.dispatch_threads_num[1] : thread_group_y,
 		        use_thread_dimensions ? input_info.dispatch_threads_num[2] : thread_group_z, mode,

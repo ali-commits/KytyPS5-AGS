@@ -35,6 +35,9 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint32_t>        user_data;
 	UniformFill                 uniform_fill;
+	// Conservative compute shortcut guard: retained plan values may depend on guest-memory
+	// specialization reads. This is not a resource footprint and is independent of SRT traces.
+	bool                        has_specialization_memory_reads = false;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

@@ -1911,8 +1911,8 @@ static void SwapStagePrepMembers(PipelineCache::StagePrep& a,
                                  PipelineCache::StagePrep& b) noexcept {
 	auto& [a_resources, a_specialization, a_permutation]                = a;
 	auto& [b_resources, b_specialization, b_permutation]                = b;
-	auto& [a_buffers, a_images, a_samplers, a_srt, a_user_data, a_fill] = a_resources;
-	auto& [b_buffers, b_images, b_samplers, b_srt, b_user_data, b_fill] = b_resources;
+	auto& [a_buffers, a_images, a_samplers, a_srt, a_user_data, a_fill, a_reads] = a_resources;
+	auto& [b_buffers, b_images, b_samplers, b_srt, b_user_data, b_fill, b_reads] = b_resources;
 	auto& [a_spec_buffers, a_spec_images]                               = a_specialization;
 	auto& [b_spec_buffers, b_spec_images]                               = b_specialization;
 	a_buffers.swap(b_buffers);
@@ -1921,6 +1921,7 @@ static void SwapStagePrepMembers(PipelineCache::StagePrep& a,
 	a_srt.swap(b_srt);
 	a_user_data.swap(b_user_data);
 	std::swap(a_fill, b_fill);
+	std::swap(a_reads, b_reads);
 	a_spec_buffers.swap(b_spec_buffers);
 	a_spec_images.swap(b_spec_images);
 	std::swap(a_permutation, b_permutation);
@@ -1931,7 +1932,9 @@ static bool SameStagePrep(const PipelineCache::StagePrep& a, const PipelineCache
 	const auto& y = b.resources;
 	return x.buffers == y.buffers && x.images == y.images && x.samplers == y.samplers &&
 	       x.flattened_srt == y.flattened_srt && x.user_data == y.user_data &&
-	       x.uniform_fill == y.uniform_fill && a.specialization == b.specialization &&
+	       x.uniform_fill == y.uniform_fill &&
+	       x.has_specialization_memory_reads == y.has_specialization_memory_reads &&
+	       a.specialization == b.specialization &&
 	       a.permutation == b.permutation;
 }
 

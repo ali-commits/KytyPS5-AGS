@@ -1097,11 +1097,11 @@ private:
 	// fresh: the writes refer to an upload made for this command (KYTY_SET_REUSE_FRESH).
 	void CommitDescriptorSet(CommandBuffer& buffer, vk::PipelineBindPoint point,
 	                         const PipelineCache::Pipeline& pipeline, bool fresh);
-	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
-	                                                     const CommandBuffer&          buffer);
-	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
-	                                              CommandBuffer& command, uint32_t group_x,
-	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
+	void UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
+	                             const CommandBuffer&          buffer);
+	[[nodiscard]] bool TryConsumeComputeFill(const ShaderComputeInputInfo& input,
+	                                        CommandBuffer& command, uint32_t group_x,
+	                                        uint32_t group_y, uint32_t group_z, uint32_t mode);
 
 	// KYTY_LDS_DEVICE_BUFFER: binds the LDS regions of a compute program whose LDS lives in a device
 	// buffer (a SharedMemory binding): one region per workgroup of `groups` (null: an indirect
