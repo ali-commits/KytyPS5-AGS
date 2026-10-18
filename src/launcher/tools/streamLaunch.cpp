@@ -30,6 +30,11 @@ void                       OnSignal(int) {
 	stop_requested = 1;
 }
 #ifdef __linux__
+volatile std::sig_atomic_t group_stop_observed = 0;
+void                       OnGuardianSignal(int signal) {
+	if (signal != SIGUSR1) group_stop_observed = 1;
+	stop_requested = 1;
+}
 int GuardianMain(int argc, char** argv) {
 	if (argc != 7) return 2;
 	const int group = std::atoi(argv[2]);
@@ -37,11 +42,17 @@ int GuardianMain(int argc, char** argv) {
 	const int owner = std::atoi(argv[4]);
 	const int ready = std::atoi(argv[5]);
 	if (group < 2 || group != ::getpgrp() || group == ::getpid()) return 2;
-	std::signal(SIGTERM, OnSignal);
-	std::signal(SIGINT, OnSignal);
-	// SIGTERM/SIGINT reach the whole group. A private request lets this guardian
-	// be the sole broadcaster when only the wrapper or host has been stopped.
-	std::signal(SIGUSR1, [](int) { stop_requested = 2; });
+	// Serialize the handlers, and keep group-shutdown observation monotonic:
+	// a later private request must never erase an already delivered group stop.
+	sigset_t shutdown_signals;
+	::sigemptyset(&shutdown_signals);
+	for (const int signal: {SIGTERM, SIGINT, SIGUSR1})
+		::sigaddset(&shutdown_signals, signal);
+	struct sigaction action {};
+	action.sa_handler = OnGuardianSignal;
+	action.sa_mask    = shutdown_signals;
+	for (const int signal: {SIGTERM, SIGINT, SIGUSR1})
+		if (::sigaction(signal, &action, nullptr) != 0) return 2;
 	if (::write(ready, "R", 1) != 1) return 2;
 	::close(ready);
 	while (!stop_requested && !StreamingProcess::Exited(host) && !StreamingProcess::Exited(owner)) {
@@ -50,7 +61,18 @@ int GuardianMain(int argc, char** argv) {
 	}
 	// This live guardian reserves the PGID until normal completion or one
 	// atomic group SIGKILL. It must exclude itself from the completion test.
-	if (stop_requested != 1) ::kill(-group, SIGTERM);
+	// Hold signal delivery across the check/send decision, including signals
+	// queued before blocking. No handler can change the observation mid-decision.
+	// Independent external group senders cannot share this critical section;
+	// a new external send after sigpending can still race with our broadcast.
+	sigset_t previous_mask;
+	if (::sigprocmask(SIG_BLOCK, &shutdown_signals, &previous_mask) != 0) return 2;
+	sigset_t pending;
+	if (::sigpending(&pending) != 0) return 2;
+	if (!group_stop_observed && !::sigismember(&pending, SIGTERM) &&
+	    !::sigismember(&pending, SIGINT))
+		::kill(-group, SIGTERM);
+	if (::sigprocmask(SIG_SETMASK, &previous_mask, nullptr) != 0) return 2;
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
 	while (StreamingProcess::GroupAlive(group, int(::getpid()))) {
 		if (std::chrono::steady_clock::now() >= deadline) {

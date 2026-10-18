@@ -1495,6 +1495,170 @@ while True:
 		QCOMPARE(launch.exitCode(), 0);
 		QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")), 1000);
 	}
+	void guardianDoesNotRebroadcastGroupStop_data() {
+		QTest::addColumn<int>("group_signal");
+		QTest::addColumn<bool>("queue_while_blocked");
+#ifdef __linux__
+		QTest::newRow("observed-SIGTERM") << int(SIGTERM) << false;
+		QTest::newRow("observed-SIGINT") << int(SIGINT) << false;
+		QTest::newRow("pending-SIGINT") << int(SIGINT) << true;
+#endif
+	}
+	void guardianDoesNotRebroadcastGroupStop() {
+#ifdef __linux__
+		QFETCH(int, group_signal);
+		QFETCH(bool, queue_while_blocked);
+		QTemporaryDir dir;
+		const auto wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		QVERIFY(QFileInfo(wrapper).isExecutable());
+		const auto fixture = dir.filePath("guardian-race.py");
+		// Trace the real guardian at the signal handler's return syscall. Queue
+		// the private request after the group signal was handled, with no chance
+		// for the shutdown decision to run between them. No timing sleeps or
+		// production test hooks are needed to expose the overwritten observation.
+		QVERIFY(Put(fixture, R"PY(import ctypes, errno, os, platform, signal, struct, sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+ATTACH, CONT, SYSCALL = 16, 7, 24
+SETOPTIONS, GET_SYSCALL_INFO = 0x4200, 0x420e
+syscalls = {"x86_64": (15, 14), "aarch64": (139, 135)}.get(platform.machine())
+if syscalls is None:
+    print("ptrace signal-return fixture requires x86_64 or aarch64")
+    sys.exit(77)
+sigreturn, sigprocmask = syscalls
+pending_case = sys.argv[4] == "pending"
+
+def trace(request, pid, address=0, data=0):
+    result = libc.ptrace(request, pid, ctypes.c_void_p(address), ctypes.c_void_p(data))
+    if result == -1:
+        raise OSError(ctypes.get_errno(), "ptrace")
+    return result
+
+def stopped(pid, expected):
+    waited, status = os.waitpid(pid, 0)
+    assert waited == pid and os.WIFSTOPPED(status), (waited, status)
+    assert os.WSTOPSIG(status) == expected, (os.WSTOPSIG(status), expected)
+
+# A disposable group leader reserves an isolated fixture group. The controller
+# remains outside it, so a broken guardian cannot signal the Qt test runner.
+leader_ready, leader_ready_write = os.pipe()
+release, release_write = os.pipe()
+leader = os.fork()
+if leader == 0:
+    os.close(release_write)
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    os.write(leader_ready_write, b"R")
+    os.read(release, 1)
+    os._exit(0)
+
+os.close(release)
+assert os.read(leader_ready, 1) == b"R"
+ready, ready_write = os.pipe()
+owner = os.pidfd_open(os.getpid())
+guardian = os.fork()
+if guardian == 0:
+    os.setpgid(0, leader)
+    os.close(release_write)
+    for fd in (owner, ready_write):
+        os.set_inheritable(fd, True)
+    os.execv(sys.argv[1], [sys.argv[1], "--guardian", str(leader), str(owner),
+                          str(owner), str(ready_write), sys.argv[3]])
+
+def timed_out(signum, frame):
+    raise TimeoutError("guardian signal interleaving did not complete")
+
+signal.signal(signal.SIGALRM, timed_out)
+signal.alarm(8)
+try:
+    assert os.read(ready, 1) == b"R"
+    try:
+        trace(ATTACH, guardian)
+    except OSError as error:
+        if error.errno == errno.EPERM:
+            print("ptrace denied by this environment")
+            sys.exit(77)
+        raise
+    stopped(guardian, signal.SIGSTOP)
+    trace(SETOPTIONS, guardian, data=1)  # TRACESYSGOOD
+    group_signal = int(sys.argv[2])
+    first_signal = signal.SIGUSR1 if pending_case else group_signal
+    if pending_case:
+        os.kill(guardian, first_signal)
+    else:
+        os.killpg(leader, first_signal)
+    trace(CONT, guardian)
+    stopped(guardian, first_signal)
+    trace(SYSCALL, guardian, data=first_signal)
+    stopped(guardian, signal.SIGTRAP | 0x80)
+    info = ctypes.create_string_buffer(128)
+    trace(GET_SYSCALL_INFO, guardian, len(info), ctypes.addressof(info))
+    assert info.raw[0] == 1 and struct.unpack_from("Q", info.raw, 24)[0] == sigreturn
+    if pending_case:
+        # Stop just after the guardian blocks shutdown signals. The group INT
+        # is pending, not observed by its handler; an erroneous TERM broadcast
+        # would deliver both signals on unblocking (they cannot coalesce).
+        while True:
+            trace(SYSCALL, guardian)
+            stopped(guardian, signal.SIGTRAP | 0x80)
+            trace(GET_SYSCALL_INFO, guardian, len(info), ctypes.addressof(info))
+            if info.raw[0] == 1 and struct.unpack_from("QQ", info.raw, 24) == (sigprocmask, 0):
+                break
+        trace(SYSCALL, guardian)
+        stopped(guardian, signal.SIGTRAP | 0x80)
+        os.killpg(leader, group_signal)
+        os.kill(guardian, signal.SIGUSR1)
+    else:
+        # The first handler has written its state, but has not returned to main.
+        os.kill(guardian, signal.SIGUSR1)
+        trace(CONT, guardian)
+        stopped(guardian, signal.SIGUSR1)
+    # Let the only other group member exit; the guardian still reserves the
+    # PGID and receives its own broadcast if the bug causes a second one.
+    os.write(release_write, b"R")
+    os.waitpid(leader, 0)
+    leader = 0
+    trace(CONT, guardian, data=0 if pending_case else signal.SIGUSR1)
+    group_deliveries = 0
+    while True:
+        _, status = os.waitpid(guardian, 0)
+        if os.WIFEXITED(status):
+            assert os.WEXITSTATUS(status) == 0, status
+            guardian = 0
+            break
+        assert os.WIFSTOPPED(status), status
+        delivered = os.WSTOPSIG(status)
+        assert delivered in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1), delivered
+        group_deliveries += delivered != signal.SIGUSR1
+        trace(CONT, guardian, data=delivered)
+    duplicates = group_deliveries - int(pending_case)
+    assert duplicates == 0, f"guardian rebroadcast shutdown {duplicates} time(s)"
+    print("group shutdown survived private request; no rebroadcast")
+finally:
+    for child in (guardian, leader):
+        if child:
+            try:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            except ProcessLookupError:
+                pass
+)PY"));
+		QProcess race;
+		race.start("/usr/bin/python3", {fixture, wrapper, QString::number(group_signal),
+		                              dir.filePath("session.json"),
+		                              queue_while_blocked ? "pending" : "observed"});
+		QVERIFY(race.waitForFinished(10000));
+		const auto output = race.readAllStandardOutput() + race.readAllStandardError();
+		if (race.exitCode() == 77) QSKIP(output.constData());
+		QCOMPARE(race.exitStatus(), QProcess::NormalExit);
+		QVERIFY2(race.exitCode() == 0, output.constData());
+#else
+		QSKIP("Linux process supervision");
+#endif
+	}
 	void managedStopAllowsGuardToFinishCaptureMetadata() {
 #ifdef __linux__
 		QTemporaryDir dir;
