@@ -16,7 +16,8 @@ public:
 	explicit TitleSound(QObject* parent = nullptr);
 	~TitleSound() override;
 
-	void SetTitle(const QString& base);
+	void                         SetTitle(const QString& base);
+	[[nodiscard]] const QString& Title() const { return m_base; }
 
 private:
 	struct Sound {

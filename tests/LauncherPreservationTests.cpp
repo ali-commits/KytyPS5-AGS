@@ -4,12 +4,18 @@
 #include "configurationEditDialog.h"
 #include "configurationItem.h"
 #include "configurationListWidget.h"
+#include "controllerPreview.h"
+#include "inputMappingDialog.h"
+#include "titleSound.h"
+#include "updateChecker.h"
 #include "emulatorCommand.h"
 #include "mainDialog.h"
 #include "streamingCatalog.h"
+#include "streamingBackend.h"
 #include "streamingWidget.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -17,6 +23,18 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QImage>
+#include <QGroupBox>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QElapsedTimer>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QListView>
+#include <QMenu>
+#include <QStackedWidget>
+#include <QTimer>
+#include <QToolButton>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -80,6 +98,37 @@ bool Capture(QWidget& widget, const QString& suffix = {}) {
     QApplication::processEvents();
     return widget.grab().save(path, "PNG");
 }
+bool CreateGridFixture(const QTemporaryDir& temp) {
+    const std::array<const char*,3> names {"Astro Fixture", "Moonlight Fixture", "Stream Fixture"};
+    for (int i=0;i<3;++i) {
+        const auto base = temp.filePath(QString("games/%1").arg(names[i]));
+        if (!Write(base+"/eboot.bin","fixture, never executed") ||
+            !Write(base+"/sce_sys/param.json",QJsonDocument(QJsonObject{
+                {"titleId",QString("PPSA9999%1").arg(i)}, {"appVersion","01.000.000"},
+                {"titleName",QString::fromLatin1(names[i])}}).toJson())) return false;
+        QImage art(480,270,QImage::Format_RGB32);
+        art.fill(QColor::fromHsv(195+i*65,160,210));
+        QPainter painter(&art);
+        QLinearGradient backdrop(0,0,480,270);
+        backdrop.setColorAt(0,QColor::fromHsv(195+i*65,180,200));
+        backdrop.setColorAt(1,QColor::fromHsv(215+i*65,230,65));
+        painter.fillRect(art.rect(),backdrop);
+        painter.setPen(QPen(QColor(255,255,255,45),3));
+        for(int line=0;line<12;++line) painter.drawLine(line*60-100,0,line*60+100,270);
+        painter.setPen(Qt::white);
+        QFont cover_font=painter.font(); cover_font.setPixelSize(34); cover_font.setBold(true);
+        painter.setFont(cover_font); painter.drawText(QRect(30,125,420,100),Qt::AlignLeft|Qt::TextWordWrap,names[i]);
+        cover_font.setPixelSize(16); cover_font.setBold(false); painter.setFont(cover_font);
+        painter.drawText(30,242,"KYTY UI TEST LIBRARY");
+        painter.end();
+        if(!art.save(base+"/sce_sys/icon0.png")) return false;
+    }
+    QSettings settings(temp.filePath("Kyty.ini"),QSettings::IniFormat);
+    settings.setValue("Launcher/game_dirs",QStringList{temp.filePath("games")});
+    settings.sync();
+    return Write(temp.filePath("compatibility_db.json"),"{}");
+}
+
 constexpr std::array<const char*, 5> Sliders {
     "slider_audio_master", "slider_audio_main", "slider_audio_music",
     "slider_audio_pad_speaker", "slider_audio_objects"};
@@ -103,6 +152,240 @@ void SetLevels(Configuration& info) {
 class LauncherPreservationTests: public QObject {
     Q_OBJECT
 private slots:
+    void headlessStartupSelectsStreamingBeforePreviewAndStartsOnlyHost() {
+#if defined(__linux__)
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        QVERIFY(CreateGridFixture(temp));
+        const auto bin=temp.filePath("bin"); QVERIFY(QDir().mkpath(bin));
+        const auto runner=bin+"/launcher_preservation_tests";
+        QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(),runner));
+        const auto emulator=bin+"/kyty_emulator";
+        const QByteArray version_stub = "#!/bin/sh\nif [ \"$#\" -ne 0 ]; then touch ../unexpected-game; exit 1; fi\nprintf 'UI fixture emulator\\nusage\\n'\n";
+        QVERIFY(Write(emulator,version_stub));
+        QVERIFY(QFile::setPermissions(emulator,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        const auto profile=temp.filePath("streaming"); QVERIFY(QDir().mkpath(profile));
+        QSettings settings(profile+"/streaming.ini",QSettings::IniFormat);
+        settings.setValue("host/backend",temp.filePath("missing-helper")); settings.sync();
+        QProcess child; auto environment=QProcessEnvironment::systemEnvironment();
+        environment.insert("KYTY_STREAMING_CONFIG_DIR",profile);
+        child.setProcessEnvironment(environment); child.setWorkingDirectory(temp.path());
+        child.start(runner,{"--headless-ui-startup-fixture"});
+        QVERIFY(child.waitForFinished(10000));
+        QCOMPARE(child.exitStatus(),QProcess::NormalExit);
+        QVERIFY2(child.exitCode()==0,child.readAllStandardError().constData());
+        QVERIFY(!QFile::exists(temp.filePath("unexpected-game")));
+        QVERIFY(!QFile::exists(profile+"/host-key.pem"));
+#else
+        QSKIP("The isolated executable fixture uses a Linux shell version stub");
+#endif
+    }
+
+    void upstreamGridSharesSelectionResizesPersistsAndKeepsCatalog() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        QString selected_title;
+        {
+            ConfigurationListWidget library;
+            library.resize(1100,700);
+            library.show();
+            auto* tree=library.findChild<QTreeWidget*>("cfgs_list");
+            auto* grid=library.findChild<QListView*>("cfgs_grid");
+            auto* toggle=library.findChild<QToolButton*>("grid_view_button");
+            auto* size=library.findChild<QSlider*>("grid_size_slider");
+            auto* views=library.findChild<QStackedWidget*>("game_views");
+            QVERIFY(tree && grid && toggle && size && views);
+            QCOMPARE(tree->topLevelItemCount(),3);
+            QCOMPARE(grid->model(),tree->model());
+            QCOMPARE(grid->selectionModel(),tree->selectionModel());
+            QVERIFY(!toggle->isChecked());
+            QCOMPARE(views->currentWidget(),tree);
+            QCOMPARE(size->minimum(),128); QCOMPARE(size->maximum(),320);
+            QCOMPARE(size->singleStep(),16); QCOMPARE(size->pageStep(),32);
+            QCOMPARE(size->value(),224);
+            tree->setCurrentItem(tree->topLevelItem(1),2);
+            selected_title=tree->currentItem()->text(0);
+            QTest::mouseClick(toggle,Qt::LeftButton);
+            QCOMPARE(views->currentWidget(),grid);
+            QCOMPARE(grid->currentIndex().column(),0);
+            QCOMPARE(grid->currentIndex().data().toString(),selected_title);
+            const auto before=library.CreateStreamingCatalog("/fixture/kyty_emulator");
+            QCOMPARE(before.size(),3);
+            QSignalSpy changed(&library,&ConfigurationListWidget::CatalogChanged);
+            size->setValue(320);
+            QCOMPARE(grid->iconSize(),QSize(320,180));
+            QVERIFY(changed.count()>0);
+            const auto after=library.CreateStreamingCatalog("/fixture/kyty_emulator");
+            QCOMPARE(after.size(),before.size());
+            for(int i=0;i<after.size();++i) QCOMPARE(after[i].arguments,before[i].arguments);
+            QSettings saved("Kyty.ini",QSettings::IniFormat);
+            QVERIFY(saved.value("Launcher/grid_view").toBool());
+            QCOMPARE(saved.value("Launcher/grid_icon_width").toInt(),320);
+            QVERIFY(Capture(library,"-grid"));
+            QTest::mouseClick(toggle,Qt::LeftButton);
+            QCOMPARE(views->currentWidget(),tree);
+            QCOMPARE(tree->currentItem()->text(0),selected_title);
+            QVERIFY(Capture(library,"-list"));
+            QTest::mouseClick(toggle,Qt::LeftButton);
+        }
+        ConfigurationListWidget restored;
+        QVERIFY(restored.findChild<QToolButton*>("grid_view_button")->isChecked());
+        QCOMPARE(restored.findChild<QSlider*>("grid_size_slider")->value(),320);
+        QCOMPARE(restored.findChild<QListView*>("cfgs_grid")->iconSize(),QSize(320,180));
+    }
+
+    void gridFilteringSortingDoubleClickAndContextActionsUseTheSameGame() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        ConfigurationListWidget library;
+        library.resize(1100,700); library.show();
+        auto* tree=library.findChild<QTreeWidget*>("cfgs_list");
+        auto* grid=library.findChild<QListView*>("cfgs_grid");
+        auto* search=library.findChild<QLineEdit*>("search_line_edit");
+        auto* toggle=library.findChild<QToolButton*>("grid_view_button");
+        QVERIFY(tree && grid && search && toggle);
+        QTest::mouseClick(toggle,Qt::LeftButton);
+        search->setText("Moonlight");
+        const auto verify_filter=[&] {
+            int visible=0;
+            for(int row=0;row<tree->topLevelItemCount();++row) {
+                const bool hidden=!tree->topLevelItem(row)->text(0).contains("Moonlight");
+                if(tree->topLevelItem(row)->isHidden()!=hidden || grid->isRowHidden(row)!=hidden) return false;
+                visible += !hidden;
+            }
+            return visible==1;
+        };
+        QVERIFY(verify_filter());
+        tree->sortItems(0,Qt::DescendingOrder);
+        QVERIFY(verify_filter());
+        search->clear();
+        const auto index=grid->model()->index(1,0);
+        QSignalSpy run(&library,&ConfigurationListWidget::Run);
+        QVERIFY(QMetaObject::invokeMethod(grid,"doubleClicked",Qt::DirectConnection,Q_ARG(QModelIndex,index)));
+        QCOMPARE(run.count(),1);
+        QCOMPARE(library.GetSelectedItem()->GetInfo().name,index.data().toString());
+        library.SetRunEnabled(false);
+        QVERIFY(QMetaObject::invokeMethod(grid,"doubleClicked",Qt::DirectConnection,Q_ARG(QModelIndex,index)));
+        QCOMPARE(run.count(),1);
+        bool popup_seen=false;
+        QStringList actions;
+        QTimer popup_timer;
+        popup_timer.setInterval(1);
+        connect(&popup_timer,&QTimer::timeout,&library,[&] {
+            auto* menu=qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if(!menu) for(auto* widget:QApplication::topLevelWidgets())
+                if(auto* candidate=qobject_cast<QMenu*>(widget);candidate && candidate->isVisible()) menu=candidate;
+            if(menu) {
+                popup_seen=true;
+                for(auto* action:menu->actions()) if(action->isVisible()) actions.append(action->text());
+                menu->close();
+            }
+        });
+        QApplication::processEvents();
+        popup_timer.start();
+        const auto point=grid->visualRect(index).center();
+        QVERIFY(QMetaObject::invokeMethod(grid,"customContextMenuRequested",Qt::DirectConnection,Q_ARG(QPoint,point)));
+        popup_timer.stop();
+        QVERIFY(popup_seen);
+        for(const auto* action:{"Cheats (experimental)...","Additional Content...","Edit game config...","Remove save data..."})
+            QVERIFY2(actions.contains(action),action);
+        QCOMPARE(library.GetSelectedItem()->GetInfo().name,index.data().toString());
+    }
+
+    void currentUpstreamRenderingAndTrophyControlsPersistWithNativeAudio() {
+        QTemporaryDir temp;
+        Configuration info;
+        EditDialog dialog(info); dialog.SetGlobalSettings({});
+        auto* zmask=dialog.findChild<QCheckBox*>("checkBox_support_zmask");
+        auto* sync=dialog.findChild<QCheckBox*>("checkBox_sync_raw_image_buffers");
+        auto* compatibility=dialog.findChild<QGroupBox*>("rendering_compatibility_group");
+        auto* duration=dialog.findChild<QSpinBox*>("spinBox_trophy_duration");
+        QVERIFY(zmask && sync && compatibility && duration);
+        QVERIFY(compatibility->isAncestorOf(zmask) && compatibility->isAncestorOf(sync));
+        QCOMPARE(duration->minimum(),5); QCOMPARE(duration->maximum(),10); QCOMPARE(duration->value(),6);
+        QVERIFY(!zmask->isChecked());
+        zmask->setChecked(true); duration->setValue(9);
+        dialog.findChild<QSlider*>("slider_audio_music")->setValue(142);
+        dialog.save();
+        QSettings file(temp.filePath("options.ini"),QSettings::IniFormat);
+        info.WriteSettings(&file); info.WriteGlobalOnlySettings(&file);
+        Configuration loaded; loaded.ReadSettings(&file); loaded.ReadGlobalOnlySettings(&file);
+        QCOMPARE(Value(BuildEmulatorArgs(loaded),"--support-zmask"),"true");
+        QCOMPARE(Value(BuildEmulatorArgs(loaded),"--trophy-duration"),"9");
+        QCOMPARE(Value(BuildEmulatorArgs(loaded),"--audio-music-volume"),"142");
+        QSettings legacy(temp.filePath("legacy.ini"),QSettings::IniFormat);
+        legacy.setValue("user_name","Legacy");
+        Configuration migrated; migrated.ReadSettings(&legacy);
+        QCOMPARE(Value(BuildEmulatorArgs(migrated),"--trophy-duration"),"6");
+        legacy.setValue("trophy_duration_seconds","invalid"); migrated.ReadSettings(&legacy);
+        QCOMPARE(migrated.trophy_duration_seconds,6);
+        legacy.setValue("trophy_duration_seconds",1); migrated.ReadSettings(&legacy);
+        QCOMPARE(migrated.trophy_duration_seconds,5);
+        legacy.setValue("trophy_duration_seconds",90); migrated.ReadSettings(&legacy);
+        QCOMPARE(migrated.trophy_duration_seconds,10);
+        auto* tabs=dialog.findChild<QTabWidget*>("settings_tabs");
+        tabs->setCurrentWidget(tabs->findChild<QWidget*>("debug_tab"));
+        QVERIFY(Capture(dialog,"-debug"));
+    }
+
+    void sharedControllerPreviewAndTitleSoundKeepStreamingAndPresetSafeguards() {
+        QTemporaryDir temp; WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        const auto old=qgetenv("KYTY_STREAMING_CONFIG_DIR");
+        qputenv("KYTY_STREAMING_CONFIG_DIR",temp.filePath("private-stream").toUtf8());
+        struct Restore { QByteArray previous; ~Restore(){previous.isNull()?qunsetenv("KYTY_STREAMING_CONFIG_DIR"):qputenv("KYTY_STREAMING_CONFIG_DIR",previous);} } restore{old};
+        MainDialog dialog;
+        auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
+        QVERIFY(preview);
+        auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
+        QVERIFY(title);
+        preview->SetSuspended(true); // This test never opens physical devices.
+        {
+            InputMappingDialog mapping({},preview,&dialog);
+            QVERIFY(mapping.findChild<QTabWidget*>("inputTabs"));
+            QVERIFY(mapping.findChildren<ControllerPreview*>().empty());
+            QVERIFY(Capture(mapping,"-controls"));
+        }
+        dialog.SetPresetWarning("Fixture preset warning");
+        bool warning_visible=false;
+        for(auto* label:dialog.findChildren<QLabel*>()) warning_visible|=label->text()=="Fixture preset warning";
+        QVERIFY(warning_visible);
+        QVERIFY(!UpdateChecker::IsSupported()); // Custom packages cannot install official runtime archives.
+        auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
+        QVERIFY(streaming);
+        auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
+        QVERIFY(tabs);
+        auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
+        tree->setCurrentItem(tree->topLevelItem(0));
+        auto* toggle=dialog.findChild<QToolButton*>("grid_view_button");
+        QTest::mouseClick(toggle,Qt::LeftButton);
+        QVERIFY(Capture(dialog,"-main-grid"));
+        QCOMPARE(title->Title(),dialog.findChild<ConfigurationListWidget*>()->GetSelectedItem()->GetInfo().basedir);
+        tabs->setCurrentWidget(streaming);
+        QVERIFY(title->Title().isEmpty());
+        QVERIFY(Capture(dialog,"-streaming-current-ui"));
+        tabs->setCurrentIndex(0);
+        QVERIFY(!title->Title().isEmpty());
+        auto* backend=dialog.findChild<StreamingBackend*>();
+        QVERIFY(backend);
+        bool preview_paused=false,title_cleared=false;
+        connect(backend,&StreamingBackend::Changed,&dialog,[&] {
+            if(backend->GetState()==StreamingBackend::State::Starting) {
+                preview_paused=preview->Error().contains("paused");
+                title_cleared=title->Title().isEmpty();
+            }
+        });
+        StreamingSettings invalid;
+        invalid.backend=temp.filePath("missing-helper");
+        backend->Start(invalid); // Fails before profile/audio/process setup.
+        QVERIFY(preview_paused && title_cleared);
+        QCOMPARE(backend->GetState(),StreamingBackend::State::Error);
+        QVERIFY(!QFile::exists(temp.filePath("private-stream/host-key.pem")));
+    }
+
     void updatedTabsKeepEveryGlobalAudioAndOcclusionControl() {
         Configuration info;
         EditDialog dialog(info);
@@ -289,6 +572,8 @@ private slots:
             file.setValue("hdr_enabled", true);
             file.setValue("perf_overlay_enabled", true);
             file.setValue("network_connected", true);
+            file.setValue("support_zmask", true);
+            file.setValue("trophy_duration_seconds", 8);
             file.endArray();
         }
         const auto patch = Cheats::PlanPath("PPSA99998");
@@ -320,6 +605,8 @@ private slots:
         QVERIFY(local_args.contains("--hdr"));
         QCOMPARE(Value(local_args, "--perf-overlay"), "true");
         QCOMPARE(Value(local_args, "--network-connected"), "true");
+        QCOMPARE(Value(local_args,"--support-zmask"),"true");
+        QCOMPARE(Value(local_args,"--trophy-duration"),"8");
         QCOMPARE(Value(local_args, "--keyboard-player"), "3");
         QCOMPARE(Value(local_args, "--addcont-dir"), temp.filePath("Additional Content"));
         QCOMPARE(local_args.count("--keymap"), 2);
@@ -456,10 +743,34 @@ int main(int argc, char** argv) {
     std::vector<char*> app_args(argv, argv + argc);
     char local[] = "--local";
     app_args.push_back(local);
+    const bool headless_fixture=argc==2 && QByteArray(argv[1])=="--headless-ui-startup-fixture";
+    char start_host[]="--start-streaming-host";
+    if(headless_fixture) app_args.push_back(start_host);
     app_args.push_back(nullptr);
-    int app_argc = argc + 1;
+    int app_argc = argc + 1 + int(headless_fixture);
     QApplication app(app_argc, app_args.data());
     QStandardPaths::setTestModeEnabled(true);
+    if(headless_fixture) {
+        MainDialog dialog;
+        auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
+        auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
+        auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
+        auto* backend=dialog.findChild<StreamingBackend*>();
+        if(!streaming || !title || !preview || !backend) return 11;
+        auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
+        if(!tabs || tabs->currentWidget()!=streaming || !title->Title().isEmpty()) return 12;
+        bool paused=false,quiet=true;
+        QObject::connect(backend,&StreamingBackend::Changed,&dialog,[&] {
+            quiet &= title->Title().isEmpty();
+            if(backend->GetState()==StreamingBackend::State::Starting)
+                paused=preview->Error().contains("paused");
+        });
+        dialog.Start();
+        QElapsedTimer deadline; deadline.start();
+        while(deadline.elapsed()<3000 && backend->GetState()!=StreamingBackend::State::Error)
+            QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+        return paused && quiet && backend->GetState()==StreamingBackend::State::Error ? 0 : 13;
+    }
     LauncherPreservationTests tests;
     return QTest::qExec(&tests, argc, argv);
 }

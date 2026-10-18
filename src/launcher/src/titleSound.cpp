@@ -47,7 +47,8 @@ TitleSound::Sound TitleSound::Decode(const QByteArray& data, const QPromise<Soun
 TitleSound::TitleSound(QObject* parent): QObject(parent) {
 	m_decode_pool.setMaxThreadCount(1);
 	connect(&m_decode, &QFutureWatcher<Sound>::finished, this, [this] {
-		if (m_decode.isCanceled() || m_decode.future().resultCount() == 0) {
+		// A completed decode can already have queued this callback when hosting clears the title.
+		if (m_base.isEmpty() || m_decode.isCanceled() || m_decode.future().resultCount() == 0) {
 			return;
 		}
 		auto sound = m_decode.future().takeResult();
