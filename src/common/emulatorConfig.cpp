@@ -221,12 +221,20 @@ bool SyncRawImageBuffersEnabled() {
 	return g_config->sync_raw_image_buffers;
 }
 
+bool SupportZmaskEnabled() {
+	return g_config->support_zmask;
+}
+
 bool TessellationEnabled() {
 	return g_config->tessellation_enabled;
 }
 
 bool TrophyEnabled() {
 	return g_config->trophy_enabled;
+}
+
+uint32_t GetTrophyDurationSeconds() {
+	return std::clamp(g_config->trophy_duration_seconds, 5u, 10u);
 }
 
 bool PlayGoHackEnabled() {

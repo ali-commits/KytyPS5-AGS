@@ -171,8 +171,11 @@ static void PrintUsage() {
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
 	::printf("  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. "
 	         "Default: false.\n");
+	::printf("  --support-zmask <true|false>         Fill HTILE buffers with uncompressed ZMask. "
+	         "Default: false.\n");
 	::printf("  --trophy-notifications <true|false>   Show trophy unlock toasts and play their "
 	         "sound.\n");
+	::printf("  --trophy-duration <seconds>          Trophy toast duration, 5-10. Default: 6.\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
 	::printf("  --skip-notice-screen <true|false>    Skip startup logos and notices in supported "
 	         "games.\n"
@@ -518,6 +521,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid vblank frequency: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--trophy-duration") {
+			if (!ParseUint32(value, options.config.trophy_duration_seconds)) {
+				::printf("invalid trophy duration: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--console-language") {
 			if (!ParseConsoleLanguage(value, options.config.console_language)) {
 				::printf("invalid console language: %s\n", value.c_str());
@@ -598,6 +606,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--sync-raw-image-buffers") {
 			if (!ParseBool(value, options.config.sync_raw_image_buffers)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--support-zmask") {
+			if (!ParseBool(value, options.config.support_zmask)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
