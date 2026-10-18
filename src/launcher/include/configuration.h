@@ -181,8 +181,10 @@ public:
 	bool                   hide_cursor_enabled         = false;
 	bool                   readback_linear_images      = false;
 	bool                   sync_raw_image_buffers      = false;
+	bool                   support_zmask               = false;
 	bool                   tessellation_enabled        = false;
 	bool                   trophy_enabled              = true;
+	int                    trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled        = false;
 	bool                   skip_notice_screen          = false;
 	bool                   network_connected           = false;
@@ -219,8 +221,10 @@ public:
 		hide_cursor_enabled         = other.hide_cursor_enabled;
 		readback_linear_images      = other.readback_linear_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;
+		support_zmask               = other.support_zmask;
 		tessellation_enabled        = other.tessellation_enabled;
 		trophy_enabled              = other.trophy_enabled;
+		trophy_duration_seconds     = other.trophy_duration_seconds;
 		perf_overlay_enabled        = other.perf_overlay_enabled;
 		skip_notice_screen          = other.skip_notice_screen;
 		network_connected           = other.network_connected;

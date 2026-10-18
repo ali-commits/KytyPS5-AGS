@@ -19,6 +19,7 @@ class QWidget;
 class InputMappingDialog final: public QDialog {
 public:
 	explicit InputMappingDialog(const QStringList& mapping, QWidget* parent = nullptr);
+	InputMappingDialog(const QStringList& mapping, ControllerPreview* preview, QWidget* parent);
 	~InputMappingDialog() override;
 
 	[[nodiscard]] QStringList Mapping() const;

@@ -364,7 +364,11 @@ double ParseMouseSensitivity(const QStringList& mapping) {
 } // namespace
 
 InputMappingDialog::InputMappingDialog(const QStringList& mapping, QWidget* parent)
-    : QDialog(parent), m_preview(new ControllerPreview(this)) {
+    : InputMappingDialog(mapping, nullptr, parent) {}
+
+InputMappingDialog::InputMappingDialog(const QStringList& mapping, ControllerPreview* preview,
+                                       QWidget* parent)
+    : QDialog(parent), m_preview(preview != nullptr ? preview : new ControllerPreview(this)) {
 	setWindowTitle(tr("Controls"));
 	resize(QSize(1360, 780).boundedTo(screen()->availableGeometry().size()));
 

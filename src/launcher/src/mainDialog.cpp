@@ -4,11 +4,12 @@
 #include "configuration.h"
 #include "configurationItem.h"
 #include "configurationListWidget.h"
-#include "controllerLightbar.h"
+#include "controllerPreview.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
 #include "streamingBackend.h"
 #include "streamingWidget.h"
+#include "titleSound.h"
 #include "updateChecker.h"
 
 #include <QApplication>
@@ -70,7 +71,8 @@ class MainDialogPrivate: public QObject {
 	Q_OBJECT
 
 public:
-	explicit MainDialogPrivate(QObject* parent = nullptr): QObject(parent) {}
+	explicit MainDialogPrivate(QObject* parent = nullptr)
+	    : QObject(parent), m_controller_preview(this), m_title_sound(this) {}
 	~MainDialogPrivate() override;
 
 	void Setup(MainDialog* main_dialog);
@@ -91,14 +93,15 @@ private:
 	static QByteArray g_last_geometry;
 	static bool       g_check_updates_on_startup;
 
-	Ui::MainDialog*    m_ui             = {nullptr};
-	MainDialog*        m_main_dialog    = nullptr;
-	UpdateChecker*     m_update_checker = nullptr;
-	ControllerLightbar m_lightbar;
-	QString            m_interpreter;
-	QString            m_preset_warning;
-	QLabel*            m_preset_label = nullptr;
-	bool               m_started      = false;
+	Ui::MainDialog*   m_ui             = {nullptr};
+	MainDialog*       m_main_dialog    = nullptr;
+	UpdateChecker*    m_update_checker = nullptr;
+	ControllerPreview m_controller_preview;
+	TitleSound        m_title_sound;
+	QString           m_interpreter;
+	QString           m_preset_warning;
+	QLabel*           m_preset_label = nullptr;
+	bool              m_started      = false;
 
 	QProcess          m_process;
 	StreamingBackend* m_streaming        = nullptr;
@@ -117,6 +120,8 @@ MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPriv
 
 MainDialogPrivate::~MainDialogPrivate() {
 	m_process.disconnect(this);
+	m_title_sound.SetTitle({});
+	m_controller_preview.Stop();
 	m_streaming->disconnect();
 	delete m_streaming;
 	delete m_ui;
@@ -125,12 +130,18 @@ MainDialogPrivate::~MainDialogPrivate() {
 void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui = new Ui::MainDialog;
 	m_ui->setupUi(main_dialog);
+	m_controller_preview.setObjectName("controllerPreview");
+	m_title_sound.setObjectName("titleSound");
+	m_ui->widget->SetControllerPreview(&m_controller_preview);
 	m_tabs = new QTabWidget(main_dialog);
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
 	m_tabs->addTab(m_ui->widget, tr("Library"));
 	m_streaming        = new StreamingBackend(StreamingSettings::ProfileDirectory(), this);
 	m_streaming_widget = new StreamingWidget(m_streaming, m_tabs);
 	m_tabs->addTab(m_streaming_widget, tr("Streaming"));
+	if (QApplication::arguments().contains("--start-streaming-host"))
+		m_tabs->setCurrentWidget(m_streaming_widget);
+	connect(m_tabs, &QTabWidget::currentChanged, this, [this] { Update(); });
 	m_ui->verticalLayout_3->addWidget(m_tabs);
 	main_dialog->setMinimumSize(700, 650);
 	main_dialog->resize(920, 860);
@@ -153,8 +164,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
-		        if (m_process.state() == QProcess::NotRunning) {
-			        m_lightbar.SetColor(color);
+		        if (m_process.state() == QProcess::NotRunning &&
+		            (m_streaming->GetState() == StreamingBackend::State::Stopped ||
+		             m_streaming->GetState() == StreamingBackend::State::Error)) {
+			        m_controller_preview.SetColor(color);
 		        }
 	        });
 	connect(m_ui->widget, &ConfigurationListWidget::Run, this, &MainDialogPrivate::Run);
@@ -162,6 +175,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	        [this](const QString&) { m_update_checker->Check(true); });
 	connect(m_update_checker, &UpdateChecker::CheckingChanged, m_ui->check_updates_link,
 	        &QLabel::setDisabled);
+	connect(m_update_checker, &UpdateChecker::InstallingChanged, this, [this] { Update(); });
 	connect(m_ui->check_updates_on_startup, &QCheckBox::toggled, this, [this](bool checked) {
 		g_check_updates_on_startup = checked;
 		m_ui->widget->WriteSettings();
@@ -188,6 +202,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 }
 
 void MainDialogPrivate::FindInterpreter() {
+	UpdateChecker::ShowPreviousResult(m_main_dialog);
 	QDir search_dir(QApplication::applicationDirPath());
 	m_interpreter = search_dir.absoluteFilePath(EMULATOR_EXE);
 
@@ -483,6 +498,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 }
 
 void MainDialogPrivate::Run() {
+	if (m_update_checker->IsInstalling()) return;
 	if (m_streaming->GetState() != StreamingBackend::State::Stopped &&
 	    m_streaming->GetState() != StreamingBackend::State::Error)
 		return;
@@ -492,7 +508,8 @@ void MainDialogPrivate::Run() {
 	}
 
 	m_running_item->SetRunning(true);
-	m_lightbar.Stop();
+	m_controller_preview.SetSuspended(true);
+	m_title_sound.SetTitle({});
 
 	auto info = m_ui->widget->CreateConfiguration(*m_running_item);
 	m_main_dialog->RunInterpreter(&m_process, *info);
@@ -506,7 +523,14 @@ void MainDialogPrivate::Update() {
 	m_streaming->SetLocalGameRunning(m_process.state() != QProcess::NotRunning);
 	const bool hosting = m_streaming->GetState() != StreamingBackend::State::Stopped &&
 	                     m_streaming->GetState() != StreamingBackend::State::Error;
-	bool run_enabled   = (!hosting && m_process.state() == QProcess::NotRunning && item != nullptr);
+	const bool busy =
+	    hosting || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
+	m_update_checker->SetGameRunning(hosting || m_process.state() != QProcess::NotRunning);
+	m_controller_preview.SetSuspended(busy);
+	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget && item != nullptr
+	                           ? item->GetInfo().basedir
+	                           : QString {});
+	bool run_enabled = !busy && item != nullptr;
 
 	if (run_enabled) {
 		const auto& info = item->GetInfo();
@@ -515,11 +539,8 @@ void MainDialogPrivate::Update() {
 	}
 
 	m_ui->widget->SetRunEnabled(run_enabled);
-	if (m_process.state() != QProcess::NotRunning) {
-		m_lightbar.Stop();
-		return;
-	}
-	m_lightbar.SetColor(m_ui->widget->GetGlobalControllerColor());
+	if (busy) return;
+	m_controller_preview.SetColor(m_ui->widget->GetGlobalControllerColor());
 }
 
 #include "mainDialog.moc"

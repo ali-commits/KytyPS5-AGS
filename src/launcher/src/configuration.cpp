@@ -14,8 +14,10 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(hide_cursor_enabled);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
+	KYTY_CFG_SET(support_zmask);
 	KYTY_CFG_SET(tessellation_enabled);
 	KYTY_CFG_SET(trophy_enabled);
+	KYTY_CFG_SET(trophy_duration_seconds);
 	KYTY_CFG_SET(perf_overlay_enabled);
 	KYTY_CFG_SET(skip_notice_screen);
 	KYTY_CFG_SET(network_connected);
@@ -62,9 +64,14 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(hide_cursor_enabled);
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
+	KYTY_CFG_GET(support_zmask);
 	KYTY_CFG_GET(tessellation_enabled);
-	trophy_enabled = s.value("trophy_enabled", trophy_enabled).toBool();
-	trophy_enabled = s.value("trophy_enabled", trophy_enabled).toBool();
+
+	trophy_enabled         = s.value("trophy_enabled", trophy_enabled).toBool();
+	bool       duration_ok = false;
+	const auto duration =
+	    s.value("trophy_duration_seconds", trophy_duration_seconds).toInt(&duration_ok);
+	trophy_duration_seconds = duration_ok ? qBound(5, duration, 10) : 6;
 	KYTY_CFG_GET(perf_overlay_enabled);
 	KYTY_CFG_GET(skip_notice_screen);
 	KYTY_CFG_GET(network_connected);
@@ -160,6 +167,9 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	}
 	if (gpu_index < -1) {
 		return fail(tr("GPU index must be -1 or greater."));
+	}
+	if (trophy_duration_seconds < 5 || trophy_duration_seconds > 10) {
+		return fail(tr("Trophy notification duration must be between 5 and 10 seconds."));
 	}
 	if (vblank_frequency < 30 || vblank_frequency > 360) {
 		return fail(tr("Vblank frequency must be between 30 and 360."));

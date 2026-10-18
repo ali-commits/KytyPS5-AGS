@@ -57,8 +57,10 @@ QStringList BuildEmulatorArgs(const Configuration& info) {
 	}
 	args << "--readback-linear-images" << BoolArg(info.readback_linear_images);
 	args << "--sync-raw-image-buffers" << BoolArg(info.sync_raw_image_buffers);
+	args << "--support-zmask" << BoolArg(info.support_zmask);
 	args << "--perf-overlay" << BoolArg(info.perf_overlay_enabled);
 	args << "--trophy-notifications" << BoolArg(info.trophy_enabled);
+	args << "--trophy-duration" << QString::number(info.trophy_duration_seconds);
 	args << "--network-connected" << BoolArg(info.network_connected);
 	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
 	if (info.tessellation_enabled) {
