@@ -2424,6 +2424,7 @@ if(BUILD_TESTING)
 	add_cp_recorder_validation(gpu_command_lane --gpu-command-lane-only)
 	add_cp_recorder_validation(stream_buffer_ring --stream-buffer-only)
 	add_cp_recorder_validation(texture_cache_layered_image --layered-image-only)
+	add_cp_recorder_validation(texture_cache_cmask_clear --cmask-fast-clear-only)
 	add_cp_recorder_validation(buffer_cache_eager_readback --readback-eager-only)
 	# KYTY_BDA_WRITES: stores and atomics through runtime V#s via BDA.
 	add_test(NAME bda_writes
