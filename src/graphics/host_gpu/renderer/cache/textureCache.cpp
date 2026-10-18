@@ -59,6 +59,19 @@ namespace {
 
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 
+// Native depth imports supersede pending clears, including retained-alias copies.
+// The metadata map type is private to TextureCache; deduce it at these internal call sites.
+bool DiscardCopiedDepthClears(auto& metas, const ImageInfo& info) {
+	if (!info.IsDepth() || info.metadata.kind != ImageMetadataKind::Htile) return false;
+	const auto metadata = metas.find(info.metadata.range.address);
+	if (metadata == metas.end() ||
+	    metadata->second.type != decltype(metadata->second.type)::HTile ||
+	    metadata->second.clear_mask == 0)
+		return false;
+	metadata->second.clear_mask = 0;
+	return true;
+}
+
 // The DccImageState* cause in the DCC CPU fallback's stderr line.
 const char* DccImageStateName(Profiler::FrameEvent cause) {
 	using Event = Profiler::FrameEvent;
@@ -1119,16 +1132,8 @@ void TextureCache::DeleteImage(ImageId id) {
 		EXIT("TextureCache: deleting a GPU-modified image without resolving its contents\n");
 	}
 	m_download_images.erase(id);
-	if (image->info.HasMetadata()) {
-		const auto metadata = m_surface_metas.find(image->info.metadata.range.address);
-		if (metadata != m_surface_metas.end() &&
-		    image->info.metadata.kind == ImageMetadataKind::Htile &&
-		    metadata->second.type == MetaDataInfo::Type::HTile) {
-			// A later binding may have reused this address for another metadata type.
-			m_surface_metas.erase(metadata);
-			NoteSurfaceMetaChange();
-		}
-	}
+	// HTile belongs to its guest allocation, not the retiring native image.
+	// UnmapMemory retires metadata independently when that allocation goes away.
 	UnregisterImage(id);
 	if (m_scheduler.Active()) {
 		uint64_t retiring_bytes = 0;
@@ -2079,6 +2084,10 @@ bool TextureCache::CopyImage(ImageId destination_id, ImageId source_id, const ch
 		TakeOverOwnedBytes(destination, source);
 	}
 	destination.ClearBufferModified();
+	if (destination.info.data.address == source.info.data.address &&
+	    DiscardCopiedDepthClears(m_surface_metas, destination.info)) {
+		NoteSurfaceMetaChange();
+	}
 	// Copies never include a stencil aspect, so combined depth/stencil images never compare equal.
 	const auto has_stencil = [](vk::Format format) {
 		return format == vk::Format::eD16UnormS8Uint || format == vk::Format::eD24UnormS8Uint ||
@@ -2241,6 +2250,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 			claim.ranges = &converted;
 		}
 		CommitGpuWrite(replacement, claim);
+		if (DiscardCopiedDepthClears(m_surface_metas, replacement.info)) NoteSurfaceMetaChange();
 	} else {
 		LOGF_COLOR(Log::Color::BrightYellow,
 		           "TextureCache: unsupported unequal-sample depth overlap copy (%u -> %u)\n",
@@ -4749,6 +4759,7 @@ void TextureCache::SyncAliasFromOwner(ImageId id) {
 				TrackImage(id);
 				CommitGpuWrite(image);
 				image.AdoptContentSerial(serial);
+				if (DiscardCopiedDepthClears(m_surface_metas, image.info)) NoteSurfaceMetaChange();
 				Profiler::CountFrameEvent(Profiler::FrameEvent::AliasSyncSkips);
 				trace_sync("skip-same-contents", 0);
 				return;

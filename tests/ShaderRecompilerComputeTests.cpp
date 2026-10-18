@@ -12608,6 +12608,122 @@ public:
       htile_depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth;
       htile_depth.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
       const auto htile_depth_image = texture_cache.FindImage(htile_depth);
+      (void)texture_cache.FindDepthTarget(htile_depth_image, htile_depth);
+      Require(name, "HTile guest metadata registration",
+              texture_cache.ClearMeta(htile_depth.info.metadata.range.address) &&
+                  texture_cache.TouchMeta(htile_depth.info.metadata.range.address, 0, false),
+              "depth acquisition did not register independent metadata slice state");
+      Require(name, "ZMask disabled by default", !Config::SupportZmaskEnabled(),
+              "ZMask compatibility must remain opt-in");
+      const auto check_zmask_binding = [&](uint64_t address, uint64_t size,
+                                            bool read, bool written, bool narrowed,
+                                            bool enabled) {
+        OnGpuThread(context, [&] {
+          Config::Load({.support_zmask = enabled});
+          auto &buffer_cache = resources.GetBufferCache();
+          constexpr uint32_t seed = 0x5a5a5a5au;
+          if (address != 0 && size != 0) {
+            buffer_cache.ReadMemory(address, size);
+            Require(name, "ZMask fixture CPU ownership", resources.InvalidateMemory(address, size),
+                    "metadata seed range was not GPU mapped");
+            const std::vector<uint32_t> words(size / sizeof(uint32_t), seed);
+            Require(name, "ZMask fixture seed",
+                    LibKernel::Memory::TryWriteBacking(address, words.data(), size) &&
+                        !buffer_cache.HasGpuDirtyBytes(address, size),
+                    "metadata seed retained stale GPU-owned bytes");
+          }
+          ShaderRecompiler::IR::Program ir{};
+          ir.stage = ShaderType::Compute;
+          ir.resource_tracking_complete = ir.shader_info_complete = true;
+          ir.info.buffers.push_back({.read = read, .written = written});
+          ShaderRecompiler::IR::AllocateBindings(ir);
+          ShaderRecompiler::IR::CompiledShaderInfo program{};
+          program.stage = ir.stage;
+          program.info = std::move(ir.info);
+          program.bindings = std::move(ir.bindings);
+          if (narrowed) {
+            program.write_ranges.nodes.push_back({.lo = 0, .hi = 0});
+            program.write_ranges.buffers.push_back(
+                {.buffer = 0, .packed_stride = 0, .bounded = true,
+                 .accesses = {{.index = 0, .offset = 0, .soffset = 0,
+                                .immediate = 64, .extent = 4}}});
+          }
+          ShaderBufferResource descriptor{};
+          descriptor.UpdateAddress48(address);
+          descriptor.fields[2] = static_cast<uint32_t>(size);
+          ShaderRecompiler::IR::ResourceSnapshot snapshot;
+          auto &value = snapshot.buffers.emplace_back();
+          std::copy_n(descriptor.fields, 4, value.dwords.begin());
+          value.dword_count = 4;
+          ShaderStageRuntime runtime{&program, &snapshot};
+          PreparedBindings bindings;
+          auto &executor = context.GetRenderExecutor();
+          executor.PrepareBindings(runtime, bindings);
+          std::array stages{&bindings};
+          executor.FindBuffers(stages);
+          executor.RebindBuffers(bindings);
+          const auto &binding = bindings.buffers[0];
+          if (address == 0 || size == 0) {
+            Require(name, "ZMask empty binding",
+                    binding.buffer == buffer_cache.GetBuffer(NULL_BUFFER_ID).Handle() &&
+                        binding.offset == 0 && binding.range == 16,
+                    "ZMask mode changed the native null-buffer binding");
+            return;
+          }
+          const bool fill = enabled && read && (address & 0x7fffu) == 0 &&
+                            texture_cache.IsMeta(address);
+          const auto *precise = std::getenv("KYTY_PRECISE_WRITE_RANGES");
+          const bool precise_enabled = precise == nullptr || std::strcmp(precise, "0") != 0;
+          if (fill || (narrowed && precise_enabled)) {
+            Require(name, "ZMask full write ownership",
+                    buffer_cache.HasGpuDirtyBytes(address + size - 4, 4) == fill,
+                    "metadata fill retained a narrow shader write claim or the fixture did not narrow");
+          }
+          auto readback = CreateHostBuffer(name, size, vk::BufferUsageFlagBits::eTransferDst, {});
+          const auto &owner = buffer_cache.GetBuffer(bindings.buffer_sources[0].id);
+          Require(name, "ZMask native descriptor owner", binding.buffer == owner.Handle(),
+                  "metadata binding did not resolve to its canonical buffer");
+          const vk::BufferCopy copy{owner.Offset(address), 0, size};
+          scheduler.Current().Handle().copyBuffer(binding.buffer, readback.buffer, 1, &copy);
+          HostReadBarrier(readback.buffer, readback.size, vk::PipelineStageFlagBits::eTransfer,
+                          vk::AccessFlagBits::eTransferWrite);
+          scheduler.Finish();
+          const auto actual = ReadBuffer(name, readback, size / sizeof(uint32_t));
+          Require(name, "GPU-visible full-range ZMask setting",
+                  std::ranges::all_of(actual, [=](uint32_t word) { return word == (fill ? 15u : seed); }),
+                  "raw metadata binding ignored enable/read/alignment gates or filled only part of its range");
+          DestroyBuffer(&readback);
+        });
+      };
+      const auto check_zmask_modes = [&] {
+        const auto address = htile_depth.info.metadata.range.address;
+        const auto size = htile_depth.info.metadata.range.size;
+        Require(name, "ZMask registered aligned HTile", (address & 0x7fffu) == 0 &&
+                    texture_cache.IsMeta(address) && size > 2 * BufferCache::CACHING_PAGESIZE,
+                "the ZMask fixture does not cover an aligned metadata allocation across pages");
+        for (const bool enabled : {false, true}) {
+          check_zmask_binding(address, size, true, false, false, enabled);
+          check_zmask_binding(address, size, true, true, false, enabled);
+          check_zmask_binding(address, size, false, true, false, enabled);
+          check_zmask_binding(address, size, true, true, true, enabled);
+        }
+        Config::Load({});
+      };
+      check_zmask_modes();
+      const auto unaligned_metadata = htile_depth.info.metadata.range.address + 4;
+      TextureCacheTestAccess::RegisterHtileMeta(texture_cache, unaligned_metadata);
+      check_zmask_binding(unaligned_metadata, 2 * BufferCache::CACHING_PAGESIZE,
+                          true, true, false, true);
+      TextureCacheTestAccess::EraseSurfaceMeta(texture_cache, unaligned_metadata);
+      const auto ordinary_buffer = htile_depth.info.metadata.range.End();
+      Require(name, "ZMask nonmetadata fixture", !texture_cache.IsMeta(ordinary_buffer),
+              "ordinary buffer unexpectedly aliases registered metadata");
+      check_zmask_binding(ordinary_buffer, 2 * BufferCache::CACHING_PAGESIZE,
+                          true, false, false, true);
+      check_zmask_binding(0, 16, true, false, false, true);
+      check_zmask_binding(htile_depth.info.metadata.range.address, 0, true, false, false, true);
+      Config::Load({});
+
       vk::ClearValue htile_clear{};
       htile_clear.depthStencil.depth = 0.25f;
       TextureCacheTestAccess::ClearImage(
@@ -12650,8 +12766,14 @@ public:
         Require(name, "HTile depth storage prefix view",
                 texture_cache.FindTexture(id, htile_storage) != nullptr,
                 "converted depth prefix has no storage view");
+        Require(name, "HTile survives native storage replacement",
+                texture_cache.IsMeta(htile_depth.info.metadata.range.address) &&
+                    !texture_cache.IsMetaCleared(htile_depth.info.metadata.range.address, 0) &&
+                    texture_cache.IsMetaCleared(htile_depth.info.metadata.range.address, 1),
+                "native depth replacement discarded guest metadata or its per-slice state");
         htile_storage_image = id;
       }
+      check_zmask_modes();
       auto htile_readback = CreateHostBuffer(
           name, htile_layers * sizeof(float), vk::BufferUsageFlagBits::eTransferDst,
           std::vector<u32>(htile_layers));
@@ -12670,6 +12792,63 @@ public:
                   std::vector<u32>(htile_layers, std::bit_cast<u32>(0.25f)),
               "partial storage conversion lost native depth data outside its view");
       DestroyBuffer(&htile_readback);
+      auto imported_depth_readback = CreateHostBuffer(name, 3 * htile_layers * sizeof(uint32_t),
+          vk::BufferUsageFlagBits::eTransferDst, {});
+      for (uint32_t pass = 0; pass < 3; ++pass) {
+        if (pass < 2) {
+          Require(name, "HTile clear before depth import",
+                  texture_cache.ClearMeta(htile_depth.info.metadata.range.address),
+                  "copied depth lost its independent HTile registration");
+        }
+        const auto imported_id = texture_cache.FindImage(htile_depth);
+        if (pass == 2) {
+          vk::ClearValue changed{};
+          changed.depthStencil.depth = 0.625f;
+          TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), imported_id,
+              {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, htile_layers}, changed);
+        }
+        auto &executor = context.GetRenderExecutor();
+        RenderDepthInfo depth{};
+        depth.desc = htile_depth;
+        depth.image_id = imported_id;
+        depth.depth_test_enable = true;
+        depth.depth_clear_value = 0.75f;
+        RenderExecutorTestAccess::BindRenderTarget(executor, imported_id);
+        RenderColorInfo no_color{};
+        const auto rendering = RenderExecutorTestAccess::AcquireRenderTargets(
+            executor, scheduler.Current(), &no_color, 0, depth);
+        Require(name, "copied depth wins over old HTile clear",
+                rendering.depth_stencil_attachment.depth_clear == (pass == 1),
+                "depth import applied an old clear, ignored a new clear, or repeated a consumed clear");
+        scheduler.BeginRendering(rendering);
+        scheduler.EndRendering();
+        RenderExecutorTestAccess::ResetBindings(executor);
+        const vk::BufferImageCopy copy{pass * htile_layers * sizeof(uint32_t), 0, 0,
+            {vk::ImageAspectFlagBits::eDepth, 0, 0, htile_layers}, {}, {1, 1, 1}};
+        texture_cache.GetImage(imported_id).Download(std::span{&copy, 1},
+            imported_depth_readback.buffer, 0, imported_depth_readback.size);
+      }
+      HostReadBarrier(imported_depth_readback.buffer, imported_depth_readback.size,
+                      vk::PipelineStageFlagBits::eTransfer, vk::AccessFlagBits::eTransferWrite);
+      scheduler.Finish();
+      const auto imported_pixels = ReadBuffer(name, imported_depth_readback, 3 * htile_layers);
+      for (uint32_t pass = 0; pass < 3; ++pass) {
+        const auto expected = std::bit_cast<uint32_t>(pass == 0 ? 0.25f : pass == 1 ? 0.75f : 0.625f);
+        Require(name, "HTile copied-depth GPU contents",
+                std::ranges::all_of(std::span{imported_pixels}.subspan(pass * htile_layers, htile_layers),
+                                    [=](uint32_t word) { return word == expected; }),
+                "HTile state overwrote imported native depth or lost a subsequent clear");
+      }
+      DestroyBuffer(&imported_depth_readback);
+      texture_cache.UnmapMemory(htile_depth.info.data.address, htile_depth.info.data.size);
+      Require(name, "HTile allocation outlives native depth",
+              texture_cache.IsMeta(htile_depth.info.metadata.range.address),
+              "retiring native depth erased an independent guest metadata allocation");
+      texture_cache.UnmapMemory(htile_depth.info.metadata.range.address,
+                                htile_depth.info.metadata.range.size);
+      Require(name, "HTile allocation retirement",
+              !texture_cache.IsMeta(htile_depth.info.metadata.range.address),
+              "unmapping guest HTile bytes retained their metadata registration");
 
       auto layered_stencil_desc = MakeLinearDesc(
           base + 0x27d4000, 6 * 4 * sizeof(float),
@@ -13786,9 +13965,16 @@ public:
           "retiring the old DCC image erased the live HTile slice state");
       texture_cache.UnmapMemory(reused_depth.info.data.address,
                                 reused_depth.info.data.size);
+      Require(name, "HTile state survives depth retirement",
+              texture_cache.IsMeta(base + 0x28000) &&
+                  !texture_cache.IsMetaCleared(base + 0x28000, 0) &&
+                  texture_cache.IsMetaCleared(base + 0x28000, 1),
+              "native image retirement discarded independent HTile slice state");
+      texture_cache.UnmapMemory(reused_depth.info.metadata.range.address,
+                                reused_depth.info.metadata.range.size);
       Require(name, "reused metadata final retirement",
               !texture_cache.IsMeta(base + 0x28000),
-              "retiring the HTile image left its metadata registered");
+              "unmapped HTile bytes retained their metadata registration");
 
       constexpr uint64_t partial_unmap_image_offset = 0x2700000;
       auto partial_unmap_image =
