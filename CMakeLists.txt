@@ -1348,6 +1348,10 @@ if(BUILD_TESTING)
 	set_tests_properties(pipeline_prefetch_rendering PROPERTIES
 		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_THREADS=2;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=127"
 		TIMEOUT 180)
+	add_test(NAME pipeline_prepare_missing_metadata
+		COMMAND ${CMAKE_COMMAND} -DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelinePrepareMode.cmake)
+	set_tests_properties(pipeline_prepare_missing_metadata PROPERTIES TIMEOUT 45)
 	add_test(NAME pipeline_prefetch_fast_first COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-prep-engine-only)
 	# This test requires an early hint; a CP-claimed parallel slot may validly use fast-first instead.
 	# Keep its prefetch-consumption assertion deterministic and cover parallel preparation below.

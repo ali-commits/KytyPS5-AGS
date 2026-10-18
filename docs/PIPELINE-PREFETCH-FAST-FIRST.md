@@ -61,3 +61,22 @@ position and cache seed for control and candidate, changing only the combined
 mode setting. Keep existing caches backed up. Record pipeline requests/uses,
 residual draw waits, compilation, GPU clocks and temperature, visual behavior,
 and area-entry stalls. No gameplay improvement is assumed from test success.
+
+## Prepare a selected game in the launcher
+
+Select a game on the Library tab and click **Precompile shaders** below the game
+list. Stop any running game or streaming host first. The launcher uses the same
+GPU, shader options and runtime directory as normal play. It prepares locally
+recorded shader/pipeline recipes and, when available, a matching
+`PipelineLists/<title-id>.kyplst` beside the emulator. No terminal is needed.
+
+The dialog reports processed shader and graphics-pipeline counts, then shows
+compute/lighting preparation and cache saving as busy stages. It reports success
+only after the native preparation process confirms completion and exits
+successfully. Cancel stops only that preparation process and its children;
+previously saved caches remain available. Missing recipes, partial preparation
+and process errors are shown in the dialog.
+
+Preparation covers available recipes. A game without recorded recipes or a
+matching list cannot precompile unknown runtime combinations; new areas can
+still compile additional shaders during play.

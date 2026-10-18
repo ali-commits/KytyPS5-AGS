@@ -5624,7 +5624,10 @@ void PipelineCache::InitializePipelineJournal() {
 	// Without a driver cache a rebuilt pipeline helps nobody; KYTY_PIPELINE_JOURNAL_FORCE=1
 	// rebuilds anyway (tests).
 	const bool force   = EnvU64("KYTY_PIPELINE_JOURNAL_FORCE", 0) != 0;
-	const bool prepare = m_list != nullptr && m_list->prepare;
+	const bool prepare = EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0;
+	if (prepare && !list)
+		replay.cache_limit_bytes =
+		    static_cast<size_t>(EnvU64("KYTY_PIPELINE_LIST_CACHE_LIMIT_MB", 448)) * 1024 * 1024;
 	if (EnvU64("KYTY_PIPELINE_JOURNAL_REPLAY", 1) == 0 || replay.items.empty() ||
 	    (m_driver_cache == nullptr && !force)) {
 		replay.items = {};
@@ -5832,35 +5835,83 @@ void PipelineCache::InitializePipelineList() {
 // prewarm and the ray-tracing kernels, saves the caches and ends the process.
 void PipelineCache::RunListPrepare() {
 	const auto begin = CompileClockNs();
-	if (m_list == nullptr) {
+	// A small, flushed protocol for the launcher. It describes each real stage rather than
+	// estimating a whole-job percentage from shaders with very different compilation costs.
+	const auto progress = [](const char* stage, uint64_t done, uint64_t total, uint64_t failures) {
+		std::printf("KYTY_PREPARE_PROGRESS %s %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", stage, done,
+		            total, failures);
+		std::fflush(stdout);
+	};
+	const auto shaders   = m_shader_precompiler != nullptr ? m_shader_precompiler->GetProgress()
+	                                                       : ShaderPrecompiler::Progress {};
+	const bool pipelines = m_journal_replay != nullptr && (m_journal_replay->running.load() != 0 ||
+	                                                       m_journal_replay->total.load() != 0);
+	if (shaders.total == 0 && !pipelines) {
 		PipelineCacheLog(
-		    "Prepare shaders: no usable pipeline list (KYTY_PIPELINE_LIST); nothing to do");
+		    "Prepare shaders: no recorded recipes or usable pipeline list for this game");
+		progress("empty", 0, 0, 1);
 		std::fflush(nullptr);
 		std::_Exit(2);
 	}
-	PipelineCacheLog("Prepare shaders: building the pipeline list's shaders and pipelines");
-	if (m_shader_precompiler != nullptr) m_shader_precompiler->Wait();
+	PipelineCacheLog("Prepare shaders: building recorded shaders and pipelines");
+	uint64_t shader_total = 0, pipeline_total = 0, failures = 0;
+	if (m_shader_precompiler != nullptr) {
+		for (;;) {
+			const auto state = m_shader_precompiler->GetProgress();
+			progress("shaders", state.done, state.total, state.failed);
+			if (state.finished) {
+				shader_total = state.total;
+				failures += state.failed;
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		}
+		m_shader_precompiler->Wait();
+	}
 	const auto shaders_ns = CompileClockNs() - begin;
-	if (m_journal_replay != nullptr) m_journal_replay->Wait();
-	if (m_compute_prewarm != nullptr) m_compute_prewarm->Drain();
-	if (m_rt != nullptr) m_rt->WaitAll();
+	if (m_journal_replay != nullptr) {
+		for (;;) {
+			const auto& replay = *m_journal_replay;
+			const auto  total  = replay.total.load();
+			progress("pipelines", std::min(replay.done.load(), total), total,
+			         replay.failed.load() + replay.missing.load() + replay.skipped_full.load());
+			if (replay.running.load() == 0) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		}
+		m_journal_replay->Wait();
+		pipeline_total = m_journal_replay->total.load();
+		failures += m_journal_replay->failed.load() + m_journal_replay->missing.load() +
+		            m_journal_replay->skipped_full.load();
+	}
+	progress("compute", 0, 0, failures);
+	if (m_compute_prewarm != nullptr) {
+		m_compute_prewarm->Drain();
+		failures += m_compute_prewarm->failed.load();
+	}
+	progress("raytracing", 0, 0, failures);
+	if (m_rt != nullptr) {
+		m_rt->WaitAll();
+		failures += GetRtPipelineTotals().failed;
+	}
 	size_t size = 0;
 	if (m_driver_cache != nullptr)
 		(void)m_graphics.device.getPipelineCacheData(m_driver_cache, &size, nullptr);
+	progress("saving", 0, 0, failures);
 	Save();
+	// Save retains the handle when the persistent driver cache could not be written.
+	if (m_driver_cache != nullptr || size > MaxDriverCacheFileSize) failures++;
 	const auto& t = g_compile_totals;
 	PipelineCacheLog(
 	    "Prepare shaders: done in {:.1f} s (shaders {:.1f} s, pipelines and saving {:.1f} s): {} "
 	    "permutations replayed, {} graphics pipelines built, {} compute pipelines prewarmed; "
-	    "driver "
-	    "cache {} bytes{}",
+	    "driver cache {} bytes; {} unavailable recipes",
 	    static_cast<double>(CompileClockNs() - begin) / 1e9, static_cast<double>(shaders_ns) / 1e9,
 	    static_cast<double>(CompileClockNs() - begin - shaders_ns) / 1e9, t.replayed.load(),
-	    t.journal_built.load(), t.prewarm_built.load(), size,
-	    size > MaxDriverCacheFileSize ? " (over the 512 MB file cap: the next start discards it)"
-	                                  : "");
+	    t.journal_built.load(), t.prewarm_built.load(), size, failures);
+	progress(failures == 0 ? "complete" : "failed", shader_total + pipeline_total,
+	         shader_total + pipeline_total, failures);
 	std::fflush(nullptr);
-	std::_Exit(0);
+	std::_Exit(failures == 0 ? 0 : 3);
 }
 
 // KYTY_PIPELINE_STATS=1: the "Pipelines 10s" line (pipelineStats.h), from the process-wide compile
@@ -5989,8 +6040,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	}
 	if (EnvU64("KYTY_PIPELINE_STATS", 0) != 0)
 		m_stats_reporter = std::make_unique<StatsReporter>(*this);
-	if (EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0 && !PipelineCacheTitleId().empty())
-		RunListPrepare();
+	if (EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0) RunListPrepare();
 }
 
 PipelineCache::~PipelineCache() {
@@ -6476,7 +6526,7 @@ void PipelineCache::InitializeShaderPrecompile() {
 	if (EnvU64("KYTY_SHADER_PRECOMPILE_REPLAY", 1) == 0 || m_shader_journal->Entries().empty()) {
 		return;
 	}
-	const bool                  prepare = m_list != nullptr && m_list->prepare;
+	const bool                  prepare = EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0;
 	ShaderPrecompiler::Settings replay;
 	replay.threads = static_cast<uint32_t>(
 	    std::clamp<uint64_t>(EnvU64("KYTY_SHADER_PRECOMPILE_THREADS", prepare ? 8 : 2), 1, 16));
@@ -6488,7 +6538,7 @@ void PipelineCache::InitializeShaderPrecompile() {
 	replay.priority_source = [](const ShaderJournal::Source& source) {
 		return source.kind == ShaderJournal::Kind::Compute && MayContainBvhIntersect(source.code);
 	};
-	if (EnvU64("KYTY_PIPELINE_PREWARM_COMPUTE", m_list != nullptr ? 1 : 0) != 0) {
+	if (EnvU64("KYTY_PIPELINE_PREWARM_COMPUTE", m_list != nullptr || prepare ? 1 : 0) != 0) {
 		const auto threads = static_cast<size_t>(
 		    std::clamp<uint64_t>(EnvU64("KYTY_PIPELINE_PREWARM_THREADS", prepare ? 4 : 1), 1, 8));
 		m_compute_prewarm                    = std::make_unique<ComputePrewarm>(*this, threads);

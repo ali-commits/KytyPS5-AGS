@@ -10,6 +10,8 @@
 #include "updateChecker.h"
 #include "emulatorCommand.h"
 #include "mainDialog.h"
+#include "launcherTheme.h"
+#include "shaderPrecompileDialog.h"
 #include "streamingCatalog.h"
 #include "streamingBackend.h"
 #include "streamingWidget.h"
@@ -37,6 +39,8 @@
 #include <QToolButton>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QProgressBar>
+#include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSlider>
@@ -86,14 +90,15 @@ QString Value(const QStringList& args, const QString& flag) {
     const auto i = args.indexOf(flag);
     return i >= 0 && i + 1 < args.size() ? args.at(i + 1) : QString {};
 }
-bool Capture(QWidget& widget, const QString& suffix = {}) {
+bool Capture(QWidget& widget, const QString& suffix = {}, bool expand = true) {
     const auto requested = qEnvironmentVariable("KYTY_PRESERVATION_SCREENSHOT");
     if (requested.isEmpty()) return true;
     const QFileInfo base(requested);
     const auto path = suffix.isEmpty() ? requested : base.dir().filePath(base.completeBaseName() + suffix + ".png");
     if (!QDir().mkpath(QFileInfo(path).absolutePath())) return false;
+    const auto requested_size=widget.size();
     widget.adjustSize();
-    widget.resize(widget.size().expandedTo(QSize(1100, 900)));
+    widget.resize(expand ? widget.size().expandedTo(QSize(1100, 900)) : requested_size.expandedTo(widget.minimumSizeHint()));
     widget.show();
     QApplication::processEvents();
     return widget.grab().save(path, "PNG");
@@ -152,6 +157,162 @@ void SetLevels(Configuration& info) {
 class LauncherPreservationTests: public QObject {
     Q_OBJECT
 private slots:
+    void precompileActionRequiresASelectedGameAndAnInterpreter() {
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        MainDialog dialog;
+        auto* prepare=dialog.findChild<QPushButton*>("precompileShadersButton");
+        QVERIFY2(prepare,"The selected game's Library has no precompile action");
+        QVERIFY(!prepare->isEnabled()); // interpreter discovery has not completed
+        auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
+        QVERIFY(tree);
+        tree->setCurrentItem(tree->topLevelItem(1));
+        QVERIFY(!prepare->isEnabled());
+    }
+
+    void selectedGamePrecompileButtonStartsTheConfiguredGame() {
+#if defined(__linux__)
+        QTemporaryDir temp; QVERIFY(temp.isValid()); QVERIFY(CreateGridFixture(temp));
+        const auto bin=temp.filePath("bin"); QVERIFY(QDir().mkpath(bin));
+        const auto self=bin+"/launcher_preservation_tests";
+        QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(),self));
+        const auto runner=bin+"/kyty_emulator";
+        QVERIFY(Write(runner,R"PY(#!/usr/bin/python3
+import json,sys,time,os
+from pathlib import Path
+if len(sys.argv)==1:
+    print('Fixture emulator\nusage');sys.exit(0)
+p=Path.cwd()
+(p/'selected-launch.json').write_text(json.dumps({'args':sys.argv[1:],'mode':os.environ.get('KYTY_PIPELINE_LIST_PREPARE')}))
+print('KYTY_PREPARE_PROGRESS shaders 1 4 0',flush=True)
+while not (p/'ui-ack').exists():time.sleep(.01)
+print('KYTY_PREPARE_PROGRESS complete 4 4 0',flush=True)
+)PY"));
+        QVERIFY(QFile::setPermissions(runner,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        QSettings settings(temp.filePath("Kyty.ini"),QSettings::IniFormat);
+        settings.setValue("MainDialog/check_updates_on_startup",false);settings.sync();
+        QProcess child;auto environment=QProcessEnvironment::systemEnvironment();
+        environment.insert("KYTY_STREAMING_CONFIG_DIR",temp.filePath("streaming"));
+        child.setProcessEnvironment(environment);child.setWorkingDirectory(temp.path());
+        child.start(self,{"--precompile-ui-fixture"});QVERIFY(child.waitForFinished(15000));
+        QVERIFY2(child.exitCode()==0,child.readAllStandardError().constData());
+        const auto launch=QJsonDocument::fromJson(Read(bin+"/selected-launch.json")).object();
+        QStringList args;for(const auto& arg:launch.value("args").toArray())args<<arg.toString();
+        QCOMPARE(Value(args,"--game"),temp.filePath("games/Stream Fixture/eboot.bin"));
+        QCOMPARE(launch.value("mode").toString(),QString("1"));
+#else
+        QSKIP("Isolated executable fixture uses Linux");
+#endif
+    }
+
+    void precompileDialogUsesSelectionAndShowsRealStagesBeforeCompletion() {
+#if defined(__linux__)
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        const auto runtime=temp.filePath("runtime with spaces"); QVERIFY(QDir().mkpath(runtime));
+        const auto runner=runtime+"/kyty_emulator";
+        QVERIFY(Write(runner,R"PY(#!/usr/bin/python3
+import json,os,sys,time
+from pathlib import Path
+p=Path(__file__).parent
+(p/'launch.json').write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'mode':os.environ.get('KYTY_PIPELINE_LIST_PREPARE'),'replay':os.environ.get('KYTY_SHADER_PRECOMPILE_REPLAY')}))
+def wait(name):
+    while not (p/name).exists(): time.sleep(.01)
+sys.stdout.write('diagnostic noise\nKYTY_PREPARE_PROG');sys.stdout.flush()
+time.sleep(.03)
+print('RESS shaders 1 4 0',flush=True);wait('shaders-ack')
+print('KYTY_PREPARE_PROGRESS pipelines 1 2 0',flush=True);wait('pipelines-ack')
+print('KYTY_PREPARE_PROGRESS saving 0 0 0',flush=True)
+print('KYTY_PREPARE_PROGRESS complete 6 6 0',flush=True);wait('exit-ack')
+)PY"));
+        QVERIFY(QFile::setPermissions(runner,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        Configuration game; game.name="Selected Game"; game.basedir=temp.filePath("selected game"); game.elf="eboot.bin";
+        ShaderPrecompileDialog dialog(runner,game); dialog.show();
+        auto* bar=dialog.findChild<QProgressBar*>("precompileProgress");
+        auto* status=dialog.findChild<QLabel*>("precompileStatus");
+        QVERIFY(bar && status);
+        QTRY_COMPARE(bar->value(),250);
+        QVERIFY(status->text().contains("1 of 4"));
+        const auto launch=QJsonDocument::fromJson(Read(runtime+"/launch.json")).object();
+        const auto args=launch.value("args").toArray(); QStringList actual;
+        for(const auto& arg:args) actual<<arg.toString();
+        QCOMPARE(Value(actual,"--game"),temp.filePath("selected game/eboot.bin"));
+        QCOMPARE(launch.value("cwd").toString(),runtime);
+        QCOMPARE(launch.value("mode").toString(),QString("1"));
+        QCOMPARE(launch.value("replay").toString(),QString("1"));
+        QVERIFY(Capture(dialog,"-precompile",false));
+        QVERIFY(Write(runtime+"/shaders-ack",""));
+        QTRY_COMPARE(bar->value(),500);
+        QVERIFY(status->text().contains("1 of 2"));
+        QVERIFY(Write(runtime+"/pipelines-ack",""));
+        QTRY_VERIFY(status->text().contains("Saving"));
+        QVERIFY(dialog.IsRunning()); // protocol completion alone must not report success
+        QVERIFY(Write(runtime+"/exit-ack",""));
+        QTRY_VERIFY(!dialog.IsRunning());
+        QCOMPARE(bar->value(),1000);
+        QVERIFY(status->text().contains("Ready to play"));
+        QVERIFY(Capture(dialog,"-precompile-complete",false));
+#else
+        QSKIP("Executable process fixture uses Python on Linux");
+#endif
+    }
+
+    void precompileDialogRejectsIncompleteRuns_data() {
+        QTest::addColumn<QByteArray>("output"); QTest::addColumn<int>("code");
+        QTest::newRow("exit-zero-without-confirmation")<<QByteArray("some output")<<0;
+        QTest::newRow("confirmation-but-failed-process")<<QByteArray("KYTY_PREPARE_PROGRESS complete 2 2 0")<<3;
+        QTest::newRow("failed-recipes")<<QByteArray("KYTY_PREPARE_PROGRESS failed 2 2 1")<<3;
+        QTest::newRow("no-recipes")<<QByteArray("KYTY_PREPARE_PROGRESS empty 0 0 1")<<2;
+        QTest::newRow("incomplete-confirmation")<<QByteArray("KYTY_PREPARE_PROGRESS complete 1 4 0")<<0;
+        QTest::newRow("empty-confirmation")<<QByteArray("KYTY_PREPARE_PROGRESS complete 0 0 0")<<0;
+        QTest::newRow("invalid-counts")<<QByteArray("KYTY_PREPARE_PROGRESS shaders 5 2 0")<<0;
+    }
+    void precompileDialogRejectsIncompleteRuns() {
+#if defined(__linux__)
+        QFETCH(QByteArray,output); QFETCH(int,code);
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        const auto runner=temp.filePath("kyty_emulator");
+        QVERIFY(Write(runner,"#!/bin/sh\nprintf '%s\\n' '"+output+"'\nexit "+QByteArray::number(code)+"\n"));
+        QVERIFY(QFile::setPermissions(runner,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        Configuration game; game.name="Fixture"; game.basedir=temp.path();
+        ShaderPrecompileDialog dialog(runner,game); dialog.show();
+        QTRY_VERIFY(!dialog.IsRunning());
+        auto* status=dialog.findChild<QLabel*>("precompileStatus");
+        auto* bar=dialog.findChild<QProgressBar*>("precompileProgress");
+        QVERIFY(!status->text().contains("Ready to play"));
+        QCOMPARE(bar->value(),0);
+        if(code==2) QVERIFY(status->text().contains("No saved shader recipes"));
+#else
+        QSKIP("Executable fixture uses a Linux shell");
+#endif
+    }
+    void precompileCancelStopsTheOwnedProcessAndItsChild() {
+#if defined(__linux__)
+        QTemporaryDir temp; QVERIFY(temp.isValid());
+        const auto runner=temp.filePath("kyty_emulator");
+        QVERIFY(Write(runner,R"PY(#!/usr/bin/python3
+import sys,subprocess,time
+from pathlib import Path
+child=subprocess.Popen([sys.executable,'-c',"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(60)"],stdout=subprocess.PIPE)
+child.stdout.readline()
+Path(__file__).with_suffix('.pid').write_text(str(child.pid))
+print('KYTY_PREPARE_PROGRESS shaders 0 1000 0',flush=True)
+time.sleep(60)
+)PY"));
+        QVERIFY(QFile::setPermissions(runner,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        Configuration game; game.name="Fixture"; game.basedir=temp.path();
+        ShaderPrecompileDialog dialog(runner,game); dialog.show();
+        QTRY_VERIFY(QFile::exists(temp.filePath("kyty_emulator.pid")));
+        const auto pid=Read(temp.filePath("kyty_emulator.pid")).trimmed();
+        QTest::mouseClick(dialog.findChild<QPushButton*>("precompileCancelClose"),Qt::LeftButton);
+        QTRY_VERIFY(!dialog.IsRunning());
+        QTRY_VERIFY(!QFile::exists("/proc/"+pid+"/stat") || Read("/proc/"+pid+"/stat").contains(") Z"));
+        QVERIFY(dialog.findChild<QLabel*>("precompileStatus")->text().contains("cancelled"));
+#else
+        QSKIP("Owned process-group fixture is Linux-specific");
+#endif
+    }
+
     void headlessStartupSelectsStreamingBeforePreviewAndStartsOnlyHost() {
 #if defined(__linux__)
         QTemporaryDir temp; QVERIFY(temp.isValid());
@@ -759,6 +920,58 @@ int main(int argc, char** argv) {
     int app_argc = argc + 1 + int(headless_fixture);
     QApplication app(app_argc, app_args.data());
     QStandardPaths::setTestModeEnabled(true);
+    if(qEnvironmentVariable("KYTY_PRESERVATION_DARK")=="1") {
+        auto palette=app.palette();
+        palette.setColor(QPalette::Window,QColor("#24272b"));
+        palette.setColor(QPalette::WindowText,QColor("#eff0f1"));
+        palette.setColor(QPalette::Base,QColor("#1b1e20"));
+        palette.setColor(QPalette::Text,QColor("#eff0f1"));
+        palette.setColor(QPalette::Button,QColor("#31363b"));
+        palette.setColor(QPalette::ButtonText,QColor("#eff0f1"));
+        palette.setColor(QPalette::Mid,QColor("#60656a"));
+        palette.setColor(QPalette::Highlight,QColor("#2d74ad"));
+        palette.setColor(QPalette::HighlightedText,Qt::white);
+        app.setPalette(palette);
+    }
+    const bool real_prepare_fixture=argc==2 && QByteArray(argv[1])=="--precompile-real-ui-fixture";
+    if((argc==2 && QByteArray(argv[1])=="--precompile-ui-fixture") || real_prepare_fixture) {
+        LauncherTheme::Initialize(app);
+        MainDialog dialog;dialog.show();dialog.Start();
+        auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
+        auto* button=dialog.findChild<QPushButton*>("precompileShadersButton");
+        auto* tabs=dialog.findChild<QTabWidget*>();
+        if(!tree || !button || !tabs || tree->topLevelItemCount()<(real_prepare_fixture ? 1 : 3))return 21;
+        tree->setCurrentItem(tree->topLevelItem(real_prepare_fixture ? 0 : 2));
+        bool clicked=false,observed=false;
+        QElapsedTimer deadline;deadline.start();
+        while(deadline.elapsed()<(real_prepare_fixture ? 180000 : 7000)) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+            if(!clicked && button->isEnabled()) {
+                if(!Capture(dialog,"-precompile-library"))return 22;
+                QTest::mouseClick(button,Qt::LeftButton);clicked=true;
+            }
+            auto* progress=dialog.findChild<ShaderPrecompileDialog*>("shaderPrecompileDialog");
+            if(!progress)continue;
+            auto* bar=progress->findChild<QProgressBar*>("precompileProgress");
+            if(real_prepare_fixture && !progress->IsRunning()) {
+                if(!progress->findChild<QLabel*>("precompileStatus")->text().contains("Ready to play"))return 26;
+                if(!Capture(*progress,"-precompile-selected-complete",false))return 27;
+                return 0;
+            }
+            if((bar->value()==250 || real_prepare_fixture) && !observed) {
+                if(button->isEnabled() || !progress->IsRunning())return 23;
+                if(!Capture(*progress,"-precompile-selected",false))return 24;
+                if(!real_prepare_fixture && !Write(QCoreApplication::applicationDirPath()+"/ui-ack",""))return 25;
+                observed=true;
+            }
+            if(observed && !progress->IsRunning()) {
+                if(!button->isEnabled() || !progress->findChild<QLabel*>("precompileStatus")->text().contains("Ready to play"))return 26;
+                if(!Capture(*progress,"-precompile-selected-complete",false))return 27;
+                return 0;
+            }
+        }
+        return 28;
+    }
     if(headless_fixture) {
         MainDialog dialog;
         auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");

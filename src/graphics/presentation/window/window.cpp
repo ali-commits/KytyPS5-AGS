@@ -850,8 +850,12 @@ static void WindowCreate(WindowContext& context) {
 	context.stream_only =
 	    StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), std::getenv("KYTY_STREAM_SOCKET"));
 #endif
-	uint32_t window_flags =
-	    WindowContext::InitialWindowFlags(Config::FullscreenEnabled(), context.stream_only);
+	const char* prepare_setting = std::getenv("KYTY_PIPELINE_LIST_PREPARE");
+	const bool  preparing =
+	    prepare_setting != nullptr && std::strtoull(prepare_setting, nullptr, 10) != 0;
+	uint32_t window_flags = WindowContext::InitialWindowFlags(Config::FullscreenEnabled(),
+	                                                          context.stream_only || preparing);
+	if (preparing) LOGF("Shader preparation: hidden compiler window\n");
 	if (context.stream_only) LOGF("Streaming-only: hidden window; local presentation disabled\n");
 #if defined(__APPLE__)
 	// SDL loads Vulkan while creating a Vulkan window, so select the bundled
