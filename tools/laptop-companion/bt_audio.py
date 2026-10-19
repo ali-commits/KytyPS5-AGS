@@ -345,8 +345,15 @@ class BluetoothAudio:
                 return False
             if self._codec is None:
                 self._codec = Opus()
+            if not self._prepared:
+                # Ready transfers motor authority from HTTPS to KCPA. Never
+                # carry a cached fallback effect into the new audio lease.
+                self._rumble = (0,0)
+                self._rumble_until = 0.0
+                self._urgent = True
             self._prepared = True
             self.status = 'Bluetooth native media ready'
+            self._condition.notify()
             return True
 
     def open(self, header):
@@ -435,8 +442,10 @@ class BluetoothAudio:
                 self._left = sides[0]
             if flags & 4:
                 self._right = sides[1]
-            self._rumble = tuple(rumble)
-            self._rumble_until = self._lease = float(deadline_monotonic_seconds)
+            self._lease = float(deadline_monotonic_seconds)
+            if not self._prepared:
+                self._rumble = tuple(rumble)
+                self._rumble_until = self._lease
             if self._lease <= now:
                 self._invalidate_input()
             self._condition.notify()
@@ -447,10 +456,13 @@ class BluetoothAudio:
             raise ValueError('Invalid rumble duration')
         state_report(0, rumble=(large, small))
         with self._condition:
-            if not self.owns_output or self.clock() >= self._lease:
+            if not self._prepared or not self.owns_output or self.clock() >= self._lease:
                 return False
             self._rumble = (large, small)
-            self._rumble_until = min(self._lease, now_us/1000000 + duration_ms/1000)
+            # Input freshness remains a separate gate in _state(). Healthy
+            # input renewals must not shorten this event's absolute duration.
+            self._rumble_until = now_us/1000000 + duration_ms/1000
+            self._urgent = True
             self._condition.notify()
             return True
 
@@ -470,6 +482,8 @@ class BluetoothAudio:
                 port.resampler.close()
             self._ports.clear()
             self._prepared = False
+            self._rumble = (0,0)
+            self._rumble_until = 0.0
             self._stop_media()
             self._condition.notify()
             return not self._fatal
@@ -528,6 +542,8 @@ class BluetoothAudio:
         rumble = self._rumble if live and now < self._rumble_until and now >= self._pcm_until else (0,0)
         left, right = (self._left, self._right) if live else (OFF,OFF)
         key = (left, right, rumble, self._armed)
+        if self._last_state and self._last_state[2] != (0,0) and now >= self._rumble_until:
+            self._urgent = True
         if (force or key != self._last_state) and (force or self._urgent or now-self._last_state_at >= (.096 if self._armed else .016)):
             self._send(state_report(self._tag(), left, right, rumble, self._armed))
             self._last_state, self._last_state_at, self._urgent = key, self.clock(), False

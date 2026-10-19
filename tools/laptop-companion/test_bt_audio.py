@@ -367,9 +367,9 @@ class Sink(unittest.TestCase):
         self.advance(bt.PERIOD)
         eventually(lambda: self.sink.queued_us() == 0)
 
-    def test_audible_actuator_suppresses_rumble_with_hold_and_reset_releases_it(self):
+    def test_audible_actuator_suppresses_kcpa_rumble_and_reset_clears_it(self):
         self.sink.prepare()
-        self.sink.controls(feedback(rumble=(65535,32768)),self.clock()+.2)
+        self.sink.rumble(65535,32768,1000,10000000)
         h=header()
         self.sink.open(h)
         self.sink.pcm(h,pcm(),10000000)
@@ -380,7 +380,54 @@ class Sink(unittest.TestCase):
         self.sink.reset()
         self.advance(.02)
         eventually(lambda: self.writes.packets()[-1][0] == 0x31)
-        self.assertEqual(self.writes.packets()[-1][5:7],bytes([128,255]))
+        self.assertEqual(self.writes.packets()[-1][5:7],bytes(2))
+        self.sink.controls(feedback(rumble=(32768,16384)),self.clock()+.2)
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes([64,128]))
+
+    def test_kcpa_rumble_survives_http_zero_and_healthy_input_lease_renewals(self):
+        self.sink.prepare()
+        self.assertTrue(self.sink.rumble(65535,32768,1000,10000000))
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes([128,255]))
+        for _ in range(8):
+            self.sink.controls(feedback(),self.clock()+.2)
+            self.advance(.12)
+            time.sleep(.002)
+            self.assertEqual(self.writes.packets()[-1][5:7],bytes([128,255]))
+        self.sink.controls(feedback(),self.clock()+.2)
+        self.advance(.03)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes(2))
+
+    def test_prepare_clears_http_motors_and_kcpa_zero_is_explicit_stop(self):
+        self.sink.controls(feedback(rumble=(65535,32768)),self.clock()+.2)
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes([128,255]))
+        self.sink.prepare()
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes(2))
+        self.sink.rumble(65535,32768,1000,round(self.clock()*1000000))
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes([128,255]))
+        self.sink.rumble(0,0,0,round(self.clock()*1000000))
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes(2))
+        self.sink.controls(feedback(rumble=(65535,65535)),self.clock()+.2)
+        self.advance(.02)
+        time.sleep(.01)
+        self.assertEqual(self.writes.packets()[-1][5:7],bytes(2))
+
+    def test_input_stop_clears_kcpa_cache_without_reviving_on_renewal(self):
+        self.sink.prepare()
+        self.sink.rumble(65535,32768,1000,10000000)
+        self.advance(.02)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes([128,255]))
+        self.sink.controls(feedback(),0)
+        eventually(lambda: self.writes.packets()[-1][5:7] == bytes(2))
+        self.sink.controls(feedback(),self.clock()+.2)
+        self.advance(.02)
+        time.sleep(.01)
+        self.assertEqual(self.writes.packets()[-1][5:7],bytes(2))
 
     def test_partial_write_fails_closed_and_shutdown_neutralizes(self):
         self.writes.short=True
