@@ -4,11 +4,12 @@ This Python/Tk application forwards a Bluetooth DualSense to an existing Kyty ho
 while the TV handles video and audio. Start the game and TV stream first, then
 click **Connect**. It does not launch games or change Bluetooth pairing.
 
-The audio-v2 edition also receives native controller PCM over its own pinned TLS
-connection. It sends waveform haptics and Opus speaker audio through one paced
-Bluetooth hidraw writer, preserving adaptive-trigger state. SDL continues to read
-buttons and calibrated motion; its rumble writes are suspended during raw output
-ownership. Normal game audio stays on the TV.
+The native-bt-v3 edition receives the game's original controller PCM over pinned
+TLS and feeds it to the emulator's actual Bluetooth driver, compiled directly
+from `src/libs/dualSenseBluetooth.cpp`. Speaker routing comes from its existing
+`dualSenseHaptics.cpp` path. SDL continues to read buttons and motion; the native
+library coordinates audio, adaptive triggers and rumble. Normal game audio stays
+on the TV. USB is outside this path.
 
 On Fedora, install system dependencies with `sudo dnf install python3 python3-tkinter SDL2`.
 Pair the DualSense in the desktop Bluetooth settings. The logged-in desktop user
@@ -86,25 +87,34 @@ Trigger flags use native DualSense bits: left 0x08, right 0x04. Each trigger is
 with right at byte 10 and left at byte 21; SDL adds USB/Bluetooth framing and CRC.
 The application makes no explicit LED writes.
 
-Native audio needs system `libopus.so.0` and `libsamplerate.so.0`, both present on
-the tested Fedora laptop. Register the laptop's public certificate separately as
+Native audio needs the packaged `native/build/libkyty_companion_bt.so`, system
+SDL3 and `libopus.so.0`, all present on the tested Fedora laptop. The library was
+built on Fedora against its runtime libraries; source hashes are recorded in
+`native/provenance.json`. Register the laptop's public certificate separately as
 a controller-audio receiver of the TV, and enable **Laptop controller audio
 companion** in the PC launcher's Streaming preferences. Audio admission requires
 the exact live controller-input lease, so disconnecting input also revokes audio.
 The UI's controller-audio line reports readiness or the failure reason. Setting
 `native_audio` to `false` retains the earlier SDL vibration path.
 
-Media uses 512 source frames per 10.666667 ms Bluetooth period, 3 kHz signed8
-stereo haptics and genuine 200-byte stereo Opus speaker frames. Valid streams may
-need up to 60 ms of packetization/resampler queue headroom; source age plus queue
-duration must still fit the independent 80 ms bound. Submitted-report retirement
-is an estimate, not measured controller playback. Late data is discarded and no
-catch-up burst is sent. Disconnect clears unsent media and submits neutral output.
+The original driver sends report0x39 over a21.333333ms period, with64 stereo
+haptic samples at3kHz and two200-byte Opus speaker packets. Its SDL conversion
+uses the original45000Hz speaker target. Source gains are already present in the
+game PCM; the adapter adds no extra gain. Receiver queue/source-age checks are
+conservative estimates, not measured controller playback or a hard realtime OS
+guarantee. The native input-lease watchdog stops new output and closes its owned
+streams; an OS write already in flight still has to drain through the driver.
 
-Tests cover exact wire packets against the earlier Java fixtures, real Opus
-decoding, mixed signed waveforms, resampler continuity, paced cancellation,
-ownership and sustained KCPA streams. Accepted hidraw writes prove transport
-submission; audible sound and felt texture require physical observation.
+**Test speaker** and **Test haptics** run explicit two-second checks while the
+controller relay is disconnected. Disconnect or closing the window cancels a
+check. Nothing plays automatically when the app opens.
+
+Tests exercise the actual original sender with a fake controller, independent
+CRC/Opus decoding, exact speaker routing, clock-domain conversion, lease expiry,
+opaque-handle reuse and sustained KCPA streams. The old `bt_audio.py` prototype
+and its Java fixtures are retained as historical tests; production selects
+`native_audio.NativeAudio`. Accepted HID writes establish transport submission;
+audible sound and felt texture require physical observation.
 
 References: [SDL2 PS5 driver](https://github.com/libsdl-org/SDL/blob/SDL2/src/joystick/hidapi/SDL_hidapi_ps5.c)
 and [Moonlight button definitions](https://github.com/moonlight-stream/moonlight-common-c/blob/master/src/Limelight.h).

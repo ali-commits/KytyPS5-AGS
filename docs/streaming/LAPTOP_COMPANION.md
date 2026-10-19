@@ -18,15 +18,19 @@ controller attached to the TV, disconnect the companion and restart the TV strea
 
 The companion forwards buttons, sticks, analogue triggers, touchpad **click**, and
 SDL's calibrated accelerometer/gyro samples. The host returns rumble and
-adaptive-trigger effects. Audio-v2 adds native waveform haptics and controller
-speaker audio over Bluetooth through the existing controller PCM broker.
+adaptive-trigger effects. The native-bt-v3 laptop app feeds original game PCM
+through the emulator's actual `dualSenseBluetooth.cpp` sender and its existing
+speaker-routing logic, compiled into a library on Fedora. It uses Bluetooth;
+the unreliable USB path is outside this work.
 Positional touchpad gestures remain unsupported.
 
 Enable **Laptop controller audio companion** in the PC launcher's Streaming
 preferences. The provisioned audio-v2 profile enables it already. The laptop app
 shows a separate controller-audio status after Connect. Audio stops if its input
-lease, TV session or controller connection ends. The laptop uses a single raw
-writer so ordinary SDL rumble cannot disable native audio haptics.
+lease, TV session or controller connection ends. The native library coordinates
+audio, triggers and rumble. Only one companion may be open. Historical versions
+must also be closed because they predate the instance lock and can send competing
+output. The two-second test buttons are available after Disconnect.
 
 Both directions use TLS with a dedicated client certificate and an exact pin for
 the host certificate. The laptop's key and configuration are under

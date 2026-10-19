@@ -100,6 +100,11 @@ class NativeAdapter(unittest.TestCase):
     def last_controls(self):
         return [e for e in self.driver.events if e[0] == 'controls'][-1]
 
+    def test_durable_audio_generation_keeps_full_uint64_width(self):
+        h = self.prepared(generation=(1 << 40) + 7)
+        packet, pcm = block(h)
+        self.assertTrue(self.sink.pcm(packet, pcm, 10000000))
+
     def test_acquire_resolves_existing_sdl_gamepad_once_and_owns_until_shutdown(self):
         self.assertTrue(self.sink.acquire())
         self.assertEqual([e for e in self.driver.events if e[0] == 'find'], [('find', b'aa:bb')])

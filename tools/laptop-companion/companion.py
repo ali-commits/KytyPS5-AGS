@@ -99,8 +99,8 @@ class ControllerAudio:
     """Bind one raw writer to the existing input relay and its PCM receiver."""
     def __init__(self, controller, config, *, sink_factory=None, client_factory=None):
         if sink_factory is None:
-            from bt_audio import BluetoothAudio
-            sink_factory = BluetoothAudio
+            from native_audio import NativeAudio
+            sink_factory = NativeAudio
         if client_factory is None:
             from audio_client import AudioClient
             client_factory = AudioClient
@@ -144,6 +144,8 @@ class Worker:
         self.config = config
         self.commands = queue.Queue()
         self.status = queue.Queue(maxsize=1)
+        self.relay_active = False
+        self.testing = False
         self.thread = threading.Thread(target=self.run, daemon=True, name='kyty-sdl')
         self.thread.start()
 
@@ -187,7 +189,35 @@ class Worker:
                 try:
                     while True:
                         command = self.commands.get_nowait()
-                        if command == 'connect':
+                        if command in ('test-speaker', 'test-haptics'):
+                            if session or wanted or pending:
+                                message = 'Disconnect the controller relay before running a test.'
+                                continue
+                            from reference_check import run_reference
+                            deferred = []
+
+                            def canceled():
+                                try:
+                                    while True:
+                                        deferred.append(self.commands.get_nowait())
+                                except queue.Empty:
+                                    return bool(deferred)
+
+                            self.testing = True
+                            kind = 2 if command == 'test-speaker' else 1
+                            self.publish('Running two-second controller test…\nDisconnect or close to stop.')
+                            try:
+                                result = run_reference(controller, kind, canceled=canceled)
+                                message = ('Test stopped.' if result['canceled'] else
+                                           f"{result['kind'].capitalize()} test finished · {result['reports_accepted']} reports accepted.")
+                            except Exception as exc:
+                                message = 'Controller test failed: ' + str(exc)
+                            finally:
+                                self.testing = False
+                                for item in deferred:
+                                    self.commands.put(item)
+                            continue
+                        elif command == 'connect':
                             wanted = True
                         else:
                             wanted = False
@@ -269,6 +299,7 @@ class Worker:
                     message = 'Host timed out; effects stopped. Reconnect after checking the host.'
                 if closing and (session is None and pending is None or now - started > 0.4):
                     break
+                self.relay_active = bool(session or wanted or pending)
                 if now - last_publish >= 0.1:
                     audio_status = audio.status if audio is not None else (audio_error or 'off')
                     self.publish(f"{message}\nController battery: {controller.battery}\nInput snapshots: {sent} · Last response: {latency:.1f} ms\nFeedback: {('connected' if feedback.deadline else 'off')}\nController audio: {audio_status}")
@@ -326,12 +357,14 @@ def acquire_app_lock(config_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='Private JSON identity/config file')
+    parser.add_argument('--connect', action='store_true',
+                        help='Connect the controller relay without launching a game')
     args = parser.parse_args()
     import tkinter as tk
     from tkinter import ttk
     root = tk.Tk()
     root.title('Kyty Controller')
-    root.geometry('680x300')
+    root.geometry('680x360')
     state = tk.StringVar(value='Loading configuration…')
     ttk.Label(root, text='Kyty · Laptop controller', font=('', 16, 'bold')).pack(pady=12)
     ttk.Label(root, textvariable=state, wraplength=645, justify='left').pack(fill='x', padx=16)
@@ -341,6 +374,8 @@ def main():
         config = load_config(args.config)
         instance_lock = acquire_app_lock(args.config)
         worker = Worker(config)
+        if args.connect:
+            worker.commands.put('connect')
     except Exception as e:
         state.set(str(e))
     row = ttk.Frame(root)
@@ -351,9 +386,18 @@ def main():
             worker.commands.put(value)
     ttk.Button(row, text='Connect', command=lambda: command('connect')).pack(side='left', padx=6)
     ttk.Button(row, text='Disconnect', command=lambda: command('disconnect')).pack(side='left', padx=6)
+    tests = ttk.Frame(root)
+    tests.pack(pady=6)
+    speaker_test = ttk.Button(tests, text='Test speaker (2 seconds)', command=lambda: command('test-speaker'))
+    speaker_test.pack(side='left', padx=6)
+    haptics_test = ttk.Button(tests, text='Test haptics (2 seconds)', command=lambda: command('test-haptics'))
+    haptics_test.pack(side='left', padx=6)
 
     def poll():
         if worker:
+            testing_enabled = not worker.relay_active and not worker.testing
+            for button in (speaker_test, haptics_test):
+                button.configure(state='normal' if testing_enabled else 'disabled')
             try:
                 state.set(worker.status.get_nowait())
             except queue.Empty:

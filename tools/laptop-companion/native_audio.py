@@ -42,7 +42,7 @@ def _load(path):
 
 
 def _header(h, kind):
-    widths = dict(type=8, kind=8, channels=8, generation=32, producer_epoch=64,
+    widths = dict(type=8, kind=8, channels=8, generation=64, producer_epoch=64,
                   port=32, rate=32, port_generation=64, sequence=64,
                   first_frame=64, source_time_us=64)
     if (not isinstance(h, dict) or any(type(h.get(k)) is not int or not 0 <= h[k] < 1 << bits

@@ -337,12 +337,20 @@ class Session:
                         continue
                     queue = self._queue(port_id)
                     pending_frames = (queue * port['h']['rate'] + 999999) // 1000000
-                    consumed = port['next'] - min(port['next'], pending_frames)
+                    # A negative cursor represents startup/transport latency
+                    # before source frame zero. Keep it for per-record timing.
+                    consumed = port['next'] - pending_frames
                     while port['pending'] and port['pending'][0][0] <= consumed:
                         port['pending'].popleft()
-                    for _, source in port['pending']:
+                    for end_frame, source in port['pending']:
+                        # Newer queued samples are behind this record. Charging
+                        # the entire queue to every old record double-counts
+                        # latency and rejects a healthy native Bluetooth stream.
+                        ahead = max(0, end_frame - consumed)
+                        remaining = min(queue, (ahead * 1000000 + port['h']['rate'] - 1)
+                                        // port['h']['rate'])
                         _require(now + self.clock.offset - source + self.clock.uncertainty
-                                 + queue <= MAX_AGE_US, 'queued sample delivery deadline')
+                                 + remaining <= MAX_AGE_US, 'queued sample delivery deadline')
             if now >= self.next_ping and self.ping_sent == 0:
                 self.ping_sent = now
                 outgoing.append(self._control(9, dict(client_send_us=now)))
