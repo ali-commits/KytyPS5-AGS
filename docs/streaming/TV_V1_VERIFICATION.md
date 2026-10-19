@@ -4,7 +4,7 @@ The dedicated `kytyps5-streaming` command now uses the current native launcher t
 own hosting. Kyty TV opens its paired PC/game library and sends normal Bluetooth
 controller input through the ordinary GameStream path. No phone is required.
 
-## Installed build
+## Initial v1 build
 
 - Runtime: `/home/ali/.local/opt/kytyps5-streaming/20261019-tv-v1`.
 - Private profile: `/home/ali/.config/kytyps5-streaming/20261019-tv-v1/streaming`.
@@ -58,3 +58,33 @@ Detailed private evidence and rollback references are in
 `/home/ali/.local/state/kyty-tv-stream-v1-20261019`. Curated build/review evidence
 is retained under this runtime's `verification/tv-v1/`. Old installations and
 new copied progress remain separate; no save writeback was performed.
+
+
+## v1.2 launch fixes and clean reinstall
+
+The custom TV client was cleanly reinstalled on2026-10-19, preserving only the
+client identity and saved PC database from a private backup. Controller Lab,
+its self-test package and the temporary callback probe were removed. Stock
+Moonlight was left installed.
+
+Client source: `8dd1e97f11be097dd57761140e9d8561691f0bca`; version319,
+`12.2-kyty-tv-streaming-v1.2`; APK SHA256
+`b358ff1c1f7450a45e46745a2c4181ee23acb122b2f906e282004342c0297f51`.
+
+Two device failures were isolated:
+
+- Projectivy cached the former ViewerActivity component. Its exported compatibility
+  entry now redirects to PcView with a fresh intent and immediately finishes.
+- The TV denies WRITE_EPG_DATA for optional home-screen recommendations. That
+  SecurityException escaped the native connection-started callback and produced
+  error0. Recommendation denial is now logged and skipped. Native startup that
+  throws after entering JNI now stops native state before dropping callback
+  references and releasing connection ownership, preventing orphaned streams and
+  the later native stage assertion.
+
+The legacy-entry, optional-recommendation, startup-race, controller-output boundary
+and Android11 input tests passed; assemble and lint passed. An actual TV callback
+probe reproduced the permission denial before the fix and completed afterward,
+without launching a game. Pairing identity files were verified byte-for-byte.
+The corrected old shortcut opens PcView. Real game retry remains user acceptance.
+Private evidence: `/home/ali/.local/state/kyty-tv-reinstall-20261019`.
