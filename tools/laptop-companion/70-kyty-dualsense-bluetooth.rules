@@ -1,0 +1,2 @@
+# Kyty laptop companion: active desktop user access to Bluetooth DualSense only.
+SUBSYSTEM=="hidraw", KERNELS=="0005:054C:0CE6.*", TAG+="uaccess"

@@ -9,6 +9,9 @@ The native launcher owns hosting, pairing, clients, game launches
 and private audio. Kyty and the host remain independently built programs in separate
 repositories. This is a private experiment, not a supported upstream release.
 
+The [laptop controller companion](LAPTOP_COMPANION.md) adds a Bluetooth DualSense
+connection through a nearby Fedora laptop while Kyty TV retains video and audio.
+
 ## TV streaming v1 (2026-10-19)
 
 The current baseline uses the experimental PC launcher and **Kyty TV** with a Bluetooth

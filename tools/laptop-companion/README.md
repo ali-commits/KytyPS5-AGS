@@ -9,6 +9,16 @@ Pair the DualSense in the desktop Bluetooth settings. The logged-in desktop user
 needs access to its hidraw device for SDL HIDAPI; if it is unavailable, check
 udev/uaccess permissions. SDL2 2.0.18 or newer is required; current SDL2 is preferred.
 
+The included `70-kyty-dualsense-bluetooth.rules` grants the active desktop user
+access to Bluetooth DualSense `054c:0ce6` only. It is installed on `thinker`.
+For another laptop, install it into `/etc/udev/rules.d/`, reload udev rules and
+reconnect the controller:
+
+```sh
+sudo install -m 644 70-kyty-dualsense-bluetooth.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
 Run:
 
 ```sh
@@ -43,7 +53,8 @@ needed. Installing or configuring it does not start the game or test motors.
 
 The UI reports battery level categories supplied by SDL, response latency,
 snapshot count and feedback status. Cross/Circle/Square/Triangle, D-pad, shoulders,
-Options/Create, PS, stick clicks and touchpad click are supported. Stick Y uses
+Options, PS, stick clicks and touchpad click are supported. Create and touchpad
+click both reach the host's existing native touchpad-button path. Stick Y uses
 negative-up; trigger axes range from 0 to 1. Calibrated accelerometer m/s² and
 gyroscope rad/s retain SDL coordinates and units, bounded to 160 and 40. Positional
 touchpad gestures are not supported. Battery percentage is unavailable through
