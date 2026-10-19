@@ -151,16 +151,14 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_monitor->setObjectName("streamLocalAudio");
 	m_monitor->setChecked(settings.local_audio);
 	quality_form->addRow(m_monitor);
-	m_controller_audio =
-	    new QCheckBox(tr("Controller audio companion (saved setting; inactive on TV)"), m_quality);
+	m_controller_audio = new QCheckBox(tr("Laptop controller audio companion"), m_quality);
 	m_controller_audio->setObjectName("streamControllerAudio");
 	m_controller_audio->setChecked(settings.controller_audio);
-	m_controller_audio->setEnabled(false);
+	m_controller_audio->setEnabled(true);
 	quality_form->addRow(m_controller_audio);
 	auto* controller_hint =
-	    new QLabel(tr("Unavailable for TV sessions. Bluetooth buttons, sticks and triggers use "
-	                  "Kyty TV; advanced effects and controller audio are disabled. "
-	                  "Historical companion preferences are preserved."),
+	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered laptop "
+	                  "companion while video and game audio remain on Kyty TV."),
 	               m_quality);
 	controller_hint->setWordWrap(true);
 	quality_form->addRow(controller_hint);
@@ -169,7 +167,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_controller_audio_port->setRange(0, 65535);
 	m_controller_audio_port->setSpecialValueText(tr("Automatic"));
 	m_controller_audio_port->setValue(settings.controller_audio_port);
-	m_controller_audio_port->setEnabled(false);
+	m_controller_audio_port->setEnabled(true);
 	quality_form->addRow(tr("Controller audio port"), m_controller_audio_port);
 	m_save = new QPushButton(tr("Save preferences"), m_quality);
 	quality_form->addRow(m_save);
@@ -222,9 +220,8 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	clients_layout->addWidget(m_forget);
 	devices->addWidget(clients, 1);
 	layout->addLayout(devices);
-	auto* receiver_group =
-	    new QGroupBox(tr("Controller audio companion · unavailable for TV"), content);
-	receiver_group->setEnabled(false);
+	auto* receiver_group = new QGroupBox(tr("Controller audio companions"), content);
+	receiver_group->setEnabled(true);
 	auto* receiver_layout     = new QVBoxLayout(receiver_group);
 	m_controller_audio_status = new QLabel(receiver_group);
 	m_controller_audio_status->setObjectName("streamControllerAudioStatus");
@@ -330,15 +327,12 @@ StreamingSettings StreamingWidget::Settings() const {
 void StreamingWidget::StartHosting() {
 	if (!Save()) return;
 	auto settings = Settings();
-	// TV baseline uses ordinary GameStream input; retain the historical opt-in on disk.
-	settings.controller_audio = false;
+	// Input stays on the selected client; controller PCM uses its separate companion.
 	m_backend->Start(settings);
 }
 bool StreamingWidget::Save() {
-	const auto settings                  = Settings();
-	auto       validation_settings       = settings;
-	validation_settings.controller_audio = false;
-	const auto error                     = validation_settings.Validate();
+	const auto settings = Settings();
+	const auto error    = settings.Validate();
 	if (!error.isEmpty()) {
 		m_error->setText(error);
 		m_error->show();
@@ -438,8 +432,8 @@ void StreamingWidget::Update() {
 	const auto audio = m_backend->ControllerAudioStatus();
 	m_controller_audio_status->setText(
 	    audio.isEmpty()
-	        ? tr("Controller audio is unavailable for TV sessions. "
-	             "Saved companion settings and receivers are preserved.")
+	        ? tr("Enable laptop controller audio and connect a registered companion "
+	             "while the TV game is running.")
 	        : tr("%1 · %2 · %3 bytes · %4 ms queued%5")
 	              .arg(audio.value("state").toString(), audio.value("receiver_name").toString())
 	              .arg(audio.value("bytes").toVariant().toULongLong())

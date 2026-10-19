@@ -104,6 +104,8 @@ class ProtocolTests(unittest.TestCase):
 class CanonicalCppCodecTests(unittest.TestCase):
     def test_python_frames_against_actual_cpp_encode_decode(self):
         repo = Path(__file__).resolve().parents[2]
+        if not (repo / 'src/controller_audio/protocol.cpp').is_file():
+            self.skipTest('Source-only C++ oracle is unavailable in the installed app')
         source = r'''#include "controller_audio/protocol.h"
 #include <iostream>
 #include <iterator>
@@ -208,7 +210,7 @@ class SessionTests(unittest.TestCase):
             self.receive(pcm)
 
     def test_queue_and_source_deadlines_clear_output(self):
-        for source, queue in ((self.now - 71000, 0), (self.now + 1000, 0), (self.now, 11000)):
+        for source, queue in ((self.now - 71000, 0), (self.now + 1000, 0), (self.now, 51000)):
             with self.subTest(source=source, queue=queue):
                 self.setUp(); self.active(); self.sink.queue = queue
                 with self.assertRaisesRegex(audio.ProtocolError, 'deadline|queue'):
@@ -422,3 +424,34 @@ class TLSTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class SustainedBluetoothTests(unittest.TestCase):
+    def test_packetization_and_resampling_fit_bounded_audio_queue(self):
+        from bt_audio import BluetoothAudio, OFF
+        for rate in (1000,3000,44100,48000,96000):
+            with self.subTest(rate=rate):
+                t=[1.0]
+                sink=BluetoothAudio(clock=lambda:t[0],writer=lambda p:len(p))
+                sink.owns_output=True
+                sink.prepare=lambda:setattr(sink,'_prepared',True) or True
+                session=audio.Session(sink)
+                session.clock.sample(999900,1000000,999950,999950)
+                session.receive(*state('preparing'),1000000)
+                session.receive(*state('active'),1000000)
+                session.receive(*decoded(wire(2,7,9,rate=rate,pg=1,seq=1,stream=1)),1000000)
+                frames=rate//100
+                payload=struct.pack('<ff',.01,0)*frames
+                try:
+                    for n in range(100):
+                        arrival=1+n*.01
+                        while sink._next_media and sink._next_media<arrival-1e-9:
+                            t[0]=sink._next_media
+                            sink._media(t[0])
+                        t[0]=arrival
+                        sink.controls({'rumble':[0,0],'triggers':{'flags':12,'left':list(OFF),'right':list(OFF)}},arrival+.2)
+                        now=int(arrival*1e6)
+                        session.tick(now)
+                        session.receive(*decoded(wire(3,7,9,rate=rate,pg=1,seq=n+2,first=n*frames,source=now,payload=payload,stream=1)),now)
+                finally:
+                    sink.reset()
+                    sink.owns_output=False

@@ -23,7 +23,9 @@ HEADER = struct.Struct('>4sBBBBIIQQIIQQQQ')
 FIELDS = ('type', 'kind', 'channels', 'generation', 'producer_epoch', 'port',
           'rate', 'port_generation', 'sequence', 'first_frame', 'source_time_us')
 MAX_PAYLOAD = 16384
-MAX_QUEUE_US = 20000
+# A512-frame Bluetooth packet and SRC lookahead need phase headroom.
+# The independent80ms source-age bound still applies to every delivery.
+MAX_QUEUE_US = 60000
 MAX_AGE_US = 80000
 MAX_I64 = (1 << 63) - 1
 MAX_U64 = (1 << 64) - 1

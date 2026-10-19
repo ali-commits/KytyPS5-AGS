@@ -300,7 +300,7 @@ private slots:
 		QCOMPARE(args.at(1), QString("2560"));
 		QVERIFY(untouched.isEmpty());
 	}
-	void tvHostingPreservesInactiveCompanionPreferences() {
+	void tvHostingEnablesLaptopControllerAudio() {
 		QTemporaryDir dir;
 		QVERIFY(GenerateCertificate(dir.path()));
 		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
@@ -309,6 +309,7 @@ private slots:
 			QVERIFY(QFile::setPermissions(dir.filePath(name),
 			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
 		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}\n"));
 		FixtureEnvironment environment(dir.path());
 		const auto profile = dir.filePath("profile");
 		QVERIFY(QDir().mkpath(profile));
@@ -317,8 +318,8 @@ private slots:
 		settings.backend = dir.filePath("host");
 		settings.port = FreeBasePort();
 		settings.controller_audio = true;
-		// A legacy companion port must not block an ordinary TV session.
-		settings.controller_audio_port = settings.port + 1;
+		// A laptop audio receiver runs alongside the ordinary TV session.
+		settings.controller_audio_port = settings.port + 30;
 		settings.Write(saved);
 		saved.sync();
 		const auto receivers_path = QDir(profile).filePath("controller-audio-clients.json");
@@ -330,23 +331,23 @@ private slots:
 		auto* port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
 		auto* status = widget.findChild<QLabel*>("streamControllerAudioStatus");
 		QVERIFY(enabled && port && status);
-		QVERIFY(!enabled->isEnabled());
-		QVERIFY(!port->isEnabled());
-		QVERIFY(!widget.findChild<QListWidget*>("streamControllerAudioReceivers")->isEnabled());
-		QVERIFY(status->text().contains("unavailable", Qt::CaseInsensitive));
+		QVERIFY(enabled->isEnabled());
+		QVERIFY(port->isEnabled());
+		QVERIFY(widget.findChild<QListWidget*>("streamControllerAudioReceivers")->isEnabled());
+		QVERIFY(!status->text().contains("unavailable", Qt::CaseInsensitive));
 		QVERIFY(widget.findChild<QComboBox*>("streamResolution")->isHidden());
 		QVERIFY(widget.findChild<QComboBox*>("streamFps")->isHidden());
 		widget.StartHosting();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
 		const auto config = Read(QDir(profile).filePath("host.conf"));
-		QVERIFY(config.contains("kyty_controller_audio = false\n"));
-		QVERIFY(!config.contains("kyty_controller_audio_port"));
-		QVERIFY(!config.contains("kyty_controller_audio_clients"));
+		QVERIFY(config.contains("kyty_controller_audio = true\n"));
+		QVERIFY(config.contains("kyty_controller_audio_port"));
+		QVERIFY(config.contains("kyty_controller_audio_clients"));
 		const auto manifest = QJsonDocument::fromJson(Read(QDir(profile).filePath("launch.json"))).object();
 		QVERIFY(manifest.value("unified_stream_profile").toBool());
 		saved.sync();
 		QVERIFY(saved.value("controller_audio/enabled").toBool());
-		QCOMPARE(saved.value("controller_audio/port").toInt(), settings.port + 1);
+		QCOMPARE(saved.value("controller_audio/port").toInt(), settings.port + 30);
 		QCOMPARE(Read(receivers_path), receivers);
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
@@ -393,13 +394,14 @@ private slots:
 		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 1, 5000);
 		QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("waiting", Qt::CaseInsensitive), 5000);
 		receivers->setCurrentRow(0);
-		QVERIFY(!toggle->isEnabled());
-		backend.SetControllerAudioReceiverEnabled(id, false);
+		QVERIFY(toggle->isEnabled());
+		QTest::mouseClick(toggle, Qt::LeftButton);
 		QTRY_VERIFY_WITH_TIMEOUT(
 		    Read(dir.filePath("api-requests.jsonl")).contains("\"enabled\": false"), 5000);
 		QTRY_VERIFY_WITH_TIMEOUT(receivers->item(0)->text().contains("disabled"), 5000);
-		QVERIFY(!remove->isEnabled());
-		backend.RemoveControllerAudioReceiver(id);
+		receivers->setCurrentRow(0);
+		QVERIFY(remove->isEnabled());
+		QTest::mouseClick(remove, Qt::LeftButton);
 		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 0, 5000);
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
@@ -607,8 +609,8 @@ private slots:
 		QVERIFY2(enabled, "Historical controller audio preferences remain inspectable.");
 		QVERIFY(port);
 		QVERIFY(!enabled->isChecked());
-		QVERIFY(!enabled->isEnabled());
-		QVERIFY(!port->isEnabled());
+		QVERIFY(enabled->isEnabled());
+		QVERIFY(port->isEnabled());
 		QCOMPARE(port->value(), 0);
 		enabled->setChecked(true);
 		port->setValue(48219);

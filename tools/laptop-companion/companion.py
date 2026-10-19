@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import http.client
 import json
+import os
+import stat
 from pathlib import Path
 import queue
 import ssl
@@ -93,6 +95,49 @@ class Network:
     def close(self):
         self.requests.put(None)
 
+class ControllerAudio:
+    """Bind one raw writer to the existing input relay and its PCM receiver."""
+    def __init__(self, controller, config, *, sink_factory=None, client_factory=None):
+        if sink_factory is None:
+            from bt_audio import BluetoothAudio
+            sink_factory = BluetoothAudio
+        if client_factory is None:
+            from audio_client import AudioClient
+            client_factory = AudioClient
+        self.controller = controller
+        self.config = config
+        self.sink = sink_factory(serial=getattr(controller, 'serial', None))
+        self.client_factory = client_factory
+        self.client = None
+        self.attached = False
+
+    def start(self):
+        try:
+            self.controller.attach_output(self.sink)
+            self.attached = True
+            self.client = self.client_factory(self.config, self.sink)
+            self.client.start()
+        except Exception:
+            self.close()
+            raise
+
+    @property
+    def status(self):
+        return f'{self.client.status if self.client else "off"} · {self.sink.status}'
+
+    def close(self):
+        try:
+            if self.client is not None:
+                self.client.close()
+                self.client = None
+        finally:
+            if self.attached:
+                self.controller.detach_output()
+                self.attached = False
+            else:
+                self.sink.shutdown()
+
+
 class Worker:
 
     def __init__(self, config):
@@ -123,6 +168,15 @@ class Worker:
         latency = 0
         last_publish = 0
         started = 0
+        audio = None
+        audio_attempted = False
+        audio_error = ''
+
+        def stop_audio():
+            nonlocal audio
+            if audio is not None:
+                audio.close()
+                audio = None
         try:
             controller = Controller()
             feedback = Feedback(controller)
@@ -138,6 +192,7 @@ class Worker:
                         else:
                             wanted = False
                             feedback.stop()
+                            stop_audio()
                             if command == 'close':
                                 closing = True
                 except queue.Empty:
@@ -145,12 +200,15 @@ class Worker:
                 snapshot = controller.snapshot()
                 if not snapshot['connected']:
                     feedback.stop()
+                    stop_audio()
+                    audio_attempted = False
                 try:
                     tag, data, error, finished = network.results.get_nowait()
                     latency = (finished - started) * 1000
                     pending = None
                     if error:
                         feedback.stop()
+                        stop_audio()
                         session = None
                         wanted = False
                         message = error
@@ -159,18 +217,29 @@ class Worker:
                         if not isinstance(session, str) or not session:
                             raise ValueError('Host omitted session')
                         sequence = 0
+                        audio_attempted = False
+                        audio_error = ''
                         message = 'Connected'
                     elif tag == 'input' and session:
                         if data.get('session') != session:
                             raise ValueError('Host returned a different session')
                         # Do not let a late reply restart expired feedback.
                         if wanted and snapshot['connected'] and (now - started < 0.2):
+                            if self.config.get('native_audio', True) and not audio_attempted:
+                                audio_attempted = True
+                                try:
+                                    audio = ControllerAudio(controller, self.config)
+                                    audio.start()
+                                except Exception as exc:
+                                    audio = None
+                                    audio_error = str(exc)
                             feedback.apply(data, started)
                             feedback.expire(now)
                         else:
                             feedback.stop()
                     elif tag == 'disconnect':
                         session = None
+                        stop_audio()
                         message = 'Disconnected'
                 except queue.Empty:
                     pass
@@ -195,21 +264,28 @@ class Worker:
                         network.send(pending, payload)
                 if pending and now - started >= 0.2:
                     feedback.stop()
+                    stop_audio()
                     wanted = False
                     message = 'Host timed out; effects stopped. Reconnect after checking the host.'
                 if closing and (session is None and pending is None or now - started > 0.4):
                     break
                 if now - last_publish >= 0.1:
-                    self.publish(f"{message}\nController: {controller.battery}\nInput snapshots: {sent} · Last response: {latency:.1f} ms\nFeedback: {('active' if feedback.deadline else 'off')}")
+                    audio_status = audio.status if audio is not None else (audio_error or 'off')
+                    self.publish(f"{message}\nController battery: {controller.battery}\nInput snapshots: {sent} · Last response: {latency:.1f} ms\nFeedback: {('connected' if feedback.deadline else 'off')}\nController audio: {audio_status}")
                     last_publish = now
                 time.sleep(0.01)
         except Exception as e:
             self.publish(str(e))
         finally:
-            if controller:
-                controller.close()
-            if network:
-                network.close()
+            try:
+                stop_audio()
+            finally:
+                try:
+                    if controller:
+                        controller.close()
+                finally:
+                    if network:
+                        network.close()
 
 def load_config(path):
     path = Path(path).expanduser()
@@ -228,6 +304,25 @@ def load_config(path):
         raise ValueError('Client key must be private (chmod 600)')
     return config
 
+def acquire_app_lock(config_path):
+    """Keep another app instance from initializing a competing SDL writer."""
+    import fcntl
+    path = Path(config_path).expanduser().parent / 'app.lock'
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise RuntimeError('Controller app lock must be an owner-only regular file')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Kyty Controller is already running; use its existing window') from None
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='Private JSON identity/config file')
@@ -236,13 +331,16 @@ def main():
     from tkinter import ttk
     root = tk.Tk()
     root.title('Kyty Controller')
-    root.geometry('610x250')
+    root.geometry('680x300')
     state = tk.StringVar(value='Loading configuration…')
     ttk.Label(root, text='Kyty · Laptop controller', font=('', 16, 'bold')).pack(pady=12)
-    ttk.Label(root, textvariable=state, wraplength=580, justify='left').pack(fill='x', padx=16)
+    ttk.Label(root, textvariable=state, wraplength=645, justify='left').pack(fill='x', padx=16)
     worker = None
+    instance_lock = None
     try:
-        worker = Worker(load_config(args.config))
+        config = load_config(args.config)
+        instance_lock = acquire_app_lock(args.config)
+        worker = Worker(config)
     except Exception as e:
         state.set(str(e))
     row = ttk.Frame(root)
@@ -272,7 +370,12 @@ def main():
                 root.destroy()
         finish()
     root.protocol('WM_DELETE_WINDOW', close)
+    import signal
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, lambda *_: close())
     poll()
     root.mainloop()
+    if instance_lock is not None:
+        os.close(instance_lock)
 if __name__ == '__main__':
     main()

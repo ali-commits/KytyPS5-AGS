@@ -2,6 +2,7 @@
 import ctypes as C
 import ctypes.util
 import math
+import time
 # SDL GameController buttons mapped to Moonlight/Limelight flags.
 BUTTONS = {
     0: 4096,
@@ -58,7 +59,7 @@ class Feedback:
         if len(rumble) != 2 or any((type(v) is not int or not 0 <= v <= 65535 for v in rumble)):
             raise ValueError('Invalid rumble')
         report = trigger_report(t['flags'], t['left'], t['right'])
-        self.controller.effects(rumble, report, lease)
+        self.controller.effects(rumble, report, lease, deadline=now + lease / 1000)
         self.deadline = now + lease / 1000
 
     def expire(self, now):
@@ -74,6 +75,8 @@ class Controller:
     def __init__(self):
         self.s = C.CDLL(ctypes.util.find_library('SDL2') or 'libSDL2-2.0.so.0')
         self.pad = None
+        self.output = None
+        self.serial = None
         signatures = {
             'SDL_SetHint': (C.c_int, [C.c_char_p, C.c_char_p]),
             'SDL_Init': (C.c_int, [C.c_uint32]),
@@ -86,6 +89,7 @@ class Controller:
             'SDL_GameControllerGetButton': (C.c_uint8, [C.c_void_p, C.c_int]),
             'SDL_GameControllerGetAxis': (C.c_int16, [C.c_void_p, C.c_int]),
             'SDL_GameControllerGetType': (C.c_int, [C.c_void_p]),
+            'SDL_GameControllerGetSerial': (C.c_char_p, [C.c_void_p]),
             'SDL_GameControllerGetJoystick': (C.c_void_p, [C.c_void_p]),
             'SDL_JoystickCurrentPowerLevel': (C.c_int, [C.c_void_p]),
             'SDL_GameControllerSetSensorEnabled': (C.c_int, [C.c_void_p, C.c_int, C.c_int]),
@@ -125,6 +129,8 @@ class Controller:
                     self.s.SDL_GameControllerClose(p)
                     continue
                 self.pad = p
+                serial = self.s.SDL_GameControllerGetSerial(p)
+                self.serial = serial.decode(errors='replace') if serial else None
                 for sensor in (1, 2):
                     self.s.SDL_GameControllerSetSensorEnabled(p, sensor, 1)
                 break
@@ -141,7 +147,31 @@ class Controller:
             self.battery = {-1: 'Unknown', 0: 'Empty', 1: 'Low', 2: 'Medium', 3: 'Full', 4: 'Wired', 5: 'Unknown'}.get(power, 'Unknown')
         return result
 
-    def effects(self, rumble, report, lease):
+    def attach_output(self, output):
+        """Cancel SDL's old rumble before a single raw writer takes ownership."""
+        if getattr(self, 'output', None) is not None:
+            raise RuntimeError('A controller output writer is already attached')
+        self.stop()
+        if output.acquire() is False:
+            output.shutdown()
+            raise RuntimeError(getattr(output, 'status', 'Controller output unavailable'))
+        self.output = output
+
+    def detach_output(self):
+        output = getattr(self, 'output', None)
+        if output is not None:
+            output.shutdown()
+            self.output = None
+            self.stop()
+
+    def effects(self, rumble, report, lease, *, deadline=None):
+        output = getattr(self, 'output', None)
+        if output is not None and output.owns_output:
+            feedback = {'lease_ms': lease, 'rumble': rumble,
+                        'triggers': {'flags': report[0], 'left': list(report[21:32]),
+                                     'right': list(report[10:21])}}
+            output.controls(feedback, deadline if deadline is not None else time.monotonic() + lease / 1000)
+            return
         if not self.pad:
             return
         # Trigger update first; SDL rumble maintains its own state.
@@ -152,12 +182,18 @@ class Controller:
             raise RuntimeError(self.error())
 
     def stop(self):
+        output = getattr(self, 'output', None)
+        if output is not None and output.owns_output:
+            output.controls({'lease_ms': 1, 'rumble': [0, 0],
+                             'triggers': {'flags': 12, 'left': OFF, 'right': OFF}}, 0)
+            return
         if self.pad:
             self.s.SDL_GameControllerRumble(self.pad, 0, 0, 0)
             p = trigger_report(12, OFF, OFF)
             self.s.SDL_GameControllerSendEffect(self.pad, C.create_string_buffer(p), len(p))
 
     def close(self):
+        self.detach_output()
         self.stop()
         if self.pad:
             self.s.SDL_GameControllerClose(self.pad)

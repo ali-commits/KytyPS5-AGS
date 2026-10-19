@@ -17,9 +17,16 @@ there is no automatic game launch or background service. If switching back to a
 controller attached to the TV, disconnect the companion and restart the TV stream.
 
 The companion forwards buttons, sticks, analogue triggers, touchpad **click**, and
-SDL's calibrated accelerometer/gyro samples. The host returns ordinary rumble and
-adaptive-trigger effects. Positional touchpad gestures, native waveform haptics
-and controller-speaker playback are not implemented in this edition.
+SDL's calibrated accelerometer/gyro samples. The host returns rumble and
+adaptive-trigger effects. Audio-v2 adds native waveform haptics and controller
+speaker audio over Bluetooth through the existing controller PCM broker.
+Positional touchpad gestures remain unsupported.
+
+Enable **Laptop controller audio companion** in the PC launcher's Streaming
+preferences. The provisioned audio-v2 profile enables it already. The laptop app
+shows a separate controller-audio status after Connect. Audio stops if its input
+lease, TV session or controller connection ends. The laptop uses a single raw
+writer so ordinary SDL rumble cannot disable native audio haptics.
 
 Both directions use TLS with a dedicated client certificate and an exact pin for
 the host certificate. The laptop's key and configuration are under
@@ -38,3 +45,9 @@ SDL's sensor and effect support. It does not grant access to other HID models.
 Source and tests: `tools/laptop-companion/`. Host policy and ownership tests live
 in the separate pinned host repository. Automated tests and physical game
 observations must be recorded separately in installation verification evidence.
+
+Audio-v2 runtime is `~/.local/opt/kytyps5-streaming/20261019-laptop-audio-v2`.
+The prior `20261019-laptop-v1` installation and laptop app version are retained.
+Stop the current host before using the previous runtime's `start-streaming.sh`.
+Game state is copied for the upgrade; later progress belongs to the selected
+runtime and is not automatically copied back during rollback.
