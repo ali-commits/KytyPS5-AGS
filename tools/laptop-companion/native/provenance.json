@@ -1,0 +1,10 @@
+{
+  "core": "Compile original src/libs/dualSenseBluetooth.cpp directly, unchanged; compile-time HID open/write/close hooks register atomic output leases and count OS transport acceptance.",
+  "routing": "SpeakerRoute uses original RouteSpeaker payload fields; Triggers uses SDL DS5EffectsState_t47-byte payload.",
+  "sha256": {
+    "src/libs/dualSenseBluetooth.cpp": "70cf11795d0f0c8dd67c4e9ef9b884aba4142d0764f79985e9dae2a19c386b33",
+    "src/libs/dualSenseBluetooth.h": "59125dc882f143405cd8a003f4937d68e23bf9e8bac964c2c068523df69f8f78",
+    "src/libs/dualSenseHaptics.cpp": "84d07f63f304f4204e7c802cc92c780d2aa8693507bf5db1aac3e75e1b4f44b0",
+    "tools/laptop-companion/native/packets.h": "fca50a0c6533e5702c2340dd6e5f6998946e365fa7e763e3e9165b3b9f01ff67"
+  }
+}
