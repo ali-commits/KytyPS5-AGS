@@ -47,8 +47,8 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	title->setFont(font);
 	layout->addWidget(title);
 	auto* description =
-	    new QLabel(tr("Host your Kyty library for Moonlight. Video comes from the game before "
-	                  "local window scaling; only private game audio is captured."),
+	    new QLabel(tr("Start hosting here, then choose a PC and game in Kyty TV. Video comes from "
+	                  "the game before local window scaling; only private game audio is captured."),
 	               content);
 	description->setWordWrap(true);
 	layout->addWidget(description);
@@ -119,11 +119,11 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	profile_row->addWidget(m_codec);
 	quality_form->addRow(tr("Preferred output"), profile_row);
 	quality_form->setRowVisible(profile_row, false);
-	auto* hint =
-	    new QLabel(tr("Choose streaming resolution, frame rate, quality and bitrate on your phone. "
-	                  "The TV, host capture and emulator streaming output use that one profile. "
-	                  "Local Library game settings stay separate. Streaming is headless."),
-	               m_quality);
+	auto* hint = new QLabel(
+	    tr("Choose resolution, frame rate, quality and bitrate in Kyty TV. "
+	       "The negotiated TV profile controls host capture and emulator streaming output. "
+	       "Local Library game settings stay separate. Streaming is headless."),
+	    m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
 	m_show_local = new QCheckBox(tr("Show game window on this PC"), m_quality);
@@ -152,13 +152,16 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_monitor->setChecked(settings.local_audio);
 	quality_form->addRow(m_monitor);
 	m_controller_audio =
-	    new QCheckBox(tr("Native DualSense haptics and controller speaker (USB)"), m_quality);
+	    new QCheckBox(tr("Controller audio companion (saved setting; inactive on TV)"), m_quality);
 	m_controller_audio->setObjectName("streamControllerAudio");
 	m_controller_audio->setChecked(settings.controller_audio);
+	m_controller_audio->setEnabled(false);
 	quality_form->addRow(m_controller_audio);
-	auto* controller_hint = new QLabel(tr("Requires the companion receiver. Main game audio stays "
-	                                      "on the client’s normal speakers."),
-	                                   m_quality);
+	auto* controller_hint =
+	    new QLabel(tr("Unavailable for TV sessions. Bluetooth buttons, sticks and triggers use "
+	                  "Kyty TV; advanced effects and controller audio are disabled. "
+	                  "Historical companion preferences are preserved."),
+	               m_quality);
 	controller_hint->setWordWrap(true);
 	quality_form->addRow(controller_hint);
 	m_controller_audio_port = new QSpinBox(m_quality);
@@ -166,6 +169,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_controller_audio_port->setRange(0, 65535);
 	m_controller_audio_port->setSpecialValueText(tr("Automatic"));
 	m_controller_audio_port->setValue(settings.controller_audio_port);
+	m_controller_audio_port->setEnabled(false);
 	quality_form->addRow(tr("Controller audio port"), m_controller_audio_port);
 	m_save = new QPushButton(tr("Save preferences"), m_quality);
 	quality_form->addRow(m_save);
@@ -218,7 +222,9 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	clients_layout->addWidget(m_forget);
 	devices->addWidget(clients, 1);
 	layout->addLayout(devices);
-	auto* receiver_group      = new QGroupBox(tr("Controller audio companion"), content);
+	auto* receiver_group =
+	    new QGroupBox(tr("Controller audio companion · unavailable for TV"), content);
+	receiver_group->setEnabled(false);
 	auto* receiver_layout     = new QVBoxLayout(receiver_group);
 	m_controller_audio_status = new QLabel(receiver_group);
 	m_controller_audio_status->setObjectName("streamControllerAudioStatus");
@@ -322,11 +328,17 @@ StreamingSettings StreamingWidget::Settings() const {
 	return s;
 }
 void StreamingWidget::StartHosting() {
-	if (Save()) m_backend->Start(Settings());
+	if (!Save()) return;
+	auto settings = Settings();
+	// TV baseline uses ordinary GameStream input; retain the historical opt-in on disk.
+	settings.controller_audio = false;
+	m_backend->Start(settings);
 }
 bool StreamingWidget::Save() {
-	const auto settings = Settings();
-	const auto error    = settings.Validate();
+	const auto settings                  = Settings();
+	auto       validation_settings       = settings;
+	validation_settings.controller_audio = false;
+	const auto error                     = validation_settings.Validate();
 	if (!error.isEmpty()) {
 		m_error->setText(error);
 		m_error->show();
@@ -367,7 +379,7 @@ void StreamingWidget::Update() {
 			m_status->setText(tr("Starting · checking host and private audio…"));
 			break;
 		case StreamingBackend::State::Ready:
-			m_status->setText(tr("Hosting ready · choose a game in Moonlight"));
+			m_status->setText(tr("Hosting ready · choose a game in Kyty TV"));
 			break;
 		case StreamingBackend::State::Stopping:
 			m_status->setText(tr("Stopping host and owned audio routes…"));
@@ -426,7 +438,8 @@ void StreamingWidget::Update() {
 	const auto audio = m_backend->ControllerAudioStatus();
 	m_controller_audio_status->setText(
 	    audio.isEmpty()
-	        ? tr("Enable controller audio above and start hosting to see companion status.")
+	        ? tr("Controller audio is unavailable for TV sessions. "
+	             "Saved companion settings and receivers are preserved.")
 	        : tr("%1 · %2 · %3 bytes · %4 ms queued%5")
 	              .arg(audio.value("state").toString(), audio.value("receiver_name").toString())
 	              .arg(audio.value("bytes").toVariant().toULongLong())

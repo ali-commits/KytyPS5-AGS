@@ -5,26 +5,37 @@ Sunshine-derived Moonlight host. Capture happens before local window scaling.
 Your Intel-connected monitors can continue to show the normal desktop. No display
 capture, dummy display connector, or desktop input injection is used by this mode.
 
-The native launcher owns hosting, quality settings, pairing, clients, game launches
+The native launcher owns hosting, pairing, clients, game launches
 and private audio. Kyty and the host remain independently built programs in separate
 repositories. This is a private experiment, not a supported upstream release.
 
-## Current phone and TV direction (2026-10-16)
+## TV streaming v1 (2026-10-19)
 
-The user selected a three-app setup: PC headless host, TV video/audio client,
-and OPPO Reno11 Bluetooth controller/game-picker app. Public Android input,
-gyro/accel and short vibration passed on the real Android16 phone. Foreground dim
-controller mode is accepted. The three-app candidate adds authenticated phone input, TV launch/stop coordination
-and one streaming resolution independent of local game settings. See the
-[three-app setup and morning checks](THREE_APPS.md) and the
-[phone direction](../superpowers/specs/2026-10-16-phone-controller-design.md).
-The TV is intentionally off during phone checks, the laptop companion remains
-paused, and gameplay tests remain user-launched. Earlier laptop/USB instructions
-below describe previous experiments rather than the selected playback setup.
+The current baseline uses the experimental PC launcher and **Kyty TV** with a Bluetooth
+controller connected to the TV. The launcher owns its host, private audio and game
+processes. Select **Start hosting** on the PC, choose the PC/game from Kyty TV's
+library, then use **Stop game** and **Stop hosting** on the PC when finished.
+Opening Kyty TV does not start a game. A phone coordinator is unnecessary.
+
+Choose **1080p, 60 FPS, SDR, HEVC and 30 Mbps** in Kyty TV for the first device test.
+The negotiated GameStream resolution/FPS sets both capture and the emulator's
+streaming-only output. The hidden historical PC quality/local-display controls
+are retained for compatibility; local Library game settings stay separate.
+
+TV baseline supports Bluetooth buttons, sticks and analogue triggers. The TV
+client disables rumble, haptics, adaptive triggers, controller speaker, LEDs and
+motion requests because effects can disrupt usable controller input on this TV.
+The PC controller-audio companion controls are unavailable, and launcher-started
+TV hosting always disables that path. Historical companion preferences, ports and
+receiver records remain saved for future advanced work.
+
+The earlier [three-app setup](THREE_APPS.md) and [controller-audio candidate](CONTROLLER_AUDIO.md)
+are historical experiments. The independent standalone background host is retired;
+start hosting through the PC launcher's Streaming tab.
 
 ## Start and pair
 
-The dedicated `kytyps5-streaming` command now selects the tested v2 build.
+The dedicated `kytyps5-streaming` command opens the experimental PC launcher.
 Interactive game tests are user-led. Unattended automated tests must have a bounded
 deadline that closes the game as well as the client; disconnecting Moonlight alone
 is insufficient. See [VERIFICATION.md](VERIFICATION.md) for current results.
@@ -32,16 +43,14 @@ is insufficient. See [VERIFICATION.md](VERIFICATION.md) for current results.
 Run `kytyps5-streaming`. The experimental launcher has **Library** and **Streaming**
 tabs. The library and game settings start from a copy of the working installation.
 
-1. Open **Streaming** and use **1080p**, **60 FPS**, **HEVC**, and the default 30 Mbps
-   maximum for the first TV test. Leave the NVIDIA adapter field empty for RTX 3090.
-   Clear **Show game window on this PC** for streaming-only play. Existing profiles
-   keep this option enabled until you change it.
+1. Open **Streaming** in the PC launcher. Leave the NVIDIA adapter field empty
+   for RTX 3090. Choose the streaming profile in **Kyty TV** using the baseline above.
 2. Select **Start hosting** and wait for **Ready**. Copy the displayed LAN address,
    including its port. The default base port is 48189, separate from system Sunshine.
-3. In Moonlight, manually add that address, for example `192.168.1.3:48189`.
+3. In Kyty TV, manually add that address, for example `192.168.1.3:48189`.
    Start pairing. Select that pending device in the launcher, enter Moonlight's
    four-digit PIN and select **Pair**.
-4. Choose **ASTRO BOT** from Moonlight's game list. Moonlight launches the game
+4. Choose **ASTRO BOT** from Kyty TV's game list. Kyty TV launches the game
    through the packaged guard and the same argument builder used by local play.
 5. Use **Stop game** to end the session, then **Stop hosting** when finished.
 
@@ -50,10 +59,9 @@ a custom host port; if a particular TV client does not, the launcher also expose
 the base port setting. Start with SDR and HDR disabled. H.264 is available if that
 TV has trouble with HEVC. AV1 is disabled for this RTX 3090 edition.
 
-Match Moonlight's resolution/FPS settings to the capture preference. The preference
-sets the exported image size; it does not change the game's internal rendering.
-Scaling a 1080p source to 1440p does not create additional native detail. Moonlight
-chooses the final encoded output, and the launcher labels requested session values.
+Kyty TV chooses the final encoded output. Its negotiated resolution/FPS also sets
+the exported image size, without rewriting local game settings. Scaling a 1080p
+source to 1440p does not create additional native detail.
 
 While hosting, local Library launch is disabled so Moonlight owns the one game
 session. Stop hosting to launch locally. A global emulator guard also prevents
@@ -67,7 +75,7 @@ System dialogs, the on-screen keyboard and trophy notices are included in the
 stream in this mode. The remote controller operates interactive system panels;
 buttons used there are released before game input resumes.
 
-## Audio, input and state
+## Audio, input and historical device evidence
 
 Game audio uses an explicitly selected private SDL/Pulse output. The host captures
 only that sink's monitor. A real selected system playback device can receive an
@@ -79,6 +87,9 @@ private PipeWire graph and policy-only WirePlumber process. That graph contains 
 physical audio devices and does not change the system's Dummy Output. TV audio
 remains available; Dummy Output cannot provide audible local playback. The launcher
 owns and stops those private processes.
+
+For the TV baseline, the client suppresses the advanced effects described below.
+The following laptop evidence is historical, and does not certify TV gameplay.
 
 Remote gamepad state goes directly into Kyty's controller state. Disconnect releases
 remote-owned buttons/axes while preserving local held buttons. Basic rumble and a
@@ -97,8 +108,9 @@ waveform texture. HD haptic audio, controller-speaker audio and touchpad forward
 are separate work; full haptics and controller speaker are the selected next stage.
 Keyboard and mouse forwarding are intentionally ignored by the native host.
 
-Installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
-Private settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
+Historical v2 installation: `/home/ali/.local/opt/kytyps5-streaming/20261016-native-v2`.
+Historical v2 settings: `/home/ali/.config/kytyps5-streaming/20261016-native-v2`.
+Use the current package provenance for the active installation/profile.
 The working `20261016-native-v1` installation and profile are retained for rollback.
 The previous command is backed up under v2 `verification/v1-command-before-v2-default/`.
 The normal `kytyps5`, `astro-bot`, system Sunshine and their settings remain separate.
@@ -167,21 +179,16 @@ group has exited, then allows a same-profile restart. Recovery may take about si
 seconds while a stubborn process is killed. Stale private frame sockets from a
 killed host are recovered without removing another live listener.
 
-## Manual device check
+## Manual TV baseline check
 
-1. Start at 1080p/60 and play a short Astro section. Check movement, jumping, menu
-   buttons, audio timing and basic rumble using the controller connected to the TV.
-2. Clear **Show game window on this PC**, restart hosting and launch from Moonlight.
-   Confirm the client receives the game while no game window appears on the PC.
-   With the option enabled, also check resizing, maximizing and minimizing locally.
-3. Disconnect and reconnect Moonlight to the running game. Confirm picture, sound
-   and controller release/reconnect without restarting the emulator.
-4. Stop the game and hosting, select 1440p, restart hosting and match Moonlight's
-   resolution. Compare detail, frame pacing and latency on the TV.
-5. Stop the game normally and confirm the last crash-capture manifest records an
-   exit. Keep any failing session's `_CrashCapture` directory for diagnosis.
-6. With a supported DualSense client, test a gyro action and both adaptive triggers
-   in gameplay. Compare physical trigger resistance separately from ordinary rumble.
+1. Connect the Bluetooth controller to the TV. In Kyty TV choose 1080p/60, SDR,
+   HEVC and 30 Mbps, then select the PC and Astro from the library.
+2. Check movement, jumping, menu buttons, sticks, analogue triggers and TV audio.
+   Effects, controller speaker and motion are intentionally unavailable in v1.
+3. Disconnect and reconnect Kyty TV. Confirm picture, sound and controller
+   release/reconnect without restarting the emulator.
+4. Use **Stop game**, then **Stop hosting** on the PC. Confirm the game's final
+   crash-capture manifest records an exit. Retain failing captures for diagnosis.
 
 Changes to experimental game progress stay in the experimental save copy.
 

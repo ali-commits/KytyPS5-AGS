@@ -171,7 +171,7 @@ class LauncherStreamingTests: public QObject {
 		return 0;
 	}
 private slots:
-	void unifiedPhoneResolutionIsolatedFromLocalProfile() {
+	void negotiatedTvResolutionIsolatedFromLocalProfile() {
 		const QStringList local{
 				"--screen-width",     "2560", "--screen-height", "1440",
 				"--vblank-frequency", "60",   "--game",          "/games/Astro"};
@@ -199,7 +199,7 @@ private slots:
 			QCOMPARE(local.at(3), QString("1440"));
 		}
 	}
-	void unifiedWrapperAppliesOneOutputSizeAtProcessBoundary() {
+	void ordinaryTvGameStreamWrapperUsesNegotiatedProfile() {
 		QTemporaryDir dir;
 		const auto wrapper = QDir(QCoreApplication::applicationDirPath())
 														 .filePath("libexec/kyty_stream_launch");
@@ -227,30 +227,32 @@ private slots:
 		QString error;
 		QVERIFY(StreamingCatalog::WritePrivate(
 				dir.filePath("launch.json"), QJsonDocument(manifest).toJson(), &error));
-		for (const auto &size :
-				 QList<QPair<QString, QString>>{{"1920", "1080"}, {"2560", "1440"}}) {
+		for (const auto& mode: QList<QStringList>{{"1920", "1080", "60"},
+		                                        {"2560", "1440", "30"}}) {
 			QProcess process;
 			HostEnvironment(&process, manifest);
 			auto env = process.processEnvironment();
-			env.insert("SUNSHINE_CLIENT_WIDTH", size.first);
-			env.insert("SUNSHINE_CLIENT_HEIGHT", size.second);
-			env.insert("SUNSHINE_CLIENT_FPS", "60");
+			env.insert("SUNSHINE_CLIENT_WIDTH", mode[0]);
+			env.insert("SUNSHINE_CLIENT_HEIGHT", mode[1]);
+			env.insert("SUNSHINE_CLIENT_FPS", mode[2]);
+			env.insert("SUNSHINE_CLIENT_NAME", "Living-room TV");
 			process.setProcessEnvironment(env);
 			process.start(wrapper, {dir.filePath("launch.json"), "profile"});
 			QVERIFY(process.waitForFinished(5000));
 			const auto diagnostic = process.readAllStandardError();
 			QVERIFY2(process.exitCode() == 0, diagnostic.constData());
 			QVERIFY(diagnostic.contains("Kyty streaming profile: game=profile requested="));
-			QVERIFY(diagnostic.contains("effective=" + size.first.toUtf8() + "x" + size.second.toUtf8() + "@60"));
+			QVERIFY(diagnostic.contains("effective=" + mode[0].toUtf8() + "x" + mode[1].toUtf8() + "@" + mode[2].toUtf8()));
 			QVERIFY(diagnostic.contains("local_profile=unchanged"));
 			const auto result =
 					QJsonDocument::fromJson(process.readAllStandardOutput()).object();
-			QCOMPARE(result.value("width").toString(), size.first);
-			QCOMPARE(result.value("height").toString(), size.second);
+			QCOMPARE(result.value("width").toString(), mode[0]);
+			QCOMPARE(result.value("height").toString(), mode[1]);
+			QCOMPARE(result.value("fps").toString(), mode[2]);
 			QCOMPARE(result.value("headless").toString(), QString("1"));
 			const auto args = result.value("args").toArray();
-			QCOMPARE(args, QJsonArray({"--screen-width", size.first,
-																 "--screen-height", size.second}));
+			QCOMPARE(args, QJsonArray({"--screen-width", mode[0],
+																 "--screen-height", mode[1]}));
 			QCOMPARE(Read(local), local_settings);
 			QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(dir.filePath("session.json")),
 															 1000);
@@ -298,6 +300,57 @@ private slots:
 		QCOMPARE(args.at(1), QString("2560"));
 		QVERIFY(untouched.isEmpty());
 	}
+	void tvHostingPreservesInactiveCompanionPreferences() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		FixtureEnvironment environment(dir.path());
+		const auto profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		QSettings saved(QDir(profile).filePath("streaming.ini"), QSettings::IniFormat);
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port = FreeBasePort();
+		settings.controller_audio = true;
+		// A legacy companion port must not block an ordinary TV session.
+		settings.controller_audio_port = settings.port + 1;
+		settings.Write(saved);
+		saved.sync();
+		const auto receivers_path = QDir(profile).filePath("controller-audio-clients.json");
+		const QByteArray receivers("{\"historical\": true}\n");
+		QVERIFY(Put(receivers_path, receivers));
+		StreamingBackend backend(profile);
+		StreamingWidget widget(&backend);
+		auto* enabled = widget.findChild<QCheckBox*>("streamControllerAudio");
+		auto* port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
+		auto* status = widget.findChild<QLabel*>("streamControllerAudioStatus");
+		QVERIFY(enabled && port && status);
+		QVERIFY(!enabled->isEnabled());
+		QVERIFY(!port->isEnabled());
+		QVERIFY(!widget.findChild<QListWidget*>("streamControllerAudioReceivers")->isEnabled());
+		QVERIFY(status->text().contains("unavailable", Qt::CaseInsensitive));
+		QVERIFY(widget.findChild<QComboBox*>("streamResolution")->isHidden());
+		QVERIFY(widget.findChild<QComboBox*>("streamFps")->isHidden());
+		widget.StartHosting();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(QDir(profile).filePath("host.conf"));
+		QVERIFY(config.contains("kyty_controller_audio = false\n"));
+		QVERIFY(!config.contains("kyty_controller_audio_port"));
+		QVERIFY(!config.contains("kyty_controller_audio_clients"));
+		const auto manifest = QJsonDocument::fromJson(Read(QDir(profile).filePath("launch.json"))).object();
+		QVERIFY(manifest.value("unified_stream_profile").toBool());
+		saved.sync();
+		QVERIFY(saved.value("controller_audio/enabled").toBool());
+		QCOMPARE(saved.value("controller_audio/port").toInt(), settings.port + 1);
+		QCOMPARE(Read(receivers_path), receivers);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
 	void controllerAudioLifecycleAndReceiverControls() {
 		QTemporaryDir dir;
 		QVERIFY(GenerateCertificate(dir.path()));
@@ -340,12 +393,13 @@ private slots:
 		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 1, 5000);
 		QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("waiting", Qt::CaseInsensitive), 5000);
 		receivers->setCurrentRow(0);
-		QVERIFY(toggle->isEnabled());
-		toggle->click();
+		QVERIFY(!toggle->isEnabled());
+		backend.SetControllerAudioReceiverEnabled(id, false);
 		QTRY_VERIFY_WITH_TIMEOUT(
 		    Read(dir.filePath("api-requests.jsonl")).contains("\"enabled\": false"), 5000);
 		QTRY_VERIFY_WITH_TIMEOUT(receivers->item(0)->text().contains("disabled"), 5000);
-		remove->click();
+		QVERIFY(!remove->isEnabled());
+		backend.RemoveControllerAudioReceiver(id);
 		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 0, 5000);
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
@@ -550,9 +604,11 @@ private slots:
 		StreamingWidget  widget(&backend);
 		auto*            enabled = widget.findChild<QCheckBox*>("streamControllerAudio");
 		auto*            port    = widget.findChild<QSpinBox*>("streamControllerAudioPort");
-		QVERIFY2(enabled, "Controller audio needs an explicit opt-in control.");
+		QVERIFY2(enabled, "Historical controller audio preferences remain inspectable.");
 		QVERIFY(port);
 		QVERIFY(!enabled->isChecked());
+		QVERIFY(!enabled->isEnabled());
+		QVERIFY(!port->isEnabled());
 		QCOMPARE(port->value(), 0);
 		enabled->setChecked(true);
 		port->setValue(48219);
@@ -1334,8 +1390,7 @@ while True: time.sleep(0.05)
 		QTemporaryDir     dir;
 		QSettings         file(dir.filePath("streaming.ini"), QSettings::IniFormat);
 		StreamingSettings settings;
-		settings.controller_audio      = true;
-		settings.controller_audio_port = settings.port;
+		settings.adapter = "invalid\nadapter";
 		settings.Write(file);
 		file.sync();
 		StreamingBackend backend(dir.path());
@@ -1344,7 +1399,7 @@ while True: time.sleep(0.05)
 		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
 		QVERIFY(backend.Logs().isEmpty());
 		QVERIFY(
-		    widget.findChild<QLabel*>("streamError")->text().contains("separate from GameStream"));
+		    widget.findChild<QLabel*>("streamError")->text().contains("line breaks"));
 		QVERIFY(!QFile::exists(dir.filePath("host.conf")));
 	}
 	void nativeWidgetDoesNotStartHostAndShowsActionableError() {

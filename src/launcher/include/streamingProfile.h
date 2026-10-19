@@ -18,7 +18,7 @@ inline bool Apply(bool unified, const QProcessEnvironment& client, QStringList* 
 	const auto        rate   = fps.toUInt(&parsed);
 	if (!sizes.contains(width + 'x' + height) || !parsed || rate == 0 ||
 	    QString::number(rate) != fps || !Streaming::IsCaptureFrameRateSupported(rate)) {
-		if (error) *error = "Managed streaming needs a supported negotiated resolution and FPS.";
+		if (error) *error = "Streaming needs a supported negotiated client resolution and FPS.";
 		return false;
 	}
 	QStringList rewritten;
