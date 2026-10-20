@@ -76,6 +76,7 @@
 #include "libs/agc.h"
 #include "libs/dialog.h"
 #include "libs/errno.h"
+#include "loader/systemContent.h"
 #include "loader/symbolDatabase.h"
 #include "spirv-tools/libspirv.hpp"
 
@@ -18320,7 +18321,7 @@ public:
   // while the first draw keeps its own snapshot. Additive blending shows which pixel shader each
   // draw ran. The shaders are headerless, so a commit also depends on the certified code hash.
   // KYTY_DRAW_PREP=off checks the pixels only.
-  void CheckDrawPrepEngineDraw() {
+  void CheckDrawPrepEngineDraw(bool journal_alias_fixture = false) {
     constexpr const char *name = "DrawPrepEngineDraw";
     constexpr uintptr_t base = 0x0000000206200000ull;
     constexpr uint64_t allocation_size = 0x80000;
@@ -18363,8 +18364,19 @@ public:
     AppendEnd(&vertex_code);
     std::array<std::vector<u32>, 2> pixel_codes;
     for (size_t i = 0; i < pixel_codes.size(); i++) {
+      if (journal_alias_fixture) {
+        // Two live PS inputs read the same zero VS export with different interpolation
+        // modes. The linker synthesizes a VS alias whose metadata the journal must replay.
+        pixel_codes[i].push_back(EncodeVintrp(0, 20, 0, 0, 0));
+        pixel_codes[i].push_back(EncodeVintrp(1, 20, 0, 0, 1));
+        pixel_codes[i].push_back(EncodeVintrp(2, 21, 1, 0, 2));
+      }
       for (u32 component = 0; component < 4; component++) {
         AppendVMovU32(&pixel_codes[i], component, colors[i][component]);
+      }
+      if (journal_alias_fixture) {
+        pixel_codes[i].push_back(EncodeVop2(0x03, 0, Vgpr(20), 0));
+        pixel_codes[i].push_back(EncodeVop2(0x03, 2, Vgpr(21), 2));
       }
       pixel_codes[i].push_back(EncodeExp0(0x00, 0xf));
       pixel_codes[i].push_back(EncodeExp1(0, 1, 2, 3));
@@ -18443,7 +18455,13 @@ public:
       registers.SetViewportScissor(0, 0, 0, extent, extent, false);
       registers.SetRenderTargetMask(0xf);
       registers.SetShaderMask(0xf);
-      registers.SetPsInControl(0x8000);
+      registers.SetPsInControl(journal_alias_fixture ? 0x8002 : 0x8000);
+      if (journal_alias_fixture) {
+        registers.SetPsInputEna(2);
+        registers.SetPsInputAddr(2);
+        registers.SetPsInputSettings(0, 0);
+        registers.SetPsInputSettings(1, 0x400);
+      }
       registers.SetColorBase(0, {.addr = base + target_offset});
       registers.SetColorInfo(0, {.format = Prospero::ChannelLayout::k32_32_32_32,
                                  .channel_type = Prospero::ChannelType::kFloat,
@@ -58682,6 +58700,13 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckDrawPrepEngineDraw();
     vulkan.CheckDrawRun();
+    return 0;
+  }
+  if (argc == 3 && std::strcmp(argv[1], "--pipeline-journal-fixture") == 0) {
+    VulkanHarness vulkan;
+    Loader::SystemContentLoadParamSfo(argv[2]);
+    vulkan.CheckDrawPrepEngineDraw(true);
+    vulkan.CheckDrawPrepEngineTextures();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-prep-engine-only") == 0) {

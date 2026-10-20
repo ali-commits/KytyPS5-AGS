@@ -215,7 +215,7 @@ print('KYTY_PREPARE_PROGRESS complete 4 4 0',flush=True)
 import json,os,sys,time
 from pathlib import Path
 p=Path(__file__).parent
-(p/'launch.json').write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'mode':os.environ.get('KYTY_PIPELINE_LIST_PREPARE'),'replay':os.environ.get('KYTY_SHADER_PRECOMPILE_REPLAY')}))
+(p/'launch.json').write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'mode':os.environ.get('KYTY_PIPELINE_LIST_PREPARE'),'replay':os.environ.get('KYTY_SHADER_PRECOMPILE_REPLAY'),'retarget':os.environ.get('KYTY_PIPELINE_JOURNAL_RETARGET')}))
 def wait(name):
     while not (p/name).exists(): time.sleep(.01)
 sys.stdout.write('diagnostic noise\nKYTY_PREPARE_PROG');sys.stdout.flush()
@@ -227,7 +227,12 @@ print('KYTY_PREPARE_PROGRESS complete 6 6 0',flush=True);wait('exit-ack')
 )PY"));
         QVERIFY(QFile::setPermissions(runner,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
         Configuration game; game.name="Selected Game"; game.basedir=temp.filePath("selected game"); game.elf="eboot.bin";
+        const bool had_retarget=qEnvironmentVariableIsSet("KYTY_PIPELINE_JOURNAL_RETARGET");
+        const auto old_retarget=qgetenv("KYTY_PIPELINE_JOURNAL_RETARGET");
+        qputenv("KYTY_PIPELINE_JOURNAL_RETARGET","0"); // Legacy bundled preset must not disable migration.
         ShaderPrecompileDialog dialog(runner,game); dialog.show();
+        if(had_retarget) qputenv("KYTY_PIPELINE_JOURNAL_RETARGET",old_retarget);
+        else qunsetenv("KYTY_PIPELINE_JOURNAL_RETARGET");
         auto* bar=dialog.findChild<QProgressBar*>("precompileProgress");
         auto* status=dialog.findChild<QLabel*>("precompileStatus");
         QVERIFY(bar && status);
@@ -240,6 +245,7 @@ print('KYTY_PREPARE_PROGRESS complete 6 6 0',flush=True);wait('exit-ack')
         QCOMPARE(launch.value("cwd").toString(),runtime);
         QCOMPARE(launch.value("mode").toString(),QString("1"));
         QCOMPARE(launch.value("replay").toString(),QString("1"));
+        QCOMPARE(launch.value("retarget").toString(),QString("1"));
         QVERIFY(Capture(dialog,"-precompile",false));
         QVERIFY(Write(runtime+"/shaders-ack",""));
         QTRY_COMPARE(bar->value(),500);

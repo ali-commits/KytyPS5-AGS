@@ -79,6 +79,9 @@ ShaderPrecompileDialog::ShaderPrecompileDialog(const QString&       interpreter,
 	environment.insert("KYTY_SHADER_PRECOMPILE_WAIT", "0");
 	environment.insert("KYTY_PIPELINE_JOURNAL", "1");
 	environment.insert("KYTY_PIPELINE_JOURNAL_REPLAY", "1");
+	// A translator update changes module hashes while retaining compatible recipe inputs.
+	// Preparation must build the selected game's current pipelines, not only its old keys.
+	environment.insert("KYTY_PIPELINE_JOURNAL_RETARGET", "1");
 	environment.insert("KYTY_PIPELINE_JOURNAL_WAIT", "0");
 	m_process.setProcessEnvironment(environment);
 	m_process.setProcessChannelMode(QProcess::MergedChannels);

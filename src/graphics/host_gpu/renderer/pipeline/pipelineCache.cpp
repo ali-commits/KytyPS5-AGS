@@ -95,6 +95,28 @@ namespace {
 Live::Switch g_pipeline_prefetch("KYTY_PIPELINE_PREFETCH", Live::ParseDefaultOff);
 Live::Switch g_program_prefetch("KYTY_PIPELINE_PREFETCH_PROGRAMS", Live::ParseDefaultOff);
 
+// The stored VS input prefix predates parameter aliases. BuildStageStaticKey records
+// them after its eight base words, so recover them without changing the journal ABI.
+bool RestoreVertexParameterAliases(ShaderVertexInputInfo& info, std::span<const uint32_t> state) {
+	info.param_alias_mask = 0;
+	info.param_alias_source.fill(0);
+	constexpr size_t tag_word = 8;
+	if (state.size() <= tag_word || state[tag_word] != 0x7A11A5u) return true;
+	if (state.size() <= tag_word + 1) return false;
+	const auto mask = state[tag_word + 1];
+	// At least the clip-space flag must follow the selected source indices.
+	if (mask == 0 || state.size() <= tag_word + 2 + std::popcount(mask)) return false;
+	size_t word = tag_word + 2;
+	for (uint32_t destination = 0; destination < 32; ++destination) {
+		if ((mask & (1u << destination)) == 0) continue;
+		const auto source = state[word++];
+		if (source >= 32) return false;
+		info.param_alias_source[destination] = static_cast<uint8_t>(source);
+	}
+	info.param_alias_mask = mask;
+	return true;
+}
+
 uint8_t RemapSourceAlphaFactor(uint8_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
 		case Prospero::BlendFactor::kSrcAlpha:
@@ -3412,7 +3434,8 @@ struct PipelineCache::ProgramCache {
 		std::memcpy(static_cast<void*>(&input_info), source.input_info.data(), stored);
 		input_info.stage = {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
-			input_info.param_alias_mask = 0;
+			if (!RestoreVertexParameterAliases(input_info, source.static_state))
+				return Outcome::Skipped;
 		}
 		auto&      scratch = ThreadScratch();
 		ProgramKey key;
@@ -5303,7 +5326,9 @@ struct PipelineCache::JournalReplay {
 			failed.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		if (!force && !item.from_list && cache.IsKnownPipeline(record.key)) {
+		// A known old key says nothing about the current translator's modules. Resolve
+		// compatible current modules before deciding that a retargeted pipeline is warm.
+		if (!retarget && !force && !item.from_list && cache.IsKnownPipeline(record.key)) {
 			skipped_known.fetch_add(1, std::memory_order_relaxed);
 			g_compile_totals.journal_skipped.fetch_add(1, std::memory_order_relaxed);
 			NoteReplayKey(record.key);
@@ -5323,13 +5348,17 @@ struct PipelineCache::JournalReplay {
 		bool                                               retargeted = false;
 		const auto hashes = GraphicsPipelineSnapshot::SerializedModules(snapshot_words);
 		for (size_t i = 0; i < hashes.size(); i++) {
-			auto module = hashes[i] != 0 ? g_shader_modules.Pin(hashes[i]) : vk::ShaderModule {};
-			if (module == nullptr && (retarget || hashes[i] == 0) &&
-			    i < payload.identities.size() && payload.identities[i].first != 0) {
-				module     = g_shader_modules.PinIdentity(payload.identities[i].first,
-				                                          payload.identities[i].second);
-				retargeted = retargeted || module != nullptr;
+			vk::ShaderModule module = nullptr;
+			if ((retarget || hashes[i] == 0) && i < payload.identities.size() &&
+			    payload.identities[i].first != 0) {
+				// Prefer this replay's permutation, even if another live permutation
+				// happens to retain the recorded module's old content hash.
+				module = g_shader_modules.PinIdentity(payload.identities[i].first,
+				                                      payload.identities[i].second);
 			}
+			if (module == nullptr && hashes[i] != 0) module = g_shader_modules.Pin(hashes[i]);
+			if (module != nullptr)
+				retargeted = retargeted || g_shader_modules.HashOf(module) != hashes[i];
 			if (module == nullptr) {
 				found = false;
 				break;
@@ -5374,7 +5403,8 @@ struct PipelineCache::JournalReplay {
 			// The rebuilt create info must describe the journaled pipeline exactly.
 			const auto check = DescribeGraphicsPipeline(snapshot->Info(), signature.subspan(0));
 			if (check.key != 0) NoteReplayKey(check.key);
-			if (retargeted && check.key != 0 && !force && cache.IsKnownPipeline(check.key)) {
+			if ((retargeted || check.key == record.key) && check.key != 0 && !force &&
+			    cache.IsKnownPipeline(check.key)) {
 				skipped_known.fetch_add(1, std::memory_order_relaxed);
 				g_compile_totals.journal_skipped.fetch_add(1, std::memory_order_relaxed);
 				ok = true;
@@ -5673,6 +5703,7 @@ bool NormalizeListSource(const GraphicContext& graphics, ShaderJournal::Source& 
 		case ShaderJournal::Kind::Vertex: {
 			auto info = std::make_unique<ShaderVertexInputInfo>();
 			if (!load(*info)) return false;
+			if (!RestoreVertexParameterAliases(*info, source.static_state)) return false;
 			if (info->logical_stage == ShaderType::Mesh) {
 				if (!graphics.mesh_shader_enabled) return false;
 				auto&      mesh     = info->mesh;

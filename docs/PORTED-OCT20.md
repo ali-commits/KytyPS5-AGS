@@ -71,8 +71,8 @@ are kept in `~/.local/state/kytyps5-ported-20261020/`.
 ## Comparing the installations
 
 Open **KytyPS5 Streaming** or **KytyPS5 Ported** from the application menu, one at
-a time. Both use the same launcher, preset and initial copied game configuration,
-saves, patches and trophies. The candidate has independent writable directories:
+a time. Both started with the same launcher, preset and copied game configuration,
+saves, patches and trophies. The stutter repair below updates Ported only. The candidate has independent writable directories:
 
 - Program: `~/.local/opt/kytyps5-ported/20261020-high-next`
 - Settings and streaming profile: `~/.config/kytyps5-ported/20261020-high-next`
@@ -97,3 +97,44 @@ with two jobs, plus the launcher streaming check run separately in 81.91 s.
 The six focused GPU regression runs passed on the NVIDIA GPU, including the
 four-layout sparse-buffer readback and default/explicit scalar bounds paths.
 Linux syscall tracing observed successful `fsync` on the test save file.
+
+## Ported shader-cache migration repair (October 20)
+
+The first reported Ported gameplay run spent 98,353.6 ms in 755 fast-first
+pipeline builds; the worst recorded compile stall was 1,591.1 ms. Streaming's
+comparison run had 782 driver-cache hits, five fast builds and a 17.0 ms worst
+compile stall. These are compile counters, not frame-time/FPS benchmarks.
+
+The ports changed translated shader content. The copied known-pipeline index
+still described old module hashes, and the bundled RETARGET=0 preset disabled
+migration. Even with retargeting enabled, replay skipped a known old pipeline
+before resolving the current modules. Replay now resolves compatible current
+permutation identities and checks the derived current key before skipping.
+The launcher's Precompile Shaders action explicitly enables retargeting even
+when the parent environment disables it. Ported's installed preset enables it
+for normal starts as well.
+
+A second gap affected mixed flat/smooth vertex parameters: stored input bytes
+predate alias metadata, while static keys already contain it. Restore and
+validate the aliases from the recorded static key before shader replay and
+pipeline-list normalization. Keep the journal layout and full derived-key
+validation intact.
+
+The new GPU regression records real aliased vertex shaders, substitutes
+unavailable old module hashes and known old keys, and verifies that retargeting
+builds all pipelines and the next process reuses them without another build.
+It failed before each repair and passes afterward. The launcher regression
+checks that preparation overrides an inherited RETARGET=0. All 80 related
+pipeline, program-cache, draw-preparation and launcher CTests pass.
+
+Preparing a private clone of the user's game cache rebuilt 1,074 graphics
+pipelines and restored all 880 shader permutations. A repeat prepared zero
+additional graphics pipelines, recognized 3,891 recorded recipes as warm, and
+completed native preparation in 1.4 seconds. Nine legacy recipes have a zero
+permutation identity for one stage, so preparation correctly reports them as
+unavailable rather than guessing a shader. New areas can still introduce
+previously unrecorded shaders/pipelines; gameplay route verification remains
+necessary. Preserve both journals, saves and the Streaming installation.
+
+Machine-local evidence and pre-repair backups are in
+`~/.local/state/kytyps5-ported-stutter-20261020/`.

@@ -1351,6 +1351,11 @@ if(BUILD_TESTING)
 	set_tests_properties(pipeline_prefetch_rendering PROPERTIES
 		ENVIRONMENT "KYTY_PIPELINE_PREFETCH=1;KYTY_PIPELINE_PREFETCH_THREADS=2;KYTY_DRAW_PREP_BINDINGS=1;KYTY_DRAW_PREP_VERIFY=exit;KYTY_PIPELINE_COLD_SALT=127"
 		TIMEOUT 180)
+	add_test(NAME pipeline_journal_retarget_known
+		COMMAND ${CMAKE_COMMAND} -DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>
+		-DJOURNAL_TOOL=$<TARGET_FILE:pipeline_list_tests>
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelineJournalRetarget.cmake)
+	set_tests_properties(pipeline_journal_retarget_known PROPERTIES TIMEOUT 180)
 	add_test(NAME pipeline_prepare_missing_metadata
 		COMMAND ${CMAKE_COMMAND} -DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelinePrepareMode.cmake)

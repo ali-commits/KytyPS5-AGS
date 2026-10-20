@@ -504,7 +504,35 @@ void TestRewrite() {
 
 } // namespace
 
-int main() {
+// Recreate an old-translator journal: its content hashes are unavailable, but its
+// input identities/layouts remain compatible and its old keys are known to the driver.
+static int MakeStaleKnownJournal(const char* journal_path, const char* known_path) {
+  PipelineJournal::Settings js, ks;
+  js.path = journal_path; ks.path = known_path;
+  js.background_writer = ks.background_writer = false;
+  if (!PipelineJournal::ReadIdentity(js.path, js.identity) ||
+      !PipelineJournal::ReadIdentity(ks.path, ks.identity)) return 2;
+  PipelineJournal journal(js), known(ks);
+  const auto records = journal.Loaded();
+  if (records.empty()) return 3;
+  journal.Reset(); known.Reset();
+  for (const auto& record : records) {
+    PipelineJournalPayload payload;
+    if (!DecodePipelineJournalPayload(record.payload, payload)) return 4;
+    if (!PipelineList::RewriteSnapshotModules(
+            std::span(payload.words).first(payload.snapshot_words),
+            [](uint32_t stage) { return uint64_t{0xbaad000000000001ull} + stage; })) return 5;
+    const auto old_key = (record.key ^ 0x7bad1234567890abull) | 1u;
+    const auto bytes = EncodePipelineJournalPayload(payload.level, payload.words,
+                                                    payload.snapshot_words, payload.identities);
+    if (!journal.Add(old_key, bytes) || !known.Add(old_key)) return 6;
+  }
+  return journal.Flush() && known.Flush() ? 0 : 7;
+}
+
+int main(int argc, char** argv) {
+  if (argc == 4 && std::strcmp(argv[1], "--stale-known-journal") == 0)
+    return MakeStaleKnownJournal(argv[2], argv[3]);
 	TestExportAndRoundTrip();
 	TestResolve();
 	TestMergedStage();
