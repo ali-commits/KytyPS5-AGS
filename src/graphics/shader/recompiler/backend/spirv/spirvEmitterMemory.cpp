@@ -1793,11 +1793,9 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto element = Binary(state, spv::OpIAdd, TypeU32(state), index,
 	                            Binary(state, spv::OpShiftRightLogical, TypeU32(state),
 	                                   access.byte_offset, ConstantU32(state, 2)));
-	if (DeviceChecksDwordLoad(access)) {
-		ctx.Define(inst, EmitNative<spv::OpLoad, IR::Type::U32>(
-		                     state, EmitMemoryElementPointer(state, access, element)));
-		return;
-	}
+	// NVIDIA may return a partial DWORD from a 1-3 byte native range even with
+	// robustBufferAccess2. Scalar loads require a whole DWORD; ArrayLength floors
+	// that range to zero. Keep the explicit check for this sub-DWORD edge case.
 	const auto condition = EmitMemoryElementInBounds(state, access, element);
 	ctx.Define(inst, EmitValueOrZeroIfCondition(state, condition, [&]() {
 		           return EmitNative<spv::OpLoad, IR::Type::U32>(

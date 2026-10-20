@@ -713,6 +713,27 @@ void TestAddContent(const std::filesystem::path& root) {
   }
 }
 
+void TestFsync() {
+  Loader::SymbolDatabase symbols;
+  Libs::InitLibKernel_1(&symbols);
+  const auto* symbol = symbols.Find(
+      {"juWbTNM+8hw", "Posix", 1, "libkernel", 1, 1, Loader::SymbolType::Func});
+  Check(symbol != nullptr, "POSIX fsync export resolves");
+  const auto fsync = reinterpret_cast<int (KYTY_SYSV_ABI *)(int)>(symbol->vaddr);
+  Check(fsync(std::numeric_limits<int>::min()) == -1 &&
+            *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
+        "invalid fsync descriptor reports POSIX EBADF");
+
+  constexpr char Path[] = "/savedata0/fsync.dat";
+  const int fd = FileSystem::KernelOpen(Path, 0x602, 0777);
+  Check(fd >= 3 && FileSystem::KernelWrite(fd, "save", 4) == 4 && fsync(fd) == OK &&
+            FileSystem::KernelLseek(fd, 0, 1) == 4,
+        "fsync flushes a writable file without changing its offset");
+  Check(FileSystem::KernelClose(fd) == OK && fsync(fd) == -1 &&
+            *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
+        "closed fsync descriptor reports POSIX EBADF");
+}
+
 void TestSaveOpenVisibility() {
   constexpr char Path[] = "/savedata0/visible-save.dat";
   constexpr char Payload[] = "saved progress";
@@ -1015,6 +1036,15 @@ void CheckArchiveMount(const std::filesystem::path &root) {
             std::equal(bytes.begin(), bytes.begin() + 9, payload.end() - 9) &&
             FileSystem::KernelRead(fd, bytes.data(), bytes.size()) == 0,
         "archive reads stop at the member boundary");
+  Loader::SymbolDatabase fsync_symbols;
+  Libs::InitLibKernel_1(&fsync_symbols);
+  const auto* fsync_symbol = fsync_symbols.Find(
+      {"fTx66l5iWIA", "libkernel", 1, "libkernel", 1, 1, Loader::SymbolType::Func});
+  Check(fsync_symbol != nullptr, "kernel fsync export resolves");
+  const auto fsync_archive = reinterpret_cast<int (KYTY_SYSV_ABI *)(int)>(fsync_symbol->vaddr);
+  Check(fsync_archive(fd) == OK &&
+            FileSystem::KernelLseek(fd, 0, 1) == payload.size(),
+        "fsync succeeds on an immutable archive member without changing its offset");
   Check(FileSystem::KernelWrite(fd, bytes.data(), 1) ==
             Libs::LibKernel::KERNEL_ERROR_EBADF &&
             FileSystem::KernelPwrite(fd, bytes.data(), 1, 0) ==
@@ -1986,6 +2016,7 @@ int main(int, char**) {
   CheckReadIntoProtectedMemory(temporary.Path());
 #endif
   FileSystem::Mount(temporary.Path(), "/savedata0");
+  TestFsync();
   TestSaveOpenVisibility();
   TestAioBatches();
   CheckSaveRename(temporary.Path(), "first-save");

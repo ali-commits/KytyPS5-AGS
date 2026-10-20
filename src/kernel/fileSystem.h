@@ -52,8 +52,8 @@ struct Lifecycle {
 	static constexpr auto emergency_shutdown = Libs::LibKernel::FileSystem::EmergencyShutdown;
 };
 
-void                  Mount(const std::filesystem::path& folder, const std::string& point);
-void                  Umount(const std::string& folder_or_point);
+void Mount(const std::filesystem::path& folder, const std::string& point);
+void Umount(const std::string& folder_or_point);
 // Returns an empty path when the guest path has no mounted filesystem.
 std::filesystem::path GetRealFilename(const std::string& mounted_file_name);
 
@@ -70,6 +70,7 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);
+int KYTY_SYSV_ABI     KernelFsync(int d);
 int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelRename(const char* from, const char* to);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);

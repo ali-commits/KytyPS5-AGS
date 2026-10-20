@@ -65,6 +65,16 @@ Live::Switch g_shader_write_retick("KYTY_SHADER_WRITE_RETICK", Live::ParseDefaul
 constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
 
+void CopyGuestUpload(void* destination, uint64_t address, uint64_t size) {
+	// Finite V# ranges can include reserved or unregistered holes. Preserve the direct-copy path
+	// for committed ranges and synthetic host-memory fixtures; sparse guest reads zero the holes.
+	if (LibKernel::Memory::ClampRangeSizeQuiet(address, size) != size &&
+	    LibKernel::Memory::CopySparseMemory(address, destination, size)) {
+		return;
+	}
+	std::memcpy(destination, reinterpret_cast<const void*>(address), size);
+}
+
 bool SmallUploadRingEnabled() {
 	// Startup only: keep large requests correct through temporary upload buffers.
 	const auto* flag = std::getenv("KYTY_RAM_SMALL_UPLOAD_RING");
@@ -2784,9 +2794,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		}
 		if (reserved != nullptr && total_size <= reserved_size && guest_copies == copies.size()) {
 			for (auto& copy: copies) {
-				std::memcpy(reserved + copy.srcOffset,
-				            reinterpret_cast<const void*>(buffer.CpuAddress() + copy.dstOffset),
-				            copy.size);
+				CopyGuestUpload(reserved + copy.srcOffset, buffer.CpuAddress() + copy.dstOffset,
+				                copy.size);
 				copy.srcOffset += reserved_offset;
 			}
 			if (!copies.empty()) source = m_staging_buffer.Handle();
@@ -3068,6 +3077,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 			if (alias != nullptr) {
 				deferred->push_back(
 				    {mapped + copy.srcOffset, static_cast<const uint8_t*>(alias), copy.size});
+			} else if (index < guest_copies) {
+				CopyGuestUpload(mapped + copy.srcOffset, buffer.CpuAddress() + copy.dstOffset,
+				                copy.size);
 			} else {
 				std::memcpy(mapped + copy.srcOffset, source_of(index, copy), copy.size);
 			}
@@ -3082,7 +3094,13 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	PageManager::ApplyPendingProtects(); // KYTY_DEFER_PROTECTS: copied here
 	for (size_t index = 0; index < copies.size(); index++) {
 		const auto& copy = copies[index];
-		std::memcpy(temporary->Mapped().data() + copy.srcOffset, source_of(index, copy), copy.size);
+		if (index < guest_copies) {
+			CopyGuestUpload(temporary->Mapped().data() + copy.srcOffset,
+			                buffer.CpuAddress() + copy.dstOffset, copy.size);
+		} else {
+			std::memcpy(temporary->Mapped().data() + copy.srcOffset, source_of(index, copy),
+			            copy.size);
+		}
 	}
 	temporary->Flush(0, total_size);
 	const auto handle = temporary->Handle();
@@ -3731,7 +3749,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferNow(uint64_t vaddr, uint64
 			auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 			bool read             = false;
 			if (mapped != nullptr && StreamDirectReadEnabled()) {
-				std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
+				CopyGuestUpload(mapped, vaddr, size);
 				read = true;
 			} else if (mapped != nullptr) {
 				// KYTY_CP_COMMIT=streamread: the reservation is committed only after a successful

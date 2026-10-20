@@ -170,12 +170,16 @@ bool HashGpuCleanBacking(uint64_t vaddr, uint64_t size, uint64_t& digest,
 // May submit/wait only at GPU preparation boundaries, outside texture-cache/tracker locks.
 bool SynchronizeGpuBackingForRead(uint64_t vaddr, uint64_t size);
 bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
+// Copy committed guest mappings and zero reserved/unregistered gaps. False for non-guest ranges.
+bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);
 // Upstream's descriptor-dependency reader (57cf08688/783d9f8d6): on the GPU thread, GPU-dirty
 // buffer bytes are read back first, then the backing is read.
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 // ClampRangeSize's answer without its log or exit (0: not committed, or no ranges yet). Any thread.
 [[nodiscard]] uint64_t ClampRangeSizeQuiet(uint64_t vaddr, uint64_t size);
+// Whether any byte of the range is committed, including a resident tail after sparse holes.
+[[nodiscard]] bool HasCommittedRange(uint64_t vaddr, uint64_t size);
 // The guest virtual ranges' change generation (advanced before every change starts; 0 before
 // they exist). Unchanged since a read made before a ClampRangeSize call: the call's answer holds.
 [[nodiscard]] uint64_t VirtualRangesGeneration() noexcept;

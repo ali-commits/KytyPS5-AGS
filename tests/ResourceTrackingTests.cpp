@@ -1097,6 +1097,19 @@ void TestUniformizedMaterialImageKeys() {
   user_data[8] = first_table;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "written buffer alias with an image record was accepted");
+  user_data[8] = first_material - 1;
+  user_data[9] = 0;
+  user_data[10] = 1;
+  user_data[11] = 2u << 28u;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
+        "zero-stride payload tail alias with a material key was accepted");
+  user_data[11] = 3u << 28u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "byte-bounded adjacent write was rejected");
+  user_data[11] = 2u << 28u;
+  user_data[8] = first_material - 4;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "nonoverlapping zero-stride payload was rejected");
   CheckFatal([&] { make_plan(true, false); }, "not a valid runtime value",
              "non-clearing material mask was accepted");
   CheckFatal([&] { make_plan(false, true); }, "not a valid runtime value",
@@ -1583,6 +1596,38 @@ void TestImagesSamplersAndAliases() {
         "buffer/image descriptor alias was not linked");
 }
 
+void TestIndependentImageSamplerPairs() {
+  Fixture fixture(ShaderType::Pixel);
+  const auto address = fixture.ImageAddress();
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Image;
+  memory.image_dimension = Decoder::ImageDimension::Dim2D;
+  for (uint32_t use = 0; use < 144; ++use) {
+    const auto pair = use % 72;
+    const auto pc = use * 4;
+    const auto image = fixture.Image(
+        {Value(pair / 8), Value(0u), Value(0u), Value(0u), Value(0u),
+         Value(0u), Value(0u), Value(0u)}, pc);
+    const auto sampler = fixture.Sampler(
+        {Value(pair % 8), Value(0u), Value(0u), Value(0u)}, pc);
+    fixture.Emit(ValueOpcode::ImageSampleRaw,
+                 {image, sampler, address},
+                 fixture.AddMemory(memory, pc));
+  }
+  fixture.PlanAndTrack();
+
+  Check(fixture.program.info.images.size() == 9 &&
+            fixture.program.info.samplers.size() == 8 &&
+            fixture.program.info.sampled_pairs.size() == 72,
+        "distinct image/sampler combinations were limited or duplicated");
+  for (uint32_t index = 0; index < 72; ++index) {
+    const auto &pair = fixture.program.info.sampled_pairs[index];
+    Check(pair.image == index / 8 && pair.sampler == index % 8 &&
+              pair.first_use_pc == index * 4,
+          "sampled pair lost its independent resources or first use");
+  }
+}
+
 void TestSampleAdjustSamplerScratch() {
   Fixture fixture(ShaderType::Pixel);
   const auto active = fixture.Emit(
@@ -1805,7 +1850,8 @@ void TestGatherLodSamplerValidation() {
       user_data[9] = 0xfff000u;
       constexpr std::array sampler_controls{
           0u, 0x4001u, 1u << 26u, (1u << 26u) | 256u,
-          (1u << 26u) | (1u << 14u), 2u << 26u, 3u << 26u};
+          (1u << 26u) | (1u << 14u), 2u << 26u, (2u << 26u) | 256u,
+          (2u << 26u) | (1u << 14u), 0x0a500000u, 0x1a500000u, 3u << 26u};
       for (const auto control : sampler_controls) {
         user_data[10] = control;
         ResourceSnapshot snapshot;
@@ -2037,6 +2083,65 @@ void TestSrtFlatteningAndRuntimeMemoization() {
   Check(FindBinding(fixture.program.bindings,
                     DescriptorBindingKind::FlattenedSrt) != nullptr,
         "flattened typed SRT reads did not receive a binding");
+}
+
+// This fork retains descriptor guards in ResourcePlan rather than upstream's conditional
+// scalar-read JIT. Exercise both the uniform whitelist and its full-width evaluator here.
+void Test64BitResourceGuards() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  for (const auto comparison : {ValueOpcode::IEqual64, ValueOpcode::INotEqual64}) {
+    Fixture fixture;
+    const auto low = fixture.UserData(0);
+    const auto high = fixture.UserData(1);
+    const auto pointer = fixture.Emit(ValueOpcode::CompositeConstructU64, {low, high});
+    auto enabled = fixture.Emit(comparison, {pointer, Value(uint64_t{0})});
+    if (comparison == ValueOpcode::IEqual64)
+      enabled = fixture.Emit(ValueOpcode::LogicalNot, {enabled});
+    fixture.program.block_info[0].condition = enabled;
+    auto* use = fixture.AddBlock();
+    auto* done = fixture.AddBlock();
+    fixture.block->AddBranch(use);
+    fixture.block->AddBranch(done);
+    use->AddBranch(done);
+    fixture.program.block_info[0].terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+        .true_block = 1u, .false_block = 2u};
+    fixture.program.block_info[1].terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = 2u};
+    fixture.program.block_info[2].terminator.kind = CFG::TerminatorKind::Return;
+    const auto buffer = fixture.Emit(ValueOpcode::GetBufferResource,
+        {low, high, Value(16u), Value(0u)}, MemoryFlags{0, 4}, use);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::LoadBufferU32,
+        {buffer, Value(0u), Value(0u), Value(0u), Value(true)}, fixture.AddMemory(memory, 4), use);
+    fixture.PlanAndTrack();
+    Check(ValidateRuntimeValue(fixture.program, enabled),
+          "64-bit resource guard was not recognized as a runtime-uniform value");
+    const auto plan = ExtractResourcePlan(fixture.program);
+    Check(!plan.control_flow.empty() && !plan.control_flow[0].condition.IsEmpty(),
+          "64-bit resource guard was dropped from the retained plan");
+    std::array<uint32_t, 2> user_data{};
+    uint32_t reads = 0;
+    SrtRuntime runtime{.user_data = user_data, .userdata = &reads,
+        .read_specialization_memory = +[](void* state, uint64_t, std::span<uint32_t>) {
+          ++*static_cast<uint32_t*>(state);
+          return false;
+        }};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    for (const uint64_t address : {uint64_t{0}, uint64_t{0x1000}, uint64_t{1} << 32u,
+                                   (uint64_t{1} << 32u) | 1u}) {
+      user_data = {static_cast<uint32_t>(address), static_cast<uint32_t>(address >> 32u)};
+      SrtWalker evaluator(fixture.program, runtime);
+      uint32_t condition = 2;
+      Check(evaluator.Evaluate(enabled, condition) && condition == (address != 0),
+            "64-bit comparison truncated the high half or chose the wrong truth value");
+      DescriptorValue expected;
+      if (address) expected.dwords = {user_data[0], user_data[1], 16u, 0u};
+      Check(MaterializeResources(plan, runtime, snapshot, specialization) && reads == 0 &&
+                snapshot.buffers.size() == 1 && snapshot.buffers[0].dwords == expected.dwords,
+            "64-bit null-pointer guard activated the wrong descriptor branch");
+    }
+  }
 }
 
 void TestDynamicSrtReadRemainsExplicit() {
@@ -2840,8 +2945,9 @@ void TestEmptyBufferNormalization() {
           .buffer_base_mapped = [](void* context, uint64_t base, uint64_t size) {
             auto& mapping = *static_cast<Mapping*>(context);
             ++mapping.probes;
-            // Like renderer clamping, any mapped prefix is usable, even for a spanning V#.
-            return size != 0u && base >= mapping.base && base - mapping.base < mapping.size;
+            return size != 0u && mapping.size != 0u &&
+                (base <= mapping.base ? mapping.base - base < size
+                                      : base - mapping.base < mapping.size);
           }};
       ResourceSnapshot snapshot;
       ResourceSpecialization specialization;
@@ -2886,7 +2992,20 @@ void TestEmptyBufferNormalization() {
             "remapping unchanged descriptor words did not restore its descriptor and specialization");
       data[0] -= 4u; // Same 64 KiB block as the mapped address, but outside its mapping.
       materialize();
-      Check(is_null(), "a nearby mapped address incorrectly validated an unmapped base");
+      Check(!is_null(), "finite sparse descriptor lost its resident tail");
+      data[2] = UINT32_MAX;
+      materialize();
+      Check(is_null(), "sentinel descriptor accepted an unmapped base before a resident tail");
+      data = valid;
+      data[0] = mapping.base - 3u;
+      data[1] = 0u;
+      data[2] = 1u;
+      data[3] = 2u << 28u;
+      materialize();
+      Check(!is_null(), "zero-stride vector payload lost a resident byte beyond NumRecords");
+      data[3] = 3u << 28u;
+      materialize();
+      Check(is_null(), "byte-bounded range outside every mapping was retained");
       data = valid;
       data[0] = 0u;
       materialize();
@@ -3556,6 +3675,7 @@ int main() {
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
     Run("images and samplers", TestImagesSamplersAndAliases);
+    Run("independent image/sampler pairs", TestIndependentImageSamplerPairs);
     Run("SampleAdjust sampler scratch", TestSampleAdjustSamplerScratch);
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
     Run("gather LOD sampler validation", TestGatherLodSamplerValidation);
@@ -3566,6 +3686,7 @@ int main() {
     Run("uniformized material image keys", TestUniformizedMaterialImageKeys);
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
+    Run("64-bit resource guards", Test64BitResourceGuards);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("phi validation", TestPhiValidation);

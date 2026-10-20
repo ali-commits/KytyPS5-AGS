@@ -1,5 +1,5 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
@@ -113,8 +113,8 @@ static F32Class EmitClassifyF32Value(EmitterState& state, uint32_t value, uint32
 	cls.bits = bits;
 	cls.nan  = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIsNan, TypeBool(state), cls.nan, value);
-	cls.zero = EmitCompareU32Constant(state, spv::OpIEqual, EmitAndConstant(state, bits, 0x7fffffffu),
-	                                  0);
+	cls.zero =
+	    EmitCompareU32Constant(state, spv::OpIEqual, EmitAndConstant(state, bits, 0x7fffffffu), 0);
 	return cls;
 }
 
@@ -130,7 +130,7 @@ F32Class EmitClassifyF32Bits(EmitterState& state, uint32_t bits) {
 	const auto exponent_max =
 	    EmitCompareU32Constant(state, spv::OpIEqual, exponent_bits, 0x7f800000u);
 	const auto mantissa_nonzero = EmitCompareU32Constant(state, spv::OpINotEqual, mantissa_bits, 0);
-	cls.nan  = EmitLogicalAndBool(state, exponent_max, mantissa_nonzero);
+	cls.nan                     = EmitLogicalAndBool(state, exponent_max, mantissa_nonzero);
 	cls.zero                    = EmitCompareU32Constant(state, spv::OpIEqual, abs_bits, 0);
 	return cls;
 }
@@ -213,10 +213,9 @@ uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask) {
 	return EmitClassMaskBits(state, bits, mask, true);
 }
 
-uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
-	const auto lhs_class = EmitClassifyF32(state, lhs);
-	const auto rhs_class = EmitClassifyF32(state, rhs);
-
+static uint32_t EmitMinMaxF32(EmitterState& state, uint32_t lhs, uint32_t rhs,
+                              const F32Class& lhs_class, const F32Class& rhs_class,
+                              bool max_value) {
 	const auto numeric_cond = state.builder.AllocateId();
 	state.builder.AddFunction(max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
 	                          TypeBool(state), numeric_cond, lhs, rhs);
@@ -232,6 +231,34 @@ uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, boo
 	    EmitSelectValueU32(state, rhs_class.nan, lhs_class.bits, numeric_bits);
 	const auto result_bits = EmitSelectValueU32(state, lhs_class.nan, rhs_class.bits, rhs_nan_bits);
 	return EmitBitcastU32ToF32(state, result_bits);
+}
+
+uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+	const auto lhs_class = EmitClassifyF32(state, lhs);
+	const auto rhs_class = EmitClassifyF32(state, rhs);
+	return EmitMinMaxF32(state, lhs, rhs, lhs_class, rhs_class, max_value);
+}
+
+uint32_t EmitMedianF32Value(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
+	const auto a_class      = EmitClassifyF32(state, a);
+	const auto b_class      = EmitClassifyF32(state, b);
+	const auto c_class      = EmitClassifyF32(state, c);
+	const auto min_ab       = EmitMinMaxF32(state, a, b, a_class, b_class, false);
+	const auto min_ab_class = EmitClassifyF32(state, min_ab);
+	const auto min3         = EmitMinMaxF32(state, min_ab, c, min_ab_class, c_class, false);
+	const auto max_ab       = EmitMinMaxF32(state, a, b, a_class, b_class, true);
+	const auto max_ab_class = EmitClassifyF32(state, max_ab);
+	const auto max3         = EmitMinMaxF32(state, max_ab, c, max_ab_class, c_class, true);
+	const auto max_bc       = EmitMinMaxF32(state, b, c, b_class, c_class, true);
+	const auto max_ac       = EmitMinMaxF32(state, a, c, a_class, c_class, true);
+	// RDNA2 compares numerically against MAX3, including ties between signed zeros.
+	const auto a_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3, a);
+	const auto b_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3, b);
+	const auto median   = Select(state, TypeF32(state), a_is_max, max_bc,
+	                             Select(state, TypeF32(state), b_is_max, max_ac, max_ab));
+	const auto nan_ab   = EmitLogicalOrBool(state, a_class.nan, b_class.nan);
+	const auto any_nan  = EmitLogicalOrBool(state, nan_ab, c_class.nan);
+	return Select(state, TypeF32(state), any_nan, min3, median);
 }
 
 uint32_t EmitFlushF32DenormToSignedZero(EmitterState& state, uint32_t value) {

@@ -1306,6 +1306,9 @@ if(BUILD_TESTING)
 	add_test(NAME lds_device_buffer_shader_cases
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shader-cases-only)
 	set_tests_properties(lds_device_buffer_shader_cases PROPERTIES ENVIRONMENT "KYTY_LDS_DEVICE_BUFFER=force")
+	add_test(NAME zero_stride_buffer_binding
+	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --zero-stride-binding-only)
+	set_tests_properties(zero_stride_buffer_binding PROPERTIES TIMEOUT 60)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME spirv_local_arrays COMMAND $<TARGET_FILE:spirv_local_arrays_tests>)
 	add_test(NAME spirv_cache_salt COMMAND $<TARGET_FILE:spirv_cache_salt_tests>)

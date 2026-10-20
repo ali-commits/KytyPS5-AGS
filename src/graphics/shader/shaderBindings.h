@@ -48,6 +48,14 @@ struct ShaderBufferResource {
 		// The 14-bit stride and 32-bit record count require a 64-bit product.
 		return Stride() == 0 ? NumRecords() : static_cast<uint64_t>(Stride()) * NumRecords();
 	}
+	[[nodiscard]] uint64_t GetBindingSize(bool scalar, uint32_t max_byte_extent) const {
+		auto size = GetSize();
+		// OOB_SELECT=2 only checks NumRecords != 0 for a zero-stride vector fetch.
+		if (size != 0 && Stride() == 0 && OutOfBounds() == 2 && !scalar && size < max_byte_extent) {
+			size = max_byte_extent;
+		}
+		return size;
+	}
 	[[nodiscard]] uint8_t  DstSelX() const { return (fields[3] >> 0u) & 0x7u; }
 	[[nodiscard]] uint8_t  DstSelY() const { return (fields[3] >> 3u) & 0x7u; }
 	[[nodiscard]] uint8_t  DstSelZ() const { return (fields[3] >> 6u) & 0x7u; }

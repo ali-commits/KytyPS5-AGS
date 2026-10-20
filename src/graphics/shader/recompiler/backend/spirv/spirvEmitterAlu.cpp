@@ -1,6 +1,6 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include <array>
 #include <bit>
@@ -23,24 +23,24 @@ Pair ExtractPair(EmitterState& state, uint32_t value) {
 
 uint32_t EmitMinMaxF64(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
 	const auto bits_type = TypeU32Vector(state, 2);
-	const auto lhs_bits = Unary(state, spv::OpBitcast, bits_type, lhs);
-	const auto rhs_bits = Unary(state, spv::OpBitcast, bits_type, rhs);
-	const auto ordered = Binary(state, max_value ? spv::OpFOrdGreaterThan : spv::OpFOrdLessThan,
-	                            TypeBool(state), lhs, rhs);
-	auto result = Select(state, TypeF64(state), ordered, lhs, rhs);
+	const auto lhs_bits  = Unary(state, spv::OpBitcast, bits_type, lhs);
+	const auto rhs_bits  = Unary(state, spv::OpBitcast, bits_type, rhs);
+	const auto ordered   = Binary(state, max_value ? spv::OpFOrdGreaterThan : spv::OpFOrdLessThan,
+	                              TypeBool(state), lhs, rhs);
+	auto       result    = Select(state, TypeF64(state), ordered, lhs, rhs);
 
 	// Equal values have identical bits except signed zero: min chooses -0, max chooses +0.
-	const auto equal = Binary(state, spv::OpFOrdEqual, TypeBool(state), lhs, rhs);
+	const auto equal      = Binary(state, spv::OpFOrdEqual, TypeBool(state), lhs, rhs);
 	const auto equal_bits = Binary(state, max_value ? spv::OpBitwiseAnd : spv::OpBitwiseOr,
 	                               bits_type, lhs_bits, rhs_bits);
 	result = Select(state, TypeF64(state), equal,
 	                Unary(state, spv::OpBitcast, TypeF64(state), equal_bits), result);
 
 	// Non-IEEE mode selects the other operand for NaN, including rhs when both are NaN.
-	result = Select(state, TypeF64(state), Unary(state, spv::OpIsNan, TypeBool(state), rhs),
-	                lhs, result);
-	return Select(state, TypeF64(state), Unary(state, spv::OpIsNan, TypeBool(state), lhs),
-	              rhs, result);
+	result = Select(state, TypeF64(state), Unary(state, spv::OpIsNan, TypeBool(state), rhs), lhs,
+	                result);
+	return Select(state, TypeF64(state), Unary(state, spv::OpIsNan, TypeBool(state), lhs), rhs,
+	              result);
 }
 
 uint32_t EmitMulHigh(EmitterState& state, uint32_t lhs, uint32_t rhs, bool signed_value) {
@@ -117,15 +117,15 @@ bool IsPlainConstant(const F32Operand& operand) {
 // operand when a zero meets a denormal.
 // A constant operand drops what cannot apply: a non-NaN constant cannot be the NaN operand, and a
 // non-zero constant never forms two zeros.
-F32Operand EmitFastMinMaxF32(EmitterState& state, F32Operand lhs, F32Operand rhs,
-                             bool max_value) {
+F32Operand EmitFastMinMaxF32(EmitterState& state, F32Operand lhs, F32Operand rhs, bool max_value) {
 	auto pick = Binary(state, max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
 	                   TypeBool(state), lhs.id, rhs.id);
 	if (!IsNonNanConstant(rhs)) {
 		const auto rhs_nan = Unary(state, spv::OpIsNan, TypeBool(state), rhs.id);
 		pick               = Binary(state, spv::OpLogicalOr, TypeBool(state), pick, rhs_nan);
 		if (!IsNonNanConstant(lhs)) {
-			const auto lhs_ordered = Binary(state, spv::OpFOrdEqual, TypeBool(state), lhs.id, lhs.id);
+			const auto lhs_ordered =
+			    Binary(state, spv::OpFOrdEqual, TypeBool(state), lhs.id, lhs.id);
 			pick = Binary(state, spv::OpLogicalAnd, TypeBool(state), pick, lhs_ordered);
 		}
 	}
@@ -135,11 +135,12 @@ F32Operand EmitFastMinMaxF32(EmitterState& state, F32Operand lhs, F32Operand rhs
 	const auto rhs_bits = EmitBitcastF32ToU32(state, rhs.id);
 	auto       value    = EmitSelectValueU32(state, pick, lhs_bits, rhs_bits);
 	if (!IsPlainConstant(lhs) && !IsPlainConstant(rhs)) {
-		const auto either = Binary(state, spv::OpBitwiseOr, TypeU32(state), lhs_bits, rhs_bits);
+		const auto either    = Binary(state, spv::OpBitwiseOr, TypeU32(state), lhs_bits, rhs_bits);
 		const auto both_zero = EmitCompareU32Constant(
 		    state, spv::OpIEqual, EmitAndConstant(state, either, 0x7fffffffu), 0u);
 		const auto combined =
-		    max_value ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), lhs_bits, rhs_bits) : either;
+		    max_value ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), lhs_bits, rhs_bits)
+		              : either;
 		value = EmitSelectValueU32(state, both_zero, combined, value);
 	}
 	return {.id = EmitBitcastU32ToF32(state, value)};
@@ -150,27 +151,32 @@ F32Operand EmitFastMinMax3F32(EmitterState& state, F32Operand a, F32Operand b, F
 	return EmitFastMinMaxF32(state, EmitFastMinMaxF32(state, a, b, max_value), c, max_value);
 }
 
-// V_MED3_F32 exactly as EmitFPMedTri32 defines it (any NaN operand gives min3, otherwise
-// max(min(a,b), min(max(a,b),c))), from the exact min/max above. Constant non-NaN operands drop
-// out of the NaN test.
+// Match RDNA2 numeric MAX3 ties, including signed zeros. Constant non-NaN operands
+// drop out of the NaN test.
 uint32_t EmitFastMedTri32(EmitterState& state, F32Operand a, F32Operand b, F32Operand c) {
 	const auto min_ab   = EmitFastMinMaxF32(state, a, b, false);
 	const auto min3     = EmitFastMinMaxF32(state, min_ab, c, false);
 	const auto max_ab   = EmitFastMinMaxF32(state, a, b, true);
-	const auto high_min = EmitFastMinMaxF32(state, max_ab, c, false);
-	const auto median   = EmitFastMinMaxF32(state, min_ab, high_min, true);
+	const auto max3     = EmitFastMinMaxF32(state, max_ab, c, true);
+	const auto max_bc   = EmitFastMinMaxF32(state, b, c, true);
+	const auto max_ac   = EmitFastMinMaxF32(state, a, c, true);
+	const auto a_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3.id, a.id);
+	const auto b_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3.id, b.id);
+	const auto median   = Select(state, TypeF32(state), a_is_max, max_bc.id,
+	                             Select(state, TypeF32(state), b_is_max, max_ac.id, max_ab.id));
 	uint32_t   any_nan  = 0;
 	for (const auto* operand: {&a, &b, &c}) {
 		if (IsNonNanConstant(*operand)) {
 			continue;
 		}
 		const auto nan = Unary(state, spv::OpIsNan, TypeBool(state), operand->id);
-		any_nan = any_nan == 0 ? nan : Binary(state, spv::OpLogicalOr, TypeBool(state), any_nan, nan);
+		any_nan =
+		    any_nan == 0 ? nan : Binary(state, spv::OpLogicalOr, TypeBool(state), any_nan, nan);
 	}
 	if (any_nan == 0) {
-		return median.id;
+		return median;
 	}
-	return Select(state, TypeF32(state), any_nan, min3.id, median.id);
+	return Select(state, TypeF32(state), any_nan, min3.id, median);
 }
 
 bool FastFloatMinMax() {
@@ -223,21 +229,9 @@ uint32_t EmitFPMedTri32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1, I
 	auto& state = ctx.state;
 	if (FastFloatMinMax()) {
 		return EmitFastMedTri32(state, OperandF32(ctx, arg0), OperandF32(ctx, arg1),
-		                          OperandF32(ctx, arg2));
+		                        OperandF32(ctx, arg2));
 	}
-	const auto a        = ctx.Def(arg0);
-	const auto b        = ctx.Def(arg1);
-	const auto c        = ctx.Def(arg2);
-	const auto min_ab   = EmitMinMaxF32Value(state, a, b, false);
-	const auto min3     = EmitMinMaxF32Value(state, min_ab, c, false);
-	const auto max_ab   = EmitMinMaxF32Value(state, a, b, true);
-	const auto high_min = EmitMinMaxF32Value(state, max_ab, c, false);
-	const auto median   = EmitMinMaxF32Value(state, min_ab, high_min, true);
-	const auto nan_ab   = Binary(state, spv::OpLogicalOr, TypeBool(state),
-	                             EmitClassifyF32(state, a).nan, EmitClassifyF32(state, b).nan);
-	const auto any_nan =
-	    Binary(state, spv::OpLogicalOr, TypeBool(state), nan_ab, EmitClassifyF32(state, c).nan);
-	return Select(state, TypeF32(state), any_nan, min3, median);
+	return EmitMedianF32Value(state, ctx.Def(arg0), ctx.Def(arg1), ctx.Def(arg2));
 }
 
 uint32_t EmitFindUMsb64(EmitterState& state, uint32_t value) {
@@ -330,7 +324,8 @@ uint32_t EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value
 namespace {
 
 // One V_CVT_PKRTZ_F16_F32 half, exactly as EmitF32ToF16RtzBits computes it, with fewer selects:
-//  - |x| >= 2^-14 (f32 exponent >= 113): the truncated f16 magnitude is (|bits| >> 13) - (112 << 10).
+//  - |x| >= 2^-14 (f32 exponent >= 113): the truncated f16 magnitude is (|bits| >> 13) - (112 <<
+//  10).
 //    Finite values past the f16 range (exponent >= 143) give at least 0x7c00 there, so
 //    UMin(., 0x7bff) produces the RTZ saturation.
 //  - |x| < 2^-14 (exponent <= 112): the f16 subnormal (mantissa | hidden) >> (126 - exponent),
@@ -350,9 +345,9 @@ uint32_t EmitFastF32ToF16RtzBits(EmitterState& state, uint32_t f32) {
 	const auto normal = EmitMinMaxU32Value(
 	    state, Binary(state, spv::OpISub, TypeU32(state), high13, ConstantU32(state, 112u << 10u)),
 	    ConstantU32(state, 0x7bffu), false);
-	const auto exponent = EmitShiftRightConstant(state, abs, 23);
-	const auto shift    = EmitMinMaxU32Value(state, EmitSubConstantMinusU32(state, 126, exponent),
-	                                         ConstantU32(state, 31), false);
+	const auto exponent  = EmitShiftRightConstant(state, abs, 23);
+	const auto shift     = EmitMinMaxU32Value(state, EmitSubConstantMinusU32(state, 126, exponent),
+	                                          ConstantU32(state, 31), false);
 	const auto subnormal = Binary(
 	    state, spv::OpShiftRightLogical, TypeU32(state),
 	    EmitOrU32(state, EmitAndConstant(state, abs, 0x007fffffu), ConstantU32(state, 0x00800000u)),
@@ -364,7 +359,7 @@ uint32_t EmitFastF32ToF16RtzBits(EmitterState& state, uint32_t f32) {
 	    state, EmitCompareU32Constant(state, spv::OpUGreaterThan, abs, 0x7f800000u),
 	    ConstantU32(state, 0x0200u), ConstantU32(state, 0u));
 	const auto special = EmitOrU32(state, EmitAndConstant(state, high13, 0x7fffu), quiet);
-	result = EmitSelectValueU32(
+	result             = EmitSelectValueU32(
 	    state, EmitCompareU32Constant(state, spv::OpUGreaterThanEqual, abs, 0x7f800000u), special,
 	    result);
 	return EmitOrU32(state, result, sign);
@@ -501,9 +496,9 @@ void CollectPositionSlice(EmitterState& state) {
 }
 
 uint32_t EmitFloatBinary(ValueEmitContext& ctx, const IR::Inst& inst, spv::Op opcode) {
-	auto&      state  = ctx.state;
-	const auto result = Binary(state, opcode, TypeF32(state), ctx.Def(inst.Arg(0)),
-	                           ctx.Def(inst.Arg(1)));
+	auto&      state = ctx.state;
+	const auto result =
+	    Binary(state, opcode, TypeF32(state), ctx.Def(inst.Arg(0)), ctx.Def(inst.Arg(1)));
 	if (NoContraction(state, inst)) {
 		state.builder.AddAnnotation(spv::OpDecorate, result, spv::DecorationNoContraction);
 	}
@@ -567,16 +562,14 @@ uint32_t EmitFPIsNan32(EmitterState& state, uint32_t arg0) {
 
 uint32_t EmitFPMin32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1) {
 	if (FastFloatMinMax()) {
-		return EmitFastMinMaxF32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1), false)
-		    .id;
+		return EmitFastMinMaxF32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1), false).id;
 	}
 	return EmitMinMaxF32Value(ctx.state, ctx.Def(arg0), ctx.Def(arg1), false);
 }
 
 uint32_t EmitFPMax32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1) {
 	if (FastFloatMinMax()) {
-		return EmitFastMinMaxF32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1), true)
-		    .id;
+		return EmitFastMinMaxF32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1), true).id;
 	}
 	return EmitMinMaxF32Value(ctx.state, ctx.Def(arg0), ctx.Def(arg1), true);
 }
@@ -592,7 +585,7 @@ uint32_t EmitFPMax64(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 uint32_t EmitFPMinTri32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1, IR::Value arg2) {
 	if (FastFloatMinMax()) {
 		return EmitFastMinMax3F32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1),
-		                            OperandF32(ctx, arg2), false)
+		                          OperandF32(ctx, arg2), false)
 		    .id;
 	}
 	return EmitFMinMax3(ctx.state, ctx.Def(arg0), ctx.Def(arg1), ctx.Def(arg2), false);
@@ -601,7 +594,7 @@ uint32_t EmitFPMinTri32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1, I
 uint32_t EmitFPMaxTri32(ValueEmitContext& ctx, IR::Value arg0, IR::Value arg1, IR::Value arg2) {
 	if (FastFloatMinMax()) {
 		return EmitFastMinMax3F32(ctx.state, OperandF32(ctx, arg0), OperandF32(ctx, arg1),
-		                            OperandF32(ctx, arg2), true)
+		                          OperandF32(ctx, arg2), true)
 		    .id;
 	}
 	return EmitFMinMax3(ctx.state, ctx.Def(arg0), ctx.Def(arg1), ctx.Def(arg2), true);

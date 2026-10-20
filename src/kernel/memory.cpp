@@ -376,6 +376,19 @@ public:
 		return FindOverlap(start, size) != nullptr;
 	}
 
+	bool HasCommittedRange(uint64_t start, uint64_t size) {
+		if (start == 0 || size == 0 || size > UINT64_MAX - start) return false;
+		Common::LockGuard lock(m_mutex);
+		auto              current = LowerBound(start);
+		if (current != m_ranges.begin()) --current;
+		for (; current != m_ranges.end() && current->start < start + size; ++current) {
+			if (IsCommittedRangeType(current->type) && End(current->start, current->size) > start) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool QueryOverlap(uint64_t start, uint64_t size, Range* out) {
 		EXIT_IF(out == nullptr);
 		Common::LockGuard lock(m_mutex);
@@ -1578,6 +1591,10 @@ uint64_t ClampRangeSizeQuiet(uint64_t vaddr, uint64_t size) {
 	return g_virtual_ranges != nullptr ? g_virtual_ranges->ClampRangeSize(vaddr, size) : 0;
 }
 
+bool HasCommittedRange(uint64_t vaddr, uint64_t size) {
+	return g_virtual_ranges != nullptr && g_virtual_ranges->HasCommittedRange(vaddr, size);
+}
+
 uint64_t VirtualRangesGeneration() noexcept {
 	return g_virtual_ranges != nullptr ? g_virtual_ranges->Generation() : 0;
 }
@@ -1678,6 +1695,28 @@ static bool IsInPrtAperture(uint64_t address, uint64_t size = 1) {
 	}
 
 	return false;
+}
+
+bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+	if (g_virtual_ranges == nullptr || data == nullptr || vaddr == 0 || size == 0 ||
+	    size > UINT64_MAX - vaddr || !IsGpuAddressRange(vaddr, size))
+		return false;
+	const auto           end = vaddr + size;
+	VirtualRanges::Range range;
+	std::memset(data, 0, size);
+	// A wholly unregistered guest range is zero-filled too, even with null normalization off.
+	if (!g_virtual_ranges->Query(vaddr, 1, &range) || range.start >= end) return true;
+	for (auto current = vaddr; current < end;) {
+		if (!g_virtual_ranges->Query(current, 1, &range) || range.start >= end) break;
+		const auto first = std::max(current, range.start);
+		const auto next  = std::min(end, range.start + range.size);
+		if (IsCommittedRangeType(range.type)) {
+			std::memcpy(static_cast<uint8_t*>(data) + (first - vaddr),
+			            reinterpret_cast<const void*>(first), next - first);
+		}
+		current = next;
+	}
+	return true;
 }
 
 bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {

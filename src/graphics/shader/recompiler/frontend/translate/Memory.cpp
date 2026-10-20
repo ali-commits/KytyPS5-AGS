@@ -1013,13 +1013,10 @@ void Translator::EmitMemory(const Decoder::Instruction& inst) {
 		lds_write_pending = true;
 	}
 	switch (inst.opcode) {
-		case Decoder::Opcode::S_DCACHE_INV:
-		case Decoder::Opcode::S_GL1_INV:
 		case Decoder::Opcode::BUFFER_GL0_INV:
-		case Decoder::Opcode::BUFFER_GL1_INV:
-			// Host shader memory has no guest-visible L0/GL1 cache to invalidate.
-			EmitControlNop();
-			return;
+		case Decoder::Opcode::BUFFER_GL1_INV: ir.Emit(IR::ValueOpcode::DataCacheInvalidate); return;
+		case Decoder::Opcode::S_DCACHE_INV:
+		case Decoder::Opcode::S_GL1_INV: EmitControlNop(); return;
 
 		case Decoder::Opcode::S_LOAD_DWORD:
 		case Decoder::Opcode::S_LOAD_DWORDX2:

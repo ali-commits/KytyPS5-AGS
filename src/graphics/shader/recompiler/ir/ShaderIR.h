@@ -64,16 +64,16 @@ struct MemoryInfo {
 	uint32_t                image_sample_flags       = 0;
 	Decoder::ImageDimension image_dimension          = Decoder::ImageDimension::Unknown;
 	uint32_t                image_address_components = 0;
-	bool                    address_is_full                                       = false;
-	bool                    data_signed                                           = false;
-	bool                    typed                                                 = false;
-	bool                    formatted                                             = false;
-	bool                    image_has_mip                                         = false;
-	bool                    image_r128                                            = false;
-	bool                    idxen                                                 = false;
-	bool                    offen                                                 = false;
-	bool                    coherent                                              = false;
-	bool                    planning_only                                         = false;
+	bool                    address_is_full          = false;
+	bool                    data_signed              = false;
+	bool                    typed                    = false;
+	bool                    formatted                = false;
+	bool                    image_has_mip            = false;
+	bool                    image_r128               = false;
+	bool                    idxen                    = false;
+	bool                    offen                    = false;
+	bool                    coherent                 = false;
+	bool                    planning_only            = false;
 
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
 		// ReadConstBuffer: one dword of an S_BUFFER_LOAD (no formats, RDNA2 ISA 7.2.1).
@@ -158,21 +158,21 @@ struct ExportInfo {
 };
 
 struct BufferResource {
-	static constexpr uint32_t NoImageAlias = UINT32_MAX;
+	static constexpr uint32_t NoImageAlias     = UINT32_MAX;
 	static constexpr uint32_t NoIndirectBuffer = UINT32_MAX;
 
-	uint32_t               source             = 0;
-	uint32_t               first_use_pc       = 0;
-	uint32_t               max_byte_extent    = 0;
-	uint32_t               packed_stride      = 0;
-	Prospero::BufferFormat descriptor_format  = Prospero::BufferFormat::kInvalid;
-	uint32_t               descriptor_swizzle = DstSel(4, 5, 6, 7);
-	uint32_t               image_alias        = NoImageAlias;
-	bool                   read               = false;
-	bool                   written            = false;
-	bool                   atomic             = false;
-	bool                   formatted          = false;
-	bool                   scalar             = false;
+	uint32_t               source                     = 0;
+	uint32_t               first_use_pc               = 0;
+	uint32_t               max_byte_extent            = 0;
+	uint32_t               packed_stride              = 0;
+	Prospero::BufferFormat descriptor_format          = Prospero::BufferFormat::kInvalid;
+	uint32_t               descriptor_swizzle         = DstSel(4, 5, 6, 7);
+	uint32_t               image_alias                = NoImageAlias;
+	bool                   read                       = false;
+	bool                   written                    = false;
+	bool                   atomic                     = false;
+	bool                   formatted                  = false;
+	bool                   scalar                     = false;
 	uint32_t               indirect_root              = NoIndirectBuffer;
 	uint32_t               indirect_mapping_offset    = 0;
 	uint32_t               indirect_search_iterations = 0;
@@ -205,7 +205,7 @@ struct ImageResource {
 	bool                          cube              = false;
 	bool                          r128              = false;
 	uint32_t                      indirect_root     = NoIndirectImage;
-	uint32_t                      indirect_mapping_offset   = 0;
+	uint32_t                      indirect_mapping_offset    = 0;
 	uint32_t                      indirect_search_iterations = 0;
 	std::vector<uint32_t>         indirect_resources;
 
@@ -213,8 +213,8 @@ struct ImageResource {
 };
 
 struct SamplerResource {
-	uint32_t source                = 0;
-	uint32_t first_use_pc          = 0;
+	uint32_t source       = 0;
+	uint32_t first_use_pc = 0;
 	// Native filtering/border variants share the original sampler's runtime descriptor.
 	uint32_t snapshot_index        = 0;
 	bool     force_point_filtering = false;
@@ -298,14 +298,13 @@ enum class StageOutputKind {
 struct PositionExportComponent {
 	uint32_t clip_distance = UINT32_MAX;
 	uint32_t cull_distance = UINT32_MAX;
-	bool     point_size     = false;
-	bool     layer          = false;
-	bool     viewport       = false;
+	bool     point_size    = false;
+	bool     layer         = false;
+	bool     viewport      = false;
 };
 
-inline PositionExportComponent DecodePositionExportComponent(uint32_t control,
-	                                                           uint32_t pos_index,
-	                                                           uint32_t component) {
+inline PositionExportComponent DecodePositionExportComponent(uint32_t control, uint32_t pos_index,
+                                                             uint32_t component) {
 	PositionExportComponent result;
 	if (pos_index == 0 || component >= 4) {
 		return result;
@@ -387,12 +386,12 @@ static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
 
 struct PushData {
-	static constexpr uint32_t DwordCount = 32;
+	static constexpr uint32_t DwordCount         = 32;
 	static constexpr uint32_t MeshDrawDwordCount = 6;
 	// Mesh draw dword 6, only for programs with ShaderMeshInputInfo::split_groups: the first
 	// workgroup of this part of a draw split past the host's X group limit (0 when unsplit; a
 	// native indirect draw's parameter block holds 0 there).
-	static constexpr uint32_t MeshFirstGroupDword = MeshDrawDwordCount;
+	static constexpr uint32_t               MeshFirstGroupDword = MeshDrawDwordCount;
 	[[nodiscard]] static constexpr uint32_t MeshDrawDwords(bool split_groups) {
 		return MeshDrawDwordCount + (split_groups ? 1u : 0u);
 	}
@@ -400,8 +399,8 @@ struct PushData {
 	// indirect mesh draw: dwords 0-1 then hold the device address of the dispatch's parameter
 	// block, whose first MeshDrawDwordCount dwords replace the pushed ones (CodegenOptions::
 	// mesh_indirect_params, renderer/meshIndirect.h).
-	static constexpr uint32_t MeshIndirectSentinel = 0xffffffffu;
-	static constexpr uint32_t NoStart    = UINT32_MAX;
+	static constexpr uint32_t        MeshIndirectSentinel = 0xffffffffu;
+	static constexpr uint32_t        NoStart              = UINT32_MAX;
 	std::array<uint32_t, DwordCount> dwords {};
 
 	[[nodiscard]] static constexpr bool CanFit(uint32_t start, uint32_t size) {
@@ -520,10 +519,10 @@ struct DescriptorBinding {
 };
 
 struct BindingLayout {
-	uint32_t                       push_data_start_dword = PushData::NoStart;
-	uint32_t                       dispatch_thread_dword = PushData::NoStart;
-	uint32_t                       memory_offset_dword = 0;
-	uint32_t                       memory_offset_count = 0;
+	uint32_t push_data_start_dword = PushData::NoStart;
+	uint32_t dispatch_thread_dword = PushData::NoStart;
+	uint32_t memory_offset_dword   = 0;
+	uint32_t memory_offset_count   = 0;
 	// Per-draw GET_LOD_STATS field of each image (one dword each, LodStatsReport::ImageField:
 	// counter id, base level, no-counter flag, counting threshold), after the memory offsets.
 	// Non-zero only for shaders instrumented for mip statistics.
@@ -537,10 +536,8 @@ struct BindingLayout {
 	[[nodiscard]] uint32_t ShaderDataDwords() const {
 		return MipStatsOffsetDword() + mip_stats_count;
 	}
-	[[nodiscard]] bool UsesPushData() const {
-		return push_data_start_dword != PushData::NoStart;
-	}
-	void AdvancePushData(uint32_t& cursor) const {
+	[[nodiscard]] bool UsesPushData() const { return push_data_start_dword != PushData::NoStart; }
+	void               AdvancePushData(uint32_t& cursor) const {
 		if (UsesPushData()) {
 			cursor = push_data_start_dword + ShaderDataDwords();
 		}
@@ -550,10 +547,9 @@ struct BindingLayout {
 };
 
 struct ShaderInfo {
-	static constexpr uint32_t MaxBuffers      = 64;
-	static constexpr uint32_t MaxImages       = 64;
-	static constexpr uint32_t MaxSamplers     = 32;
-	static constexpr uint32_t MaxSampledPairs = 64;
+	static constexpr uint32_t MaxBuffers  = 64;
+	static constexpr uint32_t MaxImages   = 64;
+	static constexpr uint32_t MaxSamplers = 32;
 
 	std::vector<BufferResource>      buffers;
 	std::vector<ImageResource>       images;
@@ -562,16 +558,16 @@ struct ShaderInfo {
 	std::vector<StageInput>          inputs;
 	std::vector<StageOutput>         outputs;
 	std::array<uint8_t, 32>          vertex_fetch_components {};
-	int32_t                          vertex_offset_sgpr = -1;
+	int32_t                          vertex_offset_sgpr   = -1;
 	int32_t                          instance_offset_sgpr = -1;
-	bool                             has_bitwise_xor    = false;
-	bool                             uses_dma           = false;
+	bool                             has_bitwise_xor      = false;
+	bool                             uses_dma             = false;
 	// IMAGE_BVH*_INTERSECT_RAY translated (KYTY_RT_STUB); counts the program's draws/dispatches.
-	bool                             uses_bvh           = false;
+	bool uses_bvh = false;
 	// KYTY_BDA_WRITES: the program stores or does atomics through a V# it computes (IndirectBuffer
 	// writes through BDA). Implies uses_dma and has_address_writes; the renderer settles each of
 	// its dispatches synchronously.
-	bool                             bda_writes         = false;
+	bool bda_writes = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };
@@ -595,22 +591,22 @@ struct DescriptorSource {
 			bool operator==(const SelectorRead& other) const = default;
 		};
 		std::optional<SelectorRead> selector;
-		uint32_t table_source    = 0;
-		uint32_t table_offset    = 0;
-		uint32_t table_immediate = 0;
-		uint32_t table_stride    = 0;
-		uint32_t table_record_bytes = 0;
-		bool     table_scalar = false;
-		uint32_t workgroup_axis  = UINT32_MAX;
-		Value    key_count;
-		Value                 selector_first;
-		Value    selector_mask;
+		uint32_t                    table_source       = 0;
+		uint32_t                    table_offset       = 0;
+		uint32_t                    table_immediate    = 0;
+		uint32_t                    table_stride       = 0;
+		uint32_t                    table_record_bytes = 0;
+		bool                        table_scalar       = false;
+		uint32_t                    workgroup_axis     = UINT32_MAX;
+		Value                       key_count;
+		Value                       selector_first;
+		Value                       selector_mask;
 
 		bool operator==(const IndirectDescriptor& other) const = default;
 	};
 
-	std::array<Value, 8>         dwords {};
-	uint32_t                     dword_count = 0;
+	std::array<Value, 8>              dwords {};
+	uint32_t                          dword_count = 0;
 	std::optional<IndirectDescriptor> indirect_descriptor;
 
 	bool operator==(const DescriptorSource& other) const = default;
@@ -683,9 +679,9 @@ struct WriteRangeAccess {
 };
 
 struct BufferWriteRange {
-	uint32_t                      buffer        = 0;
-	uint32_t                      packed_stride = 0; // Specialized ShaderBufferResource::PackedStride
-	bool                          bounded       = false;
+	uint32_t buffer        = 0;
+	uint32_t packed_stride = 0; // Specialized ShaderBufferResource::PackedStride
+	bool     bounded       = false;
 	std::vector<WriteRangeAccess> accesses;
 
 	bool operator==(const BufferWriteRange& other) const = default;
@@ -708,17 +704,17 @@ struct WriteRangeProgram {
 
 // Stable shader metadata consumed by the renderer after native IR has been discarded.
 struct CompiledShaderInfo {
-	ShaderType                    stage               = ShaderType::Unknown;
-	uint64_t                      shader_hash         = 0;
-	uint32_t                      wave_size           = 64;
-	uint32_t                      user_data_base      = 0;
-	uint32_t                      user_data_count     = 64;
-	uint32_t                      scratch_dwords      = 0;
-	uint32_t                      param_export_mask   = 0;
-	bool                          has_address_writes  = false;
-	ShaderInfo                    info;
-	BindingLayout                 bindings;
-	WriteRangeProgram             write_ranges;
+	ShaderType        stage              = ShaderType::Unknown;
+	uint64_t          shader_hash        = 0;
+	uint32_t          wave_size          = 64;
+	uint32_t          user_data_base     = 0;
+	uint32_t          user_data_count    = 64;
+	uint32_t          scratch_dwords     = 0;
+	uint32_t          param_export_mask  = 0;
+	bool              has_address_writes = false;
+	ShaderInfo        info;
+	BindingLayout     bindings;
+	WriteRangeProgram write_ranges;
 
 	// Every member (the persistent program cache's verify mode compares whole objects).
 	bool operator==(const CompiledShaderInfo& other) const = default;
@@ -739,31 +735,39 @@ struct ResourcePlan {
 		enum class Kind : uint32_t { Invalid, Immediate, Node };
 		uint64_t value = 0;
 		uint32_t index = 0;
-		Kind kind = Kind::Invalid;
+		Kind     kind  = Kind::Invalid;
 	};
 	struct EvaluationRecipe {
 		enum class Kind : uint32_t {
-			Fallback, Operation, UserData, FlatRead, Forward, Extract, ExtractCarry,
-			RawAddress, RawBuffer, Select,
+			Fallback,
+			Operation,
+			UserData,
+			FlatRead,
+			Forward,
+			Extract,
+			ExtractCarry,
+			RawAddress,
+			RawBuffer,
+			Select,
 		};
-		const Inst* instruction = nullptr;
+		const Inst*                      instruction = nullptr;
 		std::array<EvaluationOperand, 5> operands {};
-		Value selection_mask;
-		int64_t offset = 0;
-		uint32_t parameter = 0;
-		Kind kind = Kind::Fallback;
+		Value                            selection_mask;
+		int64_t                          offset    = 0;
+		uint32_t                         parameter = 0;
+		Kind                             kind      = Kind::Fallback;
 	};
 	struct ArithmeticTapeOperand {
-		uint64_t value = 0; // Immediate bits, or an earlier tape instruction's result index.
-		bool immediate = true;
+		uint64_t value     = 0; // Immediate bits, or an earlier tape instruction's result index.
+		bool     immediate = true;
 	};
 	struct ArithmeticTapeInstruction {
 		enum class Kind : uint8_t { Boundary, Operation, Forward, Extract, ExtractCarry };
 		std::array<ArithmeticTapeOperand, 4> operands {};
-		const Inst* instruction = nullptr;
-		uint32_t parameter = 0; // Boundary recipe index or extract component.
-		Kind kind = Kind::Boundary;
-		uint8_t operand_count = 0;
+		const Inst*                          instruction = nullptr;
+		uint32_t parameter     = 0; // Boundary recipe index or extract component.
+		Kind     kind          = Kind::Boundary;
+		uint8_t  operand_count = 0;
 	};
 	struct ArithmeticTape {
 		uint32_t first = 0;
@@ -778,8 +782,8 @@ struct ResourcePlan {
 		std::vector<Entry> values;
 		// Nested tapes in this memo context use disjoint, stack-allocated slices.
 		std::vector<uint64_t> tape_values;
-		size_t               tape_values_used = 0;
-		uint64_t           generation = 0;
+		size_t                tape_values_used = 0;
+		uint64_t              generation       = 0;
 	};
 
 	ResourcePlan() = default;
@@ -787,48 +791,48 @@ struct ResourcePlan {
 
 	ResourcePlan(const ResourcePlan&)            = delete;
 	ResourcePlan& operator=(const ResourcePlan&) = delete;
-	ResourcePlan(ResourcePlan&&) noexcept         = default;
+	ResourcePlan(ResourcePlan&&) noexcept        = default;
 	ResourcePlan& operator=(ResourcePlan&& other) noexcept;
 
 	ShaderType                    stage           = ShaderType::Unknown;
 	uint64_t                      shader_hash     = 0;
 	uint32_t                      user_data_base  = 0;
 	uint32_t                      user_data_count = 64;
-	std::list<Inst>                     value_storage;
-	std::vector<MemoryInfo>             memory_info;
-	std::vector<DescriptorSource>       descriptor_sources;
-	std::vector<ResourceBlock>          control_flow;
-	std::vector<SrtRead>                srt_reads;
+	std::list<Inst>               value_storage;
+	std::vector<MemoryInfo>       memory_info;
+	std::vector<DescriptorSource> descriptor_sources;
+	std::vector<ResourceBlock>    control_flow;
+	std::vector<SrtRead>          srt_reads;
 	// Exclusive run ends for adjacent raw flat reads; empty on untranslated plans.
 	// Runs preserve read order, resolved handle, opcode and clean/ordinary context.
-	std::vector<uint32_t>               srt_read_run_ends;
-	std::vector<EvaluationRecipe>       evaluation_recipes;
+	std::vector<uint32_t>         srt_read_run_ends;
+	std::vector<EvaluationRecipe> evaluation_recipes;
 	// Immutable entry points for the same evaluator, decoded once after cloning.
 	// These contain indices/immediate constants only, never guest read results.
 	std::vector<std::array<EvaluationOperand, 8>> descriptor_roots;
-	std::vector<EvaluationOperand>      flat_read_roots;
-	std::vector<EvaluationOperand>      condition_roots;
-	std::vector<uint8_t>                initial_active_sources;
+	std::vector<EvaluationOperand>                flat_read_roots;
+	std::vector<EvaluationOperand>                condition_roots;
+	std::vector<uint8_t>                          initial_active_sources;
 	// Compacted traversal skips only empty unconditional blocks; no guest reads
 	// or source activations are removed. Separate from decoded expression roots.
-	std::vector<uint32_t>               flow_aliases;
-	std::vector<uint8_t>                flow_initial_sources;
-	std::vector<ArithmeticTape>         arithmetic_tapes;
+	std::vector<uint32_t>                  flow_aliases;
+	std::vector<uint8_t>                   flow_initial_sources;
+	std::vector<ArithmeticTape>            arithmetic_tapes;
 	std::vector<ArithmeticTapeInstruction> arithmetic_tape_instructions;
-	std::vector<uint8_t>                clean_flat_slots;
-	bool                                requires_specialization_memory = false;
-	bool                                has_address_writes = false;
-	bool                                srt_plan_complete          = false;
-	bool                                resource_tracking_complete = false;
-	ShaderInfo                          info;
-	UniformFillPlan                     uniform_fill;
+	std::vector<uint8_t>                   clean_flat_slots;
+	bool                                   requires_specialization_memory = false;
+	bool                                   has_address_writes             = false;
+	bool                                   srt_plan_complete              = false;
+	bool                                   resource_tracking_complete     = false;
+	ShaderInfo                             info;
+	UniformFillPlan                        uniform_fill;
 	// Dense memo slot count. Unsealed programs still grow it lazily while evaluating;
 	// a sealed plan assigned every slot when it was extracted and never writes it again.
-	mutable uint32_t                    evaluation_value_count = 0;
-	bool                                evaluation_sealed      = false;
+	mutable uint32_t evaluation_value_count = 0;
+	bool             evaluation_sealed      = false;
 	// Unique per sealed plan (AssignTraceIdentity, when sealed, cloned or decoded); keys the
 	// per-thread SRT replay traces (KYTY_SRT_TRACE).
-	uint64_t                            trace_identity         = 0;
+	uint64_t trace_identity = 0;
 
 	void AssignTraceIdentity() {
 		static std::atomic<uint64_t> next_identity {0};
@@ -842,9 +846,9 @@ struct ResourcePlan {
 struct EvaluationScratch {
 	EvaluationScratch() = default;
 
-	EvaluationScratch(const EvaluationScratch&)            = delete;
-	EvaluationScratch& operator=(const EvaluationScratch&) = delete;
-	EvaluationScratch(EvaluationScratch&&) noexcept         = default;
+	EvaluationScratch(const EvaluationScratch&)                = delete;
+	EvaluationScratch& operator=(const EvaluationScratch&)     = delete;
+	EvaluationScratch(EvaluationScratch&&) noexcept            = default;
 	EvaluationScratch& operator=(EvaluationScratch&&) noexcept = default;
 
 	std::deque<ResourcePlan::EvaluationContext> evaluation_contexts;
@@ -864,27 +868,26 @@ struct Program: ResourcePlan {
 
 	Program(const Program&)            = delete;
 	Program& operator=(const Program&) = delete;
-	Program(Program&&) noexcept         = default;
-	Program& operator=(Program&& other) noexcept;
+	Program(Program&&) noexcept        = default;
+	Program&           operator=(Program&& other) noexcept;
 	CompiledShaderInfo TakeCompiledInfo() &&;
 
 	std::vector<std::unique_ptr<Block>> block_storage;
 	BlockList                           blocks;
-	uint32_t                      wave_size      = 64;
-	uint32_t                      scratch_dwords = 0;
-	bool                          dispatcher_fallback = false;
-	CFG::FailureKind              cfg_failure_kind    = CFG::FailureKind::None;
-	std::string                   fallback_reason;
-	std::vector<BlockInfo>        block_info;
+	uint32_t                            wave_size           = 64;
+	uint32_t                            scratch_dwords      = 0;
+	bool                                dispatcher_fallback = false;
+	CFG::FailureKind                    cfg_failure_kind    = CFG::FailureKind::None;
+	std::string                         fallback_reason;
+	std::vector<BlockInfo>              block_info;
 	// Typed memory and export instructions reference shader-local metadata by dense index.
 	// Decoder-only details (such as NSA register numbers) have already become IR operands.
-	std::vector<ExportInfo>       export_info;
-	std::vector<Value>            dynamic_reads;
-	bool                          shader_info_complete = false;
-	BindingLayout                 bindings;
-	bool                          binding_layout_complete = false;
-	WriteRangeProgram             write_ranges;
-
+	std::vector<ExportInfo> export_info;
+	std::vector<Value>      dynamic_reads;
+	bool                    shader_info_complete = false;
+	BindingLayout           bindings;
+	bool                    binding_layout_complete = false;
+	WriteRangeProgram       write_ranges;
 };
 
 std::string ProgramToString(const Program& program);
@@ -898,15 +901,15 @@ bool        HasShaderMemoryWrites(const Program& program);
 // ir/ProgramCodec.cpp (the persistent program cache's encoding; its layout checks enforce it).
 [[nodiscard]] bool CloneProgram(const Program& source, Program& target);
 
-void  ValidateProgram(const Program& program, bool require_ssa);
+void ValidateProgram(const Program& program, bool require_ssa);
 // Whether translations run ValidateProgram: debug builds, or with KYTY_IR_VALIDATE=1 in release.
 // The checks only ever stop the emulator, and they were about a fifth of a release translation
 // (first-encounter hitches, precompile time; chenxiao07 a28de66fe).
 [[nodiscard]] bool ValidationEnabled();
-void  ResolveControlFlowIdentities(Program& program);
-bool  EquivalentValue(const ResourcePlan& program, Value left, Value right);
-Value ResolveInvariantPhi(const ResourcePlan& program, Value value);
-Value ResolveActiveU32(Value value, Value active);
+void               ResolveControlFlowIdentities(Program& program);
+bool               EquivalentValue(const ResourcePlan& program, Value left, Value right);
+Value              ResolveInvariantPhi(const ResourcePlan& program, Value value);
+Value              ResolveActiveU32(Value value, Value active);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

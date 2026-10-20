@@ -36,7 +36,7 @@ SrtRuntime CleanRuntime(SrtRuntime runtime) {
 
 namespace {
 
-constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
+constexpr uint64_t AddressMask    = 0x0000ffffffffffffull;
 constexpr uint32_t MaxFlatReadRun = 16;
 
 const char* StageName(ShaderType stage) {
@@ -81,21 +81,22 @@ bool AddSignedAddress(uint64_t base, int64_t offset, uint64_t& result) {
 bool ComputeRawAddress(bool buffer, int64_t immediate, uint64_t low, uint64_t high, uint64_t offset,
                        uint64_t records, uint64_t& address, uint64_t& available) {
 	const auto base = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
-	available = UINT64_MAX;
+	available       = UINT64_MAX;
 	if (buffer) {
 		if (immediate < 0) return false;
 		const auto byte_offset = static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
-		const auto aligned = byte_offset & ~uint64_t {3};
-		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
-		const auto size = stride == 0u ? static_cast<uint64_t>(static_cast<uint32_t>(records))
-		                              : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
+		const auto aligned     = byte_offset & ~uint64_t {3};
+		const auto stride      = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		const auto size = stride == 0u
+		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
+		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
 		if (aligned > size || size - aligned < sizeof(uint32_t)) return false;
 		available = size - aligned;
-		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
+		address   = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
 		return true;
 	}
-	const auto relative = (immediate & ~int64_t {3}) +
-	                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
+	const auto relative =
+	    (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
 	return AddSignedAddress(base & ~uint64_t {3}, relative, address);
 }
 
@@ -164,9 +165,11 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 		case ValueOpcode::SelectU32:
 		case ValueOpcode::SelectF32:
 		case ValueOpcode::ULessThan32:
+		case ValueOpcode::IEqual64:
 		case ValueOpcode::IEqual32:
 		case ValueOpcode::UGreaterThan32:
 		case ValueOpcode::SGreaterThanEqual32:
+		case ValueOpcode::INotEqual64:
 		case ValueOpcode::INotEqual32:
 		case ValueOpcode::LogicalOr:
 		case ValueOpcode::LogicalAnd:
@@ -373,9 +376,8 @@ public:
 						                        (op == ValueOpcode::ReadConstBuffer &&
 						                         kind == ResourceKind::ScalarAddress);
 						if (crosswired) {
-							Fail(flags.pc,
-							     fmt::format("{} has incompatible scalar memory metadata",
-							                 ValueOpcodeName(op)));
+							Fail(flags.pc, fmt::format("{} has incompatible scalar memory metadata",
+							                           ValueOpcodeName(op)));
 						}
 					}
 				}
@@ -496,9 +498,10 @@ private:
 	}
 
 	// KYTY_SRT_VARIANT_READS: whether the read's address (its GetAddressResource or V# handle) can
-	// be computed before the dispatch, by the same rules as every other runtime value. A loop-carried
-	// pointer (a phi ResolveInvariantPhi cannot reduce) or data the GPU produces cannot: a flat slot
-	// for such a read could never be evaluated and would drop the whole dispatch.
+	// be computed before the dispatch, by the same rules as every other runtime value. A
+	// loop-carried pointer (a phi ResolveInvariantPhi cannot reduce) or data the GPU produces
+	// cannot: a flat slot for such a read could never be evaluated and would drop the whole
+	// dispatch.
 	bool EvaluableBeforeDispatch(Value handle) {
 		handle           = handle.Resolve();
 		const auto* inst = handle.TryInstruction();
@@ -513,11 +516,11 @@ private:
 		return evaluable;
 	}
 
-	Program&           m_program;
-	std::vector<Inst*> m_visiting;
-	std::vector<Inst*> m_visited;
-	std::vector<Patch> m_patches;
-	bool               m_variant_reads = false;
+	Program&                              m_program;
+	std::vector<Inst*>                    m_visiting;
+	std::vector<Inst*>                    m_visited;
+	std::vector<Patch>                    m_patches;
+	bool                                  m_variant_reads = false;
 	std::unordered_map<const Inst*, bool> m_evaluable_memo;
 };
 
@@ -527,12 +530,12 @@ void BuildSrtReadRuns(ResourcePlan& program) {
 	struct Shape {
 		const Inst* handle = nullptr;
 		ValueOpcode opcode = ValueOpcode::Void;
-		int64_t offset = 0;
-		bool clean = false;
+		int64_t     offset = 0;
+		bool        clean  = false;
 	};
 	const auto shape = [&](uint32_t index, Shape& result) {
 		const auto& read = program.srt_reads[index];
-		auto* inst = read.value.Resolve().TryInstruction();
+		auto*       inst = read.value.Resolve().TryInstruction();
 		if (inst == nullptr || !IsRawRead(program, *inst)) {
 			return false;
 		}
@@ -546,11 +549,11 @@ void BuildSrtReadRuns(ResourcePlan& program) {
 		                inst->Arg(3).Resolve() != Value(true) || memory.address_is_full)) {
 			return false;
 		}
-		const auto offset = inst->Arg(1).Resolve();
+		const auto  offset = inst->Arg(1).Resolve();
 		const auto* handle = inst->Arg(0).ResolveInstruction();
 		if (!offset.IsImmediate() || offset.GetType() != Type::U32 || handle == nullptr ||
-		    handle->GetOpcode() != (buffer ? ValueOpcode::GetBufferResource
-		                                  : ValueOpcode::GetAddressResource) ||
+		    handle->GetOpcode() !=
+		        (buffer ? ValueOpcode::GetBufferResource : ValueOpcode::GetAddressResource) ||
 		    handle->NumArgs() != (buffer ? 4u : 2u)) {
 			return false;
 		}
@@ -585,7 +588,8 @@ void BuildSrtReadRuns(ResourcePlan& program) {
 			previous = next;
 			++end;
 		}
-		for (auto i = first; i < end; ++i) program.srt_read_run_ends[i] = end;
+		for (auto i = first; i < end; ++i)
+			program.srt_read_run_ends[i] = end;
 		first = end;
 	}
 }
@@ -651,8 +655,8 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 	}();
 	if (!enabled) return;
 	using Operand = ResourcePlan::EvaluationOperand;
-	using Recipe = ResourcePlan::EvaluationRecipe;
-	using Kind = Recipe::Kind;
+	using Recipe  = ResourcePlan::EvaluationRecipe;
+	using Kind    = Recipe::Kind;
 	std::unordered_set<const Inst*> owned;
 	// Assign every retained node before resolving operands, including forward edges.
 	for (const auto& inst: program.value_storage) {
@@ -682,9 +686,10 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 		return {0, index, Operand::Kind::Node};
 	};
 	for (const auto& inst: program.value_storage) {
-		auto& recipe = program.evaluation_recipes[inst.EvaluationIndex(program.evaluation_value_count)];
+		auto& recipe =
+		    program.evaluation_recipes[inst.EvaluationIndex(program.evaluation_value_count)];
 		recipe.instruction = &inst;
-		const auto op = inst.GetOpcode();
+		const auto op      = inst.GetOpcode();
 		if (IsRuntimeSelect(op) && inst.NumArgs() == 3) {
 			recipe.selection_mask = inst.Arg(0).Resolve();
 		}
@@ -698,13 +703,13 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 		};
 		if (op == ValueOpcode::GetUserData && inst.Arg(0).IsImmediate() &&
 		    inst.Arg(0).GetType() == Type::ScalarReg) {
-			recipe.kind = Kind::UserData;
+			recipe.kind      = Kind::UserData;
 			recipe.parameter = RegIndex(inst.Arg(0).ScalarRegister());
 		} else if (op == ValueOpcode::ReadConst) {
 			const auto slot = inst.Arg(1).Resolve();
 			if (slot.IsImmediate() && slot.GetType() == Type::U32 &&
 			    slot.U32() < program.srt_reads.size()) {
-				recipe.parameter = slot.U32();
+				recipe.parameter   = slot.U32();
 				recipe.operands[0] = compile(program.srt_reads[slot.U32()].value);
 				if (recipe.operands[0].kind != Operand::Kind::Invalid) recipe.kind = Kind::FlatRead;
 			}
@@ -712,7 +717,8 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 		           op == ValueOpcode::CompositeExtractU32x2) {
 			const auto component = inst.Arg(1).Resolve();
 			if (!component.IsImmediate() || component.GetType() != Type::U32 ||
-			    component.U32() >= 2) continue;
+			    component.U32() >= 2)
+				continue;
 			recipe.parameter = component.U32();
 			if (op == ValueOpcode::CompositeExtractU64) {
 				recipe.operands[0] = compile(inst.Arg(0));
@@ -720,19 +726,22 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 			} else if (const auto* source = inst.Arg(0).Resolve().TryInstruction()) {
 				if (source->GetOpcode() == ValueOpcode::CompositeConstructU32x2) {
 					recipe.operands[0] = compile(source->Arg(recipe.parameter));
-					if (recipe.operands[0].kind != Operand::Kind::Invalid) recipe.kind = Kind::Forward;
+					if (recipe.operands[0].kind != Operand::Kind::Invalid)
+						recipe.kind = Kind::Forward;
 				} else if (source->GetOpcode() == ValueOpcode::IAddCarry32) {
 					recipe.operands[0] = compile(source->Arg(0));
 					recipe.operands[1] = compile(source->Arg(1));
 					if (recipe.operands[0].kind != Operand::Kind::Invalid &&
-					    recipe.operands[1].kind != Operand::Kind::Invalid) recipe.kind = Kind::ExtractCarry;
+					    recipe.operands[1].kind != Operand::Kind::Invalid)
+						recipe.kind = Kind::ExtractCarry;
 				}
 			}
 		} else if (IsRawRead(program, inst)) {
 			const auto* handle = inst.Arg(0).Resolve().TryInstruction();
-			const bool buffer = op == ValueOpcode::ReadConstBuffer;
+			const bool  buffer = op == ValueOpcode::ReadConstBuffer;
 			if (handle == nullptr || handle->NumArgs() != (buffer ? 4u : 2u)) continue;
-			recipe.offset = static_cast<int32_t>(program.memory_info[inst.Flags<MemoryFlags>().index].offset);
+			recipe.offset =
+			    static_cast<int32_t>(program.memory_info[inst.Flags<MemoryFlags>().index].offset);
 			recipe.operands[0] = compile(handle->Arg(0));
 			recipe.operands[1] = compile(handle->Arg(1));
 			recipe.operands[2] = compile(inst.Arg(1));
@@ -772,9 +781,10 @@ void BuildSrtEvaluationRecipes(ResourcePlan& program) {
 	program.condition_roots.resize(program.control_flow.size());
 	program.initial_active_sources.assign(program.descriptor_sources.size(), 1u);
 	for (size_t block = 0; block < program.control_flow.size(); ++block) {
-		const auto& flow = program.control_flow[block];
+		const auto& flow               = program.control_flow[block];
 		program.condition_roots[block] = compile(flow.condition);
-		for (const auto source: flow.sources) program.initial_active_sources.at(source) = 0u;
+		for (const auto source: flow.sources)
+			program.initial_active_sources.at(source) = 0u;
 	}
 }
 
@@ -784,28 +794,30 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 		return setting != nullptr && std::strcmp(setting, "1") == 0;
 	}();
 	if (!enabled || program.evaluation_recipes.empty()) return;
-	using Operand = ResourcePlan::EvaluationOperand;
-	using Recipe = ResourcePlan::EvaluationRecipe;
-	using TapeOperand = ResourcePlan::ArithmeticTapeOperand;
-	using Instruction = ResourcePlan::ArithmeticTapeInstruction;
-	constexpr uint32_t NoIndex = UINT32_MAX;
-	constexpr uint32_t MaxOperations = 64;
+	using Operand                          = ResourcePlan::EvaluationOperand;
+	using Recipe                           = ResourcePlan::EvaluationRecipe;
+	using TapeOperand                      = ResourcePlan::ArithmeticTapeOperand;
+	using Instruction                      = ResourcePlan::ArithmeticTapeInstruction;
+	constexpr uint32_t NoIndex             = UINT32_MAX;
+	constexpr uint32_t MaxOperations       = 64;
 	constexpr uint32_t MaxPlanInstructions = 16384;
-	const auto count = program.evaluation_recipes.size();
+	const auto         count               = program.evaluation_recipes.size();
 	if (count > UINT32_MAX) return;
 	std::unordered_map<const Inst*, uint32_t> indices;
-	std::vector<uint32_t> arities(count), uses(count), parent(count, NoIndex);
-	std::vector<uint8_t> roots(count), covered(count), visiting(count);
+	std::vector<uint32_t>                     arities(count), uses(count), parent(count, NoIndex);
+	std::vector<uint8_t>                      roots(count), covered(count), visiting(count);
 	for (uint32_t i = 0; i < count; ++i) {
 		const auto& recipe = program.evaluation_recipes[i];
 		if (recipe.instruction != nullptr) indices.emplace(recipe.instruction, i);
 		arities[i] = ArithmeticArity(recipe);
 		if ((recipe.kind == Recipe::Kind::Extract || recipe.kind == Recipe::Kind::ExtractCarry) &&
-		    recipe.parameter >= 2) arities[i] = 0;
+		    recipe.parameter >= 2)
+			arities[i] = 0;
 		for (uint32_t operand = 0; operand < arities[i]; ++operand) {
 			const auto& value = recipe.operands[operand];
 			if (value.kind == Operand::Kind::Invalid ||
-			    (value.kind == Operand::Kind::Node && value.index >= count)) arities[i] = 0;
+			    (value.kind == Operand::Kind::Node && value.index >= count))
+				arities[i] = 0;
 		}
 	}
 	const auto index_of = [&](Value value) {
@@ -829,7 +841,8 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 			}
 		}
 		for (const auto& [child, reference_count]: references) {
-			uses[child] = std::min(2u, uses[child] + std::max(reference_count[0], reference_count[1]));
+			uses[child] =
+			    std::min(2u, uses[child] + std::max(reference_count[0], reference_count[1]));
 			parent[child] = i;
 		}
 	}
@@ -838,18 +851,22 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 		if (index != NoIndex) roots[index] = 1;
 	};
 	for (const auto& descriptor: program.descriptor_sources) {
-		for (uint32_t i = 0; i < descriptor.dword_count; ++i) mark_root(descriptor.dwords[i]);
+		for (uint32_t i = 0; i < descriptor.dword_count; ++i)
+			mark_root(descriptor.dwords[i]);
 		if (descriptor.indirect_descriptor.has_value()) {
 			mark_root(descriptor.indirect_descriptor->selector_mask);
 			mark_root(descriptor.indirect_descriptor->key_count);
 		}
 	}
-	for (const auto& read: program.srt_reads) mark_root(read.value);
-	for (const auto& block: program.control_flow) mark_root(block.condition);
-	for (uint32_t i = 0; i < program.uniform_fill.fill.words; ++i) mark_root(program.uniform_fill.values[i]);
+	for (const auto& read: program.srt_reads)
+		mark_root(read.value);
+	for (const auto& block: program.control_flow)
+		mark_root(block.condition);
+	for (uint32_t i = 0; i < program.uniform_fill.fill.words; ++i)
+		mark_root(program.uniform_fill.values[i]);
 
 	std::vector<ResourcePlan::ArithmeticTape> tapes(count);
-	std::vector<Instruction> instructions;
+	std::vector<Instruction>                  instructions;
 	// Start at natural region roots; the second pass handles bounded region cuts.
 	for (uint32_t pass = 0; pass < 2; ++pass) {
 		for (uint32_t root = 0; root < count; ++root) {
@@ -858,9 +875,10 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 			                          arities[parent[root]] == 0;
 			if (natural_root != (pass == 0)) continue;
 			std::vector<Instruction> region;
-			std::vector<uint32_t> interior;
-			bool valid = true;
-			const auto emit = [&](auto&& self, const Operand& value, uint32_t depth) -> TapeOperand {
+			std::vector<uint32_t>    interior;
+			bool                     valid = true;
+			const auto               emit  = [&](auto&& self, const Operand& value,
+			                                     uint32_t depth) -> TapeOperand {
 				if (!valid) return {};
 				if (value.kind == Operand::Kind::Immediate) return {value.value, true};
 				if (value.kind != Operand::Kind::Node || value.index >= count) {
@@ -872,7 +890,8 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 					valid = false;
 					return {};
 				}
-				const bool inline_node = node == root ||
+				const bool inline_node =
+				    node == root ||
 				    (arities[node] != 0 && uses[node] == 1 && !roots[node] && !covered[node] &&
 				     interior.size() < MaxOperations && depth < MaxOperations);
 				Instruction instruction;
@@ -881,15 +900,23 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 				} else {
 					visiting[node] = 1;
 					interior.push_back(node);
-					const auto& recipe = program.evaluation_recipes[node];
-					instruction.instruction = recipe.instruction;
-					instruction.parameter = recipe.parameter;
+					const auto& recipe        = program.evaluation_recipes[node];
+					instruction.instruction   = recipe.instruction;
+					instruction.parameter     = recipe.parameter;
 					instruction.operand_count = static_cast<uint8_t>(arities[node]);
 					switch (recipe.kind) {
-						case Recipe::Kind::Operation: instruction.kind = Instruction::Kind::Operation; break;
-						case Recipe::Kind::Forward: instruction.kind = Instruction::Kind::Forward; break;
-						case Recipe::Kind::Extract: instruction.kind = Instruction::Kind::Extract; break;
-						case Recipe::Kind::ExtractCarry: instruction.kind = Instruction::Kind::ExtractCarry; break;
+						case Recipe::Kind::Operation:
+							instruction.kind = Instruction::Kind::Operation;
+							break;
+						case Recipe::Kind::Forward:
+							instruction.kind = Instruction::Kind::Forward;
+							break;
+						case Recipe::Kind::Extract:
+							instruction.kind = Instruction::Kind::Extract;
+							break;
+						case Recipe::Kind::ExtractCarry:
+							instruction.kind = Instruction::Kind::ExtractCarry;
+							break;
 						default: valid = false; break;
 					}
 					for (uint32_t i = 0; valid && i < arities[node]; ++i) {
@@ -904,14 +931,18 @@ void BuildSrtArithmeticTapes(ResourcePlan& program) {
 			(void)emit(emit, Operand {0, root, Operand::Kind::Node}, 0);
 			// Tiny regions retain the original evaluator. Rejected compilation has
 			// no runtime effects, and does not install a partially compiled tape.
-			if (!valid || interior.size() < 2 || region.size() > MaxPlanInstructions - instructions.size()) continue;
-			tapes[root] = {static_cast<uint32_t>(instructions.size()), static_cast<uint32_t>(region.size())};
+			if (!valid || interior.size() < 2 ||
+			    region.size() > MaxPlanInstructions - instructions.size())
+				continue;
+			tapes[root] = {static_cast<uint32_t>(instructions.size()),
+			               static_cast<uint32_t>(region.size())};
 			instructions.insert(instructions.end(), region.begin(), region.end());
-			for (const auto node: interior) covered[node] = 1;
+			for (const auto node: interior)
+				covered[node] = 1;
 		}
 	}
 	if (!instructions.empty()) {
-		program.arithmetic_tapes = std::move(tapes);
+		program.arithmetic_tapes             = std::move(tapes);
 		program.arithmetic_tape_instructions = std::move(instructions);
 	}
 }
@@ -947,7 +978,8 @@ SrtWalker::SrtWalker(const ResourcePlan& program, EvaluationScratch& scratch,
       m_count_recipes(!program.evaluation_recipes.empty() && Profiler::AggregateEnabled()) {
 	// CleanRuntime preserves these identities and replaces only the reader. Custom
 	// ordinary readers may represent another memory domain and cannot borrow.
-	m_share_clean_values = runtime.share_clean_values && clean_evaluator != nullptr &&
+	m_share_clean_values =
+	    runtime.share_clean_values && clean_evaluator != nullptr &&
 	    runtime.read_memory == nullptr && runtime.read_specialization_memory != nullptr &&
 	    clean_evaluator->m_runtime.read_memory == runtime.read_specialization_memory &&
 	    runtime.userdata == clean_evaluator->m_runtime.userdata &&
@@ -969,21 +1001,24 @@ SrtWalker::~SrtWalker() {
 		if (m_tape_executions != 0) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::SrtTapeExecutions, m_tape_executions);
 			Profiler::CountFrameEvent(Profiler::FrameEvent::SrtTapeOperations, m_tape_operations);
-			Profiler::CountFrameEvent(Profiler::FrameEvent::SrtTapeBoundaryCalls, m_tape_boundary_calls);
+			Profiler::CountFrameEvent(Profiler::FrameEvent::SrtTapeBoundaryCalls,
+			                          m_tape_boundary_calls);
 		}
 	}
 	EXIT_IF(m_scratch.evaluation_depth == 0u ||
 	        &m_scratch.evaluation_contexts[m_scratch.evaluation_depth - 1u] != &m_context);
 	--m_scratch.evaluation_depth;
 	if (m_shared_clean_hits != 0) {
-		Profiler::CountFrameEvent(Profiler::FrameEvent::SrtSharedCleanMemoHits, m_shared_clean_hits);
+		Profiler::CountFrameEvent(Profiler::FrameEvent::SrtSharedCleanMemoHits,
+		                          m_shared_clean_hits);
 	}
 }
 
 bool SrtWalker::BorrowCleanValue(uint32_t index, uint64_t& result) {
 	if (!m_share_clean_values) return false;
 	const auto& clean = m_clean_evaluator->m_context;
-	if (index >= clean.values.size() || clean.values[index].generation != clean.generation) return false;
+	if (index >= clean.values.size() || clean.values[index].generation != clean.generation)
+		return false;
 	// A completed strict result has already checked GPU ownership and contributed
 	// its exact semantic reads to the shared observer. Copy its value, not its
 	// generation. Failed/in-progress nodes and other EXEC contexts never cross over.
@@ -1057,8 +1092,8 @@ bool SrtWalker::EvaluateWideImpl(Value value, uint64_t& result) {
 			return EvaluateRecipeNode(index, result);
 		}
 	}
-	if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
-	    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
+	if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) && inst->NumArgs() == 3 &&
+	    inst->Arg(0).Resolve() == m_active_mask) {
 		if (m_trace_record != nullptr) m_trace_record->Abort("active mask");
 		return EvaluateWide(inst->Arg(1), result);
 	}
@@ -1081,7 +1116,7 @@ bool SrtWalker::EvaluateWideImpl(Value value, uint64_t& result) {
 		return true;
 	}
 	m_context.values[index].generation = m_context.generation | 1u;
-	uint64_t out = 0;
+	uint64_t out                       = 0;
 	if (m_trace_record != nullptr) m_trace_record->Open();
 	const bool evaluated = EvaluateInst(*inst, out);
 	if (m_trace_record != nullptr) m_trace_record->CloseInst(*this, *inst, index, evaluated, out);
@@ -1093,7 +1128,7 @@ bool SrtWalker::EvaluateWideImpl(Value value, uint64_t& result) {
 	}
 	memo.value      = out;
 	memo.generation = m_context.generation;
-	result = out;
+	result          = out;
 	return true;
 }
 
@@ -1118,12 +1153,12 @@ const Inst* SrtWalker::FlatReadInstruction(uint32_t slot, uint32_t& memo_index) 
 		}
 	}
 	const auto* inst = m_program.srt_reads[slot].value.ResolveInstruction();
-	memo_index = MemoIndex(*inst);
+	memo_index       = MemoIndex(*inst);
 	return inst;
 }
 
 bool SrtWalker::EvaluateOperandImpl(const ResourcePlan::EvaluationOperand& operand,
-                                    uint64_t& result) {
+                                    uint64_t&                              result) {
 	using Kind = ResourcePlan::EvaluationOperand::Kind;
 	switch (operand.kind) {
 		case Kind::Immediate:
@@ -1145,9 +1180,8 @@ bool SrtWalker::EvaluateRecipeNode(uint32_t index, uint64_t& result) {
 	// a predicate, or cache this select under a different active-mask context.
 	if (!m_active_mask.IsEmpty() && recipe.selection_mask == m_active_mask) {
 		if (m_trace_record != nullptr) m_trace_record->Abort("active mask");
-		return recipe.kind == Kind::Select
-		           ? EvaluateOperand(recipe.operands[1], result)
-		           : EvaluateWide(recipe.instruction->Arg(1), result);
+		return recipe.kind == Kind::Select ? EvaluateOperand(recipe.operands[1], result)
+		                                   : EvaluateWide(recipe.instruction->Arg(1), result);
 	}
 	if (index >= m_context.values.size()) {
 		m_context.values.resize(m_program.evaluation_value_count);
@@ -1169,8 +1203,10 @@ bool SrtWalker::EvaluateRecipeNode(uint32_t index, uint64_t& result) {
 	m_context.values[index].generation = m_context.generation | 1u;
 	if (m_trace_record != nullptr) m_trace_record->Open();
 	if (m_count_recipes) {
-		if (recipe.kind == Kind::Fallback) ++m_fallback_nodes;
-		else ++m_compiled_nodes;
+		if (recipe.kind == Kind::Fallback)
+			++m_fallback_nodes;
+		else
+			++m_compiled_nodes;
 	}
 	uint64_t out = 0;
 	// Fallback is selected before evaluating any operand. A failed recipe is a
@@ -1178,10 +1214,11 @@ bool SrtWalker::EvaluateRecipeNode(uint32_t index, uint64_t& result) {
 	// A recording sees the node's operands through the recipe (the tape computes the same value).
 	const auto* tape = m_trace_record == nullptr && index < m_program.arithmetic_tapes.size() &&
 	                           m_program.arithmetic_tapes[index].count != 0
-	                       ? &m_program.arithmetic_tapes[index] : nullptr;
-	const bool evaluated = tape != nullptr ? EvaluateArithmeticTape(*tape, out)
-	                       : recipe.kind == Kind::Fallback ? EvaluateInst(*recipe.instruction, out)
-	                                                       : EvaluateRecipe(recipe, out);
+	                       ? &m_program.arithmetic_tapes[index]
+	                       : nullptr;
+	const bool  evaluated = tape != nullptr                 ? EvaluateArithmeticTape(*tape, out)
+	                        : recipe.kind == Kind::Fallback ? EvaluateInst(*recipe.instruction, out)
+	                                                        : EvaluateRecipe(recipe, out);
 	if (m_trace_record != nullptr) {
 		if (recipe.kind == Kind::Fallback || recipe.kind == Kind::Operation) {
 			m_trace_record->CloseInst(*this, *recipe.instruction, index, evaluated, out);
@@ -1194,30 +1231,31 @@ bool SrtWalker::EvaluateRecipeNode(uint32_t index, uint64_t& result) {
 		memo.generation = 0;
 		return false;
 	}
-	memo.value = out;
+	memo.value      = out;
 	memo.generation = m_context.generation;
-	result = out;
+	result          = out;
 	return true;
 }
 
-bool SrtWalker::EvaluateArithmeticTape(const ResourcePlan::ArithmeticTape& tape,
-                                       uint64_t& result) {
-	using Kind = ResourcePlan::ArithmeticTapeInstruction::Kind;
+bool SrtWalker::EvaluateArithmeticTape(const ResourcePlan::ArithmeticTape& tape, uint64_t& result) {
+	using Kind      = ResourcePlan::ArithmeticTapeInstruction::Kind;
 	const auto base = m_context.tape_values_used;
-	const auto end = base + tape.count;
+	const auto end  = base + tape.count;
 	if (end < base || tape.count == 0 ||
-	    static_cast<size_t>(tape.first) + tape.count > m_program.arithmetic_tape_instructions.size()) return false;
+	    static_cast<size_t>(tape.first) + tape.count >
+	        m_program.arithmetic_tape_instructions.size())
+		return false;
 	if (m_context.tape_values.size() < end) m_context.tape_values.resize(end);
 	struct ScratchScope {
 		ResourcePlan::EvaluationContext& context;
-		size_t previous;
+		size_t                           previous;
 		~ScratchScope() { context.tape_values_used = previous; }
 	} scope {m_context, base};
 	m_context.tape_values_used = end;
 	if (m_count_recipes) ++m_tape_executions;
 	for (uint32_t i = 0; i < tape.count; ++i) {
 		const auto& instruction = m_program.arithmetic_tape_instructions[tape.first + i];
-		uint64_t value = 0;
+		uint64_t    value       = 0;
 		if (instruction.kind == Kind::Boundary) {
 			if (m_count_recipes) ++m_tape_boundary_calls;
 			if (!EvaluateRecipeNode(instruction.parameter, value)) return false;
@@ -1228,20 +1266,25 @@ bool SrtWalker::EvaluateArithmeticTape(const ResourcePlan::ArithmeticTape& tape,
 				const auto& operand = instruction.operands[arg];
 				// Only earlier results are legal, including under nested tape calls.
 				if (!operand.immediate && operand.value >= i) return false;
-				operands[arg] = operand.immediate ? operand.value : m_context.tape_values[base + operand.value];
+				operands[arg] =
+				    operand.immediate ? operand.value : m_context.tape_values[base + operand.value];
 			}
 			if (m_count_recipes) ++m_tape_operations;
 			switch (instruction.kind) {
 				case Kind::Operation:
 					if (!EvaluateInstWithOperands(*instruction.instruction, value,
-					        [&](size_t arg, uint64_t& out) {
-						        if (arg >= instruction.operand_count) return false;
-						        out = operands[arg];
-						        return true;
-					        })) return false;
+					                              [&](size_t arg, uint64_t& out) {
+						                              if (arg >= instruction.operand_count)
+							                              return false;
+						                              out = operands[arg];
+						                              return true;
+					                              }))
+						return false;
 					break;
 				case Kind::Forward: value = operands[0]; break;
-				case Kind::Extract: value = static_cast<uint32_t>(operands[0] >> (instruction.parameter * 32u)); break;
+				case Kind::Extract:
+					value = static_cast<uint32_t>(operands[0] >> (instruction.parameter * 32u));
+					break;
 				case Kind::ExtractCarry:
 					value = static_cast<uint64_t>(static_cast<uint32_t>(operands[0])) +
 					        static_cast<uint32_t>(operands[1]);
@@ -1258,8 +1301,7 @@ bool SrtWalker::EvaluateArithmeticTape(const ResourcePlan::ArithmeticTape& tape,
 	return true;
 }
 
-bool SrtWalker::EvaluateRecipe(const ResourcePlan::EvaluationRecipe& recipe,
-                               uint64_t& result) {
+bool SrtWalker::EvaluateRecipe(const ResourcePlan::EvaluationRecipe& recipe, uint64_t& result) {
 	using Kind = ResourcePlan::EvaluationRecipe::Kind;
 	uint64_t a = 0;
 	uint64_t b = 0;
@@ -1269,7 +1311,8 @@ bool SrtWalker::EvaluateRecipe(const ResourcePlan::EvaluationRecipe& recipe,
 			return EvaluateInst(*recipe.instruction, result, &recipe);
 		case Kind::UserData:
 			if (recipe.parameter < m_program.user_data_base ||
-			    recipe.parameter - m_program.user_data_base >= m_runtime.user_data.size()) return false;
+			    recipe.parameter - m_program.user_data_base >= m_runtime.user_data.size())
+				return false;
 			result = m_runtime.user_data[recipe.parameter - m_program.user_data_base];
 			return true;
 		case Kind::FlatRead:
@@ -1284,8 +1327,9 @@ bool SrtWalker::EvaluateRecipe(const ResourcePlan::EvaluationRecipe& recipe,
 			result = static_cast<uint32_t>(a >> (recipe.parameter * 32u));
 			return true;
 		case Kind::ExtractCarry:
-			if (!EvaluateOperand(recipe.operands[0], a) || !EvaluateOperand(recipe.operands[1], b)) return false;
-			a = static_cast<uint64_t>(static_cast<uint32_t>(a)) + static_cast<uint32_t>(b);
+			if (!EvaluateOperand(recipe.operands[0], a) || !EvaluateOperand(recipe.operands[1], b))
+				return false;
+			a      = static_cast<uint64_t>(static_cast<uint32_t>(a)) + static_cast<uint32_t>(b);
 			result = static_cast<uint32_t>(a >> (recipe.parameter * 32u));
 			return true;
 		case Kind::RawAddress:
@@ -1346,15 +1390,13 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 		}
 		const auto sum =
 		    static_cast<uint64_t>(static_cast<uint32_t>(lhs)) + static_cast<uint32_t>(rhs);
-		result =
-		    component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
+		result = component == 0u ? static_cast<uint32_t>(sum) : static_cast<uint32_t>(sum >> 32u);
 		return true;
 	}
 	return false;
 }
 
-bool SrtWalker::ResolveRawReadAddress(const Inst& inst, uint64_t& address,
-	                                  uint64_t& available) {
+bool SrtWalker::ResolveRawReadAddress(const Inst& inst, uint64_t& address, uint64_t& available) {
 	if (!m_program.evaluation_recipes.empty()) {
 		const auto index = MemoIndex(inst);
 		if (index < m_program.evaluation_recipes.size()) {
@@ -1393,18 +1435,19 @@ bool SrtWalker::ResolveRawReadAddress(const Inst& inst, uint64_t& address,
 }
 
 bool SrtWalker::ResolveRecipeReadAddress(const ResourcePlan::EvaluationRecipe& recipe,
-                                        uint64_t& address, uint64_t& available) {
+                                         uint64_t& address, uint64_t& available) {
 	uint64_t low = 0, high = 0, offset = 0;
-	if (!EvaluateOperand(recipe.operands[0], low) ||
-	    !EvaluateOperand(recipe.operands[1], high) ||
-	    !EvaluateOperand(recipe.operands[2], offset)) return false;
-	const bool buffer = recipe.kind == ResourcePlan::EvaluationRecipe::Kind::RawBuffer;
-	uint64_t records = 0;
+	if (!EvaluateOperand(recipe.operands[0], low) || !EvaluateOperand(recipe.operands[1], high) ||
+	    !EvaluateOperand(recipe.operands[2], offset))
+		return false;
+	const bool buffer  = recipe.kind == ResourcePlan::EvaluationRecipe::Kind::RawBuffer;
+	uint64_t   records = 0;
 	if (buffer) {
 		uint64_t word3 = 0;
 		// Word 3 is semantically evaluated even though the address math does not use it.
 		if (!EvaluateOperand(recipe.operands[3], records) ||
-		    !EvaluateOperand(recipe.operands[4], word3)) return false;
+		    !EvaluateOperand(recipe.operands[4], word3))
+			return false;
 	}
 	return ComputeRawAddress(buffer, recipe.offset, low, high, offset, records, address, available);
 }
@@ -1429,8 +1472,9 @@ bool SrtWalker::ReadRawWord(uint64_t address, uint64_t& result, bool allow_probe
 		// the same protected page. A failed probe leaves the original read intact.
 		// The coherence checks add work even on already-readable pages, so this
 		// path remains controlled by the optional runtime probe callback.
-		const bool probed = allow_probe && m_runtime.try_read_clean_backing != nullptr &&
-		    address != 0 && address < gpu_limit && sizeof(word) < gpu_limit - address &&
+		const bool probed =
+		    allow_probe && m_runtime.try_read_clean_backing != nullptr && address != 0 &&
+		    address < gpu_limit && sizeof(word) < gpu_limit - address &&
 		    m_runtime.try_read_clean_backing(m_runtime.userdata, address, {&word, 1});
 		if (!probed) {
 			if (!InPlaceReadable(address)) {
@@ -1489,7 +1533,7 @@ void SrtWalker::NoteUnmappedRead(uint64_t address) const {
 }
 
 bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
-	uint64_t address = 0;
+	uint64_t address   = 0;
 	uint64_t available = 0;
 	if (!ResolveRawReadAddress(inst, address, available)) {
 		ObserveSrtRead(m_runtime, address, {}, false);
@@ -1498,9 +1542,9 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	return ReadRawWord(address, result);
 }
 
-bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end,
-	                           std::vector<uint32_t>& flat, uint32_t& consumed) {
-	consumed = 0;
+bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end, std::vector<uint32_t>& flat,
+                                uint32_t& consumed) {
+	consumed          = 0;
 	const bool strict = m_runtime.read_specialization_memory != nullptr &&
 	                    m_runtime.read_memory == m_runtime.read_specialization_memory;
 	if (m_runtime.try_read_clean_backing == nullptr || !m_active_mask.IsEmpty() ||
@@ -1509,8 +1553,8 @@ bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end,
 	}
 	auto* const record = m_trace_record;
 	if (record != nullptr) record->BeginFlat();
-	uint32_t memo_index = 0;
-	const auto* inst = FlatReadInstruction(first, memo_index);
+	uint32_t    memo_index = 0;
+	const auto* inst       = FlatReadInstruction(first, memo_index);
 	if (m_context.values.size() < m_program.evaluation_value_count) {
 		m_context.values.resize(m_program.evaluation_value_count);
 	}
@@ -1528,7 +1572,7 @@ bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end,
 	// can grow memo storage or populate another flat read, so retain no Entry reference.
 	m_context.values[memo_index].generation = m_context.generation | 1u;
 	if (record != nullptr) record->Open();
-	uint64_t address = 0;
+	uint64_t address   = 0;
 	uint64_t available = 0;
 	if (!ResolveRawReadAddress(*inst, address, available)) {
 		ObserveSrtRead(m_runtime, address, {}, false);
@@ -1557,12 +1601,13 @@ bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end,
 		++words;
 		stop_data = true;
 	}
-	const auto run_words = words;
+	const auto                           run_words = words;
 	std::array<uint32_t, MaxFlatReadRun> values {};
-	constexpr uint64_t gpu_limit = uint64_t {1} << 40u;
-	const auto bytes = static_cast<uint64_t>(words) * sizeof(uint32_t);
+	constexpr uint64_t                   gpu_limit = uint64_t {1} << 40u;
+	const auto                           bytes = static_cast<uint64_t>(words) * sizeof(uint32_t);
 	// Do not turn a scalar GPU range into a union outside the predicate's GPU domain.
-	const bool probed = address != 0 && address < gpu_limit && bytes < gpu_limit - address &&
+	const bool probed =
+	    address != 0 && address < gpu_limit && bytes < gpu_limit - address &&
 	    m_runtime.try_read_clean_backing(m_runtime.userdata, address, {values.data(), words});
 	if (probed) {
 		ObserveSrtRead(m_runtime, address, {values.data(), words}, true);
@@ -1578,17 +1623,17 @@ bool SrtWalker::EvaluateFlatRun(uint32_t first, uint32_t end,
 			return false;
 		}
 		values[0] = static_cast<uint32_t>(value);
-		words = 1;
+		words     = 1;
 	}
 	if (record != nullptr) {
 		record->CloseFlat(*this, *inst, first, end, run_words, probed, stop_data, words);
 	}
 	for (uint32_t i = 0; i < words; ++i) {
-		const auto& read = m_program.srt_reads[first + i];
-		uint32_t index = 0;
+		const auto& read  = m_program.srt_reads[first + i];
+		uint32_t    index = 0;
 		(void)FlatReadInstruction(first + i, index);
 		m_context.values[index] = {values[i], m_context.generation};
-		flat[read.flat_offset] = values[i];
+		flat[read.flat_offset]  = values[i];
 	}
 	consumed = words;
 	return true;
@@ -1604,13 +1649,11 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result,
 
 template <typename ReadOperand>
 bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, ReadOperand&& arg) {
-	uint64_t a = 0;
-	uint64_t b = 0;
-	uint64_t c = 0;
+	uint64_t   a       = 0;
+	uint64_t   b       = 0;
+	uint64_t   c       = 0;
 	const auto binary  = [&]() { return arg(0, a) && arg(1, b); };
-	const auto ternary = [&]() {
-		return arg(0, a) && arg(1, b) && arg(2, c);
-	};
+	const auto ternary = [&]() { return arg(0, a) && arg(1, b) && arg(2, c); };
 	switch (inst.GetOpcode()) {
 		case ValueOpcode::GetUserData: {
 			const auto reg = RegIndex(inst.Arg(0).ScalarRegister());
@@ -1626,8 +1669,7 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 		case ValueOpcode::ReadFirstLane: {
 			const auto clean_runtime = CleanRuntime(m_runtime);
 			SrtWalker  clean_active(m_program, clean_runtime, {}, nullptr, inst.Arg(1));
-			SrtWalker  active(m_program, m_runtime, m_clean_flat_slots, &clean_active,
-			                  inst.Arg(1));
+			SrtWalker  active(m_program, m_runtime, m_clean_flat_slots, &clean_active, inst.Arg(1));
 			return active.EvaluateWide(inst.Arg(0), result);
 		}
 		case ValueOpcode::BitCastU32F32:
@@ -1638,8 +1680,8 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 			if (!binary()) {
 				return false;
 			}
-			result = static_cast<uint32_t>(a) |
-			         (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
+			result =
+			    static_cast<uint32_t>(a) | (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
 			return true;
 		case ValueOpcode::ReadConst: {
 			const auto slot = inst.Arg(1).Resolve();
@@ -1647,8 +1689,8 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 			    slot.U32() >= m_program.srt_reads.size()) {
 				return false;
 			}
-			if (slot.U32() < m_clean_flat_slots.size() &&
-			    m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
+			if (slot.U32() < m_clean_flat_slots.size() && m_clean_flat_slots[slot.U32()] != 0u &&
+			    m_clean_evaluator != nullptr) {
 				return m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value,
 				                                       result);
 			}
@@ -1809,8 +1851,8 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 			return false;
 		case ValueOpcode::ShiftRightArithmetic32:
 			if (binary()) {
-				result = static_cast<uint32_t>(
-				    std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >> (b & 31u));
+				result = static_cast<uint32_t>(std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >>
+				                               (b & 31u));
 				return true;
 			}
 			return false;
@@ -1830,7 +1872,7 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 				const auto mask = width == 32u  ? UINT32_MAX
 				                  : width == 0u ? 0u
 				                                : (uint32_t {1} << width) - 1u;
-				result = width == 0u ? 0u : (static_cast<uint32_t>(a) >> offset) & mask;
+				result          = width == 0u ? 0u : (static_cast<uint32_t>(a) >> offset) & mask;
 				return true;
 			}
 			return false;
@@ -1868,10 +1910,9 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 				result = static_cast<uint32_t>(a);
 				return true;
 			}
-			const auto mask =
-			    width == 32u ? UINT32_MAX : ((uint32_t {1} << width) - 1u) << offset;
-			result = (static_cast<uint32_t>(a) & ~mask) |
-			         ((static_cast<uint32_t>(b) << offset) & mask);
+			const auto mask = width == 32u ? UINT32_MAX : ((uint32_t {1} << width) - 1u) << offset;
+			result =
+			    (static_cast<uint32_t>(a) & ~mask) | ((static_cast<uint32_t>(b) << offset) & mask);
 			return true;
 		}
 		case ValueOpcode::SelectU32:
@@ -1883,6 +1924,11 @@ bool SrtWalker::EvaluateInstWithOperands(const Inst& inst, uint64_t& result, Rea
 			}
 			return false;
 		}
+		case ValueOpcode::IEqual64:
+		case ValueOpcode::INotEqual64:
+			if (!binary()) return false;
+			result = inst.GetOpcode() == ValueOpcode::IEqual64 ? a == b : a != b;
+			return true;
 		case ValueOpcode::IEqual32:
 			if (binary()) {
 				result = static_cast<uint32_t>(a) == static_cast<uint32_t>(b);
@@ -1952,13 +1998,14 @@ bool SrtWalker::EvaluateDescriptorImpl(uint32_t source, DescriptorValue& result)
 		return false;
 	}
 	const auto& descriptor = m_program.descriptor_sources[source];
-	result = {};
-	result.dword_count = descriptor.dword_count;
+	result                 = {};
+	result.dword_count     = descriptor.dword_count;
 	for (uint32_t index = 0; index < descriptor.dword_count; ++index) {
-		const bool ok = source < m_program.descriptor_roots.size()
-		    ? EvaluateRoot(descriptor.dwords[index], m_program.descriptor_roots[source][index],
-		                   result.dwords[index])
-		    : Evaluate(descriptor.dwords[index], result.dwords[index]);
+		const bool ok =
+		    source < m_program.descriptor_roots.size()
+		        ? EvaluateRoot(descriptor.dwords[index], m_program.descriptor_roots[source][index],
+		                       result.dwords[index])
+		        : Evaluate(descriptor.dwords[index], result.dwords[index]);
 		if (!ok) {
 			return false;
 		}
@@ -1970,7 +2017,7 @@ std::span<const uint8_t> SrtWalker::FindActiveSourcesImpl() {
 	if (m_program.control_flow.empty()) {
 		return {};
 	}
-	auto& active = m_scratch.active_sources;
+	auto&      active  = m_scratch.active_sources;
 	const bool decoded = m_program.condition_roots.size() == m_program.control_flow.size();
 	const bool compact = m_program.flow_aliases.size() == m_program.control_flow.size();
 	if (compact) {
@@ -1985,9 +2032,9 @@ std::span<const uint8_t> SrtWalker::FindActiveSourcesImpl() {
 			}
 		}
 	}
-	auto& visited = m_scratch.visited_blocks;
-	auto& pending = m_scratch.pending_blocks;
-	auto& visit_tags = m_scratch.flow_visit_tags;
+	auto&    visited     = m_scratch.visited_blocks;
+	auto&    pending     = m_scratch.pending_blocks;
+	auto&    visit_tags  = m_scratch.flow_visit_tags;
 	uint32_t visit_epoch = 0;
 	if (compact) {
 		// Tags are epoch-stamped per scratch, so tags left by other plans never match.
@@ -2006,7 +2053,7 @@ std::span<const uint8_t> SrtWalker::FindActiveSourcesImpl() {
 	pending.push_back(0u);
 	while (!pending.empty()) {
 		const auto requested = pending.back();
-		const auto index = compact ? m_program.flow_aliases.at(requested) : requested;
+		const auto index     = compact ? m_program.flow_aliases.at(requested) : requested;
 		pending.pop_back();
 		if (compact) {
 			if (visit_tags.at(index) == visit_epoch) continue;
@@ -2037,10 +2084,11 @@ bool SrtWalker::RefreshFlatBufferImpl(std::vector<uint32_t>& flat) {
 	}
 	flat.resize(m_program.srt_reads.size());
 	for (uint32_t index = 0; index < m_program.srt_reads.size();) {
-		const auto& read = m_program.srt_reads[index];
-		const bool clean = read.flat_offset < m_clean_flat_slots.size() &&
-		                   m_clean_flat_slots[read.flat_offset] != 0u;
-		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr)) {
+		const auto& read  = m_program.srt_reads[index];
+		const bool  clean = read.flat_offset < m_clean_flat_slots.size() &&
+		                    m_clean_flat_slots[read.flat_offset] != 0u;
+		if (clean &&
+		    (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr)) {
 			return false;
 		}
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
@@ -2066,8 +2114,9 @@ bool SrtWalker::RefreshFlatBufferImpl(std::vector<uint32_t>& flat) {
 			}
 		}
 		const bool ok = index < m_program.flat_read_roots.size()
-		    ? evaluator.EvaluateRoot(read.value, m_program.flat_read_roots[index], flat[read.flat_offset])
-		    : evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		                    ? evaluator.EvaluateRoot(read.value, m_program.flat_read_roots[index],
+		                                             flat[read.flat_offset])
+		                    : evaluator.Evaluate(read.value, flat[read.flat_offset]);
 		if (!ok) {
 			return false;
 		}
@@ -2126,14 +2175,13 @@ void BuildSrtPlan(Program& program, bool variant_reads) {
 	program.srt_plan_complete = true;
 }
 
-
 // ---------------------------------------------------------------------------------------------
 // KYTY_SRT_TRACE: replay traces (SrtWalker.h).
 
 struct SrtTraceOp {
 	enum Kind : uint8_t {
-		Pure,            // EvaluateInstWithOperands of a pure instruction over the operands
-		UserData,        // user data register `imm`
+		Pure,     // EvaluateInstWithOperands of a pure instruction over the operands
+		UserData, // user data register `imm`
 		ShaderBase,
 		Pass,            // the operand (phi, bit casts, ReadConst, flat read / forward recipes)
 		Extract,         // dword `param` of the operand
@@ -2158,12 +2206,12 @@ struct SrtTraceOp {
 struct SrtTraceCall {
 	uint8_t     kind   = 0;
 	uint8_t     walker = 0;
-	Value       value;           // Wide: the requested value as given
-	const void* id     = nullptr; // Operand: the requested operand
-	uint32_t    a      = 0;       // Descriptor: the source
-	uint32_t    end    = 0;       // entries up to here answer it
-	int32_t     result = 0;       // Wide / Operand
-	uint32_t    results_first = 0; // coarse requests: their values in SrtTrace::results
+	Value       value;                   // Wide: the requested value as given
+	const void* id            = nullptr; // Operand: the requested operand
+	uint32_t    a             = 0;       // Descriptor: the source
+	uint32_t    end           = 0;       // entries up to here answer it
+	int32_t     result        = 0;       // Wide / Operand
+	uint32_t    results_first = 0;       // coarse requests: their values in SrtTrace::results
 	uint32_t    results_count = 0;
 	uint32_t    active_first  = 0; // Active: the active sources in SrtTrace::actives
 	uint32_t    active_count  = 0;
@@ -2242,20 +2290,20 @@ constexpr size_t   TraceVariants  = 8;
 // Refreshes in a row whose first request matched no variant before a plan backs off (its cases
 // do not repeat: recording every refresh would cost more than walking).
 constexpr uint32_t TraceMaxNewCases = 16;
-constexpr uint32_t TraceMaxMisses = 4;
-constexpr uint32_t TraceBackoff   = 256;
-constexpr size_t   TraceMaxOps    = 16384;
-constexpr uint8_t  FlagBuffer     = 1;
+constexpr uint32_t TraceMaxMisses   = 4;
+constexpr uint32_t TraceBackoff     = 256;
+constexpr size_t   TraceMaxOps      = 16384;
+constexpr uint8_t  FlagBuffer       = 1;
 
 struct TraceSlot {
-	const ResourcePlan*       plan     = nullptr;
-	uint64_t                  identity = 0;
+	const ResourcePlan*                                  plan     = nullptr;
+	uint64_t                                             identity = 0;
 	std::array<std::unique_ptr<SrtTrace>, TraceVariants> traces;
-	uint32_t                  uses    = 0;
-	uint32_t                  misses  = 0;
-	uint32_t                  backoff = 0;
-	bool                      record_next = false; // a refresh matched no variant
-	uint32_t                  new_cases   = 0;     // such refreshes in a row
+	uint32_t                                             uses    = 0;
+	uint32_t                                             misses  = 0;
+	uint32_t                                             backoff = 0;
+	bool     record_next = false; // a refresh matched no variant
+	uint32_t new_cases   = 0;     // such refreshes in a row
 };
 
 // Per thread: a worker sees several hundred plans (vertex, pixel and compute stages of every
@@ -2269,11 +2317,11 @@ struct TraceEvent {
 
 struct TraceThread {
 	std::array<TraceSlot, size_t {1} << TraceSlotBits> slots;
-	std::vector<int32_t>                              memo_refs[2];
-	std::vector<TraceEvent>                           coarse;
-	std::vector<uint64_t>                             values;
-	std::array<uint32_t, MaxFlatReadRun>              stash {};
-	std::unique_ptr<SrtTrace>                         spare;
+	std::vector<int32_t>                               memo_refs[2];
+	std::vector<TraceEvent>                            coarse;
+	std::vector<uint64_t>                              values;
+	std::array<uint32_t, MaxFlatReadRun>               stash {};
+	std::unique_ptr<SrtTrace>                          spare;
 };
 
 TraceThread& ThreadTraces() {
@@ -2335,16 +2383,16 @@ bool TraceStatsEnabled() {
 }
 
 struct TraceStats {
-	std::atomic<uint64_t> refreshes {0};
-	std::atomic<uint64_t> served {0};
-	std::atomic<uint64_t> partial {0};
-	std::atomic<uint64_t> recorded {0};
-	std::atomic<uint64_t> record_failed {0};
-	std::atomic<uint64_t> abandoned {0};
-	std::atomic<uint64_t> backoff {0};
-	std::atomic<uint64_t> verified {0};
-	std::atomic<uint64_t> differences {0};
-	std::mutex            mutex;
+	std::atomic<uint64_t>                     refreshes {0};
+	std::atomic<uint64_t>                     served {0};
+	std::atomic<uint64_t>                     partial {0};
+	std::atomic<uint64_t>                     recorded {0};
+	std::atomic<uint64_t>                     record_failed {0};
+	std::atomic<uint64_t>                     abandoned {0};
+	std::atomic<uint64_t>                     backoff {0};
+	std::atomic<uint64_t>                     verified {0};
+	std::atomic<uint64_t>                     differences {0};
+	std::mutex                                mutex;
 	std::unordered_map<std::string, uint64_t> reasons;
 };
 
@@ -2370,19 +2418,19 @@ void PrintTraceStats() {
 	}
 	const auto refreshes = stats.refreshes.load(std::memory_order_relaxed);
 	const auto served    = stats.served.load(std::memory_order_relaxed);
-	std::printf("SrtTrace: refreshes %llu served %llu (%.1f%%) partial %llu recorded %llu "
-	            "record-failed %llu abandoned %llu backoff %llu verified %llu differences %llu |%s\n",
-	            static_cast<unsigned long long>(refreshes), static_cast<unsigned long long>(served),
-	            refreshes != 0 ? 100.0 * static_cast<double>(served) / static_cast<double>(refreshes)
-	                           : 0.0,
-	            static_cast<unsigned long long>(stats.partial.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.recorded.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.record_failed.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.abandoned.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.backoff.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.verified.load(std::memory_order_relaxed)),
-	            static_cast<unsigned long long>(stats.differences.load(std::memory_order_relaxed)),
-	            reasons.c_str());
+	std::printf(
+	    "SrtTrace: refreshes %llu served %llu (%.1f%%) partial %llu recorded %llu "
+	    "record-failed %llu abandoned %llu backoff %llu verified %llu differences %llu |%s\n",
+	    static_cast<unsigned long long>(refreshes), static_cast<unsigned long long>(served),
+	    refreshes != 0 ? 100.0 * static_cast<double>(served) / static_cast<double>(refreshes) : 0.0,
+	    static_cast<unsigned long long>(stats.partial.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.recorded.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.record_failed.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.abandoned.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.backoff.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.verified.load(std::memory_order_relaxed)),
+	    static_cast<unsigned long long>(stats.differences.load(std::memory_order_relaxed)),
+	    reasons.c_str());
 	std::fflush(stdout);
 }
 
@@ -2493,7 +2541,7 @@ SrtTraceSession::SrtTraceSession(const ResourcePlan& program, SrtWalker& clean, 
 	}
 	auto&      traces = ThreadTraces();
 	const auto key    = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&program));
-	auto&      slot   = traces.slots[((key >> 4u) * 0x9E3779B97F4A7C15ull) >> (64u - TraceSlotBits)];
+	auto&      slot = traces.slots[((key >> 4u) * 0x9E3779B97F4A7C15ull) >> (64u - TraceSlotBits)];
 	if (slot.plan != &program || slot.identity != program.trace_identity) {
 		if (stats && slot.plan != nullptr) {
 			CountReason("slot", "taken from another plan");
@@ -2531,8 +2579,8 @@ SrtTraceSession::SrtTraceSession(const ResourcePlan& program, SrtWalker& clean, 
 		return;
 	}
 	slot.record_next = false;
-	m_state     = State::Record;
-	m_recording = traces.spare != nullptr ? traces.spare.release() : new SrtTrace;
+	m_state          = State::Record;
+	m_recording      = traces.spare != nullptr ? traces.spare.release() : new SrtTrace;
 	m_recording->Clear();
 	m_recording->SetShape(runtime);
 	Frames().clear();
@@ -2643,7 +2691,7 @@ void SrtTraceSession::Abandon(const char* reason) {
 		std::rotate(traces.begin() + m_variant, traces.begin() + m_variant + 1, traces.end());
 	}
 	const bool new_case = m_cursor == 0;
-	m_trace = nullptr;
+	m_trace             = nullptr;
 	// Record the case this refresh is: a new variant when no variant matched its start (backing
 	// off when such cases keep coming), a replacement when a variant broke (backing off when
 	// that keeps happening).
@@ -2720,8 +2768,8 @@ bool SrtTraceSession::Operand(SrtWalker& walker, const ResourcePlan::EvaluationO
 	if (m_state == State::Record) {
 		if (!m_coarse && Frames().empty()) {
 			// An immediate or invalid operand at the top is no request (serving answers it as is).
-			m_pending = node ? CallId {CallKind::Operand, walker.m_trace_id, {}, &operand, 0}
-			                 : CallId {};
+			m_pending =
+			    node ? CallId {CallKind::Operand, walker.m_trace_id, {}, &operand, 0} : CallId {};
 		}
 		return walker.EvaluateOperandImpl(operand, result);
 	}
@@ -2803,10 +2851,10 @@ std::span<const uint8_t> SrtTraceSession::Active(SrtWalker& walker) {
 		const auto active = walker.FindActiveSourcesImpl();
 		const auto count  = static_cast<uint32_t>(ThreadTraces().coarse.size());
 		if (EndCoarse(count)) {
-			auto& trace              = *m_recording;
-			auto& call               = trace.calls.back();
-			call.active_first        = static_cast<uint32_t>(trace.actives.size());
-			call.active_count        = static_cast<uint32_t>(active.size());
+			auto& trace       = *m_recording;
+			auto& call        = trace.calls.back();
+			call.active_first = static_cast<uint32_t>(trace.actives.size());
+			call.active_count = static_cast<uint32_t>(active.size());
 			trace.actives.insert(trace.actives.end(), active.begin(), active.end());
 		}
 		return active;
@@ -2947,10 +2995,10 @@ void SrtTraceSession::CloseInst(const SrtWalker& walker, const Inst& inst, uint3
 		return;
 	}
 	SrtTraceOp op;
-	op.walker      = walker.m_trace_id;
-	op.count       = static_cast<uint8_t>(frame.count);
-	op.inst        = &inst;
-	const auto opc = inst.GetOpcode();
+	op.walker           = walker.m_trace_id;
+	op.count            = static_cast<uint8_t>(frame.count);
+	op.inst             = &inst;
+	const auto opc      = inst.GetOpcode();
 	int        expected = -1;
 	if (IsTracePure(opc)) {
 		op.kind  = SrtTraceOp::Pure;
@@ -2987,7 +3035,8 @@ void SrtTraceSession::CloseInst(const SrtWalker& walker, const Inst& inst, uint3
 					break;
 				}
 				const auto* source = inst.Arg(0).ResolveInstruction();
-				if (source != nullptr && source->GetOpcode() == ValueOpcode::CompositeConstructU32x2) {
+				if (source != nullptr &&
+				    source->GetOpcode() == ValueOpcode::CompositeConstructU32x2) {
 					op.kind  = SrtTraceOp::Pass;
 					expected = 1;
 				} else if (source != nullptr && source->GetOpcode() == ValueOpcode::IAddCarry32) {
@@ -3045,7 +3094,7 @@ void SrtTraceSession::CloseInst(const SrtWalker& walker, const Inst& inst, uint3
 	Push({ref, value});
 }
 
-void SrtTraceSession::CloseRecipe(const SrtWalker& walker,
+void SrtTraceSession::CloseRecipe(const SrtWalker&                      walker,
                                   const ResourcePlan::EvaluationRecipe& recipe, uint32_t index,
                                   bool ok, uint64_t value) {
 	using Kind = ResourcePlan::EvaluationRecipe::Kind;
@@ -3177,9 +3226,9 @@ void SrtTraceSession::CloseFlat(const SrtWalker& walker, const Inst& inst, uint3
 	head.flags  = buffer ? FlagBuffer : 0u;
 	(void)probed;
 	(void)stop_data;
-	head.imm    = immediate;
-	head.first  = first;
-	head.end    = end;
+	head.imm   = immediate;
+	head.first = first;
+	head.end   = end;
 	for (uint32_t i = 0; i < frame.count; i++) {
 		head.args[i] = frame.events[i].ref;
 	}
@@ -3221,26 +3270,29 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 		bool     ok     = true;
 		switch (op.kind) {
 			case SrtTraceOp::Pure:
-				ok = walker.EvaluateInstWithOperands(*op.inst, value, [&](size_t arg, uint64_t& out) {
-					if (arg >= op.count) return false;
-					out = v[arg];
-					return true;
-				});
+				ok = walker.EvaluateInstWithOperands(*op.inst, value,
+				                                     [&](size_t arg, uint64_t& out) {
+					                                     if (arg >= op.count) return false;
+					                                     out = v[arg];
+					                                     return true;
+				                                     });
 				break;
 			case SrtTraceOp::UserData: {
 				const auto& user = walker.m_runtime.user_data;
 				const auto  base = static_cast<int64_t>(m_program.user_data_base);
-				ok = op.imm >= base && static_cast<uint64_t>(op.imm - base) < user.size();
+				ok    = op.imm >= base && static_cast<uint64_t>(op.imm - base) < user.size();
 				value = ok ? user[static_cast<size_t>(op.imm - base)] : 0u;
 				break;
 			}
 			case SrtTraceOp::ShaderBase: value = walker.m_runtime.shader_base; break;
 			case SrtTraceOp::Pass: value = v[0]; break;
-			case SrtTraceOp::Extract: value = static_cast<uint32_t>(v[0] >> (op.param * 32u)); break;
+			case SrtTraceOp::Extract:
+				value = static_cast<uint32_t>(v[0] >> (op.param * 32u));
+				break;
 			case SrtTraceOp::AddCarryExtract: {
-				const auto sum =
-				    static_cast<uint64_t>(static_cast<uint32_t>(v[0])) + static_cast<uint32_t>(v[1]);
-				value = static_cast<uint32_t>(sum >> (op.param * 32u));
+				const auto sum = static_cast<uint64_t>(static_cast<uint32_t>(v[0])) +
+				                 static_cast<uint32_t>(v[1]);
+				value          = static_cast<uint32_t>(sum >> (op.param * 32u));
 				break;
 			}
 			case SrtTraceOp::Select:
@@ -3254,17 +3306,17 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 				const bool buffer    = (op.flags & FlagBuffer) != 0u;
 				uint64_t   address   = 0;
 				uint64_t   available = 0;
-				ok = ComputeRawAddress(buffer, op.imm, v[0], v[1], v[2], buffer ? v[3] : 0u, address,
-				                       available) &&
+				ok = ComputeRawAddress(buffer, op.imm, v[0], v[1], v[2], buffer ? v[3] : 0u,
+				                       address, available) &&
 				     walker.ReadRawWord(address, value);
 				break;
 			}
 			case SrtTraceOp::FlatRun: {
 				// The run's words: the values EvaluateFlatRun gave these slots, however it batched
 				// them (the walk's batches depend on where pages end; the words do not). Each word
-				// must lie inside the buffer, as its own evaluation requires. Words are read with the
-				// clean probe, page by page, or one by one where a probe cannot serve them (as the
-				// walk does); any failed read leaves the slots to the walk.
+				// must lie inside the buffer, as its own evaluation requires. Words are read with
+				// the clean probe, page by page, or one by one where a probe cannot serve them (as
+				// the walk does); any failed read leaves the slots to the walk.
 				const bool buffer    = (op.flags & FlagBuffer) != 0u;
 				const auto words     = static_cast<uint32_t>(op.param);
 				uint64_t   address   = 0;
@@ -3279,13 +3331,15 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 				constexpr uint64_t gpu_limit = uint64_t {1} << 40u;
 				const auto&        runtime   = walker.m_runtime;
 				for (uint32_t done = 0; done < words;) {
-					const auto at    = address + static_cast<uint64_t>(done) * sizeof(uint32_t);
-					const auto room  = static_cast<uint32_t>((4096u - (at & 4095u)) / sizeof(uint32_t));
+					const auto at = address + static_cast<uint64_t>(done) * sizeof(uint32_t);
+					const auto room =
+					    static_cast<uint32_t>((4096u - (at & 4095u)) / sizeof(uint32_t));
 					const auto chunk = std::min(words - done, room);
 					const auto bytes = static_cast<uint64_t>(chunk) * sizeof(uint32_t);
 					if (runtime.try_read_clean_backing != nullptr && at != 0 && at < gpu_limit &&
 					    bytes < gpu_limit - at &&
-					    runtime.try_read_clean_backing(runtime.userdata, at, {stash + done, chunk})) {
+					    runtime.try_read_clean_backing(runtime.userdata, at,
+					                                   {stash + done, chunk})) {
 						ObserveSrtRead(runtime, at, {stash + done, chunk}, true);
 						done += chunk;
 						continue;
@@ -3294,7 +3348,8 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 					// walk reads such words one by one, as here.
 					for (uint32_t k = 0; k < chunk; k++) {
 						uint64_t word = 0;
-						if (!walker.ReadRawWord(at + static_cast<uint64_t>(k) * sizeof(uint32_t), word)) {
+						if (!walker.ReadRawWord(at + static_cast<uint64_t>(k) * sizeof(uint32_t),
+						                        word)) {
 							m_fail = "guard: flat run read";
 							return false;
 						}
@@ -3308,7 +3363,8 @@ bool SrtTraceSession::RunOps(uint32_t end) {
 			case SrtTraceOp::FlatMember: value = stash[op.param]; break;
 		}
 		if (!ok) {
-			m_fail = op.kind == SrtTraceOp::RawRead ? "guard: read failed" : "guard: evaluation failed";
+			m_fail =
+			    op.kind == SrtTraceOp::RawRead ? "guard: read failed" : "guard: evaluation failed";
 			return false;
 		}
 		values[i] = value;

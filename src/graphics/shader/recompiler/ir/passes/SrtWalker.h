@@ -42,7 +42,7 @@ struct SrtRuntime {
 	SrtMappedRange is_guest_mapped = nullptr;
 	// Dispatch workgroup counts (compute). No descriptor this planner tracks reads them yet.
 	std::span<const uint32_t> workgroup_counts;
-	// Binding truth is queried afresh; optional override also supports independent materializers.
+	// Any committed byte of the binding probe range; queried afresh for each materialization.
 	bool (*buffer_base_mapped)(void* userdata, uint64_t address, uint64_t size) = nullptr;
 };
 

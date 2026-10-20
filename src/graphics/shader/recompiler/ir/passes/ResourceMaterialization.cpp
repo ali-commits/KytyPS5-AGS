@@ -51,22 +51,15 @@ bool SpecializationFail(std::string_view message) {
 	return false;
 }
 
-// KYTY_SPEC_UNMAPPED_NULL (default on; =0 off): a buffer V# the renderer would bind as empty
-// (base 0, no records, or a base outside every guest mapping: FindBuffers' ClampRangeSizeQuiet)
-// specializes as the null descriptor, as a V# with a non-zero type does. Its stride, swizzle,
-// ADD_TID and format bits cannot change what the shader reads (nothing) or writes (dropped), so
-// the garbage words a game leaves in a descriptor slot it only uses on a branch it does not take
-// no longer compile a new permutation per value (Astro Bot's [Performance] patches: a vertex
-// shader's atomic V# gave ~80 permutations in minutes). The probe answers exactly the binding's
-// question (is the base mapped), so a V# with a mapped base is never nulled. The decision is made
-// per materialization from the current words: the same slot holding a real V# later specializes
-// normally (a different key, so the null permutation is not reused for it).
+// KYTY_SPEC_UNMAPPED_NULL: retain null normalization for wholly unmapped descriptors.
+// Finite descriptors probe their effective payload, which may include sparse holes; oversized
+// and sentinel ranges still require a committed base because FindBuffers clamps their prefix.
 std::atomic<SrtMappedRange> g_unmapped_buffer_probe {nullptr};
 std::atomic<uint64_t>       g_unmapped_buffer_nulls {0};
 
 // Whether the buffer descriptor must specialize (and bind) as null.
-bool NullBufferDescriptor(const ShaderBufferResource& descriptor, const SrtRuntime& runtime,
-                          bool count = true) {
+bool NullBufferDescriptor(const ShaderBufferResource& descriptor, const BufferResource& buffer,
+                          const SrtRuntime& runtime, bool count = true) {
 	if (descriptor.Type() != 0) {
 		return true;
 	}
@@ -75,12 +68,14 @@ bool NullBufferDescriptor(const ShaderBufferResource& descriptor, const SrtRunti
 		return false;
 	}
 	const uint64_t base = descriptor.Base48();
-	const uint64_t size = descriptor.GetSize();
+	const uint64_t size = descriptor.GetBindingSize(buffer.scalar, buffer.max_byte_extent);
+	const uint64_t probe_size =
+	    size >= (uint64_t {1} << 30u) || descriptor.NumRecords() == UINT32_MAX ? 1u : size;
 	// Query every materialization: a previously mapped page can be unmapped or remapped.
 	if (base != 0u && size != 0u &&
 	    (runtime.buffer_base_mapped != nullptr
-	         ? runtime.buffer_base_mapped(runtime.userdata, base, size)
-	         : probe(base, size))) {
+	         ? runtime.buffer_base_mapped(runtime.userdata, base, probe_size)
+	         : probe(base, probe_size))) {
 		return false;
 	}
 	if ((descriptor.fields[0] | descriptor.fields[1] | descriptor.fields[2] |
@@ -288,8 +283,9 @@ bool WrittenBuffersDisjoint(const ResourcePlan& program, const ResourceSnapshot&
 		if (!program.info.buffers[i].written) continue;
 		ShaderBufferResource buffer;
 		if (!DecodeBufferDescriptor(snapshot.buffers[i], buffer)) return false;
-		const auto base = buffer.Base48();
-		const auto size = buffer.GetSize();
+		const auto  base     = buffer.Base48();
+		const auto& metadata = program.info.buffers[i];
+		const auto  size     = buffer.GetBindingSize(metadata.scalar, metadata.max_byte_extent);
 		if (size == 0u) continue;
 		if (size - 1u > AddressMask - base) return false;
 		for (const auto [address, bytes]: reads) {
@@ -639,7 +635,7 @@ static bool SpecializeBuffer(const BufferResource& buffer, DescriptorValue& desc
 		return SpecializationFail(fmt::format("buffer descriptor {} has invalid width", i));
 	}
 	const auto original_descriptor = descriptor;
-	const bool empty_binding       = NullBufferDescriptor(descriptor, runtime);
+	const bool empty_binding       = NullBufferDescriptor(descriptor, buffer, runtime);
 	if (empty_binding) {
 		descriptor_value.dwords.fill(0);
 		descriptor = {};
@@ -1382,7 +1378,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 					// SpecializeBuffer nulled the snapshot's copy the same way.
 					ShaderBufferResource decoded;
 					if (DecodeBufferDescriptor(strict, decoded) &&
-					    NullBufferDescriptor(decoded, runtime, false)) {
+					    NullBufferDescriptor(decoded, buffer, runtime, false)) {
 						strict.dwords.fill(0);
 					}
 				}
@@ -1463,18 +1459,18 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 				return false;
 			}
 			if (program.info.samplers[i].gather_lod) {
-				const auto control = snapshot.samplers[i].dwords[2];
-				const auto filter  = (control >> 26u) & 3u;
-				// MipNone always selects the base level and Point the nearest mip. Linear mip
-				// selection and nonzero LOD biases also use the nearest mip: upstream rejects the
-				// stage here, which drops draws that earlier builds rendered from mip 0.
-				if (filter > 1u || (filter == 1u && (control & 0xfffffu) != 0u)) {
+				const auto control  = snapshot.samplers[i].dwords[2];
+				const auto filter   = (control >> 26u) & 3u;
+				const auto perf_mip = (snapshot.samplers[i].dwords[1] >> 24u) & 15u;
+				// Unbiased linear gathers use the primary mip. Retain this fork's fallback
+				// for biased/snapped modes instead of dropping the entire draw.
+				if (filter > 2u || (filter != 0u && (control & 0xfffffu) != 0u) ||
+				    (filter == 2u && perf_mip != 0u)) {
 					static std::atomic_flag warned = ATOMIC_FLAG_INIT;
 					if (!warned.test_and_set(std::memory_order_relaxed)) {
-						std::fputs(
-						    "Warning: explicit-LOD gather with linear mip filtering or a LOD bias "
-						    "reads the nearest mip.\n",
-						    stderr);
+						std::fputs("Warning: explicit-LOD gather uses approximate mip selection "
+						           "for biased or snapped samplers.\n",
+						           stderr);
 					}
 				}
 			}

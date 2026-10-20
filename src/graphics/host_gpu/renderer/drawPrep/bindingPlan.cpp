@@ -1,7 +1,5 @@
 #include "graphics/host_gpu/renderer/drawPrep/bindingPlan.h"
 
-#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
-
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/onceValue.h"
@@ -14,6 +12,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/lodStats.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
@@ -71,16 +70,19 @@ bool PlanRanges(const CompiledShaderInfo& program, const ResourceSnapshot& resou
 		if (!TryDecode(resources.buffers[i], descriptor)) {
 			return false;
 		}
-		auto& range              = stage.ranges[i];
-		const auto address        = descriptor.Base48();
-		const auto requested_size = descriptor.GetSize();
-		range.out_of_bounds_mode  = BufferOutOfBoundsCombination(descriptor);
+		auto&       range    = stage.ranges[i];
+		const auto  address  = descriptor.Base48();
+		const auto& metadata = program.info.buffers[i];
+		const auto  requested_size =
+		    descriptor.GetBindingSize(metadata.scalar, metadata.max_byte_extent);
+		range.out_of_bounds_mode = BufferOutOfBoundsCombination(descriptor);
 		if (address == 0 || requested_size == 0) {
 			range.address = 0;
 			range.size    = 0;
 			continue;
 		}
-		if (LibKernel::Memory::ClampRangeSizeQuiet(address, requested_size) != requested_size) {
+		if ((requested_size >= (uint64_t {1} << 30u) || descriptor.NumRecords() == UINT32_MAX) &&
+		    LibKernel::Memory::ClampRangeSizeQuiet(address, requested_size) != requested_size) {
 			return false;
 		}
 		range.address = address;
@@ -95,7 +97,8 @@ bool PlanShaderData(const CompiledShaderInfo& program, const ResourceSnapshot& r
 	const auto& layout = program.bindings;
 	const auto  dwords = layout.ShaderDataDwords();
 	for (const auto reg: layout.user_data_registers) {
-		if (reg < program.user_data_base || reg - program.user_data_base >= resources.user_data.size()) {
+		if (reg < program.user_data_base ||
+		    reg - program.user_data_base >= resources.user_data.size()) {
 			return false;
 		}
 	}
@@ -126,12 +129,13 @@ vk::Sampler FindPlanSampler(SamplerCache& cache, const ShaderSamplerResource& de
                             bool integer_border) {
 	static_assert(sizeof(descriptor.fields) == sizeof(RememberedSampler::fields));
 	const auto slot  = (descriptor.fields[0] * 0x9e3779b1u ^ descriptor.fields[1] * 0x85ebca6bu ^
-                       descriptor.fields[2] * 0xc2b2ae35u ^ descriptor.fields[3] ^
-                       (integer_border ? 0x27d4eb2fu : 0u)) >>
-	                  24u;
+	                    descriptor.fields[2] * 0xc2b2ae35u ^ descriptor.fields[3] ^
+	                    (integer_border ? 0x27d4eb2fu : 0u)) >>
+	                   24u;
 	auto&      entry = t_samplers[slot % t_samplers.size()];
 	const auto owner = cache.InstanceId();
-	if (entry.owner == owner && entry.sampler != nullptr && entry.integer_border == integer_border &&
+	if (entry.owner == owner && entry.sampler != nullptr &&
+	    entry.integer_border == integer_border &&
 	    std::memcmp(entry.fields.data(), descriptor.fields, sizeof(descriptor.fields)) == 0) {
 		return entry.sampler;
 	}
@@ -162,9 +166,9 @@ bool PlanSamplers(SamplerCache& cache, const CompiledShaderInfo& program,
 		if (value.dword_count < sizeof(ShaderSamplerResource) / sizeof(uint32_t)) {
 			return false;
 		}
-		stage.samplers[i] =
-		    FindPlanSampler(cache, NativeSamplerDescriptor(program, static_cast<uint32_t>(i), value),
-		                    program.info.samplers[i].integer_border);
+		stage.samplers[i] = FindPlanSampler(
+		    cache, NativeSamplerDescriptor(program, static_cast<uint32_t>(i), value),
+		    program.info.samplers[i].integer_border);
 		absent += stage.samplers[i] == nullptr ? 1u : 0u;
 	}
 	if (absent != 0) {
@@ -191,7 +195,7 @@ bool PlanTextureHashes(const CompiledShaderInfo& program, const ResourceSnapshot
 		if (!TryDecode(resources.images[i], descriptor)) {
 			return false;
 		}
-		const auto key          = TextureBindingMemo::MakeKey(program.info.images[i], descriptor.fields);
+		const auto key = TextureBindingMemo::MakeKey(program.info.images[i], descriptor.fields);
 		stage.texture_hashes[i] = TextureBindingMemo::Hash(key);
 		uint64_t tag            = 0;
 		if (memo != nullptr && memo->FindHint(key, stage.texture_hashes[i], tag)) {
@@ -226,7 +230,7 @@ bool PlanBufferWrites(const CompiledShaderInfo& program, const ResourceSnapshot&
 // assuming every target's image is found (the commit compares the resolved ones).
 bool PredictTargets(const GraphicContext& graphics, const HW::Context& ctx,
                     const PreparedDraw& prepared, PipelineCache::PipelineTargets& targets) {
-	targets = {};
+	targets           = {};
 	uint32_t mrt_mask = 0;
 	if (prepared.pixel_active) {
 		for (const auto& output: prepared.pixel_info.stage.program->info.outputs) {
@@ -234,7 +238,8 @@ bool PredictTargets(const GraphicContext& graphics, const HW::Context& ctx,
 				if (output.location >= 32u) {
 					return false;
 				}
-				mrt_mask |= 1u << output.location; // the colour target (KYTY_CB_SHADER_MASK_EXPORTS)
+				mrt_mask |=
+				    1u << output.location; // the colour target (KYTY_CB_SHADER_MASK_EXPORTS)
 			}
 		}
 	}
@@ -285,8 +290,8 @@ uint32_t IndexElementSize(uint32_t index_type_and_size) {
 }
 
 void PlanPipeline(const BindingPlanContext& context, const RegisterSnapshot& registers,
-                  const DrawIndexArgs* index_args, const PreparedDraw& prepared,
-	              BindingPlan& plan, bool prefetch_only = false) {
+                  const DrawIndexArgs* index_args, const PreparedDraw& prepared, BindingPlan& plan,
+                  bool prefetch_only = false) {
 	using E = Profiler::FrameEvent;
 	// Rare (a pipeline not created yet, the map lock busy): shared totals are fine here.
 	const auto abstain = [prefetch_only](E event) {
@@ -296,8 +301,8 @@ void PlanPipeline(const BindingPlanContext& context, const RegisterSnapshot& reg
 		                                                : g_binding_totals.pipeline_abstains)
 		    .fetch_add(1, std::memory_order_relaxed);
 	};
-	const auto& ctx   = registers.context;
-	const auto& ucfg  = registers.user_config;
+	const auto& ctx  = registers.context;
+	const auto& ucfg = registers.user_config;
 	if (!DrawTopology(ucfg, plan.topology)) {
 		return abstain(E::DrawPrepBindingAbstainPipeline);
 	}
@@ -324,7 +329,8 @@ void PlanPipeline(const BindingPlanContext& context, const RegisterSnapshot& reg
 		programs.pixel = PipelineCache::PlainPixelProgram(prepared.pixel_prep);
 	}
 	if (prefetch_only) {
-		context.pipelines->PrefetchGraphicsPipeline(plan.targets, ctx, ucfg, prepared.vertex_info,
+		context.pipelines->PrefetchGraphicsPipeline(
+		    plan.targets, ctx, ucfg, prepared.vertex_info,
 		    prepared.pixel_active ? &prepared.pixel_info : nullptr, plan.topology,
 		    plan.primitive_restart, programs);
 		return;
@@ -339,11 +345,11 @@ void PlanPipeline(const BindingPlanContext& context, const RegisterSnapshot& reg
 			plan.pipeline            = pipeline;
 			plan.pipeline_generation = generation;
 			break;
-		case PipelineCache::PlanLookup::Busy:
-			return abstain(E::DrawPrepBindingAbstainPipelineBusy);
+		case PipelineCache::PlanLookup::Busy: return abstain(E::DrawPrepBindingAbstainPipelineBusy);
 		case PipelineCache::PlanLookup::Absent:
 			if (context.pipelines->PipelinePrefetchEnabled()) {
-				context.pipelines->PrefetchGraphicsPipeline(plan.targets, ctx, ucfg, prepared.vertex_info,
+				context.pipelines->PrefetchGraphicsPipeline(
+				    plan.targets, ctx, ucfg, prepared.vertex_info,
 				    prepared.pixel_active ? &prepared.pixel_info : nullptr, plan.topology,
 				    plan.primitive_restart, programs);
 			}
@@ -383,7 +389,8 @@ void PlanStatics(const RegisterSnapshot& registers, const PreparedDraw& prepared
 		    registers.context,
 		    std::any_of(outputs.begin(), outputs.end(),
 		                [](const auto& output) {
-			                return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
+			                return output.kind ==
+			                       ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
 		                }),
 		    plan.written);
 	}
@@ -445,7 +452,8 @@ uint32_t BindingParts() {
 			while (!list.empty()) {
 				const auto comma = list.find(',');
 				const auto name  = list.substr(0, comma);
-				list = comma == std::string_view::npos ? std::string_view {} : list.substr(comma + 1);
+				list =
+				    comma == std::string_view::npos ? std::string_view {} : list.substr(comma + 1);
 				if (name == "pipeline") {
 					result |= static_cast<uint32_t>(BindingPart::Pipeline);
 				} else if (name == "buffers") {
@@ -489,7 +497,7 @@ uint32_t BindingParts() {
 
 int BindingsVerifyMode() {
 	static std::atomic<int64_t> mode_once {Common::OnceUnset};
-	const auto mode = static_cast<int>(Common::Once(mode_once, [] {
+	const auto                  mode = static_cast<int>(Common::Once(mode_once, [] {
 		const auto* value = EnvValue("KYTY_DRAW_PREP_BINDINGS_VERIFY");
 		if (value == nullptr || std::strcmp(value, "0") == 0) {
 			return 0;
@@ -530,9 +538,11 @@ void PrefetchBindingPipeline(const BindingPlanContext& context, const RegisterSn
 	BindingPlan plan;
 	if (prepared.pixel_active && LodStatsCounter::PlainVariant() == LodStatsCounter::Plain::On &&
 	    PipelineCache::PlainPixelProgram(prepared.pixel_prep)) {
-		bool active = false;
+		bool                                      active = false;
 		static thread_local std::vector<uint32_t> scratch;
-		if (!PlanShaderData(*prepared.pixel_info.stage.program, prepared.pixel_prep.resources, scratch, active)) return;
+		if (!PlanShaderData(*prepared.pixel_info.stage.program, prepared.pixel_prep.resources,
+		                    scratch, active))
+			return;
 		plan.plain_pixel = !active;
 	}
 	PlanPipeline(context, registers, index_args, prepared, plan, true);
@@ -554,8 +564,8 @@ void ComputeBindingPlan(const BindingPlanContext& context, const RegisterSnapsho
 
 	const auto& vertex_program = *prepared.vertex_info.stage.program;
 	const auto& vertex_data    = prepared.vertex_prep.resources;
-	const auto* pixel_program  = prepared.pixel_active ? prepared.pixel_info.stage.program : nullptr;
-	const auto& pixel_data     = prepared.pixel_prep.resources;
+	const auto* pixel_program = prepared.pixel_active ? prepared.pixel_info.stage.program : nullptr;
+	const auto& pixel_data    = prepared.pixel_prep.resources;
 	if (prepared.pixel_active && pixel_program == nullptr) {
 		return;
 	}
@@ -619,7 +629,8 @@ void ComputeBindingPlan(const BindingPlanContext& context, const RegisterSnapsho
 		    registers.context, context.graphics->GetPhysicalDeviceProperties().limits,
 		    std::any_of(outputs.begin(), outputs.end(),
 		                [](const auto& output) {
-			                return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
+			                return output.kind ==
+			                       ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
 		                }),
 		    plan.viewports);
 	}
@@ -638,8 +649,8 @@ void CountCommittedPlan(bool used) {
 
 const PipelineCache::Pipeline* PlannedPipeline(const PipelineCache& cache, const BindingPlan& plan,
                                                std::span<const RenderColorInfo> colors,
-                                               const RenderDepthInfo& depth,
-                                               vk::PrimitiveTopology  topology,
+                                               const RenderDepthInfo&           depth,
+                                               vk::PrimitiveTopology            topology,
                                                bool primitive_restart_enable, bool plain_pixel) {
 	if (plan.pipeline == nullptr) {
 		return nullptr;

@@ -1833,9 +1833,9 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 	if (use_plan) {
 		OwnedCounters::Add(DrawPrep::GetBindingTotals().ranges_used, 1);
 	}
-	const bool     verify               = use_plan && DrawPrep::BindingsVerifyMode() != 0;
-	const auto&    graphics             = m_context.GetGraphics();
-	const uint64_t unbounded_read_limit = std::min<uint64_t>(
+	const bool     verify          = use_plan && DrawPrep::BindingsVerifyMode() != 0;
+	const auto&    graphics        = m_context.GetGraphics();
+	const uint64_t unbounded_limit = std::min<uint64_t>(
 	    uint64_t {256} * 1024 * 1024,
 	    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
 	        (graphics.StorageMinAlignment() - 1));
@@ -1855,8 +1855,10 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 		}
 		if (!use_plan || verify) {
 			auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]);
-			const auto serial_address = descriptor.Base48();
-			const auto requested_size = descriptor.GetSize();
+			const auto  serial_address = descriptor.Base48();
+			const auto& metadata       = program.info.buffers[i];
+			const auto  requested_size =
+			    descriptor.GetBindingSize(metadata.scalar, metadata.max_byte_extent);
 			if (!use_plan) {
 				NoteBufferOutOfBoundsMode(descriptor, serial_address);
 			}
@@ -1864,8 +1866,13 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 			uint64_t serial_base = 0;
 			if (serial_address != 0 && requested_size != 0) {
 				serial_base = serial_address;
-				serial_size =
-				    Libs::LibKernel::Memory::ClampRangeSizeQuiet(serial_address, requested_size);
+				// Finite descriptors may span sparse PRT holes, including a leading hole.
+				serial_size = requested_size;
+				if (requested_size >= (uint64_t {1} << 30u) ||
+				    descriptor.NumRecords() == UINT32_MAX) {
+					serial_size =
+					    LibKernel::Memory::ClampRangeSizeQuiet(serial_address, requested_size);
+				}
 				if (serial_size == 0) {
 					// An unmapped V# (typically left over from a skipped shader's output): bind
 					// no buffer instead of ending the emulator.
@@ -1893,13 +1900,12 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 			prepared.buffer_sources.push_back({});
 			continue;
 		}
-		if (size > unbounded_read_limit && !program.info.buffers[i].written &&
+		if (size > unbounded_limit &&
 		    DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]).NumRecords() ==
 		        UINT32_MAX) {
-			// Upstream #1066 (e5dcfdb87): a read through an unbounded V# (NUM_RECORDS = ~0) binds
-			// at most 256 MiB, within the storage-buffer range limit. Only sizes past the limit
-			// decode the V# here, so the plan and serial ranges above stay as they are.
-			size = unbounded_read_limit;
+			// Both read and write sentinel descriptors must fit the device limit, including
+			// the alignment prefix NativeStorageBuffer adds to the bound range.
+			size = unbounded_limit;
 		}
 		if (const auto& resource = program.info.buffers[i];
 		    !resource.written && !resource.formatted) {

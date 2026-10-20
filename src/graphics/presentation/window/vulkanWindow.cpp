@@ -2108,8 +2108,8 @@ void WindowContext::CreateVulkan() {
 	if (const auto* env = std::getenv("KYTY_SPEC_UNMAPPED_NULL");
 	    env == nullptr || std::strcmp(env, "0") != 0) {
 		ShaderRecompiler::IR::SetUnmappedBufferProbe([](uint64_t base, uint64_t size) {
-			// The question FindBuffers asks: a V# whose base no guest mapping holds binds as empty.
-			return LibKernel::Memory::ClampRangeSizeQuiet(base, size) != 0;
+			// Finite descriptors may begin in a sparse hole and reach a resident tail.
+			return LibKernel::Memory::HasCommittedRange(base, size);
 		});
 	}
 	presenter = std::make_unique<Presenter>(*this);

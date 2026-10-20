@@ -5,11 +5,11 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "kernel/memory.h"
-#include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 
 #include <algorithm>
 #include <array>
@@ -37,9 +37,9 @@ struct TransitSkipConfig {
 const TransitSkipConfig& TransitSkip() {
 	static const TransitSkipConfig config = [] {
 		TransitSkipConfig result;
-		const auto* value = std::getenv("KYTY_IMAGE_TRANSIT_SKIP");
-		result.enabled    = value == nullptr || std::strcmp(value, "0") != 0;
-		const auto* verify = std::getenv("KYTY_IMAGE_TRANSIT_SKIP_VERIFY");
+		const auto*       value = std::getenv("KYTY_IMAGE_TRANSIT_SKIP");
+		result.enabled          = value == nullptr || std::strcmp(value, "0") != 0;
+		const auto* verify      = std::getenv("KYTY_IMAGE_TRANSIT_SKIP_VERIFY");
 		if (verify != nullptr && *verify != '\0' && std::strcmp(verify, "0") != 0) {
 			result.verify = std::strcmp(verify, "exit") == 0 ? 2 : 1;
 		}
@@ -84,7 +84,7 @@ bool CopyViaBufferBatchEnabled() {
 }
 
 [[nodiscard]] vk::ImageCreateFlags ImageCreateFlags(const GraphicContext& graphics,
-                                                   const ImageInfo& info) {
+                                                    const ImageInfo&      info) {
 	vk::ImageCreateFlags flags {};
 	if (DepthAspectTransferFormat(info.pixel_format) == vk::Format::eUndefined) {
 		flags |= vk::ImageCreateFlagBits::eMutableFormat;
@@ -104,7 +104,7 @@ bool CopyViaBufferBatchEnabled() {
 	// (only for guest writes, which need storage usage as well and are not used for volumes), 2D
 	// views (IsValidViewType then allows 3D views only), then other formats' views. A device that
 	// accepts the full set (NVIDIA, AMD's Windows driver) keeps it.
-	using Bit = vk::ImageCreateFlagBits;
+	using Bit                          = vk::ImageCreateFlagBits;
 	const vk::ImageCreateFlags drops[] = {
 	    {},
 	    Bit::eBlockTexelViewCompatible,
@@ -150,12 +150,11 @@ bool CopyViaBufferBatchEnabled() {
 		// support): only when the device accepts that usage for this format and these flags.
 		if (graphics.supports_block_texel_view && info.samples == 1 && !info.IsVolume() &&
 		    ImageOps::BlockStorageUploadsEnabled()) {
-			const auto          storage = usage | vk::ImageUsageFlagBits::eStorage;
+			const auto                storage = usage | vk::ImageUsageFlagBits::eStorage;
 			vk::ImageFormatProperties properties {};
-			if (graphics.GetImageFormatProperties(info.pixel_format, HostImageType(info.type),
-			                                      vk::ImageTiling::eOptimal, storage,
-			                                      ImageCreateFlags(graphics, info),
-			                                      &properties) == vk::Result::eSuccess) {
+			if (graphics.GetImageFormatProperties(
+			        info.pixel_format, HostImageType(info.type), vk::ImageTiling::eOptimal, storage,
+			        ImageCreateFlags(graphics, info), &properties) == vk::Result::eSuccess) {
 				usage = storage;
 			}
 		}
@@ -168,7 +167,8 @@ bool CopyViaBufferBatchEnabled() {
 	}
 	if (DepthAspectTransferFormat(info.pixel_format) != vk::Format::eUndefined) {
 		usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
-		if (graphics.attachment_feedback_loop_enabled && (usage & vk::ImageUsageFlagBits::eSampled)) {
+		if (graphics.attachment_feedback_loop_enabled &&
+		    (usage & vk::ImageUsageFlagBits::eSampled)) {
 			usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
 		}
 		return usage;
@@ -186,12 +186,13 @@ bool CopyViaBufferBatchEnabled() {
 void LogImageCreateFallback(vk::Format format, vk::ImageUsageFlags dropped_usage,
                             vk::ImageCreateFlags dropped_flags) {
 	static std::mutex mutex;
-	static std::set<std::tuple<vk::Format, vk::ImageUsageFlags::MaskType,
-	                           vk::ImageCreateFlags::MaskType>>
+	static std::set<
+	    std::tuple<vk::Format, vk::ImageUsageFlags::MaskType, vk::ImageCreateFlags::MaskType>>
 	                 logged;
 	std::scoped_lock lock(mutex);
-	if (!logged.emplace(format, static_cast<vk::ImageUsageFlags::MaskType>(dropped_usage),
-	                    static_cast<vk::ImageCreateFlags::MaskType>(dropped_flags))
+	if (!logged
+	         .emplace(format, static_cast<vk::ImageUsageFlags::MaskType>(dropped_usage),
+	                  static_cast<vk::ImageCreateFlags::MaskType>(dropped_flags))
 	         .second) {
 		return;
 	}
@@ -356,8 +357,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 	return barriers;
 }
 
-bool Image::TransitIsNoOp(vk::ImageLayout                             destination_layout,
-                          vk::AccessFlags2                            destination_access,
+bool Image::TransitIsNoOp(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                           const std::optional<ImageSubresourceRange>& range) const noexcept {
 	// GetBarriers' conditions, in its order: per-subresource states or a partial range take its
 	// per-subresource path (which may create those states); otherwise it returns before changing
@@ -383,9 +383,9 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer,
                     bool deferrable) {
 	// KYTY_IMAGE_TRANSIT_SKIP: GetBarriers would record nothing and change nothing.
-	const auto& skip       = TransitSkip();
-	const bool  predicted  = skip.enabled && TransitIsNoOp(destination_layout, destination_access,
-	                                                      range);
+	const auto& skip = TransitSkip();
+	const bool  predicted =
+	    skip.enabled && TransitIsNoOp(destination_layout, destination_access, range);
 	if (predicted && skip.verify == 0) {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ImageTransitSkips);
 		return;
@@ -412,16 +412,17 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 			Profiler::CountFrameEvent(Profiler::FrameEvent::ImageTransitVerifyMismatches);
 			static std::atomic<uint32_t> logged {0};
 			if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-				std::fprintf(stderr,
-				             "ImageTransitVerify: a skipped transition of image 0x%016llx needs %zu "
-				             "barrier(s) (layout %d -> %d, access 0x%llx -> 0x%llx)\n",
-				             static_cast<unsigned long long>(info.data.address), barriers.size(),
-				             static_cast<int>(barriers.front().oldLayout),
-				             static_cast<int>(destination_layout),
-				             static_cast<unsigned long long>(
-				                 static_cast<VkAccessFlags2>(barriers.front().srcAccessMask)),
-				             static_cast<unsigned long long>(
-				                 static_cast<VkAccessFlags2>(destination_access)));
+				std::fprintf(
+				    stderr,
+				    "ImageTransitVerify: a skipped transition of image 0x%016llx needs %zu "
+				    "barrier(s) (layout %d -> %d, access 0x%llx -> 0x%llx)\n",
+				    static_cast<unsigned long long>(info.data.address), barriers.size(),
+				    static_cast<int>(barriers.front().oldLayout),
+				    static_cast<int>(destination_layout),
+				    static_cast<unsigned long long>(
+				        static_cast<VkAccessFlags2>(barriers.front().srcAccessMask)),
+				    static_cast<unsigned long long>(
+				        static_cast<VkAccessFlags2>(destination_access)));
 			}
 			if (skip.verify == 2) {
 				EXIT("ImageTransitVerify: a transition the skip decided against needs a barrier\n");
@@ -434,8 +435,8 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	g_recorded_transitions.fetch_add(1, std::memory_order_relaxed);
 	// Barrier batcher (render.h): merged with pending requests, recorded now or (deferrable) at
 	// the next flush point, ending an active rendering instance only when recorded.
-	if (m_scheduler.Active() && m_scheduler.Current().BatchImageBarriers(barriers, command_buffer,
-	                                                                     deferrable)) {
+	if (m_scheduler.Active() &&
+	    m_scheduler.Current().BatchImageBarriers(barriers, command_buffer, deferrable)) {
 		return;
 	}
 	m_scheduler.EndRendering();
@@ -577,8 +578,12 @@ void Image::CopyImageRegions(Image& source) {
 	std::vector<vk::ImageCopy> copies;
 	copies.reserve(levels);
 	for (uint32_t level = 0; level < levels; level++) {
-		const auto width  = std::max(source.backing.extent.width >> level, 1u);
-		const auto height = std::max(source.backing.extent.height >> level, 1u);
+		// Overlapping cache images can differ in size; copying the source extent into a smaller
+		// destination writes out of bounds and loses the device.
+		const auto width  = std::min(std::max(source.backing.extent.width >> level, 1u),
+		                             std::max(backing.extent.width >> level, 1u));
+		const auto height = std::min(std::max(source.backing.extent.height >> level, 1u),
+		                             std::max(backing.extent.height >> level, 1u));
 		const auto depth  = std::max(base_depth >> level, 1u);
 		const auto [source_layers, destination_layers] = SanitizeCopyLayers(source, *this, depth);
 		vk::ImageCopy copy {};
@@ -730,11 +735,11 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 	// overlap in the buffer or in the destination image, and every region's bytes are copied
 	// exactly as the former one-region-per-round loop copied them.
 	// KYTY_COPY_VIA_BUFFER_BATCH=0 restores one region per round.
-	const uint64_t offset_alignment = std::lcm<uint64_t>(source_bytes, 16);
-	const size_t   max_regions      = CopyViaBufferBatchEnabled() ? SIZE_MAX : 1;
+	const uint64_t                   offset_alignment = std::lcm<uint64_t>(source_bytes, 16);
+	const size_t                     max_regions      = CopyViaBufferBatchEnabled() ? SIZE_MAX : 1;
 	std::vector<vk::BufferImageCopy> source_copies;
 	std::vector<vk::BufferImageCopy> destination_copies;
-	uint64_t                         used = 0;
+	uint64_t                         used        = 0;
 	const auto                       flush_round = [&] {
 		if (source_copies.empty()) {
 			return;
@@ -761,10 +766,9 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 			barrier.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
 			command.pipelineBarrier2(dependency);
 		}
-		command.copyBufferToImage(buffer.Handle(), backing.image,
-		                          vk::ImageLayout::eTransferDstOptimal,
-		                          static_cast<uint32_t>(destination_copies.size()),
-		                          destination_copies.data());
+		command.copyBufferToImage(
+		    buffer.Handle(), backing.image, vk::ImageLayout::eTransferDstOptimal,
+		    static_cast<uint32_t>(destination_copies.size()), destination_copies.data());
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ImageCopyViaBufferRounds);
 		source_copies.clear();
 		destination_copies.clear();
@@ -993,7 +997,8 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	const auto accepts = [&](vk::ImageUsageFlags usage, vk::ImageCreateFlags flags) {
 		vk::ImageFormatProperties properties {};
 		return graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,
-		                                         usage, flags, &properties) == vk::Result::eSuccess &&
+		                                         usage, flags,
+		                                         &properties) == vk::Result::eSuccess &&
 		       static_cast<bool>(properties.sampleCounts & create.samples);
 	};
 	if (!accepts(create.usage, create.flags)) {
@@ -1001,7 +1006,8 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 		// the usages and flags no role of it needs here. A device that accepts it (NVIDIA) never
 		// gets here, so its images are unchanged.
 		const auto candidates = DeviceCompat::OptionalImageCreateFallbacks(
-		    static_cast<VkImageUsageFlags>(create.usage), static_cast<VkImageCreateFlags>(create.flags),
+		    static_cast<VkImageUsageFlags>(create.usage),
+		    static_cast<VkImageCreateFlags>(create.flags),
 		    static_cast<VkFormatFeatureFlags>(
 		        graphics.GetFormatProperties(create.format).optimalTilingFeatures));
 		bool accepted = false;
@@ -1018,34 +1024,36 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 			}
 		}
 		if (!accepted) {
-			EXIT("image format does not support required usage: the device refuses %s images "
-			     "(type %s, %u sample(s), extent %ux%ux%u) with usage %s and flags %s, also without "
-			     "the optional ones\n",
-			     vk::to_string(create.format).c_str(), vk::to_string(create.imageType).c_str(),
-			     info.samples, create.extent.width, create.extent.height, create.extent.depth,
-			     vk::to_string(create.usage).c_str(), vk::to_string(create.flags).c_str());
+			EXIT(
+			    "image format does not support required usage: the device refuses %s images "
+			    "(type %s, %u sample(s), extent %ux%ux%u) with usage %s and flags %s, also without "
+			    "the optional ones\n",
+			    vk::to_string(create.format).c_str(), vk::to_string(create.imageType).c_str(),
+			    info.samples, create.extent.width, create.extent.height, create.extent.depth,
+			    vk::to_string(create.usage).c_str(), vk::to_string(create.flags).c_str());
 		}
 	}
 
-	if (sparse_first_level != 0 && graphics.CreateSparseImage(create, sparse_first_level, backing)) {
+	if (sparse_first_level != 0 &&
+	    graphics.CreateSparseImage(create, sparse_first_level, backing)) {
 		// Memory behind the resident levels only (TextureCache::EnsureResidency binds more).
 	} else if (!graphics.CreateImage(create, backing)) {
 		EXIT("failed to create image: extent=%ux%ux%u format=%d layers=%u levels=%u\n",
 		     create.extent.width, create.extent.height, create.extent.depth,
 		     static_cast<int>(create.format), create.arrayLayers, create.mipLevels);
 	}
-	SetVulkanObjectNameF(
-	    graphics.device, backing.image,
-	    "Kyty.Image[guest=0x{:016x} size=0x{:x} extent={}x{}x{} format={} mips={} layers={} samples={}]",
-	    info.data.address, info.data.size, info.extent.width, info.extent.height, info.extent.depth,
-	    static_cast<uint32_t>(info.pixel_format), info.resources.levels, info.resources.layers,
-	    info.samples);
+	SetVulkanObjectNameF(graphics.device, backing.image,
+	                     "Kyty.Image[guest=0x{:016x} size=0x{:x} extent={}x{}x{} format={} mips={} "
+	                     "layers={} samples={}]",
+	                     info.data.address, info.data.size, info.extent.width, info.extent.height,
+	                     info.extent.depth, static_cast<uint32_t>(info.pixel_format),
+	                     info.resources.levels, info.resources.layers, info.samples);
 }
 
 uint64_t Image::HashGuestEdges() const {
 	std::array<uint8_t, TRACKER_PAGE_SIZE * 2> bytes {};
 	const auto                                 range = live;
-	const uint64_t head_end =
+	const uint64_t                             head_end =
 	    std::min(range.End(), Common::AlignUp(range.address, TRACKER_PAGE_SIZE));
 	const uint64_t tail_begin =
 	    std::max(range.address, Common::AlignDown(range.End(), TRACKER_PAGE_SIZE));

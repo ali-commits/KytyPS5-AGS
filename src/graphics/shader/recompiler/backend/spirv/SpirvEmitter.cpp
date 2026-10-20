@@ -1,13 +1,12 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
-
-#include "common/logging/log.h"
 
 #include <algorithm>
 #include <array>
@@ -95,9 +94,9 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	}
 	const bool uses_flattened_runtime =
 	    !program.srt_reads.empty() ||
-	     std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) {
-		     return image.indirect_search_iterations != 0u;
-	     });
+	    std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) {
+		    return image.indirect_search_iterations != 0u;
+	    });
 	if (uses_flattened_runtime) {
 		Expect(Kind::FlattenedSrt);
 	}
@@ -124,14 +123,16 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		}
 	}
 	const auto has_shader_data_storage = present[static_cast<size_t>(Kind::ShaderData)];
-	const auto shader_data_dwords = program.bindings.ShaderDataDwords();
-	const auto user_data_dwords = program.bindings.user_data_registers.size();
-	const bool has_dispatch_threads = program.bindings.dispatch_thread_dword != IR::PushData::NoStart;
+	const auto shader_data_dwords      = program.bindings.ShaderDataDwords();
+	const auto user_data_dwords        = program.bindings.user_data_registers.size();
+	const bool has_dispatch_threads =
+	    program.bindings.dispatch_thread_dword != IR::PushData::NoStart;
 	if ((program.bindings.UsesPushData() &&
 	     !IR::PushData::CanFit(program.bindings.push_data_start_dword, shader_data_dwords)) ||
 	    (has_dispatch_threads && (program.stage != ShaderType::Compute ||
 	                              program.bindings.dispatch_thread_dword != user_data_dwords)) ||
-	    program.bindings.memory_offset_dword != user_data_dwords + (has_dispatch_threads ? 3u : 0u) ||
+	    program.bindings.memory_offset_dword !=
+	        user_data_dwords + (has_dispatch_threads ? 3u : 0u) ||
 	    program.bindings.memory_offset_count != program.info.buffers.size() ||
 	    program.bindings.mip_stats_count != (mip_stats ? program.info.images.size() : 0u) ||
 	    has_shader_data_storage != (shader_data_dwords != 0 && !program.bindings.UsesPushData()) ||
@@ -239,16 +240,18 @@ void NoteGraphicsAddTid(const IR::Program& program, uint32_t lane_count, bool wa
 	static std::unordered_set<uint64_t> noted;
 	{
 		const std::lock_guard lock(mutex);
-		if (!noted.insert(program.shader_hash ^ (static_cast<uint64_t>(program.stage) << 60u)).second) {
+		if (!noted.insert(program.shader_hash ^ (static_cast<uint64_t>(program.stage) << 60u))
+		         .second) {
 			return;
 		}
 	}
 	char text[256];
-	std::snprintf(text, sizeof(text),
-	              "Kyty buffer ADD_TID: stage %u shader 0x%016" PRIx64
-	              " wave%u, %u lane(s) per invocation%s: %u buffer(s), %u swizzled, max stride %u\n",
-	              static_cast<unsigned>(program.stage), program.shader_hash, program.wave_size,
-	              lane_count, wave_clusters ? ", wave32 clusters" : "", buffers, swizzled, stride);
+	std::snprintf(
+	    text, sizeof(text),
+	    "Kyty buffer ADD_TID: stage %u shader 0x%016" PRIx64
+	    " wave%u, %u lane(s) per invocation%s: %u buffer(s), %u swizzled, max stride %u\n",
+	    static_cast<unsigned>(program.stage), program.shader_hash, program.wave_size, lane_count,
+	    wave_clusters ? ", wave32 clusters" : "", buffers, swizzled, stride);
 	Log::WriteToConsoleAndLog(text);
 }
 
@@ -257,11 +260,13 @@ void NoteClusteredProgram(const IR::Program& program) {
 	static std::unordered_set<uint64_t> noted;
 	{
 		const std::lock_guard lock(mutex);
-		if (!noted.insert(program.shader_hash ^ (static_cast<uint64_t>(program.stage) << 60u)).second) {
+		if (!noted.insert(program.shader_hash ^ (static_cast<uint64_t>(program.stage) << 60u))
+		         .second) {
 			return;
 		}
 	}
-	uint32_t first_lane = 0, lane_rw = 0, ballot = 0, dpp = 0, swizzle = 0, permute = 0, lane_id = 0;
+	uint32_t first_lane = 0, lane_rw = 0, ballot = 0, dpp = 0, swizzle = 0, permute = 0,
+	         lane_id = 0;
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			switch (inst.GetOpcode()) {
@@ -287,7 +292,7 @@ void NoteClusteredProgram(const IR::Program& program) {
 	              " runs on a wider host subgroup (KYTY_WAVE32_CLUSTERS); cross-lane ops: "
 	              "readfirstlane %u, readlane/writelane %u, ballot/any %u, dpp %u, swizzle %u, "
 	              "permute %u, lane id %u\n",
-	              program.stage == ShaderType::Pixel ? "pixel"
+	              program.stage == ShaderType::Pixel  ? "pixel"
 	              : program.stage == ShaderType::Mesh ? "mesh"
 	                                                  : "vertex",
 	              program.shader_hash, first_lane, lane_rw, ballot, dpp, swizzle, permute, lane_id);
@@ -305,8 +310,8 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 			    inst.GetType() == IR::Type::U64) {
 				requirements.buffer_int64_atomics = true;
 			}
-			// KYTY_PS_HELPER_ATOMICS_SKIP: emulated read-modify-writes (AtomicUpdate) of pixel shaders
-			// test gl_HelperInvocation.
+			// KYTY_PS_HELPER_ATOMICS_SKIP: emulated read-modify-writes (AtomicUpdate) of pixel
+			// shaders test gl_HelperInvocation.
 			if (program.stage == ShaderType::Pixel && GetCodegenOptions().ps_helper_atomics_skip) {
 				const auto buffer = IR::BufferAccessOf(inst.GetOpcode());
 				requirements.helper_invocation |=
@@ -352,13 +357,14 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					const auto bits = StorageBufferElementBits(program, memory);
 					requirements.buffer_u8 |= bits == 8u;
 					requirements.buffer_u16 |= bits == 16u;
-					// ADD_TID adds the lane's id within its wave to the index. BufferLane takes it from
-					// EmitSubgroupLocalInvocationId, the lane id every cross-lane op of the stage uses
-					// (wave64 halves, wave32 clusters). A wave64 vertex or pixel shader on a 32-wide
-					// host subgroup runs each 32 lanes as a wave of their own, so its lane is 0-31,
-					// the lane its LaneId (v_mbcnt) and shuffles see too. A hull shader's lane is its
-					// control-point invocation id (EmitLaneId), not a lane of the guest wave that packs several
-					// patches, so the guest address cannot be formed there.
+					// ADD_TID adds the lane's id within its wave to the index. BufferLane takes it
+					// from EmitSubgroupLocalInvocationId, the lane id every cross-lane op of the
+					// stage uses (wave64 halves, wave32 clusters). A wave64 vertex or pixel shader
+					// on a 32-wide host subgroup runs each 32 lanes as a wave of their own, so its
+					// lane is 0-31, the lane its LaneId (v_mbcnt) and shuffles see too. A hull
+					// shader's lane is its control-point invocation id (EmitLaneId), not a lane of
+					// the guest wave that packs several patches, so the guest address cannot be
+					// formed there.
 					if ((program.info.buffers[memory.resource].packed_stride & (1u << 20u)) != 0u) {
 						if (program.stage == ShaderType::TessellationControl) {
 							Fail(program, "buffer ADD_TID in a hull shader has no guest wave lane");
@@ -393,13 +399,15 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					requirements.subgroup_ballot              = true;
 					requirements.subgroup_shuffle             = true;
 					requirements.subgroup_local_invocation_id = true;
-					requirements.helper_invocation |=
-					    program.stage == ShaderType::Pixel &&
-					    GetCodegenOptions().ps_append_live_election;
+					requirements.helper_invocation |= program.stage == ShaderType::Pixel &&
+					                                  GetCodegenOptions().ps_append_live_election;
 				}
 			}
 			switch (inst.GetOpcode()) {
 				case IR::ValueOpcode::StoreCompletion: requirements.subgroup_barrier = true; break;
+				case IR::ValueOpcode::DataCacheInvalidate:
+					requirements.coherent_buffers = true;
+					break;
 				case IR::ValueOpcode::Ballot:
 				case IR::ValueOpcode::AnyLane: requirements.subgroup_ballot = true; break;
 				case IR::ValueOpcode::IsHelperInvocation:
@@ -464,8 +472,7 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					if (index >= program.export_info.size()) {
 						Fail(program, "attribute export has invalid metadata");
 					}
-					if (program.stage == ShaderType::Pixel &&
-					    program.export_info[index].vm) {
+					if (program.stage == ShaderType::Pixel && program.export_info[index].vm) {
 						requirements.pixel_valid_mask = true;
 					}
 					break;
@@ -538,12 +545,14 @@ void SetHostShaderClock(const HostShaderClock& clock) {
 }
 
 HostShaderClock GetHostShaderClock() {
-	return {.scope = static_cast<HostClockScope>(g_shader_clock_scope.load(std::memory_order_relaxed)),
+	return {.scope =
+	            static_cast<HostClockScope>(g_shader_clock_scope.load(std::memory_order_relaxed)),
 	        .shift = g_shader_clock_shift.load(std::memory_order_relaxed)};
 }
 
 void SetHostWaveClusters(const HostWaveClusters& clusters) {
-	g_wave_clusters.store(static_cast<uint8_t>((clusters.vertex ? 1u : 0u) | (clusters.pixel ? 2u : 0u) |
+	g_wave_clusters.store(static_cast<uint8_t>((clusters.vertex ? 1u : 0u) |
+	                                           (clusters.pixel ? 2u : 0u) |
 	                                           (clusters.mesh ? 4u : 0u)),
 	                      std::memory_order_relaxed);
 }
@@ -566,17 +575,17 @@ bool WaveClustersActive(const IR::Program& program) {
 		case ShaderType::TessellationEvaluation: return force || host.vertex;
 		case ShaderType::Pixel: return force || host.pixel;
 		case ShaderType::Mesh: return force || host.mesh;
-		// Compute pipelines require the wave size (DeviceCompat::ComputeSubgroupSize), so only a test
-		// forces clusters there (it runs the wave32 compute cases through the cluster code); hull
-		// lanes are invocation ids, not subgroup lanes.
+		// Compute pipelines require the wave size (DeviceCompat::ComputeSubgroupSize), so only a
+		// test forces clusters there (it runs the wave32 compute cases through the cluster code);
+		// hull lanes are invocation ids, not subgroup lanes.
 		case ShaderType::Compute: return force;
 		default: return false;
 	}
 }
 
 int32_t RealtimeClockShift(double timestamp_period_ns) {
-	const double     rate = timestamp_period_ns > 0.0 ? 1e9 / timestamp_period_ns : 1e9;
-	constexpr double Low  = 100e6 / 1.5;
+	const double     rate  = timestamp_period_ns > 0.0 ? 1e9 / timestamp_period_ns : 1e9;
+	constexpr double Low   = 100e6 / 1.5;
 	int32_t          shift = 0;
 	while (shift < 8 && rate / std::ldexp(1.0, shift + 1) >= Low) {
 		shift++;
@@ -587,8 +596,8 @@ int32_t RealtimeClockShift(double timestamp_period_ns) {
 	return shift;
 }
 
-std::vector<uint32_t> EmitProgram(const IR::Program& program,
-                                  ShaderStageInputInfo input_info, bool mip_stats_records) {
+std::vector<uint32_t> EmitProgram(const IR::Program& program, ShaderStageInputInfo input_info,
+                                  bool mip_stats_records) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -602,13 +611,14 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 		Fail(program, "SPIR-V emitter requires a fully planned native shader program");
 	}
 	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
-	                                   input_info.compute != nullptr && input_info.compute->lds_storage);
+	                                   input_info.compute != nullptr &&
+	                                   input_info.compute->lds_storage);
 	if (IR::ValidationEnabled()) {
 		IR::ValidateProgram(program, true);
 	}
 	EmitterState state(program, input_info);
 	state.mip_stats_records = mip_stats_records;
-	state.lane_count = ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
+	state.lane_count    = ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
 	state.wave_clusters = state.lane_count == 1 && WaveClustersActive(program);
 	if (state.wave_clusters && program.stage != ShaderType::Compute) {
 		NoteClusteredProgram(program);
