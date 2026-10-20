@@ -2,8 +2,10 @@
 
 Ported2 starts from `0948e1272930abfe1bea90e7e23708a09af974b0`, the Ported
 build the user confirmed played the first Astro Bot stage without issues.
-It is a separate comparison installation on branch `ports/jetsku-ported2`.
-The existing Ported, Streaming and main branch references are retained.
+It was initially a separate comparison installation on branch
+`ports/jetsku-ported2`. After the user's successful playtest, it was selected
+for the sole local installation and promotion to `main`. See
+[Local installation](LOCAL-INSTALLATION.md) for the current paths.
 
 ## Included change
 
@@ -55,15 +57,15 @@ Build/test/install and bounded Sky Garden smoke evidence is recorded outside
 the repository at
 `~/.local/state/kytyps5-ported2-20261020/`.
 
-## Separate installation
+## Original comparison installation (retired)
 
 - App-menu entry: **KytyPS5 Ported2**
 - Command: `kytyps5-ported2`
 - Prefix: `~/.local/opt/kytyps5-ported2/20261020-jetsku`
 - Settings/profile: `~/.config/kytyps5-ported2/20261020-jetsku`
 
-Ported2 begins with independent copies of current Ported saves, patches,
-trophies, settings, pairing profile and warm shader caches. It retains the
-existing precompile button and per-run CPU/RAM/GPU capture. Runtime logs are
-written to its own `_CrashCapture` directory. Shader codegen remains
-`86b7a2d2f817d103`; no shader cache reset is required by this port.
+Ported2 began with independent copies of Ported saves, patches, trophies,
+settings, pairing profile and warm shader caches. Its latest state is now
+preserved in the single KytyPS5 installation. The manual precompile button
+and dialog have been removed; per-run CPU/RAM/GPU capture remains.
+Shader codegen remains `86b7a2d2f817d103`; no shader cache reset is required.

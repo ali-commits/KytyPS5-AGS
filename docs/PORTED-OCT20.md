@@ -68,7 +68,11 @@ reaches the host kernel.
 Machine-specific build/test logs, installation provenance and protection hashes
 are kept in `~/.local/state/kytyps5-ported-20261020/`.
 
-## Comparing the installations
+## Comparing the installations (historical)
+
+These comparison installations have been retired after the successful Ported2
+playtest. [Local installation](LOCAL-INSTALLATION.md) describes the current
+single KytyPS5 installation. The following records the earlier evaluation.
 
 Open **KytyPS5 Streaming** or **KytyPS5 Ported** from the application menu, one at
 a time. Both started with the same launcher, preset and copied game configuration,
@@ -80,8 +84,8 @@ saves, patches and trophies. The stutter repair below updates Ported only. The c
 
 Changes made by playing one version do not propagate to the other. Streaming
 identity/pairings are copied into separate files for sequential comparisons.
-The launcher retains its selected-game **Precompile Shaders** button and progress
-bar. Prepare/warm both versions before comparing gameplay: code-generation
+The launcher then included a selected-game preparation button and progress bar,
+which have since been removed. Prepare/warm both versions before comparing gameplay: code-generation
 changes invalidate the candidate's copied program cache automatically.
 
 Use the same game, save checkpoint, level, resolution, presentation mode and
@@ -110,9 +114,9 @@ still described old module hashes, and the bundled RETARGET=0 preset disabled
 migration. Even with retargeting enabled, replay skipped a known old pipeline
 before resolving the current modules. Replay now resolves compatible current
 permutation identities and checks the derived current key before skipping.
-The launcher's Precompile Shaders action explicitly enables retargeting even
-when the parent environment disables it. Ported's installed preset enables it
-for normal starts as well.
+The then-present launcher preparation action explicitly enabled retargeting
+even when the parent environment disabled it. The installed preset continues
+to enable retargeting for normal starts.
 
 A second gap affected mixed flat/smooth vertex parameters: stored input bytes
 predate alias metadata, while static keys already contain it. Restore and

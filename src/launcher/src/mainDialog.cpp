@@ -7,7 +7,6 @@
 #include "controllerPreview.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
-#include "shaderPrecompileDialog.h"
 #include "streamingBackend.h"
 #include "streamingWidget.h"
 #include "titleSound.h"
@@ -26,7 +25,6 @@
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
-#include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
@@ -84,7 +82,6 @@ public:
 	void Update();
 	void FindInterpreter();
 	void Run();
-	void PrecompileShaders();
 	void SetPresetWarning(const QString& text);
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
@@ -111,9 +108,7 @@ private:
 	StreamingWidget*  m_streaming_widget = nullptr;
 	QTabWidget*       m_tabs             = nullptr;
 
-	QPointer<ConfigurationItem>      m_running_item;
-	QPushButton*                     m_prepare_button = nullptr;
-	QPointer<ShaderPrecompileDialog> m_precompile;
+	QPointer<ConfigurationItem> m_running_item;
 };
 
 QByteArray MainDialogPrivate::g_last_geometry;
@@ -148,12 +143,6 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		m_tabs->setCurrentWidget(m_streaming_widget);
 	connect(m_tabs, &QTabWidget::currentChanged, this, [this] { Update(); });
 	m_ui->verticalLayout_3->addWidget(m_tabs);
-	m_prepare_button = new QPushButton(tr("Precompile shaders"), main_dialog);
-	m_prepare_button->setObjectName("precompileShadersButton");
-	m_prepare_button->setToolTip(
-	    tr("Prepare saved shader recipes for the selected game before playing."));
-	m_ui->verticalLayout_3->addWidget(m_prepare_button, 0, Qt::AlignLeft);
-	connect(m_prepare_button, &QPushButton::clicked, this, &MainDialogPrivate::PrecompileShaders);
 
 	main_dialog->setMinimumSize(700, 650);
 	main_dialog->resize(920, 860);
@@ -509,25 +498,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 	s.endGroup();
 }
 
-void MainDialogPrivate::PrecompileShaders() {
-	if (!m_prepare_button->isEnabled()) return;
-	const auto* item = m_ui->widget->GetSelectedItem();
-	if (item == nullptr) return;
-	const auto game = m_ui->widget->CreateConfiguration(*item);
-	m_precompile    = new ShaderPrecompileDialog(m_interpreter, *game, m_main_dialog);
-	m_precompile->setAttribute(Qt::WA_DeleteOnClose);
-	connect(m_precompile, &ShaderPrecompileDialog::RunningChanged, this,
-	        &MainDialogPrivate::Update);
-	connect(m_precompile, &QObject::destroyed, this, [this] {
-		m_precompile = nullptr;
-		Update();
-	});
-	m_precompile->show();
-	Update();
-}
-
 void MainDialogPrivate::Run() {
-	if (m_precompile != nullptr && m_precompile->IsRunning()) return;
 	if (m_update_checker->IsInstalling()) return;
 	if (m_streaming->GetState() != StreamingBackend::State::Stopped &&
 	    m_streaming->GetState() != StreamingBackend::State::Error)
@@ -550,14 +521,12 @@ void MainDialogPrivate::Run() {
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	const bool preparing = m_precompile != nullptr && m_precompile->IsRunning();
-	m_streaming->SetLocalGameRunning(preparing || m_process.state() != QProcess::NotRunning);
+	m_streaming->SetLocalGameRunning(m_process.state() != QProcess::NotRunning);
 	const bool hosting = m_streaming->GetState() != StreamingBackend::State::Stopped &&
 	                     m_streaming->GetState() != StreamingBackend::State::Error;
-	const bool busy    = hosting || preparing || m_process.state() != QProcess::NotRunning ||
-	                     m_update_checker->IsInstalling();
-	m_update_checker->SetGameRunning(hosting || preparing ||
-	                                 m_process.state() != QProcess::NotRunning);
+	const bool busy =
+	    hosting || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
+	m_update_checker->SetGameRunning(hosting || m_process.state() != QProcess::NotRunning);
 	m_controller_preview.SetSuspended(busy);
 	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget && item != nullptr
 	                           ? item->GetInfo().basedir
@@ -571,14 +540,6 @@ void MainDialogPrivate::Update() {
 	}
 
 	m_ui->widget->SetRunEnabled(run_enabled);
-	m_prepare_button->setVisible(m_tabs->currentWidget() == m_ui->widget);
-	m_prepare_button->setEnabled(run_enabled && !m_interpreter.isEmpty());
-	m_prepare_button->setToolTip(
-	    busy ? tr("Stop the game or streaming host, and wait for any update to finish before "
-	              "preparing shaders.")
-	    : item == nullptr
-	        ? tr("Select a game to prepare its saved shader recipes.")
-	        : tr("Prepare saved shader recipes for the selected game before playing."));
 	if (busy) return;
 	m_controller_preview.SetColor(m_ui->widget->GetGlobalControllerColor());
 }
