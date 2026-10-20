@@ -2243,6 +2243,123 @@ void TestClampRangeMemoFollowsMappings() {
 	std::printf("[host]    %-48s ok (memo %s)\n", test, memo ? "on" : "off");
 }
 
+void TestCommittedRangeProbeFollowsMappings() {
+	const char* test = "CommittedRangeProbeFollowsMappings";
+	namespace Memory = Libs::LibKernel::Memory;
+	constexpr auto page = SceKernelPageSize;
+	void* reservation = nullptr;
+	CheckOk(test, Memory::KernelReserveVirtualRange(&reservation, page * 3, 0, page),
+	        "reserve sparse probe fixture");
+	const auto base = reinterpret_cast<uint64_t>(reservation);
+	void* resident = reinterpret_cast<void*>(base + page);
+	const auto map_resident = [&] {
+		CheckOk(test, Memory::KernelMapNamedFlexibleMemory(
+		                  &resident, page, SceKernelProtCpuRw, SceKernelMapFixed, "committed_probe"),
+		        "map resident probe page");
+	};
+	map_resident();
+	Check(test, !Memory::HasCommittedRange(0, page) &&
+	                !Memory::HasCommittedRange(base, 0) &&
+	                !Memory::HasCommittedRange(UINT64_MAX - 1u, 4),
+	      "invalid probe range was accepted");
+	Check(test, !Memory::HasCommittedRange(base, page) &&
+	                Memory::HasCommittedRange(base, page + 1) &&
+	                Memory::HasCommittedRange(base + page, page * 2) &&
+	                !Memory::HasCommittedRange(base + page * 2, page),
+	      "reserved holes or the half-open resident boundary were misclassified");
+	CheckOk(test, Memory::KernelMunmap(base, page), "release leading reservation");
+	Check(test, !Memory::HasCommittedRange(base, page) &&
+	                Memory::HasCommittedRange(base, page + 1),
+	      "an unregistered leading hole concealed the resident tail");
+
+	// Stable positive probes must reuse the generation-checked committed-run cache.
+	// This guards the per-buffer materialization path against restoring a lock per probe.
+	Check(test, Memory::HasCommittedRange(base + page, page * 2), "warm committed prefix");
+	Check(test, !Memory::HasCommittedRange(base + page, UINT64_MAX),
+	      "a cached committed prefix accepted an overflowing extent");
+	const auto before = Memory::TestClampRangeMemoTotals();
+	constexpr uint64_t repeats = 1024;
+	bool all_committed = true;
+	for (uint64_t i = 0; i < repeats; ++i) {
+		all_committed &= Memory::HasCommittedRange(base + page + (i & 63u), page);
+	}
+	const auto after = Memory::TestClampRangeMemoTotals();
+	const auto* setting = std::getenv("KYTY_CLAMP_RANGE_MEMO");
+	const bool memo = setting == nullptr || std::strcmp(setting, "0") != 0;
+	const bool reused = !memo ||
+	                    (after.hits - before.hits == repeats && after.misses == before.misses);
+	Check(test, all_committed, "a repeated committed-prefix probe changed its answer");
+
+	CheckOk(test, Memory::KernelMunmap(base + page, page), "unmap warmed resident page");
+	Check(test, !Memory::HasCommittedRange(base, page * 3) &&
+	                !Memory::HasCommittedRange(base + page, page),
+	      "unmapping the resident page retained a cached positive verdict");
+	map_resident();
+	Check(test, Memory::HasCommittedRange(base, page * 3) &&
+	                Memory::HasCommittedRange(base + page, page),
+	      "remapping the resident page retained a negative verdict");
+	CheckOk(test, Memory::KernelMprotect(resident, page, SceKernelProtCpuRead),
+	        "protect resident probe page");
+	Check(test, Memory::HasCommittedRange(base + page, page),
+	      "a protection change made committed memory disappear");
+	Check(test, Memory::TestClampRangeMemoTotals().verify_mismatches == 0,
+	      "cached committed-prefix answer differs from the locked lookup");
+	CheckOk(test, Memory::KernelMunmap(base + page, page * 2), "release probe fixture");
+	Check(test, reused, "repeated committed-prefix probes bypassed the mapping cache");
+	std::printf("[host]    %-48s ok (memo %s)\n", test, memo ? "on" : "off");
+}
+
+void BenchmarkCommittedRangeProbe() {
+	const char* test = "CommittedRangeProbeBenchmark";
+	namespace Memory = Libs::LibKernel::Memory;
+	void* resident = nullptr;
+	CheckOk(test, Memory::KernelMapNamedFlexibleMemory(
+	                  &resident, SceKernelPageSize, SceKernelProtCpuRw, 0, "probe_benchmark"),
+	        "map benchmark page");
+	const auto base = reinterpret_cast<uint64_t>(resident);
+	constexpr uint64_t iterations = 200000;
+	for (const auto threads : {1u, 4u, 8u}) {
+		for (const bool committed_probe : {false, true}) {
+			std::array<double, 3> timings {};
+			for (auto& elapsed : timings) {
+				std::counting_semaphore<8> ready(0);
+				std::counting_semaphore<8> start(0);
+				std::atomic<uint64_t> accepted {0};
+				std::vector<std::thread> workers;
+				for (uint32_t t = 0; t < threads; ++t) {
+					workers.emplace_back([&] {
+						(void)Memory::ClampRangeSizeQuiet(base, 128);
+						ready.release();
+						start.acquire();
+						uint64_t positives = 0;
+						for (uint64_t i = 0; i < iterations; ++i) {
+							const auto address = base + (i & 63u);
+							positives += committed_probe
+							                 ? Memory::HasCommittedRange(address, 128)
+							                 : Memory::ClampRangeSizeQuiet(address, 128) != 0;
+						}
+						accepted.fetch_add(positives, std::memory_order_relaxed);
+					});
+				}
+				for (uint32_t t = 0; t < threads; ++t) ready.acquire();
+				const auto begin = std::chrono::steady_clock::now();
+				start.release(threads);
+				for (auto& worker : workers) worker.join();
+				elapsed = std::chrono::duration<double, std::milli>(
+				              std::chrono::steady_clock::now() - begin).count();
+				Check(test, accepted == iterations * threads, "benchmark changed mapping verdicts");
+			}
+			std::sort(timings.begin(), timings.end());
+			std::printf("[bench] %s threads=%u queries=%" PRIu64
+			            " median_ms=%.3f ns/query=%.1f\n",
+			            committed_probe ? "HasCommittedRange" : "ClampRangeSizeQuiet",
+			            threads, iterations * threads, timings[1],
+			            timings[1] * 1000000.0 / static_cast<double>(iterations * threads));
+		}
+	}
+	CheckOk(test, Memory::KernelMunmap(base, SceKernelPageSize), "release benchmark page");
+}
+
 void TestNonzeroDirectOffsetAliasesSharedBacking() {
 	const char* test = "NonzeroDirectOffsetAliasesSharedBacking";
 
@@ -5025,6 +5142,14 @@ void TestSmallFiberStacksAndMigration() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
+	if (argc == 2 && std::strcmp(argv[1], "--committed-range-only") == 0) {
+		RunTest(TestCommittedRangeProbeFollowsMappings);
+		return g_failed_tests == 0 ? 0 : 1;
+	}
+	if (argc == 2 && std::strcmp(argv[1], "--committed-range-benchmark") == 0) {
+		RunTest(BenchmarkCommittedRangeProbe);
+		return g_failed_tests == 0 ? 0 : 1;
+	}
         if (argc == 2 && std::strcmp(argv[1], "--backing-cache-only") == 0) {
           RunTest(TestWarmedBackingReadsWaitForWrites);
           RunTest(TestBackingReadCacheFollowsRemap);
@@ -5130,6 +5255,7 @@ int main(int argc, char** argv) {
 	RunTest(TestReleasedReserveCanBeReused);
 	RunTest(TestMunmapAcrossAdjacentFlexibleMappings);
 	RunTest(TestClampRangeMemoFollowsMappings);
+	RunTest(TestCommittedRangeProbeFollowsMappings);
 	RunTest(TestDirectMapQueryOffsetAndPartialMunmap);
 	RunTest(TestDirectPartialProtectUnmapPreservesNeighbors);
 #if defined(__linux__)

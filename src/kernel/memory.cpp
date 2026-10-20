@@ -378,6 +378,10 @@ public:
 
 	bool HasCommittedRange(uint64_t start, uint64_t size) {
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) return false;
+		// A committed first byte proves this existential query. Reuse the generation-checked
+		// per-thread run cache for the common materialization path; only a leading hole needs
+		// the locked search for a resident tail.
+		if (ClampRangeSize(start, 1) != 0) return true;
 		Common::LockGuard lock(m_mutex);
 		auto              current = LowerBound(start);
 		if (current != m_ranges.begin()) --current;

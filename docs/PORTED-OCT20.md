@@ -138,3 +138,48 @@ necessary. Preserve both journals, saves and the Streaming installation.
 
 Machine-local evidence and pre-repair backups are in
 `~/.local/state/kytyps5-ported-stutter-20261020/`.
+
+## FPS candidate: cached sparse-buffer probes (October 20)
+
+The sparse-buffer adaptation replaced the old cached committed-prefix query
+with a locked search in `HasCommittedRange` for every qualifying buffer during
+materialization. Restore the existing generation-checked per-thread cache for a
+committed first byte; retain the full search when a descriptor starts in a hole.
+The test covers sparse tails, half-open boundaries, invalid/overflowing ranges,
+unmap/remap/protection changes and actual cache hits.
+
+The isolated 200,000-query-per-reader benchmark changed from 2.826 to 0.939 ms
+with one reader, 47.602 to 1.746 ms with four, and 124.068 to 1.804 ms with eight.
+These are probe timings, not gameplay speedups.
+
+Matched private Sky Garden tests use `underwater_aerial_garden`, identical save
+state, a stationary camera, warm caches and no preparation-phase instrumentation.
+The CPU-only candidate measured 32.78 FPS versus 32.11 in the repeated unmodified
+Ported control. The first control had measured 30.38, so run variation exceeds
+the small observed gain; the historical 25% whole-session difference and the
+reported sub-10 FPS episode remain unattributed. GPU software thermal throttling
+was observed. No large FPS recovery is claimed. A separately tested scalar-load
+shader rewrite was not retained because its independent performance benefit was
+not established.
+
+Ported's existing launch capture now samples resources at 1 Hz through
+`tools/diagnostics/runtime_resources.py`: CPU, RSS, high-water RSS, I/O/faults,
+thread CPU placement and NVIDIA utilization/clocks/temperature/throttling.
+CPU percentages use 100% per logical CPU; GPU telemetry is device-wide.
+Missing data is recorded as unavailable. Sampling ends with the game and does
+not attach a profiler. The launcher wrapper imports the installed helper from
+its private `libexec` directory. Logs remain in Ported's `_CrashCapture` run
+folder. Streaming's wrapper, installation and settings are untouched.
+
+Run `python3 -m unittest discover -s tests -p test_runtime_resources.py` and the
+three `virtual_memory_allocation*` CTests. Machine-local evidence, backups and
+installation verification are under
+`~/.local/state/kytyps5-ported-fps-fix-20261020/`.
+
+Upstream was checked through `f186b357`. The `fa8216c4` per-thread LDS sizing
+change is relevant to 23 recorded pixel permutations with live 32 KiB private
+arrays in both builds. It is a separate possible improvement: raw shader-input
+journal compatibility and the missing legacy allocation metadata need explicit
+handling before porting. The stage-input null-check cleanup is translation-time
+work and offers no established warmed-game FPS benefit. Neither update is part
+of this candidate.
