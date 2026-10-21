@@ -823,6 +823,9 @@ void StreamingBackend::PublishCatalog() {
 	m_apps_reload_pending = false;
 	m_api.Request("POST", "/api/kyty/apps/reload", {},
 	              [this](const QJsonObject&, const QString& error) {
-		              if (!error.isEmpty()) Log(tr("Sunshine app reload failed: %1").arg(error));
+		              if (error.isEmpty()) return;
+		              Log(tr("Sunshine app reload failed: %1").arg(error));
+		              m_published_app_keys.clear(); // not published: the Refresh tick retries
+		              m_apps_reload_pending = true;
 	              });
 }

@@ -2019,6 +2019,44 @@ while :; do sleep 0.05; done
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 	}
 
+	void failedAppsReloadIsRetried() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		const auto profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend     = dir.filePath("host");
+		settings.port        = FreeBasePort();
+		settings.local_audio = false;
+		FixtureEnvironment environment(dir.path());
+		StreamingBackend   backend(profile);
+		const auto         entry = [&](const QString& name) {
+            return QList<StreamingLaunchEntry> {
+                {"g1", name, "/usr/bin/true", {}, dir.path(), "/g/icon0.png"}};
+		};
+		const auto reloads = [&] {
+			return Read(dir.filePath("api-requests.jsonl")).count("/api/kyty/apps/reload");
+		};
+		backend.SetCatalog(entry("Game"));
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		QVERIFY(Put(dir.filePath("reload-fail"), "1"));
+		backend.SetCatalog(entry("Renamed"));
+		backend.PublishCatalog();
+		QTRY_COMPARE_WITH_TIMEOUT(reloads(), 1, 5000);
+		QTest::qWait(300); // the failure reply arrives
+		QVERIFY(QFile::remove(dir.filePath("reload-fail")));
+		QTRY_VERIFY_WITH_TIMEOUT((backend.Refresh(), reloads() == 2), 8000);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+
 	void catalogKeepsArgumentsOutOfBackendCommand() {
 		const StreamingLaunchEntry game {"a55",
 		                                 "Astro $() ' 日本",
