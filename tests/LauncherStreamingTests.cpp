@@ -1776,6 +1776,71 @@ while :; do sleep 0.05; done
 		QVERIFY(StreamingBackend::PreflightPorts(base).contains(QString::number(base + 1)));
 	}
 
+	void appsIncludeImagePath() {
+		StreamingLaunchEntry entry {"id1", "Game", "/bin/emu", {"--game"}, "/bin", "/g/sce_sys/icon0.png"};
+		const auto           apps = StreamingCatalog::Apps({entry}, "/w", "/m.json");
+		QCOMPARE(apps["apps"].toArray()[0].toObject()["image-path"].toString(),
+		         QStringLiteral("/g/sce_sys/icon0.png"));
+		entry.image_path.clear();
+		const auto plain = StreamingCatalog::Apps({entry}, "/w", "/m.json");
+		QVERIFY(!plain["apps"].toArray()[0].toObject().contains("image-path"));
+	}
+	void manifestTracksSettingsWithoutRestart() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		const auto profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend     = dir.filePath("host");
+		settings.port        = FreeBasePort();
+		settings.local_audio = false;
+		FixtureEnvironment environment(dir.path());
+		StreamingBackend   backend(profile);
+		const auto         entry = [&](const QString& name, const QStringList& arguments) {
+            return QList<StreamingLaunchEntry> {
+                {"g1", name, "/usr/bin/true", arguments, dir.path(), "/g/icon0.png"}};
+		};
+		const auto args = [&] {
+			return QJsonDocument::fromJson(Read(QDir(profile).filePath("launch.json")))
+			    .object()["games"]
+			    .toObject()["g1"]
+			    .toObject()["arguments"]
+			    .toArray();
+		};
+		const auto reloads = [&] {
+			return Read(dir.filePath("api-requests.jsonl")).count("/api/kyty/apps/reload");
+		};
+		backend.SetCatalog(entry("Game", {"--a"}));
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		QCOMPARE(args().at(0).toString(), QString("--a"));
+		QVERIFY(Read(QDir(profile).filePath("apps.json")).contains("/g/icon0.png"));
+		QCOMPARE(reloads(), 0);
+		backend.SetCatalog(entry("Game", {"--b"}));
+		backend.PublishCatalog();
+		QCOMPARE(args().at(0).toString(), QString("--b"));
+		QTest::qWait(500);
+		QCOMPARE(reloads(), 0);
+		backend.SetCatalog(entry("Renamed", {"--c"}));
+		backend.PublishCatalog();
+		QCOMPARE(args().at(0).toString(), QString("--c"));
+		QVERIFY(Read(QDir(profile).filePath("apps.json")).contains("Renamed"));
+		QTRY_COMPARE_WITH_TIMEOUT(reloads(), 1, 5000);
+		backend.SetCatalog(entry("Renamed", {"--d"}));
+		backend.PublishCatalog();
+		QCOMPARE(args().at(0).toString(), QString("--d"));
+		QTest::qWait(500);
+		QCOMPARE(reloads(), 1);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+
 	void catalogKeepsArgumentsOutOfBackendCommand() {
 		const StreamingLaunchEntry game {"a55",
 		                                 "Astro $() ' 日本",

@@ -44,13 +44,19 @@ QJsonObject StreamingCatalog::Apps(const QList<StreamingLaunchEntry>& entries,
 		working_directory.replace('$', "$$");
 		auto name = entry.name;
 		name.replace('$', "$$");
-		apps.append(QJsonObject {{"name", name},
-		                         {"cmd", command},
-		                         {"working-dir", working_directory},
-		                         {"auto-detach", false},
-		                         {"wait-all", true},
-		                         {"exit-timeout", 5},
-		                         {"exclude-global-prep-cmd", true}});
+		QJsonObject app {{"name", name},
+		                 {"cmd", command},
+		                 {"working-dir", working_directory},
+		                 {"auto-detach", false},
+		                 {"wait-all", true},
+		                 {"exit-timeout", 5},
+		                 {"exclude-global-prep-cmd", true}};
+		if (!entry.image_path.isEmpty()) {
+			auto image = entry.image_path;
+			image.replace('$', "$$");
+			app.insert("image-path", image);
+		}
+		apps.append(app);
 	}
 	return {{"env", QJsonObject {}}, {"apps", apps}};
 }
