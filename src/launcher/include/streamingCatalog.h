@@ -8,6 +8,7 @@ struct StreamingLaunchEntry {
 	QString     program;
 	QStringList arguments;
 	QString     working_directory;
+	QString     image_path;
 	bool        operator==(const StreamingLaunchEntry&) const = default;
 };
 namespace StreamingCatalog {

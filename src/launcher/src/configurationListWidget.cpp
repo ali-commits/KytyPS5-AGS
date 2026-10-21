@@ -9,6 +9,7 @@
 #include "configurationItem.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
+#include "gameLibrary.h"
 #include "gameListTreeWidget.h"
 #include "inputMappingDialog.h"
 #include "mainDialog.h"
@@ -21,7 +22,6 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
@@ -74,16 +74,9 @@
 
 #include "ui_configuration_list_widget.h"
 
-constexpr char CONF_FILE_NAME[]    = "Kyty.ini";
-constexpr char CONF_ORG_NAME[]     = "Kyty";
-constexpr char CONF_APP_NAME[]     = "Kyty";
-constexpr char CONF_SECTION_NAME[] = "GameConfigurations";
-constexpr char CONF_LAUNCHER[]     = "Launcher";
-constexpr char CONF_GAME_DIR[]     = "game_dir";
-constexpr char CONF_GAME_DIRS[]    = "game_dirs";
-constexpr char CONF_ADDONS_DIR[]   = "addons_dir";
-constexpr char CONF_GLOBAL[]       = "GlobalConfiguration";
-constexpr char SAVE_DATA_DIR[]     = "_SaveData";
+using namespace GameLibraryFiles;
+
+constexpr char SAVE_DATA_DIR[] = "_SaveData";
 
 constexpr int GAME_NAME_COLUMN             = 0;
 constexpr int GAME_SERIAL_COLUMN           = 1;
@@ -93,65 +86,6 @@ constexpr int GAME_SIZE_COLUMN             = 4;
 constexpr int GAME_PATH_COLUMN             = 5;
 constexpr int GAME_STATUS_COLUMN           = 6;
 constexpr int GAME_COMMENT_COLUMN          = 7;
-
-static QString NormalizeGameDirectory(const QString& dir) {
-	const auto trimmed = dir.trimmed();
-	if (trimmed.isEmpty()) {
-		return {};
-	}
-
-	return QDir::cleanPath(QDir(trimmed).absolutePath());
-}
-
-static QString PathKey(const QString& path) {
-	auto normalized = NormalizeGameDirectory(path);
-	if (normalized.isEmpty()) {
-		normalized = QDir::cleanPath(path.trimmed());
-	}
-	if (normalized.isEmpty()) {
-		return {};
-	}
-
-	auto canonical = QFileInfo(normalized).canonicalFilePath();
-	if (canonical.isEmpty()) {
-		canonical = normalized;
-	}
-	canonical = QDir::cleanPath(canonical);
-
-#ifdef __linux__
-	return canonical;
-#else
-	return canonical.toCaseFolded();
-#endif
-}
-
-static QStringList NormalizeGameDirectories(const QStringList& dirs) {
-	QStringList   dirs_ret;
-	QSet<QString> seen;
-
-	for (const auto& dir: dirs) {
-		const auto normalized = NormalizeGameDirectory(dir);
-		const auto key        = PathKey(normalized);
-		if (normalized.isEmpty() || key.isEmpty() || seen.contains(key)) {
-			continue;
-		}
-
-		seen.insert(key);
-		dirs_ret.append(normalized);
-	}
-
-	return dirs_ret;
-}
-
-static QStringList SettingsStringList(const QVariant& value) {
-	auto list = value.toStringList();
-	if (!list.isEmpty()) {
-		return list;
-	}
-
-	const auto text = value.toString();
-	return text.isEmpty() ? QStringList() : QStringList({text});
-}
 
 class GameGridDelegate: public QStyledItemDelegate {
 public:
@@ -384,19 +318,7 @@ void ConfigurationListWidget::UpdateToolbarIcons() {
 }
 
 void ConfigurationListWidget::WriteSettings() {
-	QFile                      file = QFile(QDir(".").absoluteFilePath(CONF_FILE_NAME));
-	std::unique_ptr<QSettings> s;
-	if (file.exists()) {
-		s = std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
-	} else {
-#ifdef __linux__
-		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME,
-		                                CONF_APP_NAME);
-#else
-		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::SystemScope, CONF_ORG_NAME,
-		                                CONF_APP_NAME);
-#endif
-	}
+	auto s = GameLibraryFiles::OpenSettings();
 
 	MainDialog::WriteSettings(*s);
 	ConfigurationEditDialog::WriteSettings(*s);
@@ -429,19 +351,7 @@ void ConfigurationListWidget::WriteSettings() {
 }
 
 void ConfigurationListWidget::ReadSettings() {
-	QFile                      file = QFile(QDir(".").absoluteFilePath(CONF_FILE_NAME));
-	std::unique_ptr<QSettings> s;
-	if (file.exists()) {
-		s = std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
-	} else {
-#ifdef __linux__
-		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME,
-		                                CONF_APP_NAME);
-#else
-		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::SystemScope, CONF_ORG_NAME,
-		                                CONF_APP_NAME);
-#endif
-	}
+	auto s = GameLibraryFiles::OpenSettings();
 
 	m_settings_file = s->fileName();
 
@@ -534,151 +444,11 @@ ConfigurationListWidget::CreateStreamingCatalog(const QString& interpreter) cons
 		const auto  info = CreateConfiguration(*item);
 		auto        arguments = BuildEmulatorArgs(*info);
 		if (arguments.isEmpty()) continue;
-		const auto id = QString::fromLatin1(
-		    QCryptographicHash::hash(info->game_path.toUtf8(), QCryptographicHash::Sha256).toHex());
+		const auto id = CatalogId(info->game_path);
 		entries.append(
 		    {id, info->name, interpreter, arguments, QFileInfo(interpreter).absolutePath()});
 	}
 	return entries;
-}
-
-struct GameMetadata {
-	QString title_name;
-	QString title_id;
-	QString gameVersion;
-	QString firmwareVer;
-};
-
-static QString GetJsonString(const QJsonObject& obj, const QString& key) {
-	return obj.value(key).toString().trimmed();
-}
-
-static QString GetLocalizedTitleName(const QJsonObject& root) {
-	const auto localized = root.value(QStringLiteral("localizedParameters")).toObject();
-	if (localized.isEmpty()) {
-		return {};
-	}
-
-	const auto default_language = GetJsonString(localized, QStringLiteral("defaultLanguage"));
-	if (!default_language.isEmpty()) {
-		const auto title = GetJsonString(localized.value(default_language).toObject(),
-		                                 QStringLiteral("titleName"));
-		if (!title.isEmpty()) {
-			return title;
-		}
-	}
-
-	const auto english_title = GetJsonString(localized.value(QStringLiteral("en-US")).toObject(),
-	                                         QStringLiteral("titleName"));
-	if (!english_title.isEmpty()) {
-		return english_title;
-	}
-
-	for (auto it = localized.constBegin(); it != localized.constEnd(); ++it) {
-		const auto title = GetJsonString(it.value().toObject(), QStringLiteral("titleName"));
-		if (!title.isEmpty()) {
-			return title;
-		}
-	}
-
-	return {};
-}
-
-static QString GetFirmwareVersion(const QJsonObject& root) {
-	const auto encoded = GetJsonString(root, QStringLiteral("requiredSystemSoftwareVersion"));
-	static const QRegularExpression version_pattern(
-	    QStringLiteral("^0[xX]([0-9]{6})[0-9A-Fa-f]{10}$"));
-	const auto match = version_pattern.match(encoded);
-	if (!match.hasMatch()) {
-		return {};
-	}
-
-	const auto digits = match.captured(1);
-	bool       valid  = false;
-	const int  major  = digits.left(2).toInt(&valid, 10);
-	if (!valid) {
-		return {};
-	}
-
-	QString    version = QStringLiteral("%1.%2").arg(major).arg(digits.mid(2, 2));
-	const auto patch   = digits.mid(4, 2);
-	if (patch != QStringLiteral("00")) {
-		version += QStringLiteral(".") + patch;
-	}
-
-	return version;
-}
-
-static GameMetadata GetGameMetadata(const QByteArray& param_data, const QString& fallback) {
-	GameMetadata ret;
-	ret.title_name = fallback;
-
-	if (param_data.isEmpty()) {
-		return ret;
-	}
-
-	QJsonParseError parse_error;
-	const auto      doc = QJsonDocument::fromJson(param_data, &parse_error);
-	if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
-		return ret;
-	}
-
-	const auto root  = doc.object();
-	const auto title = GetLocalizedTitleName(root);
-	if (!title.isEmpty()) {
-		ret.title_name = title;
-	}
-
-	ret.title_id = GetJsonString(root, QStringLiteral("titleId"));
-	if (ret.title_id.isEmpty()) {
-		const auto content_id = GetJsonString(root, QStringLiteral("contentId"));
-		if (content_id.size() == 36 && content_id[6] == '-' && content_id[16] == '_') {
-			ret.title_id = content_id.mid(7, 9);
-		}
-	}
-	ret.gameVersion = GetJsonString(root, QStringLiteral("appVersion"));
-	if (ret.gameVersion.isEmpty()) {
-		ret.gameVersion = GetJsonString(root, QStringLiteral("contentVersion"));
-	}
-	ret.firmwareVer = GetFirmwareVersion(root);
-
-	return ret;
-}
-
-static void SetGameFiles(Configuration& info, const QString& game_dir, const QString& game_path,
-                         const GameMetadata& metadata, bool archive) {
-	const QFileInfo game(game_dir);
-
-	info.game_path   = game_path;
-	info.basedir     = archive ? game.absoluteFilePath() : QDir(game_dir).absolutePath();
-	info.name        = metadata.title_name;
-	info.title_id    = metadata.title_id;
-	info.gameVersion = metadata.gameVersion;
-	info.firmwareVer = metadata.firmwareVer;
-
-	if (info.name.isEmpty()) {
-		info.name = archive ? game.completeBaseName() : QDir(game_dir).dirName();
-	}
-}
-
-static Configuration* FindCustomInfo(QMap<QString, Configuration*>* custom_infos,
-                                     const QString& game_path, const QString& legacy_game_path) {
-	auto custom = custom_infos->find(game_path);
-	if (custom != custom_infos->end()) {
-		return custom.value();
-	}
-
-	custom = custom_infos->find(legacy_game_path);
-	if (custom == custom_infos->end()) {
-		return nullptr;
-	}
-
-	auto* info = custom.value();
-	custom_infos->erase(custom);
-	info->game_path = game_path;
-	custom_infos->insert(game_path, info);
-
-	return info;
 }
 
 bool ConfigurationListWidget::EnsureGameDirectory() {
@@ -733,11 +503,14 @@ void ConfigurationListWidget::ScanGameDirectory() {
 
 	const QString eboot_name = QStringLiteral("eboot.bin");
 	QSet<QString> found_games;
-	const auto add_game = [this, &found_games, &eboot_name,
-	                       &running_items](const QString& base, const QString& game_path,
-	                                       const QString& legacy_game_path, const QString& fallback,
-	                                       bool archive) {
-		const QString game_key = PathKey(game_path);
+	const auto    add_game = [this, &found_games, &eboot_name,
+	                          &running_items](const GameCandidate& candidate) {
+		const auto&   base             = candidate.base;
+		const auto&   game_path        = candidate.game_path;
+		const auto&   legacy_game_path = candidate.legacy_game_path;
+		const auto&   fallback         = candidate.fallback;
+		const bool    archive          = candidate.archive;
+		const QString game_key         = PathKey(game_path);
 		if (game_key.isEmpty() || found_games.contains(game_key)) {
 			return;
 		}
@@ -810,50 +583,8 @@ void ConfigurationListWidget::ScanGameDirectory() {
 			SelectItem(item);
 		});
 	};
-	const auto scan_archives = [&add_game](const QDir& directory, const QDir& root) {
-		const auto entries = directory.entryInfoList(QDir::Files | QDir::NoSymLinks, QDir::Name);
-		for (const auto& archive: entries) {
-			const auto base = archive.absoluteFilePath();
-			if (!Common::IsSupportedArchive(GameContent::ToPath(base))) {
-				continue;
-			}
-			add_game(base, QDir::cleanPath(base), root.relativeFilePath(base),
-			         archive.completeBaseName(), true);
-		}
-	};
-
-	for (const auto& root_path: m_game_dirs) {
-		QDir root(root_path);
-		if (root_path.isEmpty() || !root.exists()) {
-			continue;
-		}
-
-		scan_archives(root, root);
-		QList<QDir> pending_dirs;
-		const auto  root_subdirs =
-		    root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
-		for (const auto& subdir: root_subdirs) {
-			pending_dirs.append(QDir(subdir.absoluteFilePath()));
-		}
-
-		while (!pending_dirs.isEmpty()) {
-			QDir game_dir = pending_dirs.takeFirst();
-			scan_archives(game_dir, root);
-
-			if (game_dir.exists(eboot_name)) {
-				const QString game_path        = NormalizeGameDirectory(game_dir.absolutePath());
-				const QString legacy_game_path = root.relativeFilePath(game_dir.absolutePath());
-				add_game(game_dir.absolutePath(), game_path, legacy_game_path, game_dir.dirName(),
-				         false);
-				continue;
-			}
-
-			const auto subdirs =
-			    game_dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
-			for (const auto& subdir: subdirs) {
-				pending_dirs.append(QDir(subdir.absoluteFilePath()));
-			}
-		}
+	for (const auto& candidate: FindCandidates(m_game_dirs)) {
+		add_game(candidate);
 	}
 
 	m_ui->cfgs_list->setSortingEnabled(sorting_enabled);
