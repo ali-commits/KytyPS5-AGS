@@ -1,10 +1,17 @@
 #include "gameLibrary.h"
+#include "hostSocket.h"
 
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QtTest>
+
+#include <atomic>
+#include <sys/stat.h>
+#include <thread>
 
 static void WriteFile(const QString& path, const QByteArray& data) {
 	QDir().mkpath(QFileInfo(path).absolutePath());
@@ -114,6 +121,46 @@ private slots:
 		QCOMPARE(catalog.size(), 2);
 		QVERIFY(library.Find(catalog.first().id) != nullptr);
 		QVERIFY(catalog.first().image_path.endsWith("sce_sys/icon0.png"));
+	}
+	void socketRoundTripAndPermissions() {
+		QTemporaryDir    dir;
+		const auto       path = dir.filePath("kyty-host/api.sock");
+		HostSocketServer server([](const QJsonObject& req, auto done) {
+			done(
+			    {200, "application/json", QJsonDocument(req).toJson(QJsonDocument::Compact), "e1"});
+		});
+		QString          error;
+		QVERIFY2(server.Listen(path, &error), qPrintable(error));
+		struct stat st {};
+		QVERIFY(::stat(QFile::encodeName(path).constData(), &st) == 0);
+		QCOMPARE(st.st_mode & 0777, mode_t {0600});
+		QVERIFY(::stat(QFile::encodeName(dir.filePath("kyty-host")).constData(), &st) == 0);
+		QCOMPARE(st.st_mode & 0777, mode_t {0700});
+		std::optional<HostReply> reply;
+		std::atomic<bool>        finished {false};
+		QString                  client_error;
+		std::thread              t([&] {
+			reply    = HostSocketCall(path, {{"type", "status"}}, 2000, &client_error);
+			finished = true;
+		});
+		QTRY_VERIFY_WITH_TIMEOUT(finished.load(), 3000);
+		t.join();
+		QVERIFY2(reply.has_value(), qPrintable(client_error));
+		QCOMPARE(reply->status, 200);
+		QCOMPARE(reply->etag, QByteArray("e1"));
+		QCOMPARE(QJsonDocument::fromJson(reply->body).object()["type"].toString(),
+		         QString("status"));
+	}
+	void socketRejectsOversizeRequest() {
+		QTemporaryDir    dir;
+		HostSocketServer server([](const QJsonObject&, auto done) { done({}); });
+		QString          error;
+		QVERIFY(server.Listen(dir.filePath("s/api.sock"), &error));
+		QLocalSocket s;
+		s.connectToServer(dir.filePath("s/api.sock"));
+		QVERIFY(s.waitForConnected(1000));
+		s.write(QByteArray(70 * 1024, 'x'));
+		QTRY_COMPARE_WITH_TIMEOUT(s.state(), QLocalSocket::UnconnectedState, 3000);
 	}
 };
 
