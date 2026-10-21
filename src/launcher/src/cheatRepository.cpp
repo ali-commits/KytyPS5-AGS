@@ -91,6 +91,7 @@ QNetworkReply* CheatRepository::Request(const QUrl& url, qint64 limit,
 	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
 	                     QNetworkRequest::SameOriginRedirectPolicy);
 	request.setRawHeader("User-Agent", "Kyty-Launcher");
+	// Sunshine forwards cheat requests with a 25 s limit: answer before it gives up.
 	request.setTransferTimeout(15000);
 	auto* reply = m_network.get(request);
 	reply->setReadBufferSize(limit + 1);
@@ -100,7 +101,7 @@ QNetworkReply* CheatRepository::Request(const QUrl& url, qint64 limit,
 			reply->abort();
 		}
 	});
-	QTimer::singleShot(30000, reply, [reply]() {
+	QTimer::singleShot(15000, reply, [reply]() {
 		if (!reply->isFinished()) {
 			reply->setProperty("timed_out", true);
 			reply->abort();
