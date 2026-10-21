@@ -50,4 +50,7 @@ HostSocketCall(const QString& path, const QJsonObject& request, int timeout_ms, 
 // $XDG_RUNTIME_DIR/kyty-host, or an empty string when XDG_RUNTIME_DIR is unset.
 [[nodiscard]] QString HostRuntimeDirectory();
 
+// Creates `dir` if needed and requires it to be a directory owned by this user, mode 0700.
+[[nodiscard]] bool PrepareHostDirectory(const QString& dir, QString* error);
+
 #endif /* LAUNCHER_INCLUDE_HOST_SOCKET_H_ */

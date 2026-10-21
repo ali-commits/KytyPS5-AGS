@@ -7,7 +7,6 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
-#include <QFileDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -59,11 +58,13 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	auto* path_row = new QHBoxLayout;
 	m_path         = new QLineEdit(settings.backend, host);
 	m_path->setObjectName("streamBackendPath");
+	m_path->setReadOnly(true);
 	path_row->addWidget(m_path);
 	m_browse = new QPushButton(tr("Browse…"), host);
+	m_browse->setEnabled(false);
 	path_row->addWidget(m_browse);
 	host_form->addRow(tr("Streaming helper"), path_row);
-	// The daemon resolves its own helper; the control is kept (hidden) for older tooling.
+	// The daemon owns the helper path, so the control is read-only (and hidden).
 	host_form->setRowVisible(path_row, false);
 	m_version = new QLabel(tr("Version checked when hosting starts"), host);
 	m_version->setWordWrap(true);
@@ -271,11 +272,6 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	private_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	logs_layout->addWidget(private_path);
 	layout->addWidget(logs);
-	connect(m_browse, &QPushButton::clicked, this, [this] {
-		const auto path =
-		    QFileDialog::getOpenFileName(this, tr("Choose Kyty streaming helper"), m_path->text());
-		if (!path.isEmpty()) m_path->setText(path);
-	});
 	connect(copy, &QPushButton::clicked, this,
 	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
 	connect(m_save, &QPushButton::clicked, this, [this] { Apply(); });
@@ -395,6 +391,11 @@ bool StreamingWidget::Apply() {
 		                if (!self) return;
 		                if (failure.isEmpty() && !reply.value("ok").toBool())
 			                failure = reply.value("error").toString(tr("Cannot save preferences."));
+		                if (failure.isEmpty() && reply.value("deferred").toBool()) {
+			                self->m_error->setText(tr("Applies after the current game"));
+			                self->m_error->show();
+			                return;
+		                }
 		                self->m_error->setText(failure);
 		                self->m_error->setVisible(!failure.isEmpty());
 	                });

@@ -19,6 +19,17 @@ class HostDaemon: public QObject {
 	Q_OBJECT
 public:
 	explicit HostDaemon(QObject* parent = nullptr);
+	~HostDaemon() override;
+
+	// What a pending restart may do now: start (backend idle), stop first, or wait (a streamed
+	// game is running, or the backend is already stopping).
+	enum class RestartStep { Wait, StopNow, StartNow };
+	[[nodiscard]] static RestartStep PlanRestart(StreamingBackend::State state,
+	                                             bool                    stream_game_running);
+	// Delay before the next hosting retry after an Error: 5 s, doubling, capped at 60 s.
+	[[nodiscard]] static int NextRetryMs(int previous_ms);
+	[[nodiscard]] bool       RetryScheduled() const { return m_retry.isActive(); }
+	[[nodiscard]] int        RetryIntervalMs() const { return m_retry.interval(); }
 
 	[[nodiscard]] bool Start(QString* error);
 	// Stops hosting, then emits Finished() once the backend is Stopped or Error (20 s at most).
@@ -41,6 +52,7 @@ private:
 	void                         WatchSettings();
 	void                         OnBackendChanged();
 	void                         StartHosting(const StreamingSettings& settings);
+	void                         ArmRetry();
 
 	CompatibilityDatabase m_compat;
 	GameLibrary           m_library;
@@ -49,7 +61,9 @@ private:
 	HostSocketServer      m_control;
 	HostSocketServer      m_api_server;
 	QFileSystemWatcher    m_watcher;
-	QTimer                m_reload, m_refresh, m_shutdown_cap;
+	QTimer                m_reload, m_refresh, m_shutdown_cap, m_retry;
+	int                   m_retry_ms        = 0;
+	int                   m_lock_fd         = -1;
 	bool                  m_restart_pending = false;
 	bool                  m_shutting_down   = false;
 	bool                  m_started         = false;

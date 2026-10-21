@@ -383,6 +383,84 @@ private slots:
 		::close(fd);
 		QVERIFY(!HostDaemon::LocalEmulatorRunning());
 	}
+	void settingsRevisionSurvivesReload() {
+		const auto id   = library.Games().first().id;
+		const auto path = "/kyty/v1/games/" + id + "/settings";
+		const auto rev =
+		    QJsonDocument::fromJson(Call(api, {{"method", "GET"}, {"path", path}}).body)
+		        .object()["revision"]
+		        .toString();
+		const auto put = Call(
+		    api, {{"method", "PUT"},
+		          {"path", path},
+		          {"body", QJsonObject {{"revision", rev},
+		                                {"values", QJsonObject {{"vblank_frequency", "90"}}}}}});
+		QCOMPARE(put.status, 200);
+		const auto put_revision = QJsonDocument::fromJson(put.body).object()["revision"].toString();
+		QVERIFY(!put_revision.isEmpty());
+		GameLibrary reloaded; // what the daemon's watcher does 500 ms after every save
+		QString     error;
+		QVERIFY2(reloaded.Load(nullptr, &error), qPrintable(error));
+		QCOMPARE(HostApi::SettingsRevision(*reloaded.Find(id)->info), put_revision);
+	}
+	void retryBackoffDoublesToCap() {
+		QCOMPARE(HostDaemon::NextRetryMs(0), 5000);
+		QCOMPARE(HostDaemon::NextRetryMs(5000), 10000);
+		QCOMPARE(HostDaemon::NextRetryMs(10000), 20000);
+		QCOMPARE(HostDaemon::NextRetryMs(20000), 40000);
+		QCOMPARE(HostDaemon::NextRetryMs(40000), 60000);
+		QCOMPARE(HostDaemon::NextRetryMs(60000), 60000);
+	}
+	void restartIsDeferredWhileAGameStreams() {
+		using S = StreamingBackend::State;
+		using R = HostDaemon::RestartStep;
+		QCOMPARE(HostDaemon::PlanRestart(S::Ready, true), R::Wait);
+		QCOMPARE(HostDaemon::PlanRestart(S::Ready, false), R::StopNow);
+		QCOMPARE(HostDaemon::PlanRestart(S::Starting, false), R::StopNow);
+		QCOMPARE(HostDaemon::PlanRestart(S::Stopping, false), R::Wait);
+		QCOMPARE(HostDaemon::PlanRestart(S::Stopped, false), R::StartNow);
+		QCOMPARE(HostDaemon::PlanRestart(S::Error, false), R::StartNow);
+	}
+	void errorSchedulesRetryWithBackoff() {
+		QTemporaryDir run, profile;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		WriteFile(profile.filePath("streaming.ini"),
+		          "[host]\nbackend=/nonexistent/kyty_stream_host\n");
+		HostDaemon daemon;
+		QString    error;
+		QVERIFY2(daemon.Start(&error), qPrintable(error));
+		QVERIFY(!daemon.RetryScheduled());
+		qunsetenv("KYTY_HOST_NO_AUTOSTART"); // a preference change now starts hosting, which fails
+		const auto sock  = run.filePath("kyty-host/control.sock");
+		auto       prefs = Control(sock, {{"type", "get-preferences"}});
+		prefs["type"]    = "set-preferences";
+		prefs["fps"]     = 30;
+		QVERIFY(Control(sock, prefs)["ok"].toBool());
+		QTRY_VERIFY_WITH_TIMEOUT(daemon.RetryScheduled(), 5000);
+		QCOMPARE(daemon.RetryIntervalMs(), 5000);
+		QCOMPARE(Control(sock, {{"type", "status"}})["state"].toString(), QString("Error"));
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		daemon.Shutdown();
+	}
+	void secondDaemonIsRefused() {
+		QTemporaryDir run, profile;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		HostDaemon first;
+		QString    error;
+		QVERIFY2(first.Start(&error), qPrintable(error));
+		const auto sock = run.filePath("kyty-host/control.sock");
+		{
+			HostDaemon second;
+			QVERIFY(!second.Start(&error));
+			QVERIFY2(error.contains("already running"), qPrintable(error));
+		}
+		QCOMPARE(Control(sock, {{"type", "status"}})["state"].toString(), QString("Stopped"));
+		first.Shutdown();
+	}
 	static QJsonObject Control(const QString& sock, const QJsonObject& request) {
 		std::optional<HostReply> reply;
 		QString                  error;

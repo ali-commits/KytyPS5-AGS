@@ -37,11 +37,7 @@ QString HostRuntimeDirectory() {
 
 #ifdef __linux__
 
-bool HostSocketServer::Listen(const QString& path, QString* error) {
-	if (m_server.isListening()) {
-		return true;
-	}
-	const auto  dir = QFileInfo(path).absolutePath();
+bool PrepareHostDirectory(const QString& dir, QString* error) {
 	struct stat st {};
 	if (!QDir().mkpath(dir) || ::lstat(QFile::encodeName(dir).constData(), &st) != 0 ||
 	    !S_ISDIR(st.st_mode) || st.st_uid != ::geteuid()) {
@@ -54,6 +50,16 @@ bool HostSocketServer::Listen(const QString& path, QString* error) {
 		if (error != nullptr) {
 			*error = QStringLiteral("Cannot make %1 private").arg(dir);
 		}
+		return false;
+	}
+	return true;
+}
+
+bool HostSocketServer::Listen(const QString& path, QString* error) {
+	if (m_server.isListening()) {
+		return true;
+	}
+	if (!PrepareHostDirectory(QFileInfo(path).absolutePath(), error)) {
 		return false;
 	}
 	QLocalServer::removeServer(path); // stale socket from a killed daemon; the directory is ours
@@ -252,6 +258,13 @@ std::optional<HostReply> HostSocketCall(const QString& path, const QJsonObject& 
 }
 
 #else // The host daemon is Linux only; other platforms build the symbols but never serve.
+
+bool PrepareHostDirectory(const QString&, QString* error) {
+	if (error != nullptr) {
+		*error = QStringLiteral("The host socket is only supported on Linux");
+	}
+	return false;
+}
 
 bool HostSocketServer::Listen(const QString&, QString* error) {
 	if (error != nullptr) {

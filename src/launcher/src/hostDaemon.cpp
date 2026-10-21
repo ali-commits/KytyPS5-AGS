@@ -18,6 +18,8 @@
 #include <QSettings>
 #include <QSocketNotifier>
 
+#include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <filesystem>
@@ -29,6 +31,8 @@
 namespace {
 
 constexpr int SHUTDOWN_CAP_MS = 20000;
+constexpr int RETRY_FIRST_MS  = 5000;
+constexpr int RETRY_MAX_MS    = 60000;
 
 HostReply Json(const QJsonObject& object) {
 	return {200, "application/json", QJsonDocument(object).toJson(QJsonDocument::Compact), {}};
@@ -119,10 +123,28 @@ HostDaemon::HostDaemon(QObject* parent)
 	m_refresh.setInterval(1000);
 	m_shutdown_cap.setSingleShot(true);
 	m_shutdown_cap.setInterval(SHUTDOWN_CAP_MS);
+	m_retry.setSingleShot(true);
 	connect(&m_reload, &QTimer::timeout, this, &HostDaemon::ReloadLibrary);
 	connect(&m_refresh, &QTimer::timeout, this, [this] {
 		m_backend.SetLocalGameRunning(LocalGameRunning());
 		m_backend.Refresh();
+		// A restart deferred by a streamed game runs once that game has ended.
+		if (m_restart_pending && !m_shutting_down &&
+		    PlanRestart(m_backend.GetState(), m_backend.StreamGameRunning()) ==
+		        RestartStep::StopNow) {
+			m_backend.Stop();
+		}
+	});
+	connect(&m_retry, &QTimer::timeout, this, [this] {
+		if (m_shutting_down || m_restart_pending ||
+		    m_backend.GetState() != StreamingBackend::State::Error) {
+			return;
+		}
+		if (LocalGameRunning()) { // Moonlight launches from the shared library: wait for the game
+			ArmRetry();
+			return;
+		}
+		StartHosting(ReadSettings());
 	});
 	connect(&m_shutdown_cap, &QTimer::timeout, this, &HostDaemon::Finished);
 	connect(&m_compat, &CompatibilityDatabase::Updated, &m_reload, qOverload<>(&QTimer::start));
@@ -135,6 +157,26 @@ HostDaemon::HostDaemon(QObject* parent)
 		WatchSettings();
 	});
 	connect(&m_backend, &StreamingBackend::Changed, this, &HostDaemon::OnBackendChanged);
+}
+
+HostDaemon::~HostDaemon() {
+	if (m_lock_fd >= 0) ::close(m_lock_fd);
+}
+
+HostDaemon::RestartStep HostDaemon::PlanRestart(StreamingBackend::State state,
+                                                bool                    stream_game_running) {
+	if (Idle(state)) return RestartStep::StartNow;
+	if (state == StreamingBackend::State::Stopping || stream_game_running) return RestartStep::Wait;
+	return RestartStep::StopNow;
+}
+
+int HostDaemon::NextRetryMs(int previous_ms) {
+	return previous_ms < RETRY_FIRST_MS ? RETRY_FIRST_MS : std::min(previous_ms * 2, RETRY_MAX_MS);
+}
+
+void HostDaemon::ArmRetry() {
+	m_retry_ms = NextRetryMs(m_retry_ms);
+	m_retry.start(m_retry_ms);
 }
 
 bool HostDaemon::LocalEmulatorRunning() {
@@ -171,6 +213,20 @@ bool HostDaemon::Start(QString* error) {
 		return false;
 	}
 	const bool autostart = !qEnvironmentVariableIsSet("KYTY_HOST_NO_AUTOSTART");
+	// One daemon per user: a second one would unlink the live sockets and orphan the first.
+	if (!PrepareHostDirectory(directory, error)) return false;
+	m_lock_fd = ::open(QFile::encodeName(directory + "/daemon.lock").constData(),
+	                   O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (m_lock_fd < 0 || ::flock(m_lock_fd, LOCK_EX | LOCK_NB) != 0) {
+		if (error != nullptr) {
+			*error = (m_lock_fd >= 0 && errno == EWOULDBLOCK)
+			             ? QStringLiteral("Kyty host is already running")
+			             : QStringLiteral("Cannot lock %1/daemon.lock.").arg(directory);
+		}
+		if (m_lock_fd >= 0) ::close(m_lock_fd);
+		m_lock_fd = -1;
+		return false;
+	}
 	if (!m_control.Listen(directory + "/control.sock", error)) return false;
 	if (!m_api_server.Listen(directory + "/api.sock", error)) return false;
 	m_started = true;
@@ -216,6 +272,10 @@ void HostDaemon::ReloadLibrary() {
 
 void HostDaemon::OnBackendChanged() {
 	const auto state = m_backend.GetState();
+	if (state == StreamingBackend::State::Ready) {
+		m_retry_ms = 0;
+		m_retry.stop();
+	}
 	if (m_restart_pending && Idle(state)) {
 		m_restart_pending = false;
 		StartHosting(m_restart_settings);
@@ -224,6 +284,12 @@ void HostDaemon::OnBackendChanged() {
 	if (m_shutting_down && Idle(state)) {
 		m_shutdown_cap.stop();
 		emit Finished();
+		return;
+	}
+	// Sunshine died, a local game blocked the start or a restart was refused: keep trying.
+	if (state == StreamingBackend::State::Error && !m_shutting_down && !m_retry.isActive() &&
+	    !qEnvironmentVariableIsSet("KYTY_HOST_NO_AUTOSTART")) {
+		ArmRetry();
 	}
 }
 
@@ -231,6 +297,7 @@ void HostDaemon::Shutdown() {
 	if (m_shutting_down) return;
 	m_shutting_down   = true;
 	m_restart_pending = false;
+	m_retry.stop();
 	m_refresh.stop();
 	m_reload.stop();
 	if (Idle(m_backend.GetState())) {
@@ -330,10 +397,15 @@ QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
 	if (!Same(current, next) && !m_shutting_down && (Active(m_backend.GetState()) || autostart)) {
 		m_restart_pending  = true;
 		m_restart_settings = next;
-		if (Idle(m_backend.GetState())) {
+		m_retry.stop();
+		const auto state = m_backend.GetState();
+		const auto step  = PlanRestart(state, m_backend.StreamGameRunning());
+		if (step == RestartStep::StartNow) {
 			OnBackendChanged();
-		} else if (m_backend.GetState() != StreamingBackend::State::Stopping) {
+		} else if (step == RestartStep::StopNow) {
 			m_backend.Stop();
+		} else if (state != StreamingBackend::State::Stopping) {
+			return {{"ok", true}, {"deferred", true}}; // the refresh tick stops after the game
 		}
 	}
 	return {{"ok", true}};
