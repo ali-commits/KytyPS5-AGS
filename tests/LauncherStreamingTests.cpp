@@ -772,7 +772,9 @@ private slots:
 		QTRY_VERIFY(autostart->isChecked()); // the fake reports is-enabled with exit status 0
 		QVERIFY(start->isEnabled());
 		QTest::mouseClick(start, Qt::LeftButton);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
+		// The daemon answers while Stopped, and `systemctl start` is a no-op for an active unit.
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user restart kyty-host.service"));
+		QVERIFY(!SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
 		fake.status["state"] = "Ready";
 		QTRY_VERIFY(stop->isEnabled());
 		QTest::mouseClick(stop, Qt::LeftButton);
@@ -781,6 +783,22 @@ private slots:
 		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user disable kyty-host.service"));
 		autostart->setChecked(true);
 		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user enable kyty-host.service"));
+	}
+	void widgetStartRestartsAnErroredDaemon() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		fake.status["state"] = "Error";
+		fake.status["error"] = "boom";
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           start = widget.findChild<QPushButton*>("streamStart");
+		QVERIFY(start);
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamStatus")->text().contains("error"));
+		QVERIFY(start->isEnabled());
+		QTest::mouseClick(start, Qt::LeftButton);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user restart kyty-host.service"));
+		QVERIFY(!SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
 	}
 	void widgetShowsDaemonStatusAddressAndLists() {
 		QTemporaryDir  dir;
@@ -1536,6 +1554,20 @@ while True: time.sleep(0.05)
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 		QVERIFY(!QFile::exists(dir.filePath("game-started")));
 		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
+	}
+	void backendReportsMissingHelperWithoutWritingHostConf() {
+		QTemporaryDir dir;
+		const auto    profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("no-such-helper");
+		settings.port    = FreeBasePort();
+		StreamingBackend backend(profile);
+		backend.Start(settings);
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Error);
+		QVERIFY(backend.Error().contains("unavailable"));
+		QVERIFY(!QFile::exists(QDir(profile).filePath("host.conf")));
+		QVERIFY(!QFile::exists(QDir(dir.path()).filePath("host.conf")));
 	}
 	void widgetApplyRejectsInvalidSettingsWithoutContactingDaemon() {
 		QTemporaryDir  dir;

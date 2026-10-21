@@ -343,7 +343,11 @@ StreamingSettings StreamingWidget::Settings() const {
 	return s;
 }
 void StreamingWidget::StartHosting() {
-	m_host->StartDaemon();
+	// `systemctl start` is a no-op on an active unit, so an idle or failed daemon needs a restart.
+	if (m_host_status.isEmpty())
+		m_host->StartDaemon();
+	else
+		m_host->RestartDaemon();
 }
 void StreamingWidget::LoadPreferences() {
 	m_host->Request({{"type", "get-preferences"}},

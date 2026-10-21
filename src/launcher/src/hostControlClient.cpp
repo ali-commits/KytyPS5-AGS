@@ -107,6 +107,10 @@ void HostControlClient::StartDaemon() {
 	RunSystemctl({"--user", "start", UNIT}, true, {});
 }
 
+void HostControlClient::RestartDaemon() {
+	RunSystemctl({"--user", "restart", UNIT}, true, {});
+}
+
 void HostControlClient::StopDaemon() {
 	RunSystemctl({"--user", "stop", UNIT}, true, {});
 }

@@ -388,9 +388,12 @@ void ConfigurationListWidget::WatchSettingsFile() {
 }
 
 void ConfigurationListWidget::ReloadSettingsFromDisk() {
-	// Never swap the list under an open game settings dialog; its own save follows anyway.
-	if (qobject_cast<ConfigurationEditDialog*>(QApplication::activeModalWidget()) != nullptr)
+	// Never swap the list under an open game settings dialog. Retry until it closes: after its own
+	// save the bytes match the snapshot (no-op), after a cancel the external edit is picked up.
+	if (qobject_cast<ConfigurationEditDialog*>(QApplication::activeModalWidget()) != nullptr) {
+		m_reload_timer->start();
 		return;
+	}
 	const auto bytes = SettingsFileBytes();
 	if (bytes == m_settings_snapshot) return; // our own write, or nothing relevant changed
 	m_settings_snapshot = bytes;

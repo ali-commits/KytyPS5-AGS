@@ -661,6 +661,33 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(tree->topLevelItemCount(),3,5000);
     }
 
+    void externalEditDuringGameDialogReloadsAfterCancel() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        ConfigurationListWidget library;
+        auto* tree=library.findChild<QTreeWidget*>("cfgs_list");
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(),3);
+        Configuration info;
+        EditDialog dialog(info);
+        int during=-1;
+        QTimer::singleShot(0,&dialog,[&] {
+            {
+                QSettings external("Kyty.ini",QSettings::IniFormat); // the daemon edits while the dialog is open
+                external.setValue("Launcher/game_dirs",QStringList{});
+                external.sync();
+            }
+            QTest::qWait(1500); // several skipped reload attempts
+            during=tree->topLevelItemCount();
+            dialog.reject();
+        });
+        dialog.exec();
+        QCOMPARE(during,3); // the list was not swapped under the open dialog
+        QTRY_COMPARE_WITH_TIMEOUT(tree->topLevelItemCount(),0,5000); // retried once it closed
+    }
+
     void streamingTabRetainsPairingAudioAndHeadlessPreferences() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());

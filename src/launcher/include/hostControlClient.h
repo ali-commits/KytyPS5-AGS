@@ -23,6 +23,7 @@ public:
 	             std::function<void(QJsonObject reply, QString error)> done);
 
 	void StartDaemon();         // systemctl --user start kyty-host.service
+	void RestartDaemon();       // systemctl --user restart kyty-host.service
 	void StopDaemon();          // systemctl --user stop kyty-host.service
 	void SetAutostart(bool on); // systemctl --user enable|disable kyty-host.service
 	void QueryAutostart(std::function<void(bool enabled)> done); // systemctl --user is-enabled
