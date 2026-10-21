@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise save/config isolation and refusal to overwrite a working install."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -134,6 +135,23 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(replaced.returncode, 0, replaced.stderr)
             self.assertEqual((config/'rollback'/'kyty-host.service').read_text(), old)
             self.assertIn(f'ExecStart={command} --host\n', (systemd/'kyty-host.service').read_text())
+
+    def test_failing_systemctl_leaves_complete_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = self.make_inputs(root)
+            fake = root/'fakebin'
+            fake.mkdir()
+            (fake/'systemctl').write_text('#!/bin/sh\nexit 1\n')
+            (fake/'systemctl').chmod(0o755)
+            prefix, config = root/'prefix', root/'config'
+            result = subprocess.run([sys.executable, str(SCRIPT), *inputs, '--prefix', str(prefix), '--config', str(config),
+                                     '--command', str(root/'bin'/'kytyps5-streaming'), '--systemd-dir', str(root/'systemd'),
+                                     '--enable'], capture_output=True, text=True,
+                                    env={**os.environ, 'PATH': f'{fake}:{os.environ["PATH"]}'})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((prefix/'share'/'kyty'/'71-kyty-uhid.rules').is_file())
+            self.assertIn('sudo udevadm control --reload-rules', result.stdout)
 
 
 if __name__ == '__main__':

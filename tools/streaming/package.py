@@ -140,11 +140,6 @@ def package(args):
         f'cd {shlex.quote(str(prefix))}\nexec ./launcher "$@"\n')
     (prefix/'start-streaming.sh').write_text(wrapper)
     (prefix/'start-streaming.sh').chmod(0o755)
-    if args.command:
-        command.parent.mkdir(parents=True, exist_ok=True)
-        command.write_text(wrapper)
-        command.chmod(0o755)
-        install_unit(args, command, config, unit_path, old_unit)
     share = prefix/'share'/'kyty'
     share.mkdir(parents=True, exist_ok=True)
     for name in ('71-kyty-uhid.rules', 'uhid.conf'):
@@ -153,7 +148,13 @@ def package(args):
     print('Run once to allow the virtual DualSense (not executed by this packager):\n'
           f'sudo install -m 644 {share}/71-kyty-uhid.rules /etc/udev/rules.d/\n'
           f'sudo install -m 644 {share}/uhid.conf /etc/modules-load.d/\n'
-          'sudo modprobe uhid && sudo udevadm control --reload-rules && sudo udevadm trigger')
+          'sudo modprobe uhid && sudo udevadm control --reload-rules && sudo udevadm trigger', flush=True)
+    # Last: a failing systemctl then leaves a complete prefix and the commands above printed.
+    if args.command:
+        command.parent.mkdir(parents=True, exist_ok=True)
+        command.write_text(wrapper)
+        command.chmod(0o755)
+        install_unit(args, command, config, unit_path, old_unit)
 
 
 def main():
