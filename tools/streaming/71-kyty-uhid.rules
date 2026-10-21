@@ -1,0 +1,8 @@
+# Kyty host: lets the active desktop user create the tunnelled virtual DualSense.
+# Risk accepted by the user: uhid can create any HID device (including keyboards).
+KERNEL=="uhid", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uhid"
+# hidraw access for Bluetooth DualSense / DualSense Edge (real or tunnelled).
+KERNEL=="hidraw*", KERNELS=="*054C:0CE6*", TAG+="uaccess"
+KERNEL=="hidraw*", KERNELS=="*054C:0DF2*", TAG+="uaccess"
+# Test-only vendor device used by the Sunshine fork's Kyty uhid unit test.
+KERNEL=="hidraw*", KERNELS=="*1209:4B59*", TAG+="uaccess"

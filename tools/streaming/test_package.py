@@ -57,6 +57,68 @@ class PackageTests(unittest.TestCase):
             self.assertIn('already exists', again.stderr)
             self.assertEqual((prefix/'_SaveData'/'progress').read_bytes(), b'experimental progress')
 
+    def make_inputs(self, root):
+        stage, base, runtime = (root/name for name in ('stage', 'base', 'runtime'))
+        for path in (stage, base, runtime):
+            path.mkdir()
+        for name in ('launcher', 'kyty_emulator'):
+            (stage/name).write_text('#!/bin/sh\nexit 0\n')
+            (stage/name).chmod(0o755)
+        (base/'Kyty.ini').write_text('[Launcher]\n')
+        (base/'u59-preset.json').write_text('{}\n')
+        (runtime/'_SaveData').mkdir()
+        (root/'host').write_bytes(b'backend')
+        (root/'emulator.map').write_bytes(b'map')
+        return ['--stage', str(stage), '--backend', str(root/'host'), '--backend-source', str(root),
+                '--base-install', str(base), '--runtime', str(runtime), '--map', str(root/'emulator.map'),
+                '--skip-running-check']
+
+    def run_package(self, inputs, prefix, config, command, systemd, *extra):
+        return subprocess.run([sys.executable, str(SCRIPT), *inputs, '--prefix', str(prefix), '--config', str(config),
+                               '--command', str(command), '--systemd-dir', str(systemd), *extra],
+                              capture_output=True, text=True)
+
+    def test_user_service_and_udev_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = self.make_inputs(root)
+            prefix, config, systemd = root/'prefix', root/'config', root/'systemd'
+            command = root/'bin'/'kytyps5-streaming'
+            result = self.run_package(inputs, prefix, config, command, systemd)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            unit = (systemd/'kyty-host.service').read_text()
+            self.assertIn(f'ExecStart={command} --host\n', unit)
+            self.assertIn('Restart=on-failure\n', unit)
+            self.assertIn('WantedBy=graphical-session.target\n', unit)
+            self.assertNotIn('@COMMAND@', unit)
+            share = prefix/'share'/'kyty'
+            self.assertIn('KERNEL=="uhid"', (share/'71-kyty-uhid.rules').read_text())
+            self.assertEqual((share/'uhid.conf').read_text(), 'uhid\n')
+            for line in (f'sudo install -m 644 {share}/71-kyty-uhid.rules /etc/udev/rules.d/',
+                         f'sudo install -m 644 {share}/uhid.conf /etc/modules-load.d/',
+                         'sudo modprobe uhid && sudo udevadm control --reload-rules && sudo udevadm trigger'):
+                self.assertIn(line, result.stdout)
+
+    def test_foreign_unit_refused_unless_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = self.make_inputs(root)
+            systemd = root/'systemd'
+            systemd.mkdir()
+            old = '[Service]\nExecStart=/old/prefix/bin/kytyps5-streaming --host\n'
+            (systemd/'kyty-host.service').write_text(old)
+            prefix, config = root/'prefix', root/'config'
+            command = root/'bin'/'kytyps5-streaming'
+            refused = self.run_package(inputs, prefix, config, command, systemd)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('--replace-unit', refused.stderr)
+            self.assertEqual((systemd/'kyty-host.service').read_text(), old)
+            self.assertFalse(prefix.exists() or config.exists() or command.exists())
+            replaced = self.run_package(inputs, prefix, config, command, systemd, '--replace-unit')
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            self.assertEqual((config/'rollback'/'kyty-host.service').read_text(), old)
+            self.assertIn(f'ExecStart={command} --host\n', (systemd/'kyty-host.service').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
