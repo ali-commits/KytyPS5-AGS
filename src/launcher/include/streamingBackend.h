@@ -45,6 +45,8 @@ public:
 	static QString PreflightPorts(int base, int controller_audio_port = 0);
 
 	[[nodiscard]] bool StreamGameRunning() const; // true while a kyty_stream_launch child is live
+	[[nodiscard]] QString     RunningGameId() const; // catalog id from session.json, or empty
+	[[nodiscard]] QJsonObject Hid() const { return m_hid; } // last GET /api/kyty/hid reply
 	void PublishCatalog(); // rewrite launch.json now; apps.json when the app set changed
 	void SetApiSocket(const QString& path) { m_api_socket = path; }
 	[[nodiscard]] QString ApiSocket() const { return m_api_socket; }
@@ -76,6 +78,7 @@ private:
 	StreamingSettings           m_settings;
 	QList<StreamingLaunchEntry> m_catalog;
 	QJsonArray                  m_pairings, m_clients, m_receivers;
+	QJsonObject                 m_hid;
 	QJsonObject                 m_controller_audio_status;
 	QString                     m_api_socket;
 	QStringList                 m_published_app_keys; // id|name|image_path of the last apps.json

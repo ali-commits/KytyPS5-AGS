@@ -51,12 +51,6 @@
 class QWidget;
 
 #if defined(_WIN32)
-constexpr char EMULATOR_EXE[] = "kyty_emulator.exe";
-#else
-constexpr char EMULATOR_EXE[] = "kyty_emulator";
-#endif
-
-#if defined(_WIN32)
 constexpr char CMD_EXE[] = "cmd.exe";
 #elif defined(__linux__)
 constexpr char KYTY_BASH_FILE[] = "kyty_run.sh";

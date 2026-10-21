@@ -1,6 +1,7 @@
 #include "cheatFile.h"
 #include "gameLibrary.h"
 #include "hostApi.h"
+#include "hostDaemon.h"
 #include "hostSocket.h"
 
 #include <QDir>
@@ -13,8 +14,11 @@
 #include <QtTest>
 
 #include <atomic>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 
 static void WriteFile(const QString& path, const QByteArray& data) {
 	QDir().mkpath(QFileInfo(path).absolutePath());
@@ -365,6 +369,60 @@ private slots:
 		QVERIFY(s.waitForConnected(1000));
 		s.write(QByteArray(70 * 1024, 'x'));
 		QTRY_COMPARE_WITH_TIMEOUT(s.state(), QLocalSocket::UnconnectedState, 3000);
+	}
+	void localEmulatorLockDetection() {
+		QTemporaryDir run;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		QVERIFY(!HostDaemon::LocalEmulatorRunning());
+		QDir().mkpath(run.filePath("kytyps5"));
+		const int fd = ::open(QFile::encodeName(run.filePath("kytyps5/emulator.lock")),
+		                      O_CREAT | O_RDWR, 0600);
+		QVERIFY(fd >= 0);
+		QCOMPARE(::flock(fd, LOCK_EX | LOCK_NB), 0);
+		QVERIFY(HostDaemon::LocalEmulatorRunning());
+		::close(fd);
+		QVERIFY(!HostDaemon::LocalEmulatorRunning());
+	}
+	static QJsonObject Control(const QString& sock, const QJsonObject& request) {
+		std::optional<HostReply> reply;
+		QString                  error;
+		std::thread              t([&] { reply = HostSocketCall(sock, request, 2000, &error); });
+		for (int i = 0; i < 300 && !reply.has_value(); ++i)
+			QTest::qWait(10);
+		t.join();
+		return reply.has_value() ? QJsonDocument::fromJson(reply->body).object() : QJsonObject {};
+	}
+	void controlSocketStatusAndPreferences() {
+		QTemporaryDir run, profile;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1"); // daemon does not start hosting in tests
+		HostDaemon daemon;
+		QString    error;
+		QVERIFY2(daemon.Start(&error), qPrintable(error));
+		const auto sock   = run.filePath("kyty-host/control.sock");
+		const auto status = Control(sock, {{"type", "status"}});
+		QCOMPARE(status["state"].toString(), QString("Stopped"));
+		QVERIFY(status["hid"].isObject());
+		QVERIFY(!status["local_game_running"].toBool());
+		QVERIFY(!Control(sock,
+		                 {{"type", "pairing-pin"}, {"id", "x"}, {"pin", "12"}, {"name", "n"}})["ok"]
+		             .toBool());
+		QVERIFY(QFileInfo::exists(run.filePath("kyty-host/api.sock")));
+		auto prefs = Control(sock, {{"type", "get-preferences"}});
+		QCOMPARE(prefs["port"].toInt(), 48189);
+		QCOMPARE(prefs["codec"].toString(), QString("HEVC"));
+		prefs["type"] = "set-preferences";
+		prefs["fps"]  = 30;
+		QVERIFY(Control(sock, prefs)["ok"].toBool());
+		QCOMPARE(Control(sock, {{"type", "get-preferences"}})["fps"].toInt(), 30);
+		QSettings file(profile.filePath("streaming.ini"), QSettings::IniFormat);
+		QCOMPARE(file.value("quality/fps").toInt(), 30);
+		prefs["port"] = 99;
+		QVERIFY(!Control(sock, prefs)["ok"].toBool());
+		QCOMPARE(Control(sock, {{"type", "get-preferences"}})["port"].toInt(), 48189);
+		QVERIFY(!Control(sock, {{"type", "nonsense"}})["ok"].toBool());
+		daemon.Shutdown();
 	}
 };
 

@@ -583,6 +583,7 @@ void StreamingBackend::TryFinishStop() {
 	m_session.clear();
 	m_pairings                    = {};
 	m_clients                     = {};
+	m_hid                         = {};
 	m_receivers                   = {};
 	m_controller_audio_status     = {};
 	m_controller_audio_refreshing = false;
@@ -636,6 +637,11 @@ void StreamingBackend::Refresh() {
 				                  m_clients = clients.value("named_certs").toArray();
 				                  emit Changed();
 			                  }
+		                  });
+		    m_api.Request("GET", "/api/kyty/hid", {},
+		                  [this, generation](const QJsonObject& hid, const QString& error) {
+			                  if (generation != m_generation) return;
+			                  m_hid = error.isEmpty() ? hid : QJsonObject {}; // optional endpoint
 		                  });
 		    RefreshControllerAudio();
 		    m_session = "No game running · choose a game in Moonlight";
@@ -790,6 +796,9 @@ void StreamingBackend::SetCatalog(const QList<StreamingLaunchEntry>& catalog) {
 }
 bool StreamingBackend::StreamGameRunning() const {
 	return !RunningSession(m_runtime).isEmpty();
+}
+QString StreamingBackend::RunningGameId() const {
+	return RunningSession(m_runtime).value("game").toString();
 }
 void StreamingBackend::PublishCatalog() {
 	if (m_state != State::Ready) return;
