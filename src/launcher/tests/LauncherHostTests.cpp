@@ -65,6 +65,37 @@ private slots:
 		QCOMPARE(reloaded.Find(id)->info->GameSettings().value("vblank_frequency").toString(),
 		         QStringLiteral("120"));
 	}
+	void partialBodyKeepsSavedFields() {
+		GameLibrary library;
+		QString     error;
+		QVERIFY(library.Load(nullptr, &error));
+		const auto  id = library.Games().first().id;
+		QJsonObject first;
+		first["vblank_frequency"] = "120";
+		QCOMPARE(library.SaveGameSettings(id, first), QString());
+		QJsonObject second;
+		second["trophy_duration_seconds"] = "7";
+		QCOMPARE(library.SaveGameSettings(id, second), QString());
+		GameLibrary reloaded;
+		QVERIFY(reloaded.Load(nullptr, &error));
+		const auto saved = reloaded.Find(id)->info->GameSettings();
+		QCOMPARE(saved.value("vblank_frequency").toString(), QStringLiteral("120"));
+		QCOMPARE(saved.value("trophy_duration_seconds").toString(), QStringLiteral("7"));
+	}
+	void elfRoundTrips() {
+		GameLibrary library;
+		QString     error;
+		QVERIFY(library.Load(nullptr, &error));
+		const auto  id = library.Games().first().id;
+		QJsonObject body;
+		body["elf"] = "other/game.elf";
+		QCOMPARE(library.SaveGameSettings(id, body), QString());
+		QCOMPARE(library.Find(id)->info->elf, QStringLiteral("other/game.elf"));
+		GameLibrary reloaded;
+		QVERIFY(reloaded.Load(nullptr, &error));
+		QCOMPARE(reloaded.Find(id)->info->GameSettings().value("elf").toString(),
+		         QStringLiteral("other/game.elf"));
+	}
 	void rejectsInvalidSettings() {
 		GameLibrary library;
 		QString     error;

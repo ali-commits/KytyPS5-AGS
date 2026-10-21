@@ -406,6 +406,7 @@ QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& sett
 	QString error;
 	candidate->CopyGameInfoFrom(*game->info);
 	candidate->CopyEmulatorSettingsFrom(*game->info);
+	candidate->elf = game->info->elf;
 	if (!candidate->SetGameSettings(settings, error)) {
 		return error.isEmpty() ? QStringLiteral("invalid") : error;
 	}
@@ -418,6 +419,7 @@ QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& sett
 	}
 	stored->CopyGameInfoFrom(*candidate);
 	stored->CopyEmulatorSettingsFrom(*candidate);
+	stored->elf             = candidate->elf;
 	stored->custom_settings = true;
 
 	auto s = OpenSettings();
@@ -435,6 +437,7 @@ QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& sett
 	}
 	// m_games entries hold shared_ptrs, so the live configuration is updated in place.
 	game->info->CopyEmulatorSettingsFrom(*candidate);
+	game->info->elf                      = candidate->elf;
 	game->info->custom_settings          = true;
 	const_cast<GameEntry*>(game)->custom = true;
 	return {};
