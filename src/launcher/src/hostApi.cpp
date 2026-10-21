@@ -51,17 +51,18 @@ constexpr Field FIELDS[] = {
     {"shader_validation_enabled", "Shader validation", "bool", 0, 0},
     {"shader_optimization_type", "Shader optimization", "enum", 0, 0},
     {"shader_log_direction", "Shader log output", "enum", 0, 0},
-    {"shader_log_folder", "Shader log folder", "string", 0, 0},
     {"command_buffer_dump_enabled", "Command buffer dump", "bool", 0, 0},
-    {"command_buffer_dump_folder", "Command buffer dump folder", "string", 0, 0},
     {"printf_direction", "Printf output", "enum", 0, 0},
-    {"printf_output_file", "Printf output file", "string", 0, 0},
     {"profiler_enabled", "Profiler", "bool", 0, 0},
     {"renderdoc_enabled", "RenderDoc", "bool", 0, 0},
     {"amd_cpu_mode", "AMD CPU mode", "enum", 0, 0},
     {"red_zone_protection_enabled", "Red zone protection", "bool", 0, 0},
-    {"elf", "Executable", "string", 0, 0},
 };
+
+// Filesystem paths are never accepted from, or shown to, a request.
+const QStringList PATH_KEYS {QStringLiteral("elf"), QStringLiteral("shader_log_folder"),
+                             QStringLiteral("command_buffer_dump_folder"),
+                             QStringLiteral("printf_output_file")};
 
 QStringList Choices(const QString& key) {
 	if (key == QLatin1String("screen_resolution")) {
@@ -150,8 +151,8 @@ QJsonArray HostApi::SettingsSchema(const Configuration& info) {
 	QStringList listed;
 	const auto  add = [&](const QString& key, const QString& label, const QString& type, qint64 min,
 	                      qint64 max) {
-		if (!values.contains(key)) {
-			return; // e.g. a Windows-only key
+		if (!values.contains(key) || PATH_KEYS.contains(key)) {
+			return; // e.g. a Windows-only key, or a path setting
 		}
 		const auto  value = values.value(key).toString();
 		QJsonObject field {{"key", key},
@@ -300,8 +301,13 @@ void HostApi::PutSettings(const GameEntry& game, const QJsonObject& body,
 	if (!values.isObject()) {
 		return done(Error(400, QStringLiteral("bad-body")));
 	}
-	// SaveGameSettings starts from the game's current values, so only the changed keys are sent.
 	auto changes = values.toObject();
+	for (const auto& key: PATH_KEYS) {
+		if (changes.contains(key)) {
+			return done(Error(400, QStringLiteral("read-only-setting")));
+		}
+	}
+	// SaveGameSettings starts from the game's current values, so only the changed keys are sent.
 	for (const auto& f: FIELDS) {
 		const auto key = QString::fromLatin1(f.key);
 		if (QLatin1String(f.type) == QLatin1String("enum") && changes.value(key).isString()) {

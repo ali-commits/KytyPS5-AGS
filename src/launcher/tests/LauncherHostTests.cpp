@@ -224,9 +224,36 @@ private slots:
 				         qPrintable(field["key"].toString()));
 			}
 		}
+		const QStringList path_keys {"elf", "shader_log_folder", "command_buffer_dump_folder",
+		                             "printf_output_file"};
 		for (const auto& key: library.Find(id)->info->GameSettings().keys()) {
-			QVERIFY2(keys.contains(key), qPrintable(key));
+			QCOMPARE(keys.contains(key), !path_keys.contains(key));
 		}
+		for (const auto& key: path_keys) {
+			QVERIFY2(!keys.contains(key), qPrintable(key));
+		}
+	}
+	void apiSettingsRejectsPathKeys() {
+		const auto id   = library.Games().first().id;
+		const auto path = "/kyty/v1/games/" + id + "/settings";
+		const auto get =
+		    QJsonDocument::fromJson(Call(api, {{"method", "GET"}, {"path", path}}).body).object();
+		const auto before = library.Find(id)->info->GameSettings();
+		for (const auto& [key, value]:
+		     {std::pair<QString, QString> {"printf_output_file", "/tmp/x"},
+		      std::pair<QString, QString> {"elf", "../evil"}}) {
+			auto r = Call(api, {{"method", "PUT"},
+			                    {"path", path},
+			                    {"body", QJsonObject {{"revision", get["revision"]},
+			                                          {"values", QJsonObject {{key, value}}}}}});
+			QCOMPARE(r.status, 400);
+			QCOMPARE(QJsonDocument::fromJson(r.body).object()["error"].toString(),
+			         QString("read-only-setting"));
+		}
+		QCOMPARE(library.Find(id)->info->GameSettings(), before);
+		auto again =
+		    QJsonDocument::fromJson(Call(api, {{"method", "GET"}, {"path", path}}).body).object();
+		QCOMPARE(again["revision"], get["revision"]);
 	}
 	void apiSettingsEnumUsesChoiceText() {
 		const auto id   = library.Games().first().id;
