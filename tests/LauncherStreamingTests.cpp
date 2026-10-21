@@ -1,3 +1,5 @@
+#include "hostControlClient.h"
+#include "hostSocket.h"
 #include "streamingApi.h"
 #include "streamingAudio.h"
 #include "streamingBackend.h"
@@ -13,6 +15,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -106,6 +109,65 @@ private:
 	QByteArray m_path;
 };
 
+// Scripted control.sock peer: answers status/get-preferences/set-preferences and records requests.
+class FakeHostDaemon {
+public:
+	explicit FakeHostDaemon(const QString& directory)
+	    : m_path(QDir(directory).filePath("host/control.sock")),
+	      m_server([this](const QJsonObject& request, std::function<void(HostReply)> done) {
+		      requests.append(request);
+		      const auto  type = request.value("type").toString();
+		      QJsonObject reply {{"ok", true}};
+		      if (type == "status") {
+			      reply = status;
+		      } else if (type == "get-preferences") {
+			      reply = preferences;
+		      } else if (type == "set-preferences") {
+			      for (auto it = request.begin(); it != request.end(); ++it)
+				      if (it.key() != "type") preferences.insert(it.key(), it.value());
+		      }
+		      done({200, "application/json", QJsonDocument(reply).toJson(QJsonDocument::Compact),
+		            {}});
+	      }) {
+		QString error;
+		m_listening = m_server.Listen(m_path, &error);
+		Q_ASSERT_X(m_listening, "FakeHostDaemon", qPrintable(error));
+	}
+	[[nodiscard]] QString Path() const { return m_path; }
+	[[nodiscard]] QList<QJsonObject> Requests(const QString& type) const {
+		QList<QJsonObject> found;
+		for (const auto& request: requests)
+			if (request.value("type").toString() == type) found.append(request);
+		return found;
+	}
+	static QJsonObject ReadyStatus() {
+		return {{"state", "Ready"},
+		        {"error", ""},
+		        {"address", "192.168.1.3"},
+		        {"port", 48189},
+		        {"session", "No game running"},
+		        {"stream_game_running", false},
+		        {"local_game_running", false},
+		        {"pairings", QJsonArray {QJsonObject {{"id", QString(32, 'a')}, {"name", "Living-room TV"}}}},
+		        {"clients", QJsonArray {QJsonObject {{"uuid", "client-1"}, {"name", "Paired TV"}}}},
+		        {"hid", QJsonObject {}}};
+	}
+	static QJsonObject DefaultPreferences() {
+		return {{"port", 48189},    {"resolution", "Native"}, {"fps", 60},
+		        {"bitrate", 30},    {"codec", "HEVC"},        {"adapter", ""},
+		        {"local_audio", true}, {"show_local", true}};
+	}
+
+	QJsonObject        status      = ReadyStatus();
+	QJsonObject        preferences = DefaultPreferences();
+	QList<QJsonObject> requests;
+
+private:
+	QString          m_path;
+	bool             m_listening = false;
+	HostSocketServer m_server;
+};
+
 class LauncherStreamingTests: public QObject {
 	Q_OBJECT
 	static bool GenerateCertificate(const QString& dir) {
@@ -169,6 +231,17 @@ class LauncherStreamingTests: public QObject {
 		for (int port = 50000; port < 64000; port += 37)
 			if (StreamingBackend::PreflightPorts(port).isEmpty()) return port;
 		return 0;
+	}
+	// A systemctl stand-in that appends its arguments to <directory>/systemctl.log and succeeds.
+	static QString MakeFakeSystemctl(const QString& directory) {
+		const auto script = QDir(directory).filePath("fake-systemctl");
+		const auto log    = QDir(directory).filePath("systemctl.log");
+		if (!Put(script, "#!/bin/sh\necho \"$@\" >> '" + log.toUtf8() + "'\nexit 0\n")) return {};
+		QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		return script;
+	}
+	static QByteArray SystemctlLog(const QString& directory) {
+		return Read(QDir(directory).filePath("systemctl.log"));
 	}
 private slots:
 	void negotiatedTvResolutionIsolatedFromLocalProfile() {
@@ -313,31 +386,17 @@ private slots:
 		FixtureEnvironment environment(dir.path());
 		const auto profile = dir.filePath("profile");
 		QVERIFY(QDir().mkpath(profile));
-		QSettings saved(QDir(profile).filePath("streaming.ini"), QSettings::IniFormat);
 		StreamingSettings settings;
 		settings.backend = dir.filePath("host");
 		settings.port = FreeBasePort();
 		settings.controller_audio = true;
 		// A laptop audio receiver runs alongside the ordinary TV session.
 		settings.controller_audio_port = settings.port + 30;
-		settings.Write(saved);
-		saved.sync();
 		const auto receivers_path = QDir(profile).filePath("controller-audio-clients.json");
 		const QByteArray receivers("{\"historical\": true}\n");
 		QVERIFY(Put(receivers_path, receivers));
 		StreamingBackend backend(profile);
-		StreamingWidget widget(&backend);
-		auto* enabled = widget.findChild<QCheckBox*>("streamControllerAudio");
-		auto* port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
-		auto* status = widget.findChild<QLabel*>("streamControllerAudioStatus");
-		QVERIFY(enabled && port && status);
-		QVERIFY(enabled->isEnabled());
-		QVERIFY(port->isEnabled());
-		QVERIFY(widget.findChild<QListWidget*>("streamControllerAudioReceivers")->isEnabled());
-		QVERIFY(!status->text().contains("unavailable", Qt::CaseInsensitive));
-		QVERIFY(widget.findChild<QComboBox*>("streamResolution")->isHidden());
-		QVERIFY(widget.findChild<QComboBox*>("streamFps")->isHidden());
-		widget.StartHosting();
+		backend.Start(settings);
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
 		const auto config = Read(QDir(profile).filePath("host.conf"));
 		QVERIFY(config.contains("kyty_controller_audio = true\n"));
@@ -345,12 +404,17 @@ private slots:
 		QVERIFY(config.contains("kyty_controller_audio_clients"));
 		const auto manifest = QJsonDocument::fromJson(Read(QDir(profile).filePath("launch.json"))).object();
 		QVERIFY(manifest.value("unified_stream_profile").toBool());
-		saved.sync();
-		QVERIFY(saved.value("controller_audio/enabled").toBool());
-		QCOMPARE(saved.value("controller_audio/port").toInt(), settings.port + 30);
 		QCOMPARE(Read(receivers_path), receivers);
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+	void profileControlsStayHiddenForTvNegotiation() {
+		QTemporaryDir      dir;
+		HostControlClient  client(dir.filePath("none/control.sock"));
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		QVERIFY(widget.findChild<QComboBox*>("streamResolution")->isHidden());
+		QVERIFY(widget.findChild<QComboBox*>("streamFps")->isHidden());
 	}
 	void controllerAudioLifecycleAndReceiverControls() {
 		QTemporaryDir dir;
@@ -372,12 +436,6 @@ private slots:
 		                .toJson()));
 		FixtureEnvironment environment(dir.path());
 		StreamingBackend   backend(dir.filePath("profile"));
-		StreamingWidget    widget(&backend);
-		auto* receivers = widget.findChild<QListWidget*>("streamControllerAudioReceivers");
-		auto* status    = widget.findChild<QLabel*>("streamControllerAudioStatus");
-		auto* toggle    = widget.findChild<QPushButton*>("streamControllerAudioToggle");
-		auto* remove    = widget.findChild<QPushButton*>("streamControllerAudioRemove");
-		QVERIFY(receivers && status && toggle && remove);
 		StreamingSettings settings;
 		settings.backend          = dir.filePath("host");
 		settings.port             = FreeBasePort();
@@ -391,18 +449,16 @@ private slots:
 		QVERIFY(config.contains(
 		    "kyty_controller_audio_clients = " +
 		    QFile::encodeName(dir.filePath("profile/controller-audio-clients.json"))));
-		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 1, 5000);
-		QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("waiting", Qt::CaseInsensitive), 5000);
-		receivers->setCurrentRow(0);
-		QVERIFY(toggle->isEnabled());
-		QTest::mouseClick(toggle, Qt::LeftButton);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.ControllerAudioReceivers().size(), 1, 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(
+		    backend.ControllerAudioStatus().value("state").toString() == "waiting", 5000);
+		backend.SetControllerAudioReceiverEnabled(id, false);
 		QTRY_VERIFY_WITH_TIMEOUT(
 		    Read(dir.filePath("api-requests.jsonl")).contains("\"enabled\": false"), 5000);
-		QTRY_VERIFY_WITH_TIMEOUT(receivers->item(0)->text().contains("disabled"), 5000);
-		receivers->setCurrentRow(0);
-		QVERIFY(remove->isEnabled());
-		QTest::mouseClick(remove, Qt::LeftButton);
-		QTRY_COMPARE_WITH_TIMEOUT(receivers->count(), 0, 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(
+		    !backend.ControllerAudioReceivers().first().toObject().value("enabled").toBool(), 5000);
+		backend.RemoveControllerAudioReceiver(id);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.ControllerAudioReceivers().size(), 0, 5000);
 		backend.Stop();
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
@@ -600,41 +656,14 @@ private slots:
 		         qPrintable(backend.Error()));
 		QVERIFY(!QFile::exists(dir.filePath("profile/host.conf")));
 	}
-	void controllerAudioSettingsMigrateAndPersist() {
-		QTemporaryDir    dir;
-		StreamingBackend backend(dir.path());
-		StreamingWidget  widget(&backend);
-		auto*            enabled = widget.findChild<QCheckBox*>("streamControllerAudio");
-		auto*            port    = widget.findChild<QSpinBox*>("streamControllerAudioPort");
-		QVERIFY2(enabled, "Historical controller audio preferences remain inspectable.");
-		QVERIFY(port);
-		QVERIFY(!enabled->isChecked());
-		QVERIFY(enabled->isEnabled());
-		QVERIFY(port->isEnabled());
-		QCOMPARE(port->value(), 0);
-		enabled->setChecked(true);
-		port->setValue(48219);
-		QSettings saved(dir.filePath("streaming.ini"), QSettings::IniFormat);
-		widget.Settings().Write(saved);
-		saved.sync();
-		QVERIFY(saved.value("controller_audio/enabled").toBool());
-		QCOMPARE(saved.value("controller_audio/port").toInt(), 48219);
-		StreamingWidget restored(&backend);
-		QVERIFY(restored.findChild<QCheckBox*>("streamControllerAudio")->isChecked());
-		QCOMPARE(restored.findChild<QSpinBox*>("streamControllerAudioPort")->value(), 48219);
-		QVERIFY(restored.Settings().Validate().isEmpty());
-		enabled->setChecked(false);
-		widget.Settings().Write(saved);
-		saved.sync();
-		QVERIFY(!saved.value("controller_audio/enabled").toBool());
-	}
 	void controllerAudioPortValidationPreservesLegacy() {
-		QTemporaryDir    dir;
-		StreamingBackend backend(dir.path());
-		StreamingWidget  widget(&backend);
-		auto*            enabled    = widget.findChild<QCheckBox*>("streamControllerAudio");
-		auto*            audio_port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
-		auto*            base       = widget.findChild<QSpinBox*>("streamPort");
+		QTemporaryDir     dir;
+		HostControlClient client(dir.filePath("none/control.sock"));
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           enabled    = widget.findChild<QCheckBox*>("streamControllerAudio");
+		auto*           audio_port = widget.findChild<QSpinBox*>("streamControllerAudioPort");
+		auto*           base       = widget.findChild<QSpinBox*>("streamPort");
 		QVERIFY(enabled);
 		QVERIFY(audio_port);
 		QVERIFY(base);
@@ -652,36 +681,156 @@ private slots:
 		enabled->setChecked(false);
 		QVERIFY(widget.Settings().Validate().isEmpty());
 	}
-	void streamingOnlyDisplayMigratesAndPersists() {
-		QTemporaryDir    dir;
-		StreamingBackend backend(dir.path());
-		StreamingWidget  widget(&backend);
-		auto*            local = widget.findChild<QCheckBox*>("streamShowLocal");
+	void streamingOnlyDisplayRoundTripsThroughDaemonPreferences() {
+		QTemporaryDir dir;
+		FakeHostDaemon fake(dir.path());
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto* local = widget.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY2(local, "Streaming-only needs an explicit local-display control.");
 		QVERIFY(local->isChecked());
-		QSettings saved(dir.filePath("streaming.ini"), QSettings::IniFormat);
+		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
+		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
 		local->setChecked(false);
-		widget.Settings().Write(saved);
-		saved.sync();
-		QVERIFY(saved.contains("display/show_local"));
-		QVERIFY(!saved.value("display/show_local").toBool());
-		StreamingWidget restored(&backend);
+		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
+		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		QVERIFY(fake.Requests("set-preferences").last().contains("show_local"));
+		QVERIFY(!fake.Requests("set-preferences").last().value("show_local").toBool());
+		QVERIFY(!fake.preferences.value("show_local").toBool());
+		HostControlClient restored_client(fake.Path());
+		restored_client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget restored(&restored_client);
 		auto*           restored_local = restored.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY(restored_local);
-		QVERIFY(!restored_local->isChecked());
+		QTRY_VERIFY(!restored_local->isChecked());
 		const auto stream_only =
 		    StreamingCatalog::Manifest({}, "/private/frames.sock", "private", "/private/game.lock",
 		                               "1080p", 60, restored.Settings().show_local);
 		QCOMPARE(stream_only.value("environment").toObject().value("KYTY_STREAM_ONLY").toString(),
 		         QString("1"));
 		local->setChecked(true);
-		widget.Settings().Write(saved);
-		saved.sync();
-		QVERIFY(saved.value("display/show_local").toBool());
 		const auto local_display =
 		    StreamingCatalog::Manifest({}, "/private/frames.sock", "private", "/private/game.lock",
 		                               "1080p", 60, widget.Settings().show_local);
 		QVERIFY(!local_display.value("environment").toObject().contains("KYTY_STREAM_ONLY"));
+	}
+	void widgetPreferencesLoadEditAndApplyThroughDaemon() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		fake.preferences = {{"port", 48300},      {"resolution", "1080p"}, {"fps", 30},
+		                    {"bitrate", 45},      {"codec", "H264"},       {"adapter", "RTX 3090"},
+		                    {"local_audio", false}, {"show_local", false}};
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           port    = widget.findChild<QSpinBox*>("streamPort");
+		auto*           bitrate = widget.findChild<QSpinBox*>("streamBitrate");
+		auto*           codec   = widget.findChild<QComboBox*>("streamCodec");
+		QTRY_COMPARE(port->value(), 48300);
+		QCOMPARE(widget.findChild<QComboBox*>("streamResolution")->currentText(), QString("1080p"));
+		QCOMPARE(widget.findChild<QComboBox*>("streamFps")->currentData().toInt(), 30);
+		QCOMPARE(bitrate->value(), 45);
+		QCOMPARE(codec->currentText(), QString("H264"));
+		QCOMPARE(widget.findChild<QLineEdit*>("streamAdapter")->text(), QString("RTX 3090"));
+		QVERIFY(!widget.findChild<QCheckBox*>("streamLocalAudio")->isChecked());
+		port->setValue(48400);
+		bitrate->setValue(60);
+		codec->setCurrentText("HEVC");
+		widget.findChild<QCheckBox*>("streamLocalAudio")->setChecked(true);
+		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
+		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		const auto sent = fake.Requests("set-preferences").last();
+		QCOMPARE(sent.value("port").toInt(), 48400);
+		QCOMPARE(sent.value("resolution").toString(), QString("1080p"));
+		QCOMPARE(sent.value("fps").toInt(), 30);
+		QCOMPARE(sent.value("bitrate").toInt(), 60);
+		QCOMPARE(sent.value("codec").toString(), QString("HEVC"));
+		QCOMPARE(sent.value("adapter").toString(), QString("RTX 3090"));
+		QVERIFY(sent.value("local_audio").toBool());
+		QVERIFY(!sent.value("show_local").toBool());
+		HostControlClient restored_client(fake.Path());
+		restored_client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget restored(&restored_client);
+		QTRY_COMPARE(restored.findChild<QSpinBox*>("streamPort")->value(), 48400);
+		QCOMPARE(restored.findChild<QSpinBox*>("streamBitrate")->value(), 60);
+		QCOMPARE(restored.findChild<QComboBox*>("streamCodec")->currentText(), QString("HEVC"));
+	}
+	void widgetStartStopAndStartAtLoginDriveSystemctl() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		fake.status["state"] = "Stopped";
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           start     = widget.findChild<QPushButton*>("streamStart");
+		auto*           stop      = widget.findChild<QPushButton*>("streamStop");
+		auto*           autostart = widget.findChild<QCheckBox*>("streamAutostart");
+		QVERIFY(start && stop && autostart);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user is-enabled kyty-host.service"));
+		QTRY_VERIFY(autostart->isChecked()); // the fake reports is-enabled with exit status 0
+		QVERIFY(start->isEnabled());
+		QTest::mouseClick(start, Qt::LeftButton);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
+		fake.status["state"] = "Ready";
+		QTRY_VERIFY(stop->isEnabled());
+		QTest::mouseClick(stop, Qt::LeftButton);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user stop kyty-host.service"));
+		autostart->setChecked(false);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user disable kyty-host.service"));
+		autostart->setChecked(true);
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user enable kyty-host.service"));
+	}
+	void widgetShowsDaemonStatusAddressAndLists() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           address = widget.findChild<QComboBox*>("streamLanAddress");
+		// The first status arrives asynchronously; before it the widget lists local interfaces.
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamStatus")->text().contains("Hosting ready"));
+		QCOMPARE(address->currentText(), QString("192.168.1.3:48189"));
+		QCOMPARE(address->count(), 1);
+		QCOMPARE(widget.findChild<QListWidget*>("streamPending")->count(), 1);
+		QCOMPARE(widget.findChild<QListWidget*>("streamClients")->count(), 1);
+		QVERIFY(widget.findChild<QPushButton*>("streamStop")->isEnabled());
+		QVERIFY(!widget.findChild<QPushButton*>("streamStart")->isEnabled());
+	}
+	void widgetPairsUnpairsAndStopsGameThroughDaemon() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		fake.status["stream_game_running"] = true;
+		fake.status["session"]             = "Game running: Astro";
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           pending = widget.findChild<QListWidget*>("streamPending");
+		auto*           clients = widget.findChild<QListWidget*>("streamClients");
+		auto*           pair    = widget.findChild<QPushButton*>("streamPair");
+		auto*           forget  = widget.findChild<QPushButton*>("streamUnpair");
+		auto*           stop    = widget.findChild<QPushButton*>("streamStopGame");
+		QVERIFY(stop);
+		QTRY_COMPARE(pending->count(), 1);
+		QTRY_VERIFY(stop->isEnabled());
+		pending->setCurrentRow(0);
+		widget.findChild<QLineEdit*>("streamPin")->setText("1234");
+		widget.findChild<QLineEdit*>("streamClientName")->setText("Den TV");
+		QTRY_VERIFY(pair->isEnabled());
+		QTest::mouseClick(pair, Qt::LeftButton);
+		QTRY_COMPARE(fake.Requests("pairing-pin").size(), 1);
+		const auto pin = fake.Requests("pairing-pin").first();
+		QCOMPARE(pin.value("id").toString(), QString(32, 'a'));
+		QCOMPARE(pin.value("pin").toString(), QString("1234"));
+		QCOMPARE(pin.value("name").toString(), QString("Den TV"));
+		clients->setCurrentRow(0);
+		QTRY_VERIFY(forget->isEnabled());
+		QTest::mouseClick(forget, Qt::LeftButton);
+		QTRY_COMPARE(fake.Requests("unpair").size(), 1);
+		QCOMPARE(fake.Requests("unpair").first().value("uuid").toString(), QString("client-1"));
+		QTest::mouseClick(stop, Qt::LeftButton);
+		QTRY_COMPARE(fake.Requests("stop-game").size(), 1);
 	}
 	void launchWrapperValidatesAndClearsStreamingOnly() {
 		QTemporaryDir dir;
@@ -1337,7 +1486,7 @@ while True: time.sleep(0.05)
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
 		qputenv("PATH", previous_path);
 	}
-	void explicitWidgetStartHostsSavedSettingsWithoutLaunchingGame() {
+	void backendHostsSavedSettingsWithoutLaunchingGame() {
 		QTemporaryDir dir;
 		QVERIFY(GenerateCertificate(dir.path()));
 		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
@@ -1367,10 +1516,10 @@ while True: time.sleep(0.05)
 		      {"-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('unexpected')",
 		       dir.filePath("game-started")},
 		      dir.path()}});
-		StreamingWidget widget(&backend);
 		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
 		QVERIFY(!QFile::exists(dir.filePath("host-pid")));
-		widget.StartHosting();
+		QSettings saved(QDir(profile).filePath("streaming.ini"), QSettings::IniFormat);
+		backend.Start(StreamingSettings::Read(saved));
 		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
 		QTRY_COMPARE_WITH_TIMEOUT(backend.Clients().size(), 1, 5000);
 		QVERIFY(backend.Session().startsWith("No game running"));
@@ -1388,42 +1537,39 @@ while True: time.sleep(0.05)
 		QVERIFY(!QFile::exists(dir.filePath("game-started")));
 		QCOMPARE(QJsonDocument::fromJson(Read(dir.filePath("modules.json"))).array().size(), 0);
 	}
-	void explicitWidgetStartRejectsInvalidSettings() {
-		QTemporaryDir     dir;
-		QSettings         file(dir.filePath("streaming.ini"), QSettings::IniFormat);
-		StreamingSettings settings;
-		settings.adapter = "invalid\nadapter";
-		settings.Write(file);
-		file.sync();
-		StreamingBackend backend(dir.path());
-		StreamingWidget  widget(&backend);
-		widget.StartHosting();
-		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
-		QVERIFY(backend.Logs().isEmpty());
-		QVERIFY(
-		    widget.findChild<QLabel*>("streamError")->text().contains("line breaks"));
-		QVERIFY(!QFile::exists(dir.filePath("host.conf")));
+	void widgetApplyRejectsInvalidSettingsWithoutContactingDaemon() {
+		QTemporaryDir  dir;
+		FakeHostDaemon fake(dir.path());
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		auto* adapter = widget.findChild<QLineEdit*>("streamAdapter");
+		adapter->setText(QStringLiteral("invalid\nadapter"));
+		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
+		QVERIFY(widget.findChild<QLabel*>("streamError")->text().contains("line breaks"));
+		QTest::qWait(50);
+		QVERIFY(fake.Requests("set-preferences").isEmpty());
 	}
-	void nativeWidgetDoesNotStartHostAndShowsActionableError() {
-		QTemporaryDir    dir;
-		StreamingBackend backend(dir.path());
-		StreamingWidget  widget(&backend);
+	void widgetShowsDaemonNotRunningAndKeepsStartAvailable() {
+		QTemporaryDir     dir;
+		HostControlClient client(dir.filePath("none/control.sock")); // nothing listens here
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
 		widget.resize(940, 900);
 		widget.show();
 		auto* start = widget.findChild<QPushButton*>("streamStart");
 		auto* stop  = widget.findChild<QPushButton*>("streamStop");
 		QVERIFY(start && stop);
+		QTRY_VERIFY(
+		    widget.findChild<QLabel*>("streamStatus")->text().contains("Host daemon is not running"));
 		QVERIFY(start->isEnabled());
 		QVERIFY(!stop->isEnabled());
-		QCOMPARE(backend.GetState(), StreamingBackend::State::Stopped);
-		QVERIFY(backend.Logs().isEmpty());
-		auto* path = widget.findChild<QLineEdit*>("streamBackendPath");
-		path->setText(dir.filePath("missing-helper"));
+		QVERIFY(!widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		QVERIFY(widget.findChild<QLineEdit*>("streamBackendPath")->isHidden());
 		QTest::mouseClick(start, Qt::LeftButton);
-		QTRY_COMPARE(backend.GetState(), StreamingBackend::State::Error);
-		QVERIFY(widget.findChild<QLabel*>("streamError")->text().contains("unavailable"));
-		QVERIFY(start->isEnabled());
-		QVERIFY(!stop->isEnabled());
+		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
+		QTest::qWait(100); // let the fake systemctl exit before the client is destroyed
 		const auto screenshot = qEnvironmentVariable("KYTY_STREAM_UI_SCREENSHOT");
 		if (!screenshot.isEmpty()) {
 			QTest::qWait(100);

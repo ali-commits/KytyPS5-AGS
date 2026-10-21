@@ -10,8 +10,8 @@
 #include "updateChecker.h"
 #include "emulatorCommand.h"
 #include "mainDialog.h"
+#include "hostSocket.h"
 #include "streamingCatalog.h"
-#include "streamingBackend.h"
 #include "streamingWidget.h"
 
 #include <QApplication>
@@ -21,6 +21,7 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QImage>
@@ -174,6 +175,10 @@ private slots:
         QVERIFY2(child.exitCode()==0,child.readAllStandardError().constData());
         QVERIFY(!QFile::exists(temp.filePath("unexpected-game")));
         QVERIFY(!QFile::exists(profile+"/host-key.pem"));
+        QFile systemctl_log(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG"));
+        QVERIFY(systemctl_log.open(QIODevice::ReadOnly));
+        QVERIFY2(systemctl_log.readAll().contains("--user start kyty-host.service"),
+                 "--start-streaming-host must ask systemd to start the daemon");
 #else
         QSKIP("The isolated executable fixture uses a Linux shell version stub");
 #endif
@@ -336,6 +341,16 @@ private slots:
         const auto old=qgetenv("KYTY_STREAMING_CONFIG_DIR");
         qputenv("KYTY_STREAMING_CONFIG_DIR",temp.filePath("private-stream").toUtf8());
         struct Restore { QByteArray previous; ~Restore(){previous.isNull()?qunsetenv("KYTY_STREAMING_CONFIG_DIR"):qputenv("KYTY_STREAMING_CONFIG_DIR",previous);} } restore{old};
+        const auto old_socket=qgetenv("KYTY_HOST_SOCKET");
+        struct RestoreSocket { QByteArray previous; ~RestoreSocket(){previous.isNull()?qunsetenv("KYTY_HOST_SOCKET"):qputenv("KYTY_HOST_SOCKET",previous);} } restore_socket{old_socket};
+        QJsonObject host_status{{"state","Ready"},{"stream_game_running",false}};
+        HostSocketServer host([&host_status](const QJsonObject& request,std::function<void(HostReply)> done) {
+            const auto reply=request.value("type").toString()=="status"?host_status:QJsonObject{{"ok",true}};
+            done({200,"application/json",QJsonDocument(reply).toJson(QJsonDocument::Compact),{}});
+        });
+        QString listen_error;
+        QVERIFY2(host.Listen(temp.filePath("host/control.sock"),&listen_error),qPrintable(listen_error));
+        qputenv("KYTY_HOST_SOCKET",temp.filePath("host/control.sock").toUtf8());
         MainDialog dialog;
         auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
         QVERIFY(preview);
@@ -377,20 +392,12 @@ private slots:
                  "The native form field clips its wrapped backend status text");
         tabs->setCurrentIndex(0);
         QVERIFY(!title->Title().isEmpty());
-        auto* backend=dialog.findChild<StreamingBackend*>();
-        QVERIFY(backend);
-        bool preview_paused=false,title_cleared=false;
-        connect(backend,&StreamingBackend::Changed,&dialog,[&] {
-            if(backend->GetState()==StreamingBackend::State::Starting) {
-                preview_paused=preview->Error().contains("paused");
-                title_cleared=title->Title().isEmpty();
-            }
-        });
-        StreamingSettings invalid;
-        invalid.backend=temp.filePath("missing-helper");
-        backend->Start(invalid); // Fails before profile/audio/process setup.
-        QVERIFY(preview_paused && title_cleared);
-        QCOMPARE(backend->GetState(),StreamingBackend::State::Error);
+        // Local play is blocked only while the daemon reports a streamed game running.
+        QVERIFY(!preview->Error().contains("paused"));
+        host_status["stream_game_running"]=true;
+        QTRY_VERIFY_WITH_TIMEOUT(preview->Error().contains("paused") && title->Title().isEmpty(),5000);
+        host_status["stream_game_running"]=false;
+        QTRY_VERIFY_WITH_TIMEOUT(!preview->Error().contains("paused") && !title->Title().isEmpty(),5000);
         QVERIFY(!QFile::exists(temp.filePath("private-stream/host-key.pem")));
     }
 
@@ -626,6 +633,34 @@ private slots:
         QCOMPARE(manifest.value("environment").toObject().value("KYTY_STREAM_ONLY").toString(), "1");
     }
 
+    void externalSettingsEditsReloadLibraryButOwnWritesDoNot() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        ConfigurationListWidget library;
+        auto* tree=library.findChild<QTreeWidget*>("cfgs_list");
+        auto* size=library.findChild<QSlider*>("grid_size_slider");
+        QVERIFY(tree && size);
+        QCOMPARE(tree->topLevelItemCount(),3);
+        const auto* first=tree->topLevelItem(0);
+        size->setValue(288); // the launcher's own write must not trigger a rescan
+        QTest::qWait(1200);
+        QCOMPARE(tree->topLevelItem(0),first);
+        {
+            QSettings external("Kyty.ini",QSettings::IniFormat); // the daemon edits the same file
+            external.setValue("Launcher/game_dirs",QStringList{});
+            external.sync();
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(tree->topLevelItemCount(),0,5000);
+        {
+            QSettings external("Kyty.ini",QSettings::IniFormat);
+            external.setValue("Launcher/game_dirs",QStringList{temp.filePath("games")});
+            external.sync();
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(tree->topLevelItemCount(),3,5000);
+    }
+
     void streamingTabRetainsPairingAudioAndHeadlessPreferences() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
@@ -760,6 +795,21 @@ int main(int argc, char** argv) {
     int app_argc = argc + 1 + int(headless_fixture);
     QApplication app(app_argc, app_args.data());
     QStandardPaths::setTestModeEnabled(true);
+    // Never reach the real systemd or daemon: a fake systemctl logs its arguments, and the
+    // control socket points at a path nothing serves. The headless child inherits both.
+    QTemporaryDir host_dir;
+    if(qEnvironmentVariableIsEmpty("KYTY_HOST_SYSTEMCTL")) {
+        const auto script=host_dir.filePath("fake-systemctl");
+        const auto log=host_dir.filePath("systemctl.log");
+        QFile file(script);
+        if(!host_dir.isValid() || !file.open(QIODevice::WriteOnly)) return 14;
+        file.write("#!/bin/sh\necho \"$@\" >> '"+log.toUtf8()+"'\nexit 0\n");
+        file.close();
+        QFile::setPermissions(script,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+        qputenv("KYTY_HOST_SYSTEMCTL",script.toUtf8());
+        qputenv("KYTY_PRESERVATION_SYSTEMCTL_LOG",log.toUtf8());
+        qputenv("KYTY_HOST_SOCKET",host_dir.filePath("none/control.sock").toUtf8());
+    }
     if(qEnvironmentVariable("KYTY_PRESERVATION_DARK")=="1") {
         auto palette=app.palette();
         palette.setColor(QPalette::Window,QColor("#24272b"));
@@ -778,21 +828,19 @@ int main(int argc, char** argv) {
         auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
         auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
         auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
-        auto* backend=dialog.findChild<StreamingBackend*>();
-        if(!streaming || !title || !preview || !backend) return 11;
+        if(!streaming || !title || !preview) return 11;
         auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
         if(!tabs || tabs->currentWidget()!=streaming || !title->Title().isEmpty()) return 12;
-        bool paused=false,quiet=true;
-        QObject::connect(backend,&StreamingBackend::Changed,&dialog,[&] {
-            quiet &= title->Title().isEmpty();
-            if(backend->GetState()==StreamingBackend::State::Starting)
-                paused=preview->Error().contains("paused");
-        });
         dialog.Start();
+        // --start-streaming-host only asks systemd for the daemon; the fake systemctl logs it.
         QElapsedTimer deadline; deadline.start();
-        while(deadline.elapsed()<3000 && backend->GetState()!=StreamingBackend::State::Error)
+        bool started=false;
+        while(deadline.elapsed()<3000 && !started) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,20);
-        return paused && quiet && backend->GetState()==StreamingBackend::State::Error ? 0 : 13;
+            QFile log(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG"));
+            started=log.open(QIODevice::ReadOnly) && log.readAll().contains("--user start kyty-host.service");
+        }
+        return started && tabs->currentWidget()==streaming && title->Title().isEmpty() ? 0 : 13;
     }
     LauncherPreservationTests tests;
     return QTest::qExec(&tests, argc, argv);

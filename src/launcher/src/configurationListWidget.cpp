@@ -261,6 +261,7 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 	m_ui->cfgs_list->setDragDropMode(QAbstractItemView::NoDragDrop);
 
 	ReadSettings();
+	WatchSettingsFile();
 	m_ui->grid_size_slider->setVisible(m_ui->grid_view_button->isChecked());
 	const auto resize_grid = [this](int width) {
 		m_ui->cfgs_grid->setIconSize(QSize(width, width * 9 / 16));
@@ -347,7 +348,60 @@ void ConfigurationListWidget::WriteSettings() {
 		it.value()->WriteSettings(s.get());
 	}
 	s->endArray();
+	s->sync(); // flush now so the watcher sees this write as already known
+	m_settings_snapshot = SettingsFileBytes();
 	emit CatalogChanged();
+}
+
+QByteArray ConfigurationListWidget::SettingsFileBytes() const {
+	QFile file(m_settings_file);
+	return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+// The host daemon rewrites Kyty.ini when a client changes game settings; follow those edits.
+// ponytail: last writer wins if both edit the same game at once; acceptable for alpha, upgrade path
+// is routing launcher edits through the daemon
+void ConfigurationListWidget::WatchSettingsFile() {
+	m_settings_snapshot = SettingsFileBytes();
+	m_settings_watcher  = new QFileSystemWatcher(this);
+	m_reload_timer      = new QTimer(this);
+	m_reload_timer->setSingleShot(true);
+	m_reload_timer->setInterval(500);
+	connect(m_reload_timer, &QTimer::timeout, this,
+	        &ConfigurationListWidget::ReloadSettingsFromDisk);
+	// Atomic saves replace the inode, which drops the file watch: re-add it after every event.
+	const auto rewatch = [this] {
+		if (QFileInfo::exists(m_settings_file) &&
+		    !m_settings_watcher->files().contains(m_settings_file)) {
+			m_settings_watcher->addPath(m_settings_file);
+			m_reload_timer->start();
+		}
+	};
+	connect(m_settings_watcher, &QFileSystemWatcher::fileChanged, this, [this, rewatch] {
+		rewatch();
+		m_reload_timer->start();
+	});
+	connect(m_settings_watcher, &QFileSystemWatcher::directoryChanged, this, rewatch);
+	const QFileInfo info(m_settings_file);
+	m_settings_watcher->addPath(info.absolutePath());
+	m_settings_watcher->addPath(m_settings_file);
+}
+
+void ConfigurationListWidget::ReloadSettingsFromDisk() {
+	// Never swap the list under an open game settings dialog; its own save follows anyway.
+	if (qobject_cast<ConfigurationEditDialog*>(QApplication::activeModalWidget()) != nullptr)
+		return;
+	const auto bytes = SettingsFileBytes();
+	if (bytes == m_settings_snapshot) return; // our own write, or nothing relevant changed
+	m_settings_snapshot = bytes;
+	{
+		// Restoring the slider must not call WriteSettings() with half-read state.
+		const QSignalBlocker blocker(m_ui->grid_size_slider);
+		ReadSettings();
+	}
+	const int width = m_ui->grid_size_slider->value();
+	m_ui->cfgs_grid->setIconSize(QSize(width, width * 9 / 16));
+	ScanGameDirectory();
 }
 
 void ConfigurationListWidget::ReadSettings() {
