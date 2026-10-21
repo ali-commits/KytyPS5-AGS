@@ -28,12 +28,19 @@ def revision(directory):
             'changes': status.stdout.splitlines() if status.returncode == 0 else []}
 
 
+def systemd_word(path):
+    text = str(path).replace('%', '%%').replace('$', '$$')
+    if not any(char.isspace() or char in '"\\%$' for char in str(path)):
+        return text
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def install_unit(args, command, config, unit_path, old_unit):
     if old_unit is not None:
         (config/'rollback').mkdir(mode=0o700, exist_ok=True)
         (config/'rollback'/UNIT_NAME).write_text(old_unit)
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text((TOOLS/(UNIT_NAME+'.in')).read_text().replace('@COMMAND@', str(command)))
+    unit_path.write_text((TOOLS/(UNIT_NAME+'.in')).read_text().replace('@COMMAND@', systemd_word(command)))
     if args.enable:
         subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         subprocess.run(['systemctl', '--user', 'enable', UNIT_NAME], check=True)
@@ -67,7 +74,7 @@ def package(args):
     unit_path = args.systemd_dir.expanduser().absolute()/UNIT_NAME
     if args.command:
         old_unit = unit_path.read_text() if unit_path.is_file() else None
-        if old_unit is not None and f'ExecStart={command} --host\n' not in old_unit and not args.replace_unit:
+        if old_unit is not None and f'ExecStart={systemd_word(command)} --host\n' not in old_unit and not args.replace_unit:
             raise SystemExit(f'{unit_path} points to a different installation; pass --replace-unit to back it up and replace it')
     base_hash = sha256(base/'Kyty.ini')
     prefix.parent.mkdir(parents=True, exist_ok=True)

@@ -99,6 +99,22 @@ class PackageTests(unittest.TestCase):
                          'sudo modprobe uhid && sudo udevadm control --reload-rules && sudo udevadm trigger'):
                 self.assertIn(line, result.stdout)
 
+    def test_exec_start_is_quoted_for_systemd(self):
+        for name, expected in (('a b', '"{}" --host'), ('p%d$x', '"{}" --host'), ('q"u\\o t', '"{}" --host')):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                inputs = self.make_inputs(root)
+                command = root/name/'kytyps5-streaming'
+                result = self.run_package(inputs, root/'prefix', root/'config', command, root/'systemd')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rendered = str(command).replace('%', '%%').replace('$', '$$')
+                if '"' in name:
+                    rendered = rendered.replace('\\', '\\\\').replace('"', '\\"')
+                self.assertIn('ExecStart=' + expected.format(rendered) + '\n', (root/'systemd'/'kyty-host.service').read_text())
+                command.unlink()
+                again = self.run_package(inputs, root/'prefix2', root/'config2', command, root/'systemd')
+                self.assertEqual(again.returncode, 0, again.stderr)
+
     def test_foreign_unit_refused_unless_replaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
