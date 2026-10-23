@@ -923,6 +923,13 @@ add_executable(pad_haptics_tests EXCLUDE_FROM_ALL
 target_link_libraries(pad_haptics_tests common fmt::fmt SDL3::SDL3-static opus)
 target_include_directories(pad_haptics_tests PRIVATE ${inc_headers})
 
+if(LINUX AND BUILD_TESTING)
+	# Run by hand with KYTY_DUALSENSE_FIXTURE; needs /dev/uhid (exit 77 = skipped).
+	add_executable(kyty_uhid_driver_check EXCLUDE_FROM_ALL "${CMAKE_SOURCE_DIR}/tools/client/uhid_driver_check.cpp")
+	target_link_libraries(kyty_uhid_driver_check common fmt::fmt SDL3::SDL3-static opus nlohmann_json::nlohmann_json)
+	target_include_directories(kyty_uhid_driver_check PRIVATE ${inc_headers})
+endif()
+
 add_executable(controller_settings_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ControllerSettingsTests.cpp"
 )
