@@ -690,10 +690,8 @@ private slots:
 		auto* local = widget.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY2(local, "Streaming-only needs an explicit local-display control.");
 		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
-		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
 		QTRY_VERIFY(local->isChecked()); // the fake daemon reports show_local = true
-		local->setChecked(false);
-		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
+		local->setChecked(false); // saved automatically, no Apply button
 		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
 		QVERIFY(fake.Requests("set-preferences").last().contains("show_local"));
 		QVERIFY(!fake.Requests("set-preferences").last().value("show_local").toBool());
@@ -738,9 +736,11 @@ private slots:
 		bitrate->setValue(60);
 		codec->setCurrentText("HEVC");
 		widget.findChild<QCheckBox*>("streamLocalAudio")->setChecked(true);
-		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
-		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
+		QTest::qWait(100);
+		QVERIFY2(fake.Requests("set-preferences").isEmpty(), "edits are debounced into one save");
 		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		QTest::qWait(800);
+		QCOMPARE(fake.Requests("set-preferences").size(), 1);
 		const auto sent = fake.Requests("set-preferences").last();
 		QCOMPARE(sent.value("port").toInt(), 48400);
 		QCOMPARE(sent.value("resolution").toString(), QString("1080p"));
@@ -1576,11 +1576,11 @@ while True: time.sleep(0.05)
 		HostControlClient client(fake.Path());
 		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
 		StreamingWidget widget(&client);
-		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
+		QTest::qWait(200); // let the stored preferences arrive
 		auto* adapter = widget.findChild<QLineEdit*>("streamAdapter");
 		adapter->setText(QStringLiteral("invalid\nadapter"));
-		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
-		QVERIFY(widget.findChild<QLabel*>("streamError")->text().contains("line breaks"));
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamError")->text().contains("line breaks"));
 		QTest::qWait(50);
 		QVERIFY(fake.Requests("set-preferences").isEmpty());
 	}
@@ -1598,7 +1598,7 @@ while True: time.sleep(0.05)
 		    widget.findChild<QLabel*>("streamStatus")->text().contains("Host daemon is not running"));
 		QVERIFY(start->isEnabled());
 		QVERIFY(!stop->isEnabled());
-		QVERIFY(!widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		QVERIFY(!widget.findChild<QPushButton*>("streamApply")); // preferences auto-save
 		QVERIFY(widget.findChild<QLineEdit*>("streamBackendPath")->isHidden());
 		QTest::mouseClick(start, Qt::LeftButton);
 		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user start kyty-host.service"));

@@ -24,6 +24,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
@@ -180,9 +181,11 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_controller_audio_port->setEnabled(true);
 	quality_form->addRow(tr("Controller audio port"), m_controller_audio_port);
 	quality_form->setRowVisible(m_controller_audio_port, false);
-	m_save = new QPushButton(tr("Apply preferences"), m_quality);
-	m_save->setObjectName("streamApply");
-	quality_form->addRow(m_save);
+	// Preferences save themselves shortly after the last edit; no Apply button.
+	m_autosave = new QTimer(this);
+	m_autosave->setSingleShot(true);
+	m_autosave->setInterval(600);
+	connect(m_autosave, &QTimer::timeout, this, [this] { Apply(); });
 	layout->addWidget(m_quality);
 	auto* sessions       = new QGroupBox(tr("Session"), content);
 	auto* session_layout = new QHBoxLayout(sessions);
@@ -274,7 +277,6 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	layout->addWidget(logs);
 	connect(copy, &QPushButton::clicked, this,
 	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
-	connect(m_save, &QPushButton::clicked, this, [this] { Apply(); });
 	connect(m_start, &QPushButton::clicked, this, &StreamingWidget::StartHosting);
 	connect(m_stop, &QPushButton::clicked, m_host, &HostControlClient::StopDaemon);
 	connect(m_close, &QPushButton::clicked, this,
@@ -306,6 +308,13 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	connect(m_clients, &QListWidget::currentRowChanged, this,
 	        [this, ready] { m_forget->setEnabled(ready() && m_clients->currentItem()); });
 	connect(m_port, &QSpinBox::valueChanged, this, [this] { Update(); });
+	for (auto* box: {m_resolution, m_fps, m_codec})
+		connect(box, &QComboBox::currentIndexChanged, this, &StreamingWidget::ScheduleApply);
+	for (auto* spin: {m_port, m_bitrate})
+		connect(spin, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
+	for (auto* check: {m_monitor, m_show_local})
+		connect(check, &QCheckBox::toggled, this, &StreamingWidget::ScheduleApply);
+	connect(m_adapter, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
 	connect(m_autostart, &QCheckBox::toggled, this, [this](bool on) {
 		m_autostart_touched = true;
 		m_host->SetAutostart(on);
@@ -353,7 +362,8 @@ void StreamingWidget::LoadPreferences() {
 }
 void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	if (p.isEmpty()) return;
-	m_prefs_loaded = true;
+	m_prefs_loaded  = true;
+	m_loading_prefs = true; // values from the daemon are not user edits
 	if (p.contains("port")) m_port->setValue(p.value("port").toInt());
 	if (p.contains("resolution")) m_resolution->setCurrentText(p.value("resolution").toString());
 	if (p.contains("fps")) m_fps->setCurrentIndex(p.value("fps").toInt() == 30 ? 0 : 1);
@@ -362,7 +372,13 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	if (p.contains("adapter")) m_adapter->setText(p.value("adapter").toString());
 	if (p.contains("local_audio")) m_monitor->setChecked(p.value("local_audio").toBool());
 	if (p.contains("show_local")) m_show_local->setChecked(p.value("show_local").toBool());
+	m_loading_prefs = false;
 	Update();
+}
+void StreamingWidget::ScheduleApply() {
+	// Before the daemon's stored values arrive, an edit would overwrite them with defaults.
+	if (m_loading_prefs || !m_prefs_loaded) return;
+	m_autosave->start();
 }
 void StreamingWidget::OnStatus(const QJsonObject& status) {
 	m_host_status = status;
@@ -408,7 +424,6 @@ void StreamingWidget::Update() {
 	const bool stopped   = !reachable || state == "Stopped" || state == "Error";
 	m_start->setEnabled(stopped);
 	m_stop->setEnabled(reachable && state != "Stopping");
-	m_save->setEnabled(reachable);
 	if (!reachable) {
 		m_status->setText(tr("Host daemon is not running"));
 	} else if (state == "Starting") {

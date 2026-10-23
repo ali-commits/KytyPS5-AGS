@@ -14,6 +14,7 @@ class QPushButton;
 class QPlainTextEdit;
 class QListWidget;
 class QGroupBox;
+class QTimer;
 class StreamingWidget: public QWidget {
 	Q_OBJECT
 public:
@@ -29,11 +30,14 @@ private:
 	void               LoadPreferences();
 	void               ApplyPreferences(const QJsonObject& preferences);
 	bool               Apply();
+	void               ScheduleApply();
 	HostControlClient* m_host;
 	QJsonObject        m_host_status;
 	QString            m_daemon_error;
 	bool               m_prefs_loaded      = false;
 	bool               m_autostart_touched = false;
+	bool               m_loading_prefs     = false;
+	QTimer*            m_autosave          = nullptr;
 	QCheckBox*         m_autostart;
 	QLineEdit*         m_path;
 	QSpinBox*          m_port;
@@ -60,7 +64,6 @@ private:
 	QPushButton*       m_pair;
 	QPushButton*       m_forget;
 	QPushButton*       m_close;
-	QPushButton*       m_save;
 	QPushButton*       m_browse;
 	QListWidget*       m_pending;
 	QListWidget*       m_clients;
