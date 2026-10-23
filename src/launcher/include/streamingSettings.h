@@ -10,8 +10,8 @@ struct StreamingSettings {
 	int     bitrate    = 30;
 	QString codec      = "HEVC";
 	QString adapter;
-	bool    local_audio           = true;
-	bool    show_local            = true;
+	bool    local_audio           = false;
+	bool    show_local            = false;
 	bool    controller_audio      = false;
 	int     controller_audio_port = 0;
 	int     ControllerAudioPort() const {

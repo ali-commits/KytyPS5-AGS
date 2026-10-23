@@ -689,9 +689,9 @@ private slots:
 		StreamingWidget widget(&client);
 		auto* local = widget.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY2(local, "Streaming-only needs an explicit local-display control.");
-		QVERIFY(local->isChecked());
 		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
 		QTRY_VERIFY(widget.findChild<QPushButton*>("streamApply")->isEnabled());
+		QTRY_VERIFY(local->isChecked()); // the fake daemon reports show_local = true
 		local->setChecked(false);
 		QTest::mouseClick(widget.findChild<QPushButton*>("streamApply"), Qt::LeftButton);
 		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
@@ -1130,8 +1130,9 @@ private slots:
 		                .toJson()));
 		StreamingBackend  backend(dir.filePath("profile"));
 		StreamingSettings settings;
-		settings.backend = dir.filePath("host");
-		settings.port    = FreeBasePort();
+		settings.backend     = dir.filePath("host");
+		settings.port        = FreeBasePort();
+		settings.local_audio = true; // exercises the loopback command too
 		backend.Start(settings);
 		QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath("command-pending")), 3000);
 		backend.Stop();

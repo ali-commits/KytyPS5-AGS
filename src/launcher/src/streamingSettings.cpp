@@ -40,8 +40,8 @@ StreamingSettings StreamingSettings::Read(QSettings& file) {
 	s.bitrate               = file.value("quality/bitrate", s.bitrate).toInt();
 	s.codec                 = file.value("quality/codec", s.codec).toString();
 	s.adapter               = file.value("quality/adapter").toString();
-	s.local_audio           = file.value("audio/local_monitor", true).toBool();
-	s.show_local            = file.value("display/show_local", true).toBool();
+	s.local_audio           = file.value("audio/local_monitor", false).toBool();
+	s.show_local            = file.value("display/show_local", false).toBool();
 	s.controller_audio      = file.value("controller_audio/enabled", false).toBool();
 	s.controller_audio_port = file.value("controller_audio/port", 0).toInt();
 	return s;
