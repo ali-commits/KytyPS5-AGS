@@ -48,6 +48,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/pipeline/programDiskCache.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -68,6 +69,7 @@
 #include "graphics/shader/recompiler/ir/ProgramCodec.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
+#include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -2332,8 +2334,16 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
           ShaderRecompiler::IR::MaterializeResources(
               resource_plan, runtime, resources, specialization),
           "translated resources could not be materialized");
+  Require(test.name, "plan references",
+          ShaderRecompiler::IR::CountDeadPlanReferences(translated.program) == 0,
+          "the translation's plan tables name instructions it does not have");
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization);
+  // Specialization can make instructions the plan tables name dead (a zero-stride buffer read's
+  // descriptor); CompileProgram must clear those references before a pass reads them.
+  Require(test.name, "plan references",
+          ShaderRecompiler::IR::CountDeadPlanReferences(result.program) == 0,
+          "the compiled program's plan tables name instructions it does not have");
   copy_check.Verify(test.name, options, specialization, result);
   cache_check.Verify(options, runtime, resources, specialization, result);
   for (const auto &[text, expected] : test.decoded_counts) {
@@ -2767,8 +2777,16 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test, bool plain_variant 
           ShaderRecompiler::IR::MaterializeResources(
               resource_plan, runtime, resources, specialization),
           "translated resources could not be materialized");
+  Require(test.name, "plan references",
+          ShaderRecompiler::IR::CountDeadPlanReferences(translated.program) == 0,
+          "the translation's plan tables name instructions it does not have");
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization);
+  // Specialization can make instructions the plan tables name dead (a zero-stride buffer read's
+  // descriptor); CompileProgram must clear those references before a pass reads them.
+  Require(test.name, "plan references",
+          ShaderRecompiler::IR::CountDeadPlanReferences(result.program) == 0,
+          "the compiled program's plan tables name instructions it does not have");
   copy_check.Verify(test.name, options, specialization, result);
   cache_check.Verify(options, runtime, resources, specialization, result);
   Require(test.name, "SPIR-V emit", !result.spirv.empty(),
@@ -4765,6 +4783,80 @@ public:
   // GPU thread (GuestGpu::Submit): with KYTY_CP_SEQ=1 the sequencer thread parses it and the GPU
   // thread resolves it; the wait suspends the resolver until the label is written, while the
   // sequencer waits at that ordering point. Also run in the other modes.
+  void CheckSplitLabelOverlay() {
+    constexpr const char *name = "SplitLabelOverlay";
+    EnsureRuntimeContext();
+    auto &context = Renderer();
+    context.InitializeGpu(nullptr);
+    auto &gpu = context.GetGpu();
+    alignas(8) std::array<uint8_t, 16> guest{};
+    const auto base = reinterpret_cast<uint64_t>(guest.data());
+    gpu.SendCommandSync([&] {
+      Require(name, "initial state", !gpu.HasDeferredLabels(), "unexpected pending labels");
+      gpu.AddDeferredLabel(base, 8, 111, 0x1122334455667788ull, true);
+      gpu.AddDeferredLabel(base + 4, 4, 112, 0xaabbccdd, true);
+      uint64_t visible = 0;
+      Require(name, "newest overlapping label", gpu.CpVisibleLabelValue(base, 8, &visible) &&
+                  visible == 0xaabbccdd55667788ull, "newer bytes did not replace older bytes");
+      uint32_t partial = 0;
+      Require(name, "partial read", gpu.CpVisibleLabelValue(base + 2, 4, &partial) &&
+                  partial == 0xccdd5566u, "overlap clipping changed the label bytes");
+      Require(name, "guest visibility", std::all_of(guest.begin(), guest.end(),
+                  [](auto byte) { return byte == 0; }), "CP overlay wrote guest memory early");
+      gpu.NoteCpVisibleLabelsWaited(base, 4);
+      gpu.DropCpVisibleLabels(base, 4);
+      Require(name, "waited superseded label", gpu.DeferredLabelSupersededBytes(base, 111) == 0x0f,
+                  "a later CP write must suppress the label the CP already waited on");
+      Require(name, "untouched successor", gpu.DeferredLabelSupersededBytes(base + 4, 112) == 0,
+                  "a disjoint label was superseded");
+      visible = 0x0102030405060708ull;
+      Require(name, "preserve uncovered bytes", gpu.CpVisibleLabelValue(base, 8, &visible) &&
+                  visible == 0xaabbccdd05060708ull, "overlay changed uncovered guest bytes");
+      gpu.DropCpVisibleLabels(base + 4, 4);
+      Require(name, "unwaited label completion", gpu.DeferredLabelSupersededBytes(base + 4, 112) == 0,
+                  "unwaited labels must still complete normally");
+      Require(name, "dropped overlay", !gpu.CpVisibleLabelValue(base, 8, &visible),
+                  "a later CP write left stale label bytes visible");
+      gpu.RemoveDeferredLabel(base, 111);
+      gpu.RemoveDeferredLabel(base + 4, 112);
+      gpu.AddDeferredLabel(base, 16, 113, 1, true);
+      Require(name, "oversized label", !gpu.CpVisibleLabelValue(base, 8, &visible),
+                  "a label larger than its captured value exposed invalid bytes");
+      gpu.RemoveDeferredLabel(base, 113);
+      // A partial reset must retain both the overlay and completion of the untouched DWORD.
+      gpu.AddDeferredLabel(base, 8, 114, 0x1122334455667788ull, true);
+      gpu.NoteCpVisibleLabelsWaited(base, 4);
+      gpu.DropCpVisibleLabels(base, 4);
+      visible = 0;
+      Require(name, "partial reset overlay", gpu.CpVisibleLabelValue(base, 8, &visible) &&
+                  visible == 0x1122334400000000ull &&
+                  gpu.DeferredLabelSupersededBytes(base, 114) == 0x0f,
+                  "resetting a DWORD discarded the untouched deferred DWORD");
+      gpu.RemoveDeferredLabel(base, 114);
+      // Exercise the real packet wait against stale physical memory, then against the overlay.
+      GraphicsInitJmpTables();
+      CommandProcessor processor(context, 0);
+      processor.Reset();
+      processor.BufferInit();
+      gpu.AddDeferredLabel(base, 4, 0, 1, true);
+      std::array<uint32_t, 7> wait{KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0), 0x10u | 3u,
+          static_cast<uint32_t>(base), static_cast<uint32_t>(base >> 32u), 0u, UINT32_MAX, 0u};
+      Pm4Execution stale_wait;
+      Require(name, "stale memory wait", processor.Process(stale_wait, wait) == Pm4ProcessResult::Blocked,
+                  "a wait passed against stale guest memory instead of the CP overlay");
+      wait[4] = 1;
+      Pm4Execution overlay_wait;
+      Require(name, "overlay wait", processor.Process(overlay_wait, wait) == Pm4ProcessResult::Complete,
+                  "a wait could not pass against the pending CP label");
+      gpu.DropCpVisibleLabels(base, 4);
+      Require(name, "passed wait tracked", gpu.DeferredLabelSupersededBytes(base, 0) == 0x0f,
+                  "the passing overlay wait was not recorded");
+      gpu.RemoveDeferredLabel(base, 0);
+      Require(name, "retired labels", !gpu.HasDeferredLabels(), "label removal leaked pending state");
+    });
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   void CheckCpSeqGuestGpu() {
     constexpr const char *name = "CpSeqGuestGpu";
     EnsureRuntimeContext();
@@ -29372,12 +29464,35 @@ public:
       mode.polymode_back_ptype = back;
       mode.provoking_vtx_last = provoking_last;
       registers.SetModeControl(mode);
-      return context.GetPipelineCache().GetGraphicsPipeline(
+      auto &pipelines = context.GetPipelineCache();
+      const PipelineCache::GraphicsPrograms programs{{vertex_shader}, pixel_shader};
+      if (std::getenv("KYTY_TEST_PIPELINE_SKIP") != nullptr) {
+        // Queue a cold optimized build, then require the same pipeline for a draw with effects.
+        // The required lookup must take the pending job, publish it once and retain exact pixels.
+        auto *ready = pipelines.TryGetGraphicsPipeline(
+            std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
+            topology, false, programs, true);
+        auto &required = pipelines.GetGraphicsPipeline(
+            std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
+            topology, false, programs);
+        auto *cached = pipelines.TryGetGraphicsPipeline(
+            std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
+            topology, false, programs, true);
+        Require(name, "skip publication", cached == &required &&
+                    (ready == nullptr || ready == cached),
+                    "a required lookup lost or duplicated the background pipeline");
+        return required;
+      }
+      return pipelines.GetGraphicsPipeline(
           std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
-          topology, false,
-          PipelineCache::GraphicsPrograms{{vertex_shader}, pixel_shader});
+          topology, false, programs);
     };
     auto &filled = pipeline(true, 2, 2);
+    if (std::getenv("KYTY_TEST_PIPELINE_SKIP") != nullptr) {
+      const auto totals = context.GetPipelineCache().GetSkipTotals();
+      Require(name, "skip worker exercised", totals.requested > 0 && totals.published > 0,
+                  "the pixel test did not consume a background pipeline");
+    }
     const auto draw = [&](const PipelineCache::Pipeline &selected, uint32_t vertex_count = 3,
                           std::array<u32, 4> clear_value = {}) {
       RenderExecutorTestAccess::BindRenderTarget(executor, color.image_id);
@@ -57507,6 +57622,7 @@ void CheckCpSeqOps(RenderContext &renderer) {
 #include "ShaderProgramCacheTests.inc"
 #include "ShaderBvhTests.inc"
 #include "ShaderBdaWriteTests.inc"
+#include "ShaderParallelCompileTests.inc"
 
 } // namespace
 } // namespace Libs::Graphics
@@ -57532,8 +57648,24 @@ int main(int argc, char **argv) {
     EnsureConfigInitialized();
     return ProgramCacheTests::CorpusProgramCache(argv[2]);
   }
+  // CPU only (--journal-compile <shaders.journal> [threads]): every permutation of a shader
+  // journal compiled once, then on several threads (ShaderParallelCompileTests.inc).
+  if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--journal-compile") == 0) {
+    EnsureConfigInitialized();
+    const auto threads = argc == 4 ? static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 0)) : 8u;
+    return ParallelCompileTests::JournalCompile(argv[2], std::clamp(threads, 1u, 64u));
+  }
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--split-labels-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckSplitLabelOverlay();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--parallel-compile-only") == 0) {
+    ParallelCompileTests::CheckParallelCompile();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--gi-probe-codegen-only") == 0) {
     GiProbeTests::CheckPixelAppendElectionCodegen();
     GiProbeTests::CheckPixelLiveExecCodegen();

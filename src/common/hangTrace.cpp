@@ -83,18 +83,18 @@ struct ImportEntry {
 	std::string dbg_name;
 	std::string program;
 };
-std::mutex                                     g_import_mutex;
-std::deque<std::unique_ptr<ImportEntry>>       g_imports;
-std::unordered_map<uint64_t, ImportEntry*>     g_imports_by_target;
-std::atomic<uint32_t>                          g_import_count {0};
-std::vector<std::string>                       g_pending_import_index_rows;
+std::mutex                                 g_import_mutex;
+std::deque<std::unique_ptr<ImportEntry>>   g_imports;
+std::unordered_map<uint64_t, ImportEntry*> g_imports_by_target;
+std::atomic<uint32_t>                      g_import_count {0};
+std::vector<std::string>                   g_pending_import_index_rows;
 
 thread_local uint64_t g_guest_caller = 0;
 
 struct AprKey {
-	uint32_t file_id = 0;
-	uint64_t offset  = 0;
-	uint64_t size    = 0;
+	uint32_t file_id                         = 0;
+	uint64_t offset                          = 0;
+	uint64_t size                            = 0;
 	bool     operator==(const AprKey&) const = default;
 };
 struct AprKeyHash {
@@ -111,19 +111,19 @@ struct AprInfo {
 	uint64_t last_ms   = 0;
 	uint64_t last_dest = 0;
 };
-std::mutex                                        g_apr_mutex;
-std::unordered_map<AprKey, AprInfo, AprKeyHash>   g_apr_keys;
-std::vector<std::string>                          g_pending_apr_rows;
-uint64_t                                          g_apr_rows_total = 0;
+std::mutex                                      g_apr_mutex;
+std::unordered_map<AprKey, AprInfo, AprKeyHash> g_apr_keys;
+std::vector<std::string>                        g_pending_apr_rows;
+uint64_t                                        g_apr_rows_total = 0;
 // Size of each file's latest read from offset 0 (guarded by g_apr_mutex). A streamer that
 // re-reads a texture file's prefix to drop mips and the whole file to add them (Astro Bot: 128 KiB
 // head <-> full file) shows its residency changes as size changes here.
-std::unordered_map<uint32_t, uint64_t>            g_apr_offset0_size;
+std::unordered_map<uint32_t, uint64_t> g_apr_offset0_size;
 // The same for reads by texture-streamer threads (name contains "TextureStreamer", Astro Bot's
 // GfxTextureStreamerThread), and their sum: an estimate of the streamed-texture footprint. Other
 // threads' offset-0 reads are level data (about 7 GiB over a U48 run).
-std::unordered_map<uint32_t, uint64_t>            g_apr_stream_size;
-uint64_t                                          g_apr_stream_bytes = 0;
+std::unordered_map<uint32_t, uint64_t> g_apr_stream_size;
+uint64_t                               g_apr_stream_bytes = 0;
 
 std::mutex               g_lod_mutex;
 std::vector<std::string> g_pending_lod_rows;
@@ -146,19 +146,19 @@ struct FaultContext {
 	uint64_t pc = 0;
 	char     thread[32] {};
 };
-thread_local FaultContext g_fault_context {};
-thread_local ReadbackKind g_readback_kind = ReadbackKind::Invalidate;
+thread_local FaultContext    g_fault_context {};
+thread_local ReadbackKind    g_readback_kind     = ReadbackKind::Invalidate;
 thread_local ImageFreeReason g_image_free_reason = ImageFreeReason::Other;
 
 thread_local GpuWriteKind g_gpu_write_kind = GpuWriteKind::ShaderStorage;
 struct PageWriter {
-	uint64_t t_ms = 0;
-	uint64_t size = 0;
+	uint64_t     t_ms = 0;
+	uint64_t     size = 0;
 	GpuWriteKind kind = GpuWriteKind::ShaderStorage;
 };
 constexpr const char* kGpuWriteKindNames[] = {"shader-storage", "occlusion-dump", "fill", "copy"};
-std::mutex                                  g_page_writer_mutex;
-std::unordered_map<uint64_t, PageWriter>    g_page_writers;
+std::mutex            g_page_writer_mutex;
+std::unordered_map<uint64_t, PageWriter> g_page_writers;
 // Every change of g_page_writers (NoteGpuWrite updates and clears). A thread's recent ranges below
 // are what the map holds for their pages only while this is still the value after that thread's
 // last update.
@@ -176,42 +176,50 @@ struct RecentGpuWrite {
 	bool         valid = false;
 };
 constinit thread_local std::array<RecentGpuWrite, 8> t_recent_writes {};
-constinit thread_local uint64_t                      t_recent_version    = UINT64_MAX;
-constinit thread_local uint32_t                      t_recent_next       = 0;
+constinit thread_local uint64_t                      t_recent_version     = UINT64_MAX;
+constinit thread_local uint32_t                      t_recent_next        = 0;
 constinit thread_local bool                          t_recent_below_clear = false;
 
 std::mutex               g_readback_mutex;
 std::vector<std::string> g_pending_readback_rows;
 uint64_t                 g_readback_rows_total = 0;
 
-constexpr const char* kReadbackKindNames[] = {"invalidate",      "fault-read",
-                                              "fault-write",     "gpu-sync",
-                                              "fault-read-side", "fault-read-dup",
-                                              "fault-read-eager", "eager-publish"};
-static_assert(std::size(kReadbackKindNames) ==
-                  static_cast<size_t>(ReadbackKind::EagerPublish) + 1,
+constexpr const char* kReadbackKindNames[] = {
+    "invalidate",      "fault-read",     "fault-write",      "gpu-sync",
+    "fault-read-side", "fault-read-dup", "fault-read-eager", "eager-publish"};
+static_assert(std::size(kReadbackKindNames) == static_cast<size_t>(ReadbackKind::EagerPublish) + 1,
               "one name per ReadbackKind");
-constexpr const char* kImageFreeReasonNames[] = {
-    "other",           "depth-association", "depth-recreate", "overlap-layout",
-    "overlap-mip-merge", "overlap-stale",   "expand",         "smaller-resources",
-    "unmap",           "gc",                "pressure-gc",    "resident-idle"};
+constexpr const char* kImageFreeReasonNames[] = {"other",
+                                                 "depth-association",
+                                                 "depth-recreate",
+                                                 "overlap-layout",
+                                                 "overlap-mip-merge",
+                                                 "overlap-stale",
+                                                 "expand",
+                                                 "smaller-resources",
+                                                 "unmap",
+                                                 "gc",
+                                                 "pressure-gc",
+                                                 "resident-idle"};
 static_assert(std::size(kImageFreeReasonNames) == static_cast<size_t>(ImageFreeReason::Count));
 
 struct NativeImageKey {
-	bool     create  = false;
-	bool     hit     = false;
-	uint32_t format  = 0;
-	uint32_t width   = 0;
-	uint32_t height  = 0;
-	uint32_t levels  = 0;
-	uint32_t usage   = 0;
+	bool     create                                  = false;
+	bool     hit                                     = false;
+	uint32_t format                                  = 0;
+	uint32_t width                                   = 0;
+	uint32_t height                                  = 0;
+	uint32_t levels                                  = 0;
+	uint32_t usage                                   = 0;
 	bool     operator==(const NativeImageKey&) const = default;
 };
 struct NativeImageKeyHash {
 	size_t operator()(const NativeImageKey& k) const {
 		uint64_t h = (static_cast<uint64_t>(k.format) << 32u) ^ k.usage ^
-		             (static_cast<uint64_t>(k.create) << 63u) ^ (static_cast<uint64_t>(k.hit) << 62u);
-		h ^= (static_cast<uint64_t>(k.width) << 20u) ^ (static_cast<uint64_t>(k.height) << 4u) ^ k.levels;
+		             (static_cast<uint64_t>(k.create) << 63u) ^
+		             (static_cast<uint64_t>(k.hit) << 62u);
+		h ^= (static_cast<uint64_t>(k.width) << 20u) ^ (static_cast<uint64_t>(k.height) << 4u) ^
+		     k.levels;
 		return static_cast<size_t>(h * 0x9E3779B97F4A7C15ull);
 	}
 };
@@ -229,13 +237,13 @@ static_assert(std::size(kTransferKindNames) == static_cast<size_t>(TransferKind:
 // Distinct keys per published second; further keys fold into address 0 of the same reason.
 constexpr size_t kTransferKeyLimit = 8192;
 struct TransferKey {
-	TransferKind kind    = TransferKind::ImageUpload;
-	const char*  reason  = nullptr;
-	const char*  detail  = nullptr;
-	uint64_t     address = 0;
-	uint32_t     format  = 0;
-	uint32_t     width   = 0;
-	uint32_t     height  = 0;
+	TransferKind kind                                 = TransferKind::ImageUpload;
+	const char*  reason                               = nullptr;
+	const char*  detail                               = nullptr;
+	uint64_t     address                              = 0;
+	uint32_t     format                               = 0;
+	uint32_t     width                                = 0;
+	uint32_t     height                               = 0;
 	bool         operator==(const TransferKey&) const = default;
 };
 struct TransferKeyHash {
@@ -253,17 +261,17 @@ struct TransferTotals {
 	uint64_t bytes      = 0;
 	uint64_t span_bytes = 0;
 };
-std::mutex                                                          g_transfer_mutex;
-std::unordered_map<TransferKey, TransferTotals, TransferKeyHash>    g_transfers;
+std::mutex                                                       g_transfer_mutex;
+std::unordered_map<TransferKey, TransferTotals, TransferKeyHash> g_transfers;
 
 // unclean.csv (RecordUncleanRead). Distinct keys per published second; further keys fold into
 // page 0 of the same reason, purpose and caller.
 constexpr size_t kUncleanKeyLimit = 4096;
 struct UncleanKey {
-	const char* reason  = nullptr;
-	const char* purpose = nullptr;
-	uint64_t    caller  = 0;
-	uint64_t    page    = 0;
+	const char* reason                              = nullptr;
+	const char* purpose                             = nullptr;
+	uint64_t    caller                              = 0;
+	uint64_t    page                                = 0;
 	bool        operator==(const UncleanKey&) const = default;
 };
 struct UncleanKeyHash {
@@ -281,8 +289,8 @@ struct UncleanTotals {
 	uint64_t first_address = 0;
 	uint64_t first_size    = 0;
 };
-std::mutex                                                     g_unclean_mutex;
-std::unordered_map<UncleanKey, UncleanTotals, UncleanKeyHash> g_unclean_reads;
+std::mutex                                                                g_unclean_mutex;
+std::unordered_map<UncleanKey, UncleanTotals, UncleanKeyHash>             g_unclean_reads;
 std::unordered_map<NativeImageKey, NativeImageTotals, NativeImageKeyHash> g_native_images;
 
 // LOD report watch state.
@@ -366,8 +374,8 @@ struct Totals {
 	std::atomic<uint64_t> gpu_rendering_ends {0};
 	std::atomic<uint64_t> gpu_draw_write_sinks {0};
 	std::array<std::atomic<uint64_t>, static_cast<size_t>(MemoryCounter::Count)> memory {};
-	std::array<std::atomic<uint64_t>, static_cast<size_t>(TransferKind::Count)> transfer_count {};
-	std::array<std::atomic<uint64_t>, static_cast<size_t>(TransferKind::Count)> transfer_bytes {};
+	std::array<std::atomic<uint64_t>, static_cast<size_t>(TransferKind::Count)>  transfer_count {};
+	std::array<std::atomic<uint64_t>, static_cast<size_t>(TransferKind::Count)>  transfer_bytes {};
 	std::atomic<uint64_t> compile_programs {0};
 	std::atomic<uint64_t> compile_translate_ns {0};
 	std::atomic<uint64_t> compile_emit_ns {0};
@@ -401,8 +409,8 @@ struct Totals {
 };
 Totals g_totals;
 
-constexpr uint64_t       kCompileRowLimit = 1'000'000;
-constexpr const char*    kCompileKindNames[] = {"program", "graphics-pipeline", "compute-pipeline"};
+constexpr uint64_t    kCompileRowLimit    = 1'000'000;
+constexpr const char* kCompileKindNames[] = {"program", "graphics-pipeline", "compute-pipeline"};
 static_assert(std::size(kCompileKindNames) == static_cast<size_t>(CompileKind::Count));
 constexpr const char*    kPipelineOriginNames[] = {"", "new", "permutation", "variant"};
 std::mutex               g_compile_mutex;
@@ -411,7 +419,7 @@ uint64_t                 g_compile_rows_total = 0;
 std::vector<std::string> g_pending_frame_rows; // guarded by g_compile_mutex
 uint64_t                 g_frame_rows_total = 0;
 uint64_t                 g_previous_flip_ns = 0;
-bool FrameTimesEnabled() {
+bool                     FrameTimesEnabled() {
 	static const bool enabled = [] {
 		const auto* value = std::getenv("KYTY_HANG_TRACE_FRAME_TIMES");
 		return value != nullptr && std::strcmp(value, "0") != 0;
@@ -597,17 +605,16 @@ bool LooksLikeCallSite(uint64_t ra, const GuestModule& m) {
 	}
 #endif
 	const auto* p = reinterpret_cast<const uint8_t*>(ra);
-	if (p[-5] == 0xE8) return true;                                       // call rel32
-	if (p[-6] == 0xFF && p[-5] == 0x15) return true;                      // call [rip+disp32]
-	if (p[-2] == 0xFF && (p[-1] & 0xF8u) == 0xD0) return true;            // call reg
-	if (p[-2] == 0xFF && (p[-1] & 0xF8u) == 0x10 && (p[-1] & 7u) != 4u &&
-	    (p[-1] & 7u) != 5u)
-		return true;                                                      // call [reg]
+	if (p[-5] == 0xE8) return true;                            // call rel32
+	if (p[-6] == 0xFF && p[-5] == 0x15) return true;           // call [rip+disp32]
+	if (p[-2] == 0xFF && (p[-1] & 0xF8u) == 0xD0) return true; // call reg
+	if (p[-2] == 0xFF && (p[-1] & 0xF8u) == 0x10 && (p[-1] & 7u) != 4u && (p[-1] & 7u) != 5u)
+		return true;                                                                 // call [reg]
 	if (p[-3] == 0xFF && (p[-2] & 0xF8u) == 0x50 && (p[-2] & 7u) != 4u) return true; // [reg+d8]
-	if (p[-4] == 0xFF && p[-3] == 0x54) return true;                      // [sib+d8]
+	if (p[-4] == 0xFF && p[-3] == 0x54) return true;                                 // [sib+d8]
 	if (p[-6] == 0xFF && (p[-5] & 0xF8u) == 0x90 && (p[-5] & 7u) != 4u) return true; // [reg+d32]
-	if (p[-7] == 0xFF && p[-6] == 0x94) return true;                      // [sib+d32]
-	if (p[-3] == 0xFF && p[-2] == 0x14) return true;                      // [sib]
+	if (p[-7] == 0xFF && p[-6] == 0x94) return true;                                 // [sib+d32]
+	if (p[-3] == 0xFF && p[-2] == 0x14) return true;                                 // [sib]
 	return false;
 }
 
@@ -635,12 +642,11 @@ std::string FormatHostAddress(uint64_t address) {
 std::string CaptureGuestCallers() {
 	std::string out;
 #ifdef _WIN32
-	uint8_t    marker = 0;
-	const auto sp     = reinterpret_cast<uint64_t>(&marker) & ~uint64_t {7};
+	uint8_t    marker       = 0;
+	const auto sp           = reinterpret_cast<uint64_t>(&marker) & ~uint64_t {7};
 	uint64_t   checked_page = 0;
 	uint32_t   found        = 0;
-	for (uint64_t address = sp; address < sp + kScanBytes && found < kMaxCallers;
-	     address += 8) {
+	for (uint64_t address = sp; address < sp + kScanBytes && found < kMaxCallers; address += 8) {
 		const auto page = address & ~uint64_t {0xfff};
 		if (page != checked_page) {
 			if (!IsReadablePage(page)) {
@@ -648,8 +654,8 @@ std::string CaptureGuestCallers() {
 			}
 			checked_page = page;
 		}
-		const auto value = *reinterpret_cast<const uint64_t*>(address);
-		const auto* m    = FindModule(value);
+		const auto  value = *reinterpret_cast<const uint64_t*>(address);
+		const auto* m     = FindModule(value);
 		if (m == nullptr || !LooksLikeCallSite(value, *m)) {
 			continue;
 		}
@@ -810,8 +816,9 @@ void Publish() {
 		rows.swap(g_pending_image_rows);
 		for (const auto& [key, totals]: g_native_images) {
 			rows.push_back(fmt::format("{},{},,,{},{},{},{},,{},0x{:x},{},{}", t_ms,
-			                           key.create ? (key.hit ? "native-create-pooled" : "native-create")
-			                                      : "native-destroy",
+			                           key.create
+			                               ? (key.hit ? "native-create-pooled" : "native-create")
+			                               : "native-destroy",
 			                           key.width, key.height, key.levels, 1, key.format, key.usage,
 			                           totals.count, totals.bytes));
 		}
@@ -822,11 +829,10 @@ void Publish() {
 	{
 		std::scoped_lock lock(g_transfer_mutex);
 		for (const auto& [key, totals]: g_transfers) {
-			rows.push_back(fmt::format(
-			    "{},{},{},{},0x{:x},{},{},{},{},{},{}", t_ms,
-			    kTransferKindNames[static_cast<uint32_t>(key.kind)], key.reason, key.detail,
-			    key.address, key.format, key.width, key.height, totals.count, totals.bytes,
-			    totals.span_bytes));
+			rows.push_back(fmt::format("{},{},{},{},0x{:x},{},{},{},{},{},{}", t_ms,
+			                           kTransferKindNames[static_cast<uint32_t>(key.kind)],
+			                           key.reason, key.detail, key.address, key.format, key.width,
+			                           key.height, totals.count, totals.bytes, totals.span_bytes));
 		}
 		g_transfers.clear();
 	}
@@ -838,7 +844,7 @@ void Publish() {
 			std::scoped_lock lock(g_unclean_mutex);
 			unclean.swap(g_unclean_reads);
 		}
-		const auto now_ms = NowMs();
+		const auto       now_ms = NowMs();
 		std::scoped_lock lock(g_page_writer_mutex);
 		for (const auto& [key, totals]: unclean) {
 			std::string writer = ",,";
@@ -847,11 +853,10 @@ void Publish() {
 				                     kGpuWriteKindNames[static_cast<uint32_t>(it->second.kind)],
 				                     now_ms - std::min(now_ms, it->second.t_ms), it->second.size);
 			}
-			rows.push_back(fmt::format("{},{},{},{},0x{:x},{},{},0x{:x},{},{}", t_ms, key.reason,
-			                           key.purpose != nullptr ? key.purpose : "",
-			                           FormatHostAddress(key.caller), key.page, totals.count,
-			                           totals.bytes, totals.first_address, totals.first_size,
-			                           writer));
+			rows.push_back(fmt::format(
+			    "{},{},{},{},0x{:x},{},{},0x{:x},{},{}", t_ms, key.reason,
+			    key.purpose != nullptr ? key.purpose : "", FormatHostAddress(key.caller), key.page,
+			    totals.count, totals.bytes, totals.first_address, totals.first_size, writer));
 		}
 	}
 	WriteRows(g_files.unclean, rows);
@@ -875,31 +880,32 @@ void Publish() {
 			}
 			const auto base = g_tex_base[id].load(std::memory_order_relaxed);
 			const auto info = g_tex_info[id].load(std::memory_order_relaxed);
-			std::fprintf(g_files.tex,
-			             "%" PRIu64 ",%u,%u,0x%" PRIx64 ",%u,%u,%u,%u\n", t_ms, id, count, base,
-			             info & 0xfffu, (info >> 12u) & 0xfffu, (info >> 24u) & 0xfu,
+			std::fprintf(g_files.tex, "%" PRIu64 ",%u,%u,0x%" PRIx64 ",%u,%u,%u,%u\n", t_ms, id,
+			             count, base, info & 0xfffu, (info >> 12u) & 0xfffu, (info >> 24u) & 0xfu,
 			             (info >> 28u) & 0xfu);
 		}
 	}
 
 	if (g_files.summary != nullptr) {
-		auto take = [](std::atomic<uint64_t>& v) { return v.exchange(0, std::memory_order_relaxed); };
-		const auto flips       = take(g_totals.flips);
-		const auto apr_reads   = take(g_totals.apr_reads);
-		const auto apr_bytes   = take(g_totals.apr_bytes);
-		const auto apr_repeats = take(g_totals.apr_repeats);
-		const auto apr_errors  = take(g_totals.apr_errors);
-		const auto lod         = take(g_totals.lod_packets);
-		const auto lod_prior   = take(g_totals.lod_prior_nonzero);
-		const auto tex_total   = TakeTexturesResolved();
-		const auto tex_mip     = take(g_totals.tex_mipstats);
-		const auto done_n      = take(g_totals.done_waits);
-		const auto done_ns     = take(g_totals.done_ns);
-		const auto done_max    = take(g_totals.done_max_ns);
-		std::string line = fmt::format(
-		    "{},{},{},{},{},{},{},{},{},{},{},{},{}", t_ms, flips, apr_reads, apr_bytes,
-		    apr_repeats, apr_errors, lod, lod_prior, tex_total, tex_mip, done_n,
-		    done_n != 0 ? done_ns / done_n / 1000u : 0, done_max / 1000u);
+		auto take = [](std::atomic<uint64_t>& v) {
+			return v.exchange(0, std::memory_order_relaxed);
+		};
+		const auto  flips       = take(g_totals.flips);
+		const auto  apr_reads   = take(g_totals.apr_reads);
+		const auto  apr_bytes   = take(g_totals.apr_bytes);
+		const auto  apr_repeats = take(g_totals.apr_repeats);
+		const auto  apr_errors  = take(g_totals.apr_errors);
+		const auto  lod         = take(g_totals.lod_packets);
+		const auto  lod_prior   = take(g_totals.lod_prior_nonzero);
+		const auto  tex_total   = TakeTexturesResolved();
+		const auto  tex_mip     = take(g_totals.tex_mipstats);
+		const auto  done_n      = take(g_totals.done_waits);
+		const auto  done_ns     = take(g_totals.done_ns);
+		const auto  done_max    = take(g_totals.done_max_ns);
+		std::string line =
+		    fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{}", t_ms, flips, apr_reads, apr_bytes,
+		                apr_repeats, apr_errors, lod, lod_prior, tex_total, tex_mip, done_n,
+		                done_n != 0 ? done_ns / done_n / 1000u : 0, done_max / 1000u);
 		uint64_t c_starts = 0, c_wait = 0, c_wmax = 0, c_busy = 0, c_slices = 0, c_inc = 0;
 		for (uint32_t index = 0; index < kMaxQueues; index++) {
 			auto&      q      = g_queues[index];
@@ -943,17 +949,15 @@ void Publish() {
 		                    take(g_totals.image_frees), take(g_totals.native_creates),
 		                    take(g_totals.native_create_bytes));
 		// Appended GPU timeline columns; keep them last so older column indices stay valid.
-		const auto gpu_samples = take(g_totals.gpu_latency_samples);
-		const auto gpu_record  = take(g_totals.gpu_record_latency_ns);
+		const auto gpu_samples  = take(g_totals.gpu_latency_samples);
+		const auto gpu_record   = take(g_totals.gpu_record_latency_ns);
 		const auto gpu_dispatch = take(g_totals.gpu_dispatch_latency_ns);
-		line += fmt::format(",{},{},{},{},{},{},{},{}", take(g_totals.gpu_busy_ns) / 1000u,
-		                    take(g_totals.gpu_cmdbufs),
-		                    gpu_samples != 0 ? gpu_record / gpu_samples / 1000u : 0,
-		                    take(g_totals.gpu_idle_ns) / 1000u,
-		                    take(g_totals.gpu_max_gap_ns) / 1000u,
-		                    take(g_totals.gpu_starved_ns) / 1000u,
-		                    gpu_samples != 0 ? gpu_dispatch / gpu_samples / 1000u : 0,
-		                    take(g_totals.gpu_dropped));
+		line += fmt::format(
+		    ",{},{},{},{},{},{},{},{}", take(g_totals.gpu_busy_ns) / 1000u,
+		    take(g_totals.gpu_cmdbufs), gpu_samples != 0 ? gpu_record / gpu_samples / 1000u : 0,
+		    take(g_totals.gpu_idle_ns) / 1000u, take(g_totals.gpu_max_gap_ns) / 1000u,
+		    take(g_totals.gpu_starved_ns) / 1000u,
+		    gpu_samples != 0 ? gpu_dispatch / gpu_samples / 1000u : 0, take(g_totals.gpu_dropped));
 		line += fmt::format(",{},{},{},{}", take(g_totals.gpu_render_passes),
 		                    take(g_totals.gpu_barriers), take(g_totals.gpu_layout_transitions),
 		                    take(g_totals.gpu_guest_cmdbufs));
@@ -974,20 +978,15 @@ void Publish() {
 		};
 		memory_columns(0, kMemoryColumnsBeforeCompile);
 		// Compile columns (appended after the memory columns).
-		line += fmt::format(",{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-		                    take(g_totals.compile_programs),
-		                    take(g_totals.compile_translate_ns) / 1000u,
-		                    take(g_totals.compile_emit_ns) / 1000u,
-		                    take(g_totals.compile_validate_ns) / 1000u,
-		                    take(g_totals.compile_module_ns) / 1000u,
-		                    take(g_totals.compile_gfx_pipelines),
-		                    take(g_totals.compile_gfx_pipeline_ns) / 1000u,
-		                    take(g_totals.compile_cs_pipelines),
-		                    take(g_totals.compile_cs_pipeline_ns) / 1000u,
-		                    take(g_totals.compile_stall_ns) / 1000u,
-		                    take(g_totals.compile_stall_max_ns) / 1000u,
-		                    take(g_totals.compile_gfx_new), take(g_totals.compile_gfx_perm),
-		                    take(g_totals.compile_gfx_variant));
+		line += fmt::format(
+		    ",{},{},{},{},{},{},{},{},{},{},{},{},{},{}", take(g_totals.compile_programs),
+		    take(g_totals.compile_translate_ns) / 1000u, take(g_totals.compile_emit_ns) / 1000u,
+		    take(g_totals.compile_validate_ns) / 1000u, take(g_totals.compile_module_ns) / 1000u,
+		    take(g_totals.compile_gfx_pipelines), take(g_totals.compile_gfx_pipeline_ns) / 1000u,
+		    take(g_totals.compile_cs_pipelines), take(g_totals.compile_cs_pipeline_ns) / 1000u,
+		    take(g_totals.compile_stall_ns) / 1000u, take(g_totals.compile_stall_max_ns) / 1000u,
+		    take(g_totals.compile_gfx_new), take(g_totals.compile_gfx_perm),
+		    take(g_totals.compile_gfx_variant));
 		line += fmt::format(",{},{},{},{},{},{}", take(g_totals.pcache_saves),
 		                    take(g_totals.pcache_save_bytes) / 1024u,
 		                    take(g_totals.pcache_save_serialize_ns) / 1000u,
@@ -1016,8 +1015,8 @@ void Publish() {
 			stream_bytes = g_apr_stream_bytes;
 		}
 		line += fmt::format(",{},{},{},{}", take(g_totals.apr_grow_reads),
-		                    take(g_totals.apr_shrink_reads),
-		                    take(g_totals.apr_shrink_max_per_flip), stream_bytes >> 20u);
+		                    take(g_totals.apr_shrink_reads), take(g_totals.apr_shrink_max_per_flip),
+		                    stream_bytes >> 20u);
 		line += fmt::format(",{}", take(g_totals.pending_ops_max));
 		// Persistent program cache (appended last so that no existing column moves).
 		line += fmt::format(",{},{}", take(g_totals.compile_disk_loads),
@@ -1028,8 +1027,8 @@ void Publish() {
 
 	for (auto* file: {g_files.summary, g_files.apr, g_files.imports, g_files.imports_index,
 	                  g_files.lod, g_files.tex, g_files.modules, g_files.queues, g_files.readbacks,
-	                  g_files.images, g_files.lodwatch, g_files.transfers, g_files.compiles, g_files.frames,
-	                  g_files.unclean, g_files.timestamps, g_files.placement}) {
+	                  g_files.images, g_files.lodwatch, g_files.transfers, g_files.compiles,
+	                  g_files.frames, g_files.unclean, g_files.timestamps, g_files.placement}) {
 		if (file != nullptr) {
 			std::fflush(file);
 		}
@@ -1063,18 +1062,17 @@ void RecordCp(const CpEvent& event) {
 	if (!CpTraceEnabled()) {
 		return;
 	}
-	const auto queue    = event.queue >= 0 ? static_cast<uint32_t>(event.queue) : g_cp_queue;
-	const auto sequence = event.queue >= 0 ? event.seq : g_cp_sequence;
-	const auto t_us     = NowNs() / 1000u;
+	const auto       queue    = event.queue >= 0 ? static_cast<uint32_t>(event.queue) : g_cp_queue;
+	const auto       sequence = event.queue >= 0 ? event.seq : g_cp_sequence;
+	const auto       t_us     = NowNs() / 1000u;
 	std::scoped_lock lock(g_cp_mutex);
 	if (g_cp_rows_total >= kCpRowLimit) {
 		return;
 	}
-	auto row = fmt::format("{},{},{},{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},{},{}", t_us,
-	                       g_cp_rows_total, OsThreadId(),
-	                       queue == UINT32_MAX ? std::string("-") : fmt::format("0x{:x}", queue),
-	                       sequence, event.event, event.address, event.value, event.ref,
-	                       event.mask, event.aux, event.size);
+	auto row = fmt::format(
+	    "{},{},{},{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},{},{}", t_us, g_cp_rows_total, OsThreadId(),
+	    queue == UINT32_MAX ? std::string("-") : fmt::format("0x{:x}", queue), sequence,
+	    event.event, event.address, event.value, event.ref, event.mask, event.aux, event.size);
 	g_cp_rows_total++;
 	g_pending_cp_rows.push_back(std::move(row));
 }
@@ -1159,34 +1157,34 @@ void Initialize() {
 	// and emitted, and the time their keys, lookups and decoding took.
 	summary_header += ",compile_disk_loads,compile_disk_load_us";
 	g_files.summary = OpenFile("summary.csv", summary_header.c_str());
-	g_files.compiles = OpenFile("compiles.csv",
-	                            "t_ms,kind,stage,guest_hash,id,id2,origin,translate_us,emit_us,"
-	                            "validate_us,module_us,pipeline_us,total_us,spirv_words,host_tid,"
-	                            "detail,clone_us,load_us");
+	g_files.compiles =
+	    OpenFile("compiles.csv", "t_ms,kind,stage,guest_hash,id,id2,origin,translate_us,emit_us,"
+	                             "validate_us,module_us,pipeline_us,total_us,spirv_words,host_tid,"
+	                             "detail,clone_us,load_us");
 	if (FrameTimesEnabled()) g_files.frames = OpenFile("frames.csv", "t_us,interval_us");
-	g_files.transfers = OpenFile("transfers.csv",
-	                             "t_ms,kind,reason,detail,address,format,width,height,count,bytes,"
-	                             "span_bytes");
-	g_files.unclean   = OpenFile("unclean.csv",
-	                             "t_ms,reason,purpose,caller,page,count,bytes,first_address,"
-	                             "first_size,last_gpu_writer,last_gpu_write_age_ms,"
-	                             "last_gpu_write_size");
-	g_files.readbacks = OpenFile("readbacks.csv",
-	                             "t_ms,kind,vaddr,size,window_begin,window_size,downloaded,"
-	                             "duration_us,host_tid,thread,pc,stack_callers,last_gpu_writer,"
-	                             "last_gpu_write_age_ms,last_gpu_write_size");
-	g_files.occlusion = OpenFile("occlusion.csv",
-	                             "t_ms,event,address,value,scopes,width,height,colors,has_depth,"
-	                             "depth_format,depth_address,condition,skip,detail");
-	g_files.lodreports = OpenFile("lodreports.csv",
-	                              "t_ms,destination,control,has_latest,sampled_counters,"
-	                              "total_samples,mean_finest_mip,pending_copies,drawn_counters,"
-	                              "counted_counters");
-	g_files.timestamps = OpenFile("timestamps.csv",
-	                              "t_ms,rewritten,skipped,unavailable,deferred,shift_avg_us,"
-	                              "shift_max_us,publish_us,publishes,ring0_us,ring1_us,ring2_us,"
-	                              "ring3_us,ring4_us,ring5_us,ring6_us,ring7_us,drs_index,drs_level,"
-	                              "drs_room_frames,drs_fps,drs_scalable_ms,drs_total_ms");
+	g_files.transfers =
+	    OpenFile("transfers.csv", "t_ms,kind,reason,detail,address,format,width,height,count,bytes,"
+	                              "span_bytes");
+	g_files.unclean =
+	    OpenFile("unclean.csv", "t_ms,reason,purpose,caller,page,count,bytes,first_address,"
+	                            "first_size,last_gpu_writer,last_gpu_write_age_ms,"
+	                            "last_gpu_write_size");
+	g_files.readbacks =
+	    OpenFile("readbacks.csv", "t_ms,kind,vaddr,size,window_begin,window_size,downloaded,"
+	                              "duration_us,host_tid,thread,pc,stack_callers,last_gpu_writer,"
+	                              "last_gpu_write_age_ms,last_gpu_write_size");
+	g_files.occlusion =
+	    OpenFile("occlusion.csv", "t_ms,event,address,value,scopes,width,height,colors,has_depth,"
+	                              "depth_format,depth_address,condition,skip,detail");
+	g_files.lodreports =
+	    OpenFile("lodreports.csv", "t_ms,destination,control,has_latest,sampled_counters,"
+	                               "total_samples,mean_finest_mip,pending_copies,drawn_counters,"
+	                               "counted_counters");
+	g_files.timestamps = OpenFile(
+	    "timestamps.csv", "t_ms,rewritten,skipped,unavailable,deferred,shift_avg_us,"
+	                      "shift_max_us,publish_us,publishes,ring0_us,ring1_us,ring2_us,"
+	                      "ring3_us,ring4_us,ring5_us,ring6_us,ring7_us,drs_index,drs_level,"
+	                      "drs_room_frames,drs_fps,drs_scalable_ms,drs_total_ms");
 	{
 		std::string header = "t_ms,role,samples,on_cp_core,cp_core";
 		for (uint32_t cpu = 0; cpu < 32; cpu++) {
@@ -1208,37 +1206,37 @@ void Initialize() {
 			}
 		}
 	}
-	g_files.lodwatch  = OpenFile("lodwatch.csv",
-	                             "t_ms,report_seq,fault_vaddr,report_offset,access,pc,thread,"
+	g_files.lodwatch =
+	    OpenFile("lodwatch.csv", "t_ms,report_seq,fault_vaddr,report_offset,access,pc,thread,"
 	                             "rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp,r8,r9,r10,r11,r12,r13,r14,r15,"
 	                             "code_file,stack_callers");
-	g_files.images    = OpenFile("images.csv",
-	                             "t_ms,event,address,age_ticks,width,height,levels,layers,reason,"
-	                             "format,usage,count,bytes");
-	g_files.apr     = OpenFile("apr.csv",
-	                           "t_ms,host_tid,thread,file_id,offset,size,destination,bytes_read,"
-	                               "result,repeat_count,first_seen_ms,previous_destination,path,"
-	                               "caller,stack_callers");
+	g_files.images =
+	    OpenFile("images.csv", "t_ms,event,address,age_ticks,width,height,levels,layers,reason,"
+	                           "format,usage,count,bytes");
+	g_files.apr =
+	    OpenFile("apr.csv", "t_ms,host_tid,thread,file_id,offset,size,destination,bytes_read,"
+	                        "result,repeat_count,first_seen_ms,previous_destination,path,"
+	                        "caller,stack_callers");
 	if (ImportsEnabled()) {
-		g_files.imports       = OpenFile("imports.csv", "t_ms,import_id,delta,total");
-		g_files.imports_index = OpenFile("imports-index.csv", "import_id,target,nid,host_function,program");
+		g_files.imports = OpenFile("imports.csv", "t_ms,import_id,delta,total");
+		g_files.imports_index =
+		    OpenFile("imports-index.csv", "import_id,target,nid,host_function,program");
 	}
-	g_files.lod     = OpenFile("lodstats.csv",
-	                           "t_ms,sequence,destination,size,control,report_reset,force_reset,"
-	                               "prior_nonzero_dwords,prior_first_nonzero,prior_hash,prior_head8,"
-	                               "prior_tail8");
-	g_files.tex     = OpenFile("texstats.csv",
-	                           "t_ms,counter_id,uses,last_base,min_lod,min_lod_warn,base_level,"
-	                               "last_level");
+	g_files.lod =
+	    OpenFile("lodstats.csv", "t_ms,sequence,destination,size,control,report_reset,force_reset,"
+	                             "prior_nonzero_dwords,prior_first_nonzero,prior_hash,prior_head8,"
+	                             "prior_tail8");
+	g_files.tex =
+	    OpenFile("texstats.csv", "t_ms,counter_id,uses,last_base,min_lod,min_lod_warn,base_level,"
+	                             "last_level");
 	g_files.modules = OpenFile("modules.csv", "name,base,size");
-	g_files.queues  = OpenFile("queues.csv",
-	                           "t_ms,queue,starts,wait_avg_us,wait_max_us,busy_us,slices,incomplete");
+	g_files.queues  = OpenFile(
+	    "queues.csv", "t_ms,queue,starts,wait_avg_us,wait_max_us,busy_us,slices,incomplete");
 
 	g_publisher = std::jthread([](std::stop_token stop) {
 		std::unique_lock lock(g_publish_mutex);
 		while (!stop.stop_requested()) {
-			g_publish_condition.wait_for(lock, stop, std::chrono::seconds(1),
-			                             [] { return false; });
+			g_publish_condition.wait_for(lock, stop, std::chrono::seconds(1), [] { return false; });
 			Publish();
 		}
 	});
@@ -1259,11 +1257,11 @@ void Shutdown() {
 		g_publisher.join();
 		Publish();
 	}
-	for (auto** file: {&g_files.summary, &g_files.apr, &g_files.imports, &g_files.imports_index,
-	                   &g_files.lod, &g_files.tex, &g_files.modules, &g_files.queues,
-	                   &g_files.readbacks, &g_files.images, &g_files.lodwatch,
-	                   &g_files.transfers, &g_files.compiles, &g_files.frames, &g_files.unclean,
-	                   &g_files.timestamps, &g_files.placement}) {
+	for (auto** file:
+	     {&g_files.summary, &g_files.apr, &g_files.imports, &g_files.imports_index, &g_files.lod,
+	      &g_files.tex, &g_files.modules, &g_files.queues, &g_files.readbacks, &g_files.images,
+	      &g_files.lodwatch, &g_files.transfers, &g_files.compiles, &g_files.frames,
+	      &g_files.unclean, &g_files.timestamps, &g_files.placement}) {
 		if (*file != nullptr) {
 			std::fclose(*file);
 			*file = nullptr;
@@ -1277,7 +1275,7 @@ void RegisterGuestCode(uint64_t base, uint64_t size, std::string_view name) {
 		return;
 	}
 	std::scoped_lock lock(g_module_mutex);
-	const auto count = g_module_count.load(std::memory_order_relaxed);
+	const auto       count = g_module_count.load(std::memory_order_relaxed);
 	for (uint32_t i = 0; i < count; i++) {
 		if (g_modules[i].base == base) {
 			return;
@@ -1313,8 +1311,7 @@ uint64_t* AllocateImportCounter(uint64_t target, std::string_view nid, std::stri
 	g_imports.push_back(std::move(entry));
 	g_imports_by_target.emplace(target, raw);
 	g_pending_import_index_rows.push_back(fmt::format("{},0x{:x},{},{},{}", raw->id, target,
-	                                                  CsvEscape(raw->nid),
-	                                                  CsvEscape(raw->dbg_name),
+	                                                  CsvEscape(raw->nid), CsvEscape(raw->dbg_name),
 	                                                  CsvEscape(raw->program)));
 	return &raw->count;
 }
@@ -1350,13 +1347,13 @@ void RecordAprRead(uint32_t file_id, std::string_view host_path, uint64_t file_o
 	if (result != 0) {
 		g_totals.apr_errors.fetch_add(1, std::memory_order_relaxed);
 	}
-	const auto caller  = g_guest_caller != 0 ? FormatAddress(g_guest_caller) : std::string();
+	const auto caller = g_guest_caller != 0 ? FormatAddress(g_guest_caller) : std::string();
 	// A stack scan costs hundreds of VirtualQuery calls. Boot issues thousands of reads from a
 	// few call sites, and scanning every one stalled the guest streamer (4 s -> 25 s to the
 	// first level). Scan only the first reads of each call site, then every 1024th.
 	thread_local std::unordered_map<uint64_t, uint32_t> scanned_callers;
-	auto&      seen    = scanned_callers[g_guest_caller];
-	const bool scan    = seen < 4 || (seen % 1024u) == 0;
+	auto&                                               seen = scanned_callers[g_guest_caller];
+	const bool                                          scan = seen < 4 || (seen % 1024u) == 0;
 	seen++;
 	const auto callers = scan ? CaptureGuestCallers() : std::string();
 
@@ -1371,12 +1368,12 @@ void RecordAprRead(uint32_t file_id, std::string_view host_path, uint64_t file_o
 		}
 		last = bytes_read;
 		if (thread_name.find("TextureStreamer") != std::string_view::npos) {
-			auto& stream = g_apr_stream_size[file_id];
+			auto& stream       = g_apr_stream_size[file_id];
 			g_apr_stream_bytes = g_apr_stream_bytes - stream + bytes_read;
 			stream             = bytes_read;
 		}
 	}
-	auto& info = g_apr_keys[AprKey {file_id, file_offset, size}];
+	auto&      info                 = g_apr_keys[AprKey {file_id, file_offset, size}];
 	const auto previous_destination = info.last_dest;
 	if (info.count == 0) {
 		info.first_ms = t_ms;
@@ -1390,11 +1387,11 @@ void RecordAprRead(uint32_t file_id, std::string_view host_path, uint64_t file_o
 		return;
 	}
 	g_apr_rows_total++;
-	g_pending_apr_rows.push_back(fmt::format(
-	    "{},{},{},0x{:08x},{},{},0x{:x},{},{},{},{},0x{:x},{},{},{}", t_ms,
-	    OsThreadId(), CsvEscape(thread_name), file_id, file_offset, size, destination, bytes_read, result,
-	    info.count, info.first_ms, previous_destination, CsvEscape(host_path), caller,
-	    CsvEscape(callers)));
+	g_pending_apr_rows.push_back(
+	    fmt::format("{},{},{},0x{:08x},{},{},0x{:x},{},{},{},{},0x{:x},{},{},{}", t_ms,
+	                OsThreadId(), CsvEscape(thread_name), file_id, file_offset, size, destination,
+	                bytes_read, result, info.count, info.first_ms, previous_destination,
+	                CsvEscape(host_path), caller, CsvEscape(callers)));
 }
 
 void RecordLodStats(const void* destination, uint32_t size, uint32_t control) {
@@ -1436,10 +1433,10 @@ void RecordLodStats(const void* destination, uint32_t size, uint32_t control) {
 	for (uint32_t i = tail_start; i < word_count; i++) {
 		tail += fmt::format("{}{:08x}", i == tail_start ? "" : " ", words[i]);
 	}
-	auto row = fmt::format("{},{},0x{:x},{},0x{:08x},{},{},{},{},0x{:016x},{},{}", NowMs(), sequence,
-	                       reinterpret_cast<uint64_t>(destination), size, control,
-	                       (control >> 19u) & 1u, (control >> 18u) & 1u, nonzero, first_nz, hash,
-	                       head, tail);
+	auto row =
+	    fmt::format("{},{},0x{:x},{},0x{:08x},{},{},{},{},0x{:016x},{},{}", NowMs(), sequence,
+	                reinterpret_cast<uint64_t>(destination), size, control, (control >> 19u) & 1u,
+	                (control >> 18u) & 1u, nonzero, first_nz, hash, head, tail);
 	std::scoped_lock lock(g_lod_mutex);
 	g_pending_lod_rows.push_back(std::move(row));
 }
@@ -1478,14 +1475,14 @@ void ArmLodReportWatch(const void* destination, uint32_t size) {
 		return;
 	}
 	std::scoped_lock lock(g_watch_mutex);
-	const auto call = g_watch_calls++;
+	const auto       call = g_watch_calls++;
 	// Skip the first reports (boot/menu) and then sample sparsely.
 	if (call < 1024 || (call % kLodWatchInterval) != 0 || g_watch_arms >= kLodWatchMaxArms) {
 		return;
 	}
 	RestoreWatchedPagesLocked();
-	const auto begin = reinterpret_cast<uint64_t>(destination);
-	const auto end   = begin + size;
+	const auto               begin = reinterpret_cast<uint64_t>(destination);
+	const auto               end   = begin + size;
 	std::vector<WatchedPage> pages;
 	for (uint64_t page = begin & ~uint64_t {0xfff}; page < end; page += 0x1000) {
 		MEMORY_BASIC_INFORMATION info {};
@@ -1498,7 +1495,8 @@ void ArmLodReportWatch(const void* destination, uint32_t size) {
 	}
 	for (const auto& watched: pages) {
 		DWORD old = 0;
-		if (VirtualProtect(reinterpret_cast<void*>(watched.page), 0x1000, PAGE_NOACCESS, &old) == 0) {
+		if (VirtualProtect(reinterpret_cast<void*>(watched.page), 0x1000, PAGE_NOACCESS, &old) ==
+		    0) {
 			RestoreWatchedPagesLocked();
 			return;
 		}
@@ -1520,11 +1518,11 @@ bool HandleLodWatchFault(uint64_t fault_vaddr, bool write, uint64_t pc, const ui
 	if (!LodWatchEnabled()) {
 		return false;
 	}
-	std::string code_file;
+	std::string      code_file;
 	std::scoped_lock lock(g_watch_mutex);
-	const auto page = fault_vaddr & ~uint64_t {0xfff};
-	const bool hit  = std::any_of(g_watched_pages.begin(), g_watched_pages.end(),
-	                              [page](const WatchedPage& w) { return w.page == page; });
+	const auto       page = fault_vaddr & ~uint64_t {0xfff};
+	const bool       hit  = std::any_of(g_watched_pages.begin(), g_watched_pages.end(),
+	                                    [page](const WatchedPage& w) { return w.page == page; });
 	if (!hit) {
 		return false;
 	}
@@ -1543,7 +1541,7 @@ bool HandleLodWatchFault(uint64_t fault_vaddr, bool write, uint64_t pc, const ui
 			}
 		}
 	}
-	const bool in_report = fault_vaddr >= g_watch_report_begin && fault_vaddr < g_watch_report_end;
+	const bool  in_report = fault_vaddr >= g_watch_report_begin && fault_vaddr < g_watch_report_end;
 	std::string regs;
 	for (int i = 0; i < 16; i++) {
 		regs += fmt::format(",0x{:x}", gpr16[i]);
@@ -1579,16 +1577,17 @@ Detail::TextureTally& Detail::AcquireTextureTally() noexcept {
 
 void Detail::RecordMipStatsTexture(const uint32_t* fields) noexcept {
 	g_totals.tex_mipstats.fetch_add(1, std::memory_order_relaxed);
-	const auto id   = fields[6] & 0xffu;
-	const auto base = ((fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)) & 0xFFFFFFFFFFull)
-	                  << 8u;
-	const auto min_lod      = (fields[1] >> 8u) & 0xfffu;
+	const auto id      = fields[6] & 0xffu;
+	const auto base    = ((fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)) & 0xFFFFFFFFFFull)
+	                     << 8u;
+	const auto min_lod = (fields[1] >> 8u) & 0xfffu;
 	const auto min_lod_warn = (fields[5] >> 8u) & 0xfffu;
 	const auto base_level   = (fields[3] >> 12u) & 0xfu;
 	const auto last_level   = (fields[3] >> 16u) & 0xfu;
 	g_tex_count[id].fetch_add(1, std::memory_order_relaxed);
 	g_tex_base[id].store(base, std::memory_order_relaxed);
-	g_tex_info[id].store(min_lod | (min_lod_warn << 12u) | (base_level << 24u) | (last_level << 28u),
+	g_tex_info[id].store(min_lod | (min_lod_warn << 12u) | (base_level << 24u) |
+	                         (last_level << 28u),
 	                     std::memory_order_relaxed);
 }
 
@@ -1623,30 +1622,33 @@ void RecordReadback(uint64_t vaddr, uint64_t size, uint64_t window_begin, uint64
 	if (downloaded) {
 		g_totals.readback_downloads.fetch_add(1, std::memory_order_relaxed);
 	}
-	const auto kind   = g_readback_kind;
-	const bool fault  = kind == ReadbackKind::FaultRead || kind == ReadbackKind::FaultWrite ||
-	                   kind == ReadbackKind::FaultReadSide || kind == ReadbackKind::FaultReadDuplicate ||
+	const auto kind  = g_readback_kind;
+	const bool fault = kind == ReadbackKind::FaultRead || kind == ReadbackKind::FaultWrite ||
+	                   kind == ReadbackKind::FaultReadSide ||
+	                   kind == ReadbackKind::FaultReadDuplicate ||
 	                   kind == ReadbackKind::FaultReadEager;
-	const auto pc     = fault && g_fault_context.pc != 0 ? FormatAddress(g_fault_context.pc) : std::string();
+	const auto pc =
+	    fault && g_fault_context.pc != 0 ? FormatAddress(g_fault_context.pc) : std::string();
 	const auto thread = fault ? std::string_view(g_fault_context.thread) : std::string_view();
 	// Stack scanning only helps when a guest thread is on this stack (CPU faults). It costs a dozen
 	// VirtualQuery calls, so scan only the first few faults of each faulting instruction.
 	thread_local std::unordered_map<uint64_t, uint32_t> scanned_pcs;
-	const bool scan    = fault && scanned_pcs.size() < 4096 && scanned_pcs[g_fault_context.pc]++ < 4;
-	const auto callers = scan ? CaptureGuestCallers() : std::string();
-	const auto now_ms  = NowMs();
-	std::string writer = ",,";
+	const bool  scan = fault && scanned_pcs.size() < 4096 && scanned_pcs[g_fault_context.pc]++ < 4;
+	const auto  callers = scan ? CaptureGuestCallers() : std::string();
+	const auto  now_ms  = NowMs();
+	std::string writer  = ",,";
 	{
 		std::scoped_lock lock(g_page_writer_mutex);
 		if (auto it = g_page_writers.find(vaddr >> 12u); it != g_page_writers.end()) {
-			writer = fmt::format("{},{},{}", kGpuWriteKindNames[static_cast<uint32_t>(it->second.kind)],
-			                     now_ms - std::min(now_ms, it->second.t_ms), it->second.size);
+			writer =
+			    fmt::format("{},{},{}", kGpuWriteKindNames[static_cast<uint32_t>(it->second.kind)],
+			                now_ms - std::min(now_ms, it->second.t_ms), it->second.size);
 		}
 	}
 	auto row = fmt::format("{},{},0x{:x},{},0x{:x},{},{},{},{},{},{},{},{}", now_ms,
-	                       kReadbackKindNames[static_cast<uint32_t>(kind)], vaddr, size, window_begin,
-	                       window_size, downloaded ? 1 : 0, duration_ns / 1000u, OsThreadId(),
-	                       CsvEscape(thread), pc, CsvEscape(callers), writer);
+	                       kReadbackKindNames[static_cast<uint32_t>(kind)], vaddr, size,
+	                       window_begin, window_size, downloaded ? 1 : 0, duration_ns / 1000u,
+	                       OsThreadId(), CsvEscape(thread), pc, CsvEscape(callers), writer);
 	std::scoped_lock lock(g_readback_mutex);
 	if (g_readback_rows_total >= kReadbackRowLimit) {
 		return;
@@ -1659,11 +1661,11 @@ void RecordOcclusion(const OcclusionEvent& event) {
 	if (!Enabled()) {
 		return;
 	}
-	auto row = fmt::format("{},{},0x{:x},{},{},{},{},{},{},{},0x{:x},{},{},{}", NowMs(), event.event,
-	                       event.address, event.value, event.scopes, event.width, event.height,
-	                       event.colors, event.has_depth ? 1 : 0, event.depth_format,
-	                       event.depth_address, event.condition, event.skip ? 1 : 0,
-	                       CsvEscape(event.detail));
+	auto row =
+	    fmt::format("{},{},0x{:x},{},{},{},{},{},{},{},0x{:x},{},{},{}", NowMs(), event.event,
+	                event.address, event.value, event.scopes, event.width, event.height,
+	                event.colors, event.has_depth ? 1 : 0, event.depth_format, event.depth_address,
+	                event.condition, event.skip ? 1 : 0, CsvEscape(event.detail));
 	std::scoped_lock lock(g_occlusion_mutex);
 	if (g_occlusion_rows_total >= kOcclusionRowLimit) {
 		return;
@@ -1691,7 +1693,7 @@ void RecordLodReport(const LodReportEvent& event) {
 	g_pending_lodreport_rows.push_back(std::move(row));
 }
 
-ScopedGpuWriteKind::ScopedGpuWriteKind(GpuWriteKind kind) : m_previous(g_gpu_write_kind) {
+ScopedGpuWriteKind::ScopedGpuWriteKind(GpuWriteKind kind): m_previous(g_gpu_write_kind) {
 	g_gpu_write_kind = kind;
 }
 
@@ -1743,9 +1745,9 @@ void NoteGpuWrite(uint64_t vaddr, uint64_t size) {
 			recent.valid = false;
 		}
 	}
-	t_recent_writes[t_recent_next++ % t_recent_writes.size()] = {first, last, writer.t_ms, size,
-	                                                             writer.kind, true};
-	t_recent_version     = version;
+	t_recent_writes[t_recent_next++ % t_recent_writes.size()] = {first, last,        writer.t_ms,
+	                                                             size,  writer.kind, true};
+	t_recent_version                                          = version;
 	t_recent_below_clear = g_page_writers.size() <= kClearPageWriters;
 }
 
@@ -1763,7 +1765,7 @@ const char* LastGpuWriteKind(uint64_t vaddr) {
 		return "unknown";
 	}
 	std::scoped_lock lock(g_page_writer_mutex);
-	const auto it = g_page_writers.find(vaddr >> 12u);
+	const auto       it = g_page_writers.find(vaddr >> 12u);
 	return it != g_page_writers.end() ? kGpuWriteKindNames[static_cast<uint32_t>(it->second.kind)]
 	                                  : "unknown";
 }
@@ -1800,7 +1802,8 @@ void RecordNativeImage(bool create, bool pool_hit, uint32_t format, uint32_t wid
 		g_totals.native_create_bytes.fetch_add(bytes, std::memory_order_relaxed);
 	}
 	std::scoped_lock lock(g_image_mutex);
-	auto& totals = g_native_images[NativeImageKey {create, pool_hit, format, width, height, levels, usage}];
+	auto&            totals =
+	    g_native_images[NativeImageKey {create, pool_hit, format, width, height, levels, usage}];
 	totals.count++;
 	totals.bytes += bytes;
 }
@@ -1813,8 +1816,13 @@ void RecordTransfer(TransferKind kind, const char* reason, const char* detail, u
 	}
 	g_totals.transfer_count[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 	g_totals.transfer_bytes[static_cast<size_t>(kind)].fetch_add(bytes, std::memory_order_relaxed);
-	TransferKey key {kind,   reason != nullptr ? reason : "", detail != nullptr ? detail : "",
-	                 address, format, width, height};
+	TransferKey      key {kind,
+	                      reason != nullptr ? reason : "",
+	                      detail != nullptr ? detail : "",
+	                      address,
+	                      format,
+	                      width,
+	                      height};
 	std::scoped_lock lock(g_transfer_mutex);
 	if (g_transfers.size() >= kTransferKeyLimit && !g_transfers.contains(key)) {
 		key.address = 0;
@@ -1879,6 +1887,24 @@ void RecordDoneWait(uint64_t wait_ns) {
 
 void RecordFlip() {
 	HangWatchdog::NoteFlip();
+	// KYTY_FRAME_TIMES_LOG=<file> (default off, independent of the hang trace): one line per guest
+	// flip, "t_us,interval_us" (present-thread clock), for frame-time percentiles and stutter
+	// counts.
+	static FILE* frame_log = [] {
+		const auto* path = std::getenv("KYTY_FRAME_TIMES_LOG");
+		return path != nullptr && path[0] != 0 ? std::fopen(path, "w") : nullptr;
+	}();
+	if (frame_log != nullptr) {
+		static uint64_t previous = 0;
+		const auto      now      = NowNs();
+		if (previous != 0) {
+			std::fprintf(frame_log, "%" PRIu64 ",%" PRIu64 "\n", now / 1000u,
+			             (now - previous) / 1000u);
+			static uint32_t lines = 0;
+			if ((++lines & 63u) == 0) std::fflush(frame_log);
+		}
+		previous = now;
+	}
 	if (!Enabled()) {
 		return;
 	}
@@ -1887,10 +1913,10 @@ void RecordFlip() {
 	          g_totals.apr_shrinks_since_flip.exchange(0, std::memory_order_relaxed));
 	if (FrameTimesEnabled()) {
 		std::scoped_lock lock(g_compile_mutex);
-		const auto now = NowNs();
+		const auto       now = NowNs();
 		if (g_previous_flip_ns != 0 && g_frame_rows_total < kCompileRowLimit) {
-			g_pending_frame_rows.push_back(fmt::format("{},{}", now / 1000u,
-			    (now - g_previous_flip_ns) / 1000u));
+			g_pending_frame_rows.push_back(
+			    fmt::format("{},{}", now / 1000u, (now - g_previous_flip_ns) / 1000u));
 			++g_frame_rows_total;
 		}
 		g_previous_flip_ns = now;
@@ -1922,9 +1948,9 @@ void RecordEopTimestamps(const EopTimestampFrame& frame) {
 	const double shift_avg_us =
 	    samples != 0 ? static_cast<double>(frame.shift_sum) / static_cast<double>(samples) / 100.0
 	                 : 0.0;
-	std::string row = fmt::format("{},{},{},{},{},{:.1f},{:.1f},{:.1f},{}", NowMs(), frame.rewritten,
-	                              frame.skipped, frame.unavailable, frame.deferred, shift_avg_us,
-	                              static_cast<double>(frame.shift_max) / 100.0,
+	std::string row = fmt::format("{},{},{},{},{},{:.1f},{:.1f},{:.1f},{}", NowMs(),
+	                              frame.rewritten, frame.skipped, frame.unavailable, frame.deferred,
+	                              shift_avg_us, static_cast<double>(frame.shift_max) / 100.0,
 	                              static_cast<double>(frame.publish_ns) / 1000.0, frame.publishes);
 	for (uint32_t i = 0; i < EopTimestampFrame::MaxRings; i++) {
 		row += i < frame.rings && frame.ring_delta_us[i] >= 0
@@ -1992,8 +2018,7 @@ void RecordGpuOpCounts(const GpuOpCounts& counts) {
 	}
 	g_totals.gpu_render_passes.fetch_add(counts.render_passes, std::memory_order_relaxed);
 	g_totals.gpu_barriers.fetch_add(counts.barriers, std::memory_order_relaxed);
-	g_totals.gpu_layout_transitions.fetch_add(counts.layout_transitions,
-	                                          std::memory_order_relaxed);
+	g_totals.gpu_layout_transitions.fetch_add(counts.layout_transitions, std::memory_order_relaxed);
 	g_totals.gpu_guest_cmdbufs.fetch_add(counts.command_buffers, std::memory_order_relaxed);
 	g_totals.gpu_barrier_requests.fetch_add(counts.barrier_requests, std::memory_order_relaxed);
 	g_totals.gpu_barriers_merged.fetch_add(counts.barriers_merged, std::memory_order_relaxed);
@@ -2043,14 +2068,14 @@ void RecordCompile(const CompileEvent& event) {
 	const auto origin = static_cast<size_t>(event.origin) < std::size(kPipelineOriginNames)
 	                        ? kPipelineOriginNames[static_cast<size_t>(event.origin)]
 	                        : "";
-	auto row = fmt::format("{},{},{},0x{:016x},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", NowMs(),
-	                       kCompileKindNames[static_cast<size_t>(event.kind)],
-	                       event.stage != nullptr ? event.stage : "", event.guest_hash, event.id,
-	                       event.id2, origin, event.translate_ns / 1000u, event.emit_ns / 1000u,
-	                       event.validate_ns / 1000u, event.module_ns / 1000u,
-	                       event.pipeline_ns / 1000u, event.total_ns / 1000u, event.spirv_words,
-	                       OsThreadId(), CsvEscape(event.detail), event.clone_ns / 1000u,
-	                       event.load_ns / 1000u);
+	auto       row =
+	    fmt::format("{},{},{},0x{:016x},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", NowMs(),
+	                kCompileKindNames[static_cast<size_t>(event.kind)],
+	                event.stage != nullptr ? event.stage : "", event.guest_hash, event.id,
+	                event.id2, origin, event.translate_ns / 1000u, event.emit_ns / 1000u,
+	                event.validate_ns / 1000u, event.module_ns / 1000u, event.pipeline_ns / 1000u,
+	                event.total_ns / 1000u, event.spirv_words, OsThreadId(),
+	                CsvEscape(event.detail), event.clone_ns / 1000u, event.load_ns / 1000u);
 	std::scoped_lock lock(g_compile_mutex);
 	if (g_compile_rows_total >= kCompileRowLimit) {
 		return;

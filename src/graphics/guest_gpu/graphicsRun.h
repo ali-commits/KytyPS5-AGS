@@ -57,19 +57,38 @@ public:
 
 	// End-of-pipe labels whose guest write is deferred to their tick's completion (see
 	// CommandProcessor::TryDeferLabel). Registration and completion run on the GPU thread.
-	void AddDeferredLabel(uint64_t address, uint32_t size, uint64_t tick);
+	// cp_visible (KYTY_LABEL_MODE=split): the command processor's own reads (WAIT_REG_MEM) see
+	// `value` while the guest write is pending (CpVisibleLabelValue).
+	void AddDeferredLabel(uint64_t address, uint32_t size, uint64_t tick, uint64_t value = 0,
+	                      bool cp_visible = false);
 	void RemoveDeferredLabel(uint64_t address, uint64_t tick);
 	[[nodiscard]] bool HasDeferredLabels() const noexcept {
 		return m_deferred_label_count.load(std::memory_order_acquire) != 0;
 	}
 	// Newest tick of a pending deferred label overlapping the range, or 0.
 	[[nodiscard]] uint64_t DeferredLabelTick(uint64_t address, uint64_t size);
+	// The bytes [address, address + size) as the newest pending CP-visible deferred labels
+	// covering them would write them, over `value` (which holds the guest memory bytes). False
+	// when no such label overlaps the range.
+	[[nodiscard]] bool CpVisibleLabelValue(uint64_t address, uint32_t size, void* value);
+	// A WAIT_REG_MEM passed on the CP-visible pending labels covering the range.
+	void NoteCpVisibleLabelsWaited(uint64_t address, uint64_t size);
+	// A command-processor write to [address, address + size): pending labels there are no longer
+	// what the command processor reads, and overlapping bytes of one a CP wait passed on are
+	// skipped (on hardware it landed before that wait passed, so before this write).
+	void DropCpVisibleLabels(uint64_t address, uint64_t size);
+	// Bit mask of bytes replaced by later CP writes (DropCpVisibleLabels).
+	[[nodiscard]] uint8_t DeferredLabelSupersededBytes(uint64_t address, uint64_t tick);
 
 private:
 	struct DeferredLabel {
-		uint64_t address = 0;
-		uint64_t size    = 0;
-		uint64_t tick    = 0;
+		uint64_t address    = 0;
+		uint64_t size       = 0;
+		uint64_t tick       = 0;
+		uint64_t value      = 0;
+		uint8_t  cp_visible = 0; // One bit per captured byte.
+		bool     cp_waited  = false;
+		uint8_t  superseded = 0; // Later CP writes must survive completion, byte by byte.
 	};
 	static constexpr uint32_t ComputePipeCount     = 7;
 	static constexpr uint32_t QueuesPerComputePipe = 8;
@@ -105,22 +124,22 @@ private:
 		bool handoff = false;
 	};
 
-	void              Enqueue(Submission submission);
-	void              WaitForIdle();
-	void              ProcessCommands();
+	void               Enqueue(Submission submission);
+	void               WaitForIdle();
+	void               ProcessCommands();
 	[[nodiscard]] bool HasPendingCommands() const noexcept {
 		return m_pending_commands.load(std::memory_order_acquire) != 0;
 	}
-	bool              Process(Submission& submission);
+	bool Process(Submission& submission);
 	// KYTY_CP_SEQ=1: a queue-0 submission, executed from the sequencer's ops.
-	bool              ProcessSequenced(Submission& submission);
+	bool ProcessSequenced(Submission& submission);
 	// The graphics submission's CE/DE streams parsed and executed on this thread (Direct).
-	bool              ProcessGraphicsDirect(Submission& submission, CommandProcessor& cp);
+	bool ProcessGraphicsDirect(Submission& submission, CommandProcessor& cp);
 	// The submission may start (or continue) now as far as the frame fence is concerned.
 	// Requires m_queue_mutex.
 	[[nodiscard]] bool FrameFencePassed(const Submission& submission) const;
-	static void       ThreadRun(void* data);
-	CommandProcessor& GetProcessor(uint32_t queue_id);
+	static void        ThreadRun(void* data);
+	CommandProcessor&  GetProcessor(uint32_t queue_id);
 
 	RenderContext&                                 m_renderer;
 	Common::Mutex                                  m_submission_mutex;
@@ -133,22 +152,23 @@ private:
 	std::atomic_uint32_t                           m_pending_commands {0};
 	std::deque<DeferredLabel>                      m_deferred_labels; // m_queue_mutex
 	std::atomic_uint32_t                           m_deferred_label_count {0};
+	std::atomic_bool                               m_cp_visible_labels {false}; // ever added
 	// Some queue front is marked blocked (set under m_queue_mutex; NotifyProgress fast path).
-	std::atomic_bool                               m_has_blocked {false};
+	std::atomic_bool m_has_blocked {false};
 	// Bounded Done (KYTY_AGC_DONE_MODE): admission sequence numbers of submissions not yet
 	// completed, the last sequence admitted before the latest Done, and its waiters.
-	std::set<uint64_t>                             m_in_flight;
-	uint64_t                                       m_next_submission_sequence = 1;
-	uint64_t                                       m_done_boundary            = 0;
-	uint32_t                                       m_done_waiters             = 0;
-	Common::CondVar                                m_done_progress;
-	uint32_t                                       m_next_queue        = 0;
-	uint32_t                                       m_submission_count  = 0;
-	bool                                           m_processing        = false;
-	bool                                           m_graphics_done     = true;
-	bool                                           m_accepting         = true;
-	bool                                           m_stopping          = false;
-	bool                                           m_shutdown_complete = false;
+	std::set<uint64_t> m_in_flight;
+	uint64_t           m_next_submission_sequence = 1;
+	uint64_t           m_done_boundary            = 0;
+	uint32_t           m_done_waiters             = 0;
+	Common::CondVar    m_done_progress;
+	uint32_t           m_next_queue        = 0;
+	uint32_t           m_submission_count  = 0;
+	bool               m_processing        = false;
+	bool               m_graphics_done     = true;
+	bool               m_accepting         = true;
+	bool               m_stopping          = false;
+	bool               m_shutdown_complete = false;
 
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;

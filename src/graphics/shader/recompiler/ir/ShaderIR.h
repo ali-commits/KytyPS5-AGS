@@ -907,9 +907,23 @@ void ValidateProgram(const Program& program, bool require_ssa);
 // (first-encounter hitches, precompile time; chenxiao07 a28de66fe).
 [[nodiscard]] bool ValidationEnabled();
 void               ResolveControlFlowIdentities(Program& program);
-bool               EquivalentValue(const ResourcePlan& program, Value left, Value right);
-Value              ResolveInvariantPhi(const ResourcePlan& program, Value value);
-Value              ResolveActiveU32(Value value, Value active);
+// References from the resource-plan tables (descriptor sources, resource control flow, SRT reads,
+// evaluation recipes and tapes, uniform fill, dynamic reads) to instructions the program no longer
+// has. Specialization can leave such references: a zero-stride buffer read or an FMASK read it
+// replaces takes its descriptor's last uses, and dead-code elimination then erases instructions
+// the descriptor source still names. Drop clears them (an empty value, a null instruction) and
+// returns how many it cleared; Count only counts them. Neither dereferences such a reference.
+size_t CountDeadPlanReferences(const Program& program);
+size_t DropDeadPlanReferences(Program& program);
+// Points plan-table references to Identity instructions at what the identities resolve to.
+// RemoveIdentities rewires only IR uses and erases the identities, so such a reference would be
+// dead (DropDeadPlanReferences clears it) although its value is still live: Astro Bot's Sky Garden
+// lost its sky and lighting that way. Before DropDeadPlanReferences, these references were read
+// through the freed identity, which still held its argument. Returns how many it redirected.
+size_t ResolvePlanIdentities(Program& program);
+bool   EquivalentValue(const ResourcePlan& program, Value left, Value right);
+Value  ResolveInvariantPhi(const ResourcePlan& program, Value value);
+Value  ResolveActiveU32(Value value, Value active);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

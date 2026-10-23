@@ -156,16 +156,16 @@ Program& Program::operator=(Program&& other) noexcept {
 
 CompiledShaderInfo Program::TakeCompiledInfo() && {
 	CompiledShaderInfo result {
-	    .stage           = stage,
-	    .shader_hash     = shader_hash,
-	    .wave_size       = wave_size,
-	    .user_data_base  = user_data_base,
-	    .user_data_count = user_data_count,
-	    .scratch_dwords  = scratch_dwords,
+	    .stage              = stage,
+	    .shader_hash        = shader_hash,
+	    .wave_size          = wave_size,
+	    .user_data_base     = user_data_base,
+	    .user_data_count    = user_data_count,
+	    .scratch_dwords     = scratch_dwords,
 	    .has_address_writes = has_address_writes,
-	    .info            = std::move(info),
-	    .bindings        = std::move(bindings),
-	    .write_ranges    = std::move(write_ranges),
+	    .info               = std::move(info),
+	    .bindings           = std::move(bindings),
+	    .write_ranges       = std::move(write_ranges),
 	};
 	for (const auto& output: result.info.outputs) {
 		if (output.kind == StageOutputKind::Parameter && output.index < 32) {
@@ -213,7 +213,7 @@ Value ResolveInvariantPhi(const ResourcePlan& program, Value value) {
 
 Value ResolveActiveU32(Value value, Value active) {
 	for (uint32_t depth = 0; depth <= 32; ++depth) {
-		value = value.Resolve();
+		value            = value.Resolve();
 		const auto* inst = value.TryInstruction();
 		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::SelectU32 ||
 		    inst->Arg(0).Resolve() != active)
@@ -493,7 +493,7 @@ void ValidateProgram(const Program& program, bool require_ssa) {
 					return Fail(fmt::format("{} has an invalid memory-info index",
 					                        ValueOpcodeName(inst.GetOpcode())));
 				}
-				const auto& memory = program.memory_info[memory_index];
+				const auto& memory        = program.memory_info[memory_index];
 				const bool  vector_buffer = memory.kind == ResourceKind::Buffer ||
 				                            memory.kind == ResourceKind::IndirectBuffer;
 				if (!vector_buffer && memory.kind != ResourceKind::ScalarBuffer) {
@@ -703,6 +703,142 @@ void ResolveControlFlowIdentities(Program& program) {
 		info.condition       = info.condition.Resolve();
 		info.indirect_target = info.indirect_target.Resolve();
 	}
+}
+
+namespace {
+
+// Every value and instruction pointer the resource-plan tables hold (not the blocks' branch
+// conditions and selectors).
+template <typename P, typename OnValue, typename OnInst>
+void ForEachPlanReference(P& program, OnValue&& on_value, OnInst&& on_inst) {
+	for (auto& descriptor: program.descriptor_sources) {
+		for (auto& value: descriptor.dwords) {
+			on_value(value);
+		}
+		if (descriptor.indirect_descriptor) {
+			on_value(descriptor.indirect_descriptor->key_count);
+			on_value(descriptor.indirect_descriptor->selector_first);
+			on_value(descriptor.indirect_descriptor->selector_mask);
+		}
+	}
+	for (auto& block: program.control_flow) {
+		on_value(block.condition);
+	}
+	for (auto& read: program.srt_reads) {
+		on_value(read.value);
+	}
+	for (auto& recipe: program.evaluation_recipes) {
+		on_inst(recipe.instruction);
+		on_value(recipe.selection_mask);
+	}
+	for (auto& instruction: program.arithmetic_tape_instructions) {
+		on_inst(instruction.instruction);
+	}
+	for (auto& value: program.uniform_fill.values) {
+		on_value(value);
+	}
+	for (auto& value: program.dynamic_reads) {
+		on_value(value);
+	}
+}
+
+// The referenced instructions that the program still owns. Only addresses are compared: a
+// reference to an erased instruction must never be dereferenced (its memory may already hold
+// another thread's data).
+std::unordered_set<const Inst*> LivePlanReferences(const Program& program) {
+	std::unordered_set<const Inst*> referenced;
+	ForEachPlanReference(
+	    program,
+	    [&](const Value& value) {
+		    if (const auto* inst = value.TryInstruction(); inst != nullptr) {
+			    referenced.insert(inst);
+		    }
+	    },
+	    [&](const Inst* inst) {
+		    if (inst != nullptr) {
+			    referenced.insert(inst);
+		    }
+	    });
+	std::unordered_set<const Inst*> live;
+	if (referenced.empty()) {
+		return live;
+	}
+	const auto note = [&](const Inst& inst) {
+		if (referenced.contains(&inst)) {
+			live.insert(&inst);
+		}
+	};
+	for (const auto& block: program.block_storage) {
+		if (block != nullptr) {
+			for (const auto& inst: *block) {
+				note(inst);
+			}
+		}
+	}
+	for (const auto& inst: program.value_storage) {
+		note(inst);
+	}
+	return live;
+}
+
+} // namespace
+
+size_t CountDeadPlanReferences(const Program& program) {
+	const auto live  = LivePlanReferences(program);
+	size_t     count = 0;
+	ForEachPlanReference(
+	    program,
+	    [&](const Value& value) {
+		    const auto* inst = value.TryInstruction();
+		    count += inst != nullptr && !live.contains(inst) ? 1u : 0u;
+	    },
+	    [&](const Inst* inst) { count += inst != nullptr && !live.contains(inst) ? 1u : 0u; });
+	return count;
+}
+
+size_t DropDeadPlanReferences(Program& program) {
+	const auto live    = LivePlanReferences(program);
+	size_t     dropped = 0;
+	ForEachPlanReference(
+	    program,
+	    [&](Value& value) {
+		    const auto* inst = value.TryInstruction();
+		    if (inst != nullptr && !live.contains(inst)) {
+			    value = Value {};
+			    dropped++;
+		    }
+	    },
+	    [&](const Inst*& inst) {
+		    if (inst != nullptr && !live.contains(inst)) {
+			    inst = nullptr;
+			    dropped++;
+		    }
+	    });
+	return dropped;
+}
+
+size_t ResolvePlanIdentities(Program& program) {
+	size_t resolved = 0;
+	ForEachPlanReference(
+	    program,
+	    [&](Value& value) {
+		    if (value.IsIdentity()) {
+			    value = value.Resolve();
+			    resolved++;
+		    }
+	    },
+	    [&](const Inst*& inst) {
+		    if (inst == nullptr || inst->GetOpcode() != ValueOpcode::Identity) {
+			    return;
+		    }
+		    // An identity of an immediate names no instruction: DropDeadPlanReferences clears it.
+		    if (auto* target = Value(const_cast<Inst*>(inst)).Resolve().TryInstruction();
+		        target != nullptr) {
+			    inst = target;
+			    resolved++;
+		    }
+	    });
+	return resolved;
 }
 
 std::string ProgramToString(const Program& program) {

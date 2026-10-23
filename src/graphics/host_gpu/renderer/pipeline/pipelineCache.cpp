@@ -4542,19 +4542,21 @@ struct PipelineCache::PrefetchState {
 		FastFirstState::GraphicsFast fast;
 	};
 	struct Pending {
-		std::future<Result> future;
-		uint64_t            ticket;
+		std::future<Result>                future;
+		uint64_t                           ticket;
+		std::shared_ptr<std::atomic<bool>> started;
 	};
-	explicit PrefetchState(PipelineCache& owner, size_t threads)
-	    : cache(owner), queue(threads, 128) {}
+	explicit PrefetchState(PipelineCache& owner, size_t threads, size_t limit = 128,
+	                       bool keyed_builds = false, const char* name = "Pipeline prefetch")
+	    : cache(owner), max_pending(limit), keyed(keyed_builds), log_name(name),
+	      queue(threads, limit) {}
 	~PrefetchState() {
 		Stop();
-		PipelineCacheLog(
-		    "Pipeline prefetch: submitted {}, used {}, unused {}; worker compile {} ms, "
-		    "CP wait {} ms (worst {} ms), {} consumed pipelines journaled",
-		    submitted.load(), used.load(), submitted.load() - used.load(),
-		    compile_ns.load() / 1000000, wait_ns.load() / 1000000, max_wait_ns.load() / 1000000,
-		    journaled.load());
+		PipelineCacheLog("{}: submitted {}, used {}, unused {}; worker compile {} ms, "
+		                 "CP wait {} ms (worst {} ms), {} consumed pipelines journaled",
+		                 log_name, submitted.load(), used.load(), submitted.load() - used.load(),
+		                 compile_ns.load() / 1000000, wait_ns.load() / 1000000,
+		                 max_wait_ns.load() / 1000000, journaled.load());
 	}
 	// A fast speculative build holds an optimizer slot until publication. Unused results and
 	// duplicate publication races must release it without scheduling an optimized build.
@@ -4575,6 +4577,8 @@ struct PipelineCache::PrefetchState {
 			std::lock_guard lock(mutex);
 			stopped = true;
 		}
+		// The skip builder's queue can hold hundreds of builds no draw waits for: drop them.
+		if (keyed) (void)queue.DropPending();
 		queue.Stop();
 		// Save stops the optimizer next. Release unconsumed reservations before its final report
 		// and before layouts and shader modules can be destroyed.
@@ -4584,15 +4588,21 @@ struct PipelineCache::PrefetchState {
 				++it; // A required lookup owns the result until Complete.
 				continue;
 			}
+			if (!it->second.started->load(std::memory_order_acquire)) {
+				it = pending.erase(it);
+				pending_count.fetch_sub(1, std::memory_order_relaxed);
+				continue;
+			}
 			auto result = it->second.future.get();
 			Discard(result);
 			it = pending.erase(it);
 		}
 	}
-	void Request(const GraphicsPipelineKey& key, const ShaderVertexInputInfo& vertex,
+	// True when this call queued the build.
+	bool Request(const GraphicsPipelineKey& key, const ShaderVertexInputInfo& vertex,
 	             const ShaderPixelInputInfo* pixel, const GraphicsPrograms& programs) {
 		std::lock_guard lock(mutex);
-		if (stopped || pending.size() >= 128 || pending.contains(key)) return;
+		if (stopped || pending.size() >= max_pending || pending.contains(key)) return false;
 		// Interface/resource arrays are copied. Compiled program metadata and shader modules
 		// are immutable and owned by ProgramCache until after Stop has joined every task.
 		auto task = std::make_shared<std::packaged_task<Result()>>(
@@ -4601,9 +4611,9 @@ struct PipelineCache::PrefetchState {
 			    Profiler::SetThreadName("PipelineCompiler");
 			    Result                     result {std::make_unique<Pipeline>()};
 			    GraphicsPipelineCreateHook hook;
-			    const bool keyed = cache.m_known != nullptr || cache.m_journal != nullptr;
-			    const bool fast_first =
-			        cache.m_fast_first != nullptr && !cache.m_fast_first->scheduler.Stopped();
+			    const bool keyed      = cache.m_known != nullptr || cache.m_journal != nullptr;
+			    const bool fast_first = !this->keyed && cache.m_fast_first != nullptr &&
+			                            !cache.m_fast_first->scheduler.Stopped();
 			    if (keyed || fast_first) {
 				    hook = [&](const vk::GraphicsPipelineCreateInfo& info,
 				               std::span<const uint32_t> signature, vk::Pipeline* pipeline) {
@@ -4650,12 +4660,21 @@ struct PipelineCache::PrefetchState {
 				    cache.NotePipelineCreated(result.compile_ns);
 			    return result;
 		    });
-		auto       future = task->get_future();
-		const auto ticket = ++next_ticket;
-		if (queue.Submit([task] { (*task)(); }, ticket)) {
-			pending.emplace(key, Pending {std::move(future), ticket});
+		auto       future  = task->get_future();
+		const auto ticket  = ++next_ticket;
+		auto       started = std::make_shared<std::atomic<bool>>(false);
+		if (queue.Submit(
+		        [task, started] {
+			        started->store(true, std::memory_order_release);
+			        (*task)();
+		        },
+		        ticket)) {
+			pending.emplace(key, Pending {std::move(future), ticket, std::move(started)});
+			pending_count.fetch_add(1, std::memory_order_relaxed);
 			submitted.fetch_add(1, std::memory_order_relaxed);
+			return true;
 		}
+		return false;
 	}
 	Result Take(const GraphicsPipelineKey& key) {
 		std::future<Result> future;
@@ -4681,10 +4700,36 @@ struct PipelineCache::PrefetchState {
 	}
 	void Complete(const GraphicsPipelineKey& key) {
 		std::lock_guard lock(mutex);
-		pending.erase(key);
+		if (pending.erase(key) != 0) pending_count.fetch_sub(1, std::memory_order_relaxed);
+	}
+	// Builds queued or running, not yet completed (a cheap check before Take).
+	std::atomic<uint64_t> pending_count {0};
+	// The skip builder's lookup: Absent (not queued: the queue was full or stopped), Pending (still
+	// building after waiting up to wait_ns), or Ready (out holds the pipeline; the key stays
+	// reserved until Complete).
+	enum class Poll : uint8_t { Absent, Pending, Ready };
+	Poll TryTake(const GraphicsPipelineKey& key, uint64_t wait_ns, Result& out) {
+		std::future<Result> future;
+		{
+			std::lock_guard lock(mutex);
+			auto            it = pending.find(key);
+			if (it == pending.end()) return Poll::Absent;
+			if (!it->second.future.valid()) return Poll::Pending;
+			if (it->second.future.wait_for(std::chrono::nanoseconds(wait_ns)) !=
+			    std::future_status::ready) {
+				return Poll::Pending;
+			}
+			future = std::move(it->second.future);
+		}
+		out = future.get();
+		used.fetch_add(1, std::memory_order_relaxed);
+		return Poll::Ready;
 	}
 
 	PipelineCache&                                                            cache;
+	const size_t                                                              max_pending;
+	const bool                                                                keyed;
+	const char* const                                                         log_name;
 	std::mutex                                                                mutex;
 	bool                                                                      stopped     = false;
 	uint64_t                                                                  next_ticket = 0;
@@ -6069,6 +6114,17 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		    threads,
 		    m_fast_first != nullptr ? "; fast-first look-ahead and background optimization" : "");
 	}
+	if (EnvU64("KYTY_PIPELINE_SKIP", 0) != 0 && m_library == nullptr) {
+		const auto threads = std::clamp<uint64_t>(EnvU64("KYTY_PIPELINE_SKIP_THREADS", 3), 1, 8);
+		m_skip_wait_ns =
+		    std::min<uint64_t>(EnvU64("KYTY_PIPELINE_SKIP_WAIT_US", 2000), 1000000) * 1000ull;
+		m_skip = std::make_unique<PrefetchState>(*this, threads, 1024, true, "Pipeline skip");
+		PipelineCacheLog(
+		    "Pipeline skip: {} background builders; draws that only change the picture wait "
+		    "{} us for a new pipeline, then are skipped until it is built "
+		    "(KYTY_PIPELINE_SKIP_THREADS, KYTY_PIPELINE_SKIP_WAIT_US)",
+		    threads, m_skip_wait_ns / 1000);
+	}
 	if (EnvU64("KYTY_PIPELINE_STATS", 0) != 0)
 		m_stats_reporter = std::make_unique<StatsReporter>(*this);
 	if (EnvU64("KYTY_PIPELINE_LIST_PREPARE", 0) != 0) RunListPrepare();
@@ -6081,6 +6137,15 @@ PipelineCache::~PipelineCache() {
 	if (m_rt != nullptr) m_rt->Shutdown();
 	m_program_cache->StopBackgroundChecks();
 	if (m_prefetch != nullptr) m_prefetch->Stop();
+	if (m_skip != nullptr) {
+		m_skip->Stop();
+		const auto skip = GetSkipTotals();
+		PipelineCacheLog(
+		    "Pipeline skip: {} draws skipped; {} pipelines built in the background ({} ms), {} "
+		    "published, {} of them within the wait; {} lookups found the queue full",
+		    skip.skipped_draws, skip.requested, skip.compile_ns / 1000000, skip.published,
+		    skip.ready_in_wait, skip.not_queued);
+	}
 	LogCompileTotals();
 	if (m_program_disk != nullptr) {
 		const auto stats = m_program_disk->GetStats();
@@ -6093,6 +6158,7 @@ PipelineCache::~PipelineCache() {
 	}
 	Save();
 	m_prefetch.reset(); // Unused speculative pipelines before layouts and program modules.
+	m_skip.reset();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& [key, pipeline]: pipelines) {
 			(void)key;
@@ -6444,6 +6510,7 @@ void PipelineCache::Save() {
 	StopBackgroundPipelines();
 	StopShaderPrecompile();
 	if (m_prefetch != nullptr) m_prefetch->Stop();
+	if (m_skip != nullptr) m_skip->Stop();
 	if (m_program_disk != nullptr) {
 		// Pending background checks are dropped; a check never outlives the disk cache.
 		m_program_cache->StopBackgroundChecks();
@@ -7577,6 +7644,35 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
     bool primitive_restart_enable, const GraphicsPrograms& programs) {
+	return *GetGraphicsPipelineImpl(colors, depth, vertex_info, command, ps_input_info, topology,
+	                                primitive_restart_enable, programs, false);
+}
+
+PipelineCache::Pipeline* PipelineCache::TryGetGraphicsPipeline(
+    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
+    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+    bool primitive_restart_enable, const GraphicsPrograms& programs, bool skippable) {
+	return GetGraphicsPipelineImpl(colors, depth, vertex_info, command, ps_input_info, topology,
+	                               primitive_restart_enable, programs,
+	                               skippable && m_skip != nullptr);
+}
+
+PipelineCache::SkipTotals PipelineCache::GetSkipTotals() const {
+	if (m_skip == nullptr) return {};
+	return {.requested     = m_skip->submitted.load(std::memory_order_relaxed),
+	        .published     = m_skip->used.load(std::memory_order_relaxed),
+	        .skipped_draws = m_skip_draws.load(std::memory_order_relaxed),
+	        .ready_in_wait = m_skip_ready_in_wait.load(std::memory_order_relaxed),
+	        .not_queued    = m_skip_not_queued.load(std::memory_order_relaxed),
+	        .compile_ns    = m_skip->compile_ns.load(std::memory_order_relaxed)};
+}
+
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineImpl(
+    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
+    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+    bool primitive_restart_enable, const GraphicsPrograms& programs, bool skippable) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -7636,12 +7732,12 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		    last.key == key) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::PipelineMemoHits);
 			FlushCompileStall();
-			return *last.pipeline;
+			return last.pipeline;
 		}
 		Profiler::CountFrameEvent(Profiler::FrameEvent::PipelineMemoMisses);
 	}
 	// Called with m_mutex held, so the generation read matches the object found.
-	const auto remember = [&](Pipeline& pipeline) -> Pipeline& {
+	const auto remember = [&](Pipeline& pipeline) -> Pipeline* {
 		if (memo_enabled) {
 			last.cache      = this;
 			last.pipeline   = &pipeline;
@@ -7649,12 +7745,79 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 			last.key        = key;
 		}
 		FlushCompileStall();
-		return pipeline;
+		return &pipeline;
 	};
 
 	PrefetchState::Result ready;
+	PrefetchState*        ready_from = nullptr;
 	uint64_t              wait_begin = 0;
-	if (m_prefetch != nullptr && vertex_info.size() == 1 &&
+	// KYTY_PIPELINE_SKIP: a draw that only changes the picture does not wait for a pipeline the
+	// driver has not built: a background thread builds it (optimized, journaled when published)
+	// and the draw is skipped until it is there, after waiting KYTY_PIPELINE_SKIP_WAIT_US for it
+	// (a driver-cache hit is usually done by then). A full queue falls back to building it here.
+	if (skippable && vertex_info.size() == 1 && topology != vk::PrimitiveTopology::ePatchList &&
+	    !graphics_debug_dump_enabled()) {
+		bool queued = false;
+		{
+			Common::LockGuard lock(m_mutex);
+			if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
+				return remember(*iter->second);
+			}
+			queued = m_skip->Request(key, vs_input_info, ps_input_info, programs);
+		}
+		const auto poll = m_skip->TryTake(key, queued ? m_skip_wait_ns : 0, ready);
+		// Totals at most every 2 s while skips or skip builds happen (the exit report may not run).
+		const auto report = [this] {
+			static uint64_t last_ns = 0;
+			const auto      now     = CompileClockNs();
+			if (now - last_ns < 2'000'000'000ull) return;
+			last_ns         = now;
+			const auto skip = GetSkipTotals();
+			PipelineCacheLog(
+			    "Pipeline skip: {} draws skipped so far; {} pipelines queued ({} ms building), {} "
+			    "published ({} within the wait); {} lookups found the queue full",
+			    skip.skipped_draws, skip.requested, skip.compile_ns / 1000000, skip.published,
+			    skip.ready_in_wait, skip.not_queued);
+		};
+		if (poll == PrefetchState::Poll::Pending) {
+			if (m_skip_draws.fetch_add(1, std::memory_order_relaxed) == 0) {
+				PipelineCacheLog("Pipeline skip: first draw skipped while its pipeline builds "
+				                 "(VS 0x{:016x})",
+				                 vs_input_info.stage.program != nullptr
+				                     ? vs_input_info.stage.program->shader_hash
+				                     : 0);
+			}
+			report();
+			return nullptr;
+		}
+		if (poll == PrefetchState::Poll::Ready) {
+			ready_from = m_skip.get();
+			wait_begin = CompileClockNs();
+			if (queued) m_skip_ready_in_wait.fetch_add(1, std::memory_order_relaxed);
+			report();
+		} else {
+			m_skip_not_queued.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	// A draw that cannot be skipped waits for a build the skip builder already has for its key
+	// (moved to the front of its queue) instead of building the pipeline a second time.
+	if (!skippable && ready_from == nullptr && m_skip != nullptr &&
+	    m_skip->pending_count.load(std::memory_order_relaxed) != 0) {
+		{
+			Common::LockGuard lock(m_mutex);
+			if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
+				return remember(*iter->second);
+			}
+		}
+		wait_begin = CompileClockNs();
+		ready      = m_skip->Take(key);
+		if (ready.pipeline != nullptr) {
+			ready_from = m_skip.get();
+		} else {
+			wait_begin = 0;
+		}
+	}
+	if (ready_from == nullptr && m_prefetch != nullptr && vertex_info.size() == 1 &&
 	    topology != vk::PrimitiveTopology::ePatchList && !graphics_debug_dump_enabled()) {
 		{
 			Common::LockGuard lock(m_mutex);
@@ -7671,12 +7834,13 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		}
 		wait_begin = CompileClockNs();
 		ready      = m_prefetch->Take(key);
+		if (ready.pipeline != nullptr) ready_from = m_prefetch.get();
 	}
 	Common::LockGuard lock(m_mutex);
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
 		if (ready.pipeline != nullptr) {
-			m_prefetch->Discard(ready);
-			m_prefetch->Complete(key);
+			ready_from->Discard(ready);
+			ready_from->Complete(key);
 		}
 		return remember(*iter->second);
 	}
@@ -7765,7 +7929,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	const auto created_pipeline = cached->pipeline;
 	auto [iter, inserted]       = m_graphics_pipelines.emplace(key, std::move(cached));
 	EXIT_IF(!inserted);
-	if (prefetched) m_prefetch->Complete(key);
+	if (prefetched) ready_from->Complete(key);
 	const bool built_fast = fast_result.snapshot != nullptr; // EnqueueGraphics takes the snapshot
 	if (built_fast) {
 		m_fast_first->EnqueueGraphics(&iter->first, created_pipeline, fast_result, vs_hash,
@@ -7826,7 +7990,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		NoteJournalPipeline(content.key, content.words, content.snapshot_words, content.identities,
 		                    guest);
 		if (prefetched && m_journal != nullptr && m_journal->Contains(content.key)) {
-			m_prefetch->journaled.fetch_add(1, std::memory_order_relaxed);
+			ready_from->journaled.fetch_add(1, std::memory_order_relaxed);
 		}
 	}
 	return remember(*iter->second);

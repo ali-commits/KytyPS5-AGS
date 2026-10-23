@@ -50,13 +50,15 @@ LoadResult Load(const std::vector<std::filesystem::path>& dirs) {
 			result.error  = "the file cannot be opened";
 			return result;
 		}
-		const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		const std::string text((std::istreambuf_iterator<char>(file)),
+		                       std::istreambuf_iterator<char>());
 		if (file.bad()) {
 			result.status = Status::Unreadable;
 			result.error  = "reading the file failed";
 			return result;
 		}
-		result.status = Parse(text, result.entries, result.error) ? Status::Loaded : Status::Invalid;
+		result.status =
+		    Parse(text, result.entries, result.error) ? Status::Loaded : Status::Invalid;
 		return result;
 	}
 	result.status = Status::Missing;
@@ -65,7 +67,8 @@ LoadResult Load(const std::vector<std::filesystem::path>& dirs) {
 
 std::string Describe(const LoadResult& result) {
 	static constexpr std::string_view consequence =
-	    "Games start with the emulator's built-in defaults, which are slower and use more video memory "
+	    "Games start with the emulator's built-in defaults, which are slower and use more video "
+	    "memory "
 	    "than the release settings. Put the u59-preset.json from the release archive next to the "
 	    "launcher.";
 	switch (result.status) {
@@ -80,8 +83,8 @@ std::string Describe(const LoadResult& result) {
 			                   where.empty() ? std::string("nowhere") : where, consequence);
 		}
 		case Status::Unreadable:
-			return fmt::format("{} cannot be read ({}: {}). {}", FileName, PathToString(result.path),
-			                   result.error, consequence);
+			return fmt::format("{} cannot be read ({}: {}). {}", FileName,
+			                   PathToString(result.path), result.error, consequence);
 		case Status::Invalid:
 			return fmt::format("{} is not valid and was not applied ({}: {}). {}", FileName,
 			                   PathToString(result.path), result.error, consequence);
@@ -100,6 +103,8 @@ const std::vector<std::string_view>& MarkerKeys() {
 	    "KYTY_FUNCTION_ARRAY_SHRINK",
 	    "KYTY_SHADER_PRECOMPILE",
 	    "KYTY_PIPELINE_JOURNAL",
+	    // Missing from the int19.4 release preset (draw reuse off): an old file is named.
+	    "KYTY_DRAW_RUN_RECALL",
 	};
 	return keys;
 }
@@ -126,26 +131,28 @@ std::vector<std::string> StartupWarnings(const EnvLookup& env) {
 	}
 	if (missing_count == MarkerKeys().size()) {
 		lines.push_back(fmt::format(
-		    "Warning: {} not applied (none of its settings are in the environment): running with the "
+		    "Warning: {} not applied (none of its settings are in the environment): running with "
+		    "the "
 		    "built-in defaults, which are slower and use more video memory. Start games from the "
 		    "launcher with {} in the launcher's folder, or set the file's variables yourself.\n",
 		    FileName, FileName));
 	} else if (missing_count != 0) {
-		lines.push_back(fmt::format(
-		    "Warning: {} looks old or edited: {} not set (built-in defaults used). Use the file from "
-		    "this release.\n",
-		    FileName, missing));
+		lines.push_back(fmt::format("Warning: {} looks old or edited: {} not set (built-in "
+		                            "defaults used). Use the file from "
+		                            "this release.\n",
+		                            FileName, missing));
 	}
 	if (is_zero("KYTY_SRT_VARIANT_READS")) {
 		lines.emplace_back(
-		    "Warning: KYTY_SRT_VARIANT_READS=0: the ray-traced lighting and GI kernels are skipped, so "
+		    "Warning: KYTY_SRT_VARIANT_READS=0: the ray-traced lighting and GI kernels are "
+		    "skipped, so "
 		    "lit geometry renders black unless the game's lighting patches are on.\n");
 	}
 	// KYTY_RT_STUB=1 keeps the passes running (every ray misses): lit, without ray-traced shadows.
 	if (is_zero("KYTY_RT_SOFTWARE") && (!is_set("KYTY_RT_STUB") || is_zero("KYTY_RT_STUB"))) {
-		lines.emplace_back(
-		    "Warning: KYTY_RT_SOFTWARE=0: software ray tracing is off, so lit geometry renders black "
-		    "unless the game's lighting patches are on.\n");
+		lines.emplace_back("Warning: KYTY_RT_SOFTWARE=0: software ray tracing is off, so lit "
+		                   "geometry renders black "
+		                   "unless the game's lighting patches are on.\n");
 	}
 	return lines;
 }

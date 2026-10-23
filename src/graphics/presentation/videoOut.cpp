@@ -7,6 +7,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
+#include "common/liveSwitch.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -843,6 +844,16 @@ void VideoOutDriver::Impl::VblankEnd() {
 	}
 }
 
+// KYTY_PRESENT_ABS_VBLANK=1 (live switch, default off): run the virtual vblank on an absolute QPC
+// timeline (deadline = origin + index * frequency / refresh, fractional ticks kept). A vblank that
+// is missed is skipped instead of repaid: the default timeline carries the overrun forward as
+// negative wait, so an over-budget frame is followed by back-to-back vblanks that keep the average
+// rate exact (what games pacing from vblank counts rely on) but bunch guest flips together. In
+// PresentMode::Immediate the switch also presents ready flips between vblanks (polling every
+// <= 500 us) instead of only at a vblank. The timeline restarts when the switch turns on or the
+// refresh rate changes. Independent of KYTY_PRESENT_UNLOCKED, which only changes FlipQueue::Flip.
+static Live::Switch g_present_abs_vblank("KYTY_PRESENT_ABS_VBLANK", Live::ParseDefaultOff);
+
 void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	// A 120 Hz timer loop that blocks between vblanks; it presents and fires the flip events the
 	// guest waits for. Its only spin is the last <= 50 us of a vblank wait (SleepMicro).
@@ -850,34 +861,116 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	const auto frequency = Common::Timer::QueryPerformanceFrequency();
 	EXIT_IF(frequency == 0);
 
-	int64_t  total_wait      = 0;
+	const auto sleep_until = [frequency](uint64_t deadline) {
+		const auto current = Common::Timer::QueryPerformanceCounter();
+		if (current >= deadline) {
+			return false;
+		}
+		const auto remaining_us = ((deadline - current) * 1000000u + frequency - 1) / frequency;
+		Common::Thread::SleepMicro(static_cast<uint32_t>(
+		    std::clamp<uint64_t>(remaining_us, 1, std::numeric_limits<uint32_t>::max())));
+		return true;
+	};
+
+	// Default (relative) timeline.
+	int64_t total_wait = 0;
+	// Absolute timeline (KYTY_PRESENT_ABS_VBLANK).
+	bool     abs_active  = false;
+	uint64_t abs_origin  = 0;
+	uint64_t abs_index   = 0;
+	uint32_t abs_refresh = 0;
+
 	uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 8th vblank
 	while (!token.stop_requested()) {
 		if ((++placement_count & 7u) == 0u) {
 			Common::SamplePlacement(Common::ThreadRole::Host);
 		}
-		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
-		if (total_wait > 0) {
-			const auto remaining_us =
-			    (static_cast<uint64_t>(total_wait) * 1000000u + frequency - 1) / frequency;
-			Common::Thread::SleepMicro(static_cast<uint32_t>(
-			    std::clamp<uint64_t>(remaining_us, 1, std::numeric_limits<uint32_t>::max())));
-		}
-		if (token.stop_requested()) {
-			break;
-		}
-		const auto frame_begin = Common::Timer::QueryPerformanceCounter();
-		total_wait -= static_cast<int64_t>(frame_begin - sleep_begin);
+		const bool absolute    = g_present_abs_vblank.On();
+		bool       behind      = false; // a vblank deadline was missed: may present a blank frame
+		uint64_t   frame_begin = 0;
+		uint64_t   period      = 1;
+		if (absolute) {
+			const auto refresh = std::max(Config::GetVblankFrequency(), 1u);
+			const auto now     = Common::Timer::QueryPerformanceCounter();
+			if (!abs_active || refresh != abs_refresh) {
+				abs_active  = true;
+				abs_origin  = now;
+				abs_index   = 0;
+				abs_refresh = refresh;
+			}
+			const auto deadline_for = [origin = abs_origin, frequency, refresh](uint64_t index) {
+				return origin + (frequency / refresh) * index +
+				       ((frequency % refresh) * index) / refresh;
+			};
+			auto deadline = deadline_for(abs_index);
+			if (now > deadline) {
+				// Move to the next scheduled tick; never fire back-to-back vblanks to repay it.
+				behind    = true;
+				abs_index = std::max(abs_index, ((now - abs_origin) * refresh) / frequency);
+				deadline  = deadline_for(abs_index);
+				while (deadline < now) {
+					deadline = deadline_for(++abs_index);
+				}
+			}
+			if (Config::GetPresentMode() == Config::PresentMode::Immediate &&
+			    !m_presenter.IsGuestPaused()) {
+				// Present each ready flip as it arrives; the guest's vblank events keep their
+				// clock.
+				while (!token.stop_requested() &&
+				       Common::Timer::QueryPerformanceCounter() < deadline) {
+					if (m_flip_queue.Flip(0)) {
+						continue;
+					}
+					const auto current = Common::Timer::QueryPerformanceCounter();
+					if (current >= deadline) {
+						break;
+					}
+					const auto remaining_us =
+					    ((deadline - current) * 1000000u + frequency - 1) / frequency;
+					Common::Thread::SleepMicro(
+					    static_cast<uint32_t>(std::clamp<uint64_t>(remaining_us, 1, 500)));
+				}
+			}
+			while (!token.stop_requested() && sleep_until(deadline)) {
+			}
+			if (token.stop_requested()) {
+				break;
+			}
+			abs_index++;
 
-		const auto refresh = std::max(Config::GetVblankFrequency(), 1u);
-		const auto period  = std::max(frequency / refresh, uint64_t {1});
+			if (m_presenter.IsGuestPaused()) {
+				(void)m_presenter.PresentLastFrame();
+				continue;
+			}
+		} else {
+			if (abs_active) {
+				abs_active = false;
+				total_wait = 0;
+			}
+			const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
+			if (total_wait > 0) {
+				const auto remaining_us =
+				    (static_cast<uint64_t>(total_wait) * 1000000u + frequency - 1) / frequency;
+				Common::Thread::SleepMicro(static_cast<uint32_t>(
+				    std::clamp<uint64_t>(remaining_us, 1, std::numeric_limits<uint32_t>::max())));
+			}
+			if (token.stop_requested()) {
+				break;
+			}
+			frame_begin = Common::Timer::QueryPerformanceCounter();
+			total_wait -= static_cast<int64_t>(frame_begin - sleep_begin);
 
-		if (m_presenter.IsGuestPaused()) {
-			(void)m_presenter.PresentLastFrame();
-			const auto frame_end = Common::Timer::QueryPerformanceCounter();
-			total_wait +=
-			    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
-			continue;
+			const auto refresh = std::max(Config::GetVblankFrequency(), 1u);
+			period             = std::max(frequency / refresh, uint64_t {1});
+
+			if (m_presenter.IsGuestPaused()) {
+				(void)m_presenter.PresentLastFrame();
+				const auto frame_end = Common::Timer::QueryPerformanceCounter();
+				total_wait +=
+				    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
+				continue;
+			}
+			behind = total_wait < 0;
 		}
 
 		VblankBegin();
@@ -898,7 +991,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 				presented = true;
 			}
 		}
-		if (!presented && total_wait < 0) {
+		if (!presented && behind) {
 			bool     any_open = false;
 			uint32_t width    = 0;
 			uint32_t height   = 0;
@@ -917,10 +1010,13 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 		VblankEnd();
 
-		const auto frame_end = Common::Timer::QueryPerformanceCounter();
-		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
-		if (total_wait < 0) {
-			Common::DebugCounters::Add(Common::DebugCounters::Counter::LateVblanks);
+		if (!absolute) {
+			const auto frame_end = Common::Timer::QueryPerformanceCounter();
+			total_wait +=
+			    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
+			if (total_wait < 0) {
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::LateVblanks);
+			}
 		}
 	}
 }
@@ -1214,6 +1310,9 @@ bool FlipQueue::IsPending(VideoOutConfig& cfg, int index) {
 	       std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
 }
 
+// KYTY_PRESENT_UNLOCKED (live switch, default off): see FlipQueue::Flip.
+static Live::Switch g_present_unlocked("KYTY_PRESENT_UNLOCKED", Live::ParseDefaultOff);
+
 bool FlipQueue::Flip(uint32_t micros) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
@@ -1250,22 +1349,42 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_mutex.Unlock();
 
 	// Lock each port in bus order, then present and complete the whole group at one Vblank.
+	// KYTY_PRESENT_UNLOCKED=1 (default off): present without the port locks (the frames belong to
+	// the presenter, and a GPU flip of the command processor waits for a port lock while a present
+	// can take milliseconds), then lock the ports again to complete the group. A port closed
+	// meanwhile keeps its requests for Cancel, which waits for this flip.
+	const bool present_unlocked = g_present_unlocked.Get() != 0;
 	std::sort(requests.begin(), requests.begin() + count,
 	          [](const auto& a, const auto& b) { return a.cfg->bus < b.cfg->bus; });
-	bool                                                                                 due = true;
+	const auto lock_ports = [&] {
+		bool current = true;
+		for (size_t i = 0; i < count; i++) {
+			auto& r = requests[i];
+			r.cfg->mutex.Lock();
+			current &= r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation;
+		}
+		return current;
+	};
+	bool due = lock_ports();
 	std::array<Graphics::Presenter::Layer, VideoOutDriver::Impl::VIDEO_OUT_BUSES.size()> layers {};
 	for (size_t i = 0; i < count; i++) {
 		auto& r = requests[i];
-		r.cfg->mutex.Lock();
-		due &= r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation;
 		if (r.id == group) {
 			due &= IsFlipDueLocked(*r.cfg, r.generation);
 		}
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
 	if (due) {
+		if (present_unlocked) {
+			for (size_t i = count; i != 0; i--) {
+				requests[i - 1].cfg->mutex.Unlock();
+			}
+		}
 		m_presenter.Present(std::span(layers.data(), count));
-		if (requests[0].cfg->bus == 0) {
+		if (present_unlocked) {
+			due = lock_ports();
+		}
+		if (due && requests[0].cfg->bus == 0) {
 			Graphics::PerformanceOverlayRecordFlip(requests[0].cfg->width, requests[0].cfg->height);
 		}
 	}

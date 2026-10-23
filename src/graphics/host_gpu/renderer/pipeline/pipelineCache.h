@@ -43,31 +43,31 @@ struct ComputeShaderInfo;
 #pragma pack(push, 1)
 
 struct PipelineStaticParameters {
-	bool                       negative_one_to_one      = false;
-	bool                       depth_clip_enable        = true;
-	vk::PrimitiveTopology      topology                 = vk::PrimitiveTopology::ePointList;
-	bool                       primitive_restart_enable = false;
-	uint32_t                   samples                  = 1;
-	bool                       sample_shading_enable    = false;
-	bool                       depth_bounds_test_enable = false;
-	float                      depth_min_bounds         = 0.0f;
-	float                      depth_max_bounds         = 0.0f;
-	uint32_t                   color_mask[RENDER_COLOR_ATTACHMENTS_MAX]           = {};
-	bool                       cull_front                                         = false;
-	bool                       cull_back                                          = false;
-	bool                       face                                               = false;
-	bool                       provoking_vtx_last                                 = false;
-	vk::PolygonMode            polygon_mode                                       = vk::PolygonMode::eFill;
-	uint8_t                    color_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    color_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    color_destblend[RENDER_COLOR_ATTACHMENTS_MAX]      = {};
-	uint8_t                    alpha_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    alpha_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    alpha_destblend[RENDER_COLOR_ATTACHMENTS_MAX]      = {};
-	bool                       separate_alpha_blend[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	bool                       blend_enable[RENDER_COLOR_ATTACHMENTS_MAX]         = {};
+	bool                  negative_one_to_one      = false;
+	bool                  depth_clip_enable        = true;
+	vk::PrimitiveTopology topology                 = vk::PrimitiveTopology::ePointList;
+	bool                  primitive_restart_enable = false;
+	uint32_t              samples                  = 1;
+	bool                  sample_shading_enable    = false;
+	bool                  depth_bounds_test_enable = false;
+	float                 depth_min_bounds         = 0.0f;
+	float                 depth_max_bounds         = 0.0f;
+	uint32_t              color_mask[RENDER_COLOR_ATTACHMENTS_MAX]      = {};
+	bool                  cull_front                                    = false;
+	bool                  cull_back                                     = false;
+	bool                  face                                          = false;
+	bool                  provoking_vtx_last                            = false;
+	vk::PolygonMode       polygon_mode                                  = vk::PolygonMode::eFill;
+	uint8_t               color_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]  = {};
+	uint8_t               color_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]  = {};
+	uint8_t               color_destblend[RENDER_COLOR_ATTACHMENTS_MAX] = {};
+	uint8_t               alpha_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]  = {};
+	uint8_t               alpha_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]  = {};
+	uint8_t               alpha_destblend[RENDER_COLOR_ATTACHMENTS_MAX] = {};
+	bool                  separate_alpha_blend[RENDER_COLOR_ATTACHMENTS_MAX] = {};
+	bool                  blend_enable[RENDER_COLOR_ATTACHMENTS_MAX]         = {};
 	// Target 0 blends with logical alpha from the second source (KYTY_BLEND_ALPHA_REMAP).
-	bool                       blend_alpha_source_remap                           = false;
+	bool blend_alpha_source_remap = false;
 
 	bool operator==(const PipelineStaticParameters& other) const noexcept;
 };
@@ -131,12 +131,12 @@ public:
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
 		bool                    uses_push_descriptors = false;
 		// Built by the start-up compute prewarm and not used by a dispatch yet (statistics only).
-		bool                    prewarmed             = false;
+		bool prewarmed = false;
 	};
 
 	struct GraphicsPrograms {
 		std::array<ShaderProgram, 3> vertex;
-		ShaderProgram pixel;
+		ShaderProgram                pixel;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
@@ -188,7 +188,8 @@ public:
 	};
 	[[nodiscard]] SpeculativeResult PrepareGraphicsProgramsSpeculative(
 	    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
-	    const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
+	    const HW::ShaderRegisters& sh, const HW::Context& context,
+	    const HW::UserConfig&                               user_config,
 	    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
 	    bool pixel_active, ShaderVertexInputInfo& vertex_info, ShaderPixelInputInfo& pixel_info,
 	    StagePrep& vertex_prep, StagePrep& pixel_prep, GraphicsPrograms& programs,
@@ -201,10 +202,11 @@ public:
 	// nothing synchronized; published programs only, or clean compiles with
 	// KYTY_PIPELINE_PREFETCH_PROGRAMS). input_info holds the dispatch's workgroup counts and
 	// thread-dimension mode on entry (DrawPrep::MakeComputeInputInfo).
-	[[nodiscard]] SpeculativeResult PrepareComputeProgramSpeculative(
-	    const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
-	    ShaderComputeInputInfo& input_info, StagePrep& stage_prep, ShaderProgram& program,
-	    uint64_t* compile_ns = nullptr);
+	[[nodiscard]] SpeculativeResult
+	PrepareComputeProgramSpeculative(const HW::ComputeShaderInfo& regs,
+	                                 const HW::ShaderRegisters&   sh,
+	                                 ShaderComputeInputInfo& input_info, StagePrep& stage_prep,
+	                                 ShaderProgram& program, uint64_t* compile_ns = nullptr);
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
@@ -212,6 +214,23 @@ public:
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                              const GraphicsPrograms& programs);
+	// KYTY_PIPELINE_SKIP (default off): with `skippable` (the draw only changes the picture), a
+	// pipeline that does not exist yet is built on a background thread and the lookup returns null
+	// until it is there (the draw is skipped), after a short wait (KYTY_PIPELINE_SKIP_WAIT_US).
+	// Otherwise as GetGraphicsPipeline.
+	Pipeline* TryGetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	                                 const RenderDepthInfo&                 depth,
+	                                 std::span<const ShaderVertexInputInfo> vertex_info,
+	                                 CommandBuffer&                         command,
+	                                 const ShaderPixelInputInfo*            ps_input_info,
+	                                 vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                 const GraphicsPrograms& programs, bool skippable);
+	[[nodiscard]] bool PipelineSkipEnabled() const noexcept { return m_skip != nullptr; }
+	struct SkipTotals {
+		uint64_t requested = 0, published = 0, skipped_draws = 0, ready_in_wait = 0, not_queued = 0;
+		uint64_t compile_ns = 0;
+	};
+	[[nodiscard]] SkipTotals GetSkipTotals() const;
 
 	// Draw-prep binding plans (KYTY_DRAW_PREP_BINDINGS, drawPrep/bindingPlan.h). Everything the
 	// graphics pipeline key takes from a draw's resolved colour and depth targets: the key is a
@@ -249,15 +268,19 @@ public:
 	[[nodiscard]] PrefetchTotals GetPrefetchTotals() const;
 	// KYTY_PIPELINE_FAST_FIRST counters (all zero when it is off); tests and diagnostics.
 	[[nodiscard]] FastFirstSnapshot GetFastFirstTotals() const;
-	void NoteProgramPrefetchWait(uint64_t ns);
+	void                            NoteProgramPrefetchWait(uint64_t ns);
 	void PrefetchGraphicsPipeline(const PipelineTargets& targets, const HW::Context& ctx,
-	    const HW::UserConfig& user_config, const ShaderVertexInputInfo& vertex_info,
-	    const ShaderPixelInputInfo* pixel_info, vk::PrimitiveTopology topology,
-	    bool primitive_restart_enable, const GraphicsPrograms& programs);
-	void PrefetchGraphicsPipeline(std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
-	    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
-	    const ShaderPixelInputInfo* pixel_info, vk::PrimitiveTopology topology,
-	    bool primitive_restart_enable, const GraphicsPrograms& programs);
+	                              const HW::UserConfig&        user_config,
+	                              const ShaderVertexInputInfo& vertex_info,
+	                              const ShaderPixelInputInfo*  pixel_info,
+	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                              const GraphicsPrograms& programs);
+	void PrefetchGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	                              const RenderDepthInfo&                 depth,
+	                              std::span<const ShaderVertexInputInfo> vertex_info,
+	                              CommandBuffer& command, const ShaderPixelInputInfo* pixel_info,
+	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                              const GraphicsPrograms& programs);
 	enum class PlanLookup : uint8_t {
 		Found,
 		Absent,      // no pipeline for the key yet (GetGraphicsPipeline creates it)
@@ -280,7 +303,8 @@ public:
 	}
 	// The command processor taking a plan's pipeline in place of GetGraphicsPipeline: what that
 	// lookup does besides finding the object (the EXEC_ON_NOOP note, the compile-stall report).
-	void NotePlannedPipeline(const RenderDepthInfo& depth, const ShaderPixelInputInfo* ps_input_info);
+	void      NotePlannedPipeline(const RenderDepthInfo&      depth,
+	                              const ShaderPixelInputInfo* ps_input_info);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
 	// The pipeline a compute dispatch runs, or null when the dispatch must be skipped. Programs
@@ -315,7 +339,7 @@ public:
 		uint64_t verify_checks     = 0;
 		uint64_t verify_mismatches = 0;
 		// Permutations published by the shader precompile replay (KYTY_SHADER_PRECOMPILE).
-		uint64_t replayed          = 0;
+		uint64_t replayed = 0;
 	};
 	[[nodiscard]] static ProgramTotals Totals();
 	// The persistent program cache; null when KYTY_PROGRAM_CACHE is off.
@@ -395,23 +419,26 @@ private:
 	// Persistent translated-program cache (KYTY_PROGRAM_CACHE, programDiskCache.h); null when
 	// off. m_program_cache refers to it.
 	std::unique_ptr<ProgramDiskCache> m_program_disk;
-	vk::PipelineCache             m_driver_cache = nullptr;
-	std::filesystem::path         m_driver_cache_path;
+	vk::PipelineCache                 m_driver_cache = nullptr;
+	std::filesystem::path             m_driver_cache_path;
 	// The driver cache started from a file (not empty).
-	bool                          m_driver_cache_loaded = false;
+	bool m_driver_cache_loaded = false;
 	// Keys of pipelines the driver cache holds (KYTY_PIPELINE_KNOWN, written with the driver cache
-	// file; in memory only when just KYTY_PIPELINE_JOURNAL or KYTY_PIPELINE_LIST is on); null when all
-	// are off.
+	// file; in memory only when just KYTY_PIPELINE_JOURNAL or KYTY_PIPELINE_LIST is on); null when
+	// all are off.
 	std::unique_ptr<PipelineJournal> m_known;
-	// The graphics pipelines the game needed in earlier runs, by content key (KYTY_PIPELINE_JOURNAL);
-	// recorded as they are created and rebuilt on background threads at start-up. Null when off.
+	// The graphics pipelines the game needed in earlier runs, by content key
+	// (KYTY_PIPELINE_JOURNAL); recorded as they are created and rebuilt on background threads at
+	// start-up. Null when off.
 	std::unique_ptr<PipelineJournal> m_journal;
 	struct JournalReplay;
 	std::unique_ptr<JournalReplay> m_journal_replay;
-	// The loaded pipeline list (KYTY_PIPELINE_LIST) until the replays take its content; null when off.
+	// The loaded pipeline list (KYTY_PIPELINE_LIST) until the replays take its content; null when
+	// off.
 	struct ListState;
 	std::unique_ptr<ListState> m_list;
-	// Background builds of every replayed compute program's pipeline (KYTY_PIPELINE_PREWARM_COMPUTE).
+	// Background builds of every replayed compute program's pipeline
+	// (KYTY_PIPELINE_PREWARM_COMPUTE).
 	struct ComputePrewarm;
 	std::unique_ptr<ComputePrewarm> m_compute_prewarm;
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
@@ -421,7 +448,8 @@ private:
 	std::unique_ptr<PipelineDiagnostics> m_diagnostics;
 	// Guards the pipeline maps and the driver cache. ProgramCache has its own locks.
 	Common::Mutex m_mutex;
-	// Periodic crash-safe saves of m_driver_cache on a background thread (KYTY_PIPELINE_CACHE_SAVE).
+	// Periodic crash-safe saves of m_driver_cache on a background thread
+	// (KYTY_PIPELINE_CACHE_SAVE).
 	std::unique_ptr<DriverCacheSaver> m_saver;
 	// Graphics pipeline libraries and the background compiles that replace linked pipelines
 	// (KYTY_PIPELINE_LIBRARY, pipelineLibrary.h); null when off or unsupported.
@@ -431,6 +459,18 @@ private:
 	std::unique_ptr<FastFirstState> m_fast_first;
 	struct PrefetchState;
 	std::unique_ptr<PrefetchState> m_prefetch;
+	// KYTY_PIPELINE_SKIP: the background builder of skipped draws' pipelines (a keyed
+	// PrefetchState).
+	std::unique_ptr<PrefetchState> m_skip;
+	uint64_t                       m_skip_wait_ns = 0;
+	std::atomic<uint64_t> m_skip_draws {0}, m_skip_ready_in_wait {0}, m_skip_not_queued {0};
+	Pipeline* GetGraphicsPipelineImpl(std::span<const RenderColorInfo>       colors,
+	                                  const RenderDepthInfo&                 depth,
+	                                  std::span<const ShaderVertexInputInfo> vertex_info,
+	                                  CommandBuffer&                         command,
+	                                  const ShaderPixelInputInfo*            ps_input_info,
+	                                  vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                  const GraphicsPrograms& programs, bool skippable);
 	// The 10 s "Pipelines" console line (KYTY_PIPELINE_STATS=1, pipelineStats.h); null when off.
 	struct StatsReporter;
 	std::unique_ptr<StatsReporter> m_stats_reporter;
@@ -453,7 +493,7 @@ private:
 	bool BuildGraphicsPipelineKey(const PipelineTargets& targets, const HW::Context& ctx,
 	                              const HW::UserConfig&        user_config,
 	                              const ShaderVertexInputInfo& vs_input_info,
-	                              const ShaderPixelInputInfo* ps_input_info,
+	                              const ShaderPixelInputInfo*  ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                              const GraphicsPrograms& programs, bool fatal,
 	                              GraphicsPipelineKey& key) const;
@@ -462,18 +502,19 @@ private:
 	void InitializeKnownPipelines();
 	void InitializePipelineList();
 	void InitializePipelineJournal();
-	// KYTY_PIPELINE_LIST_PREPARE: builds the list's shaders and pipelines, saves and ends the process.
+	// KYTY_PIPELINE_LIST_PREPARE: builds the list's shaders and pipelines, saves and ends the
+	// process.
 	[[noreturn]] void RunListPrepare();
 	// Stops the journal replay and the compute prewarm (before the shader replay and the program
 	// cache they use go).
-	void StopBackgroundPipelines();
+	void               StopBackgroundPipelines();
 	[[nodiscard]] bool IsKnownPipeline(uint64_t key) const;
 	void               NoteKnownPipeline(uint64_t key);
 	// Journals a graphics pipeline the game created (content key, words of GraphicsContent);
 	// `guest` holds the stages' guest hashes (pixel last) for the verify log.
 	void NoteJournalPipeline(uint64_t key, std::span<const uint32_t> words, uint32_t snapshot_words,
 	                         std::span<const std::pair<uint64_t, uint64_t>> identities,
-	                         const std::array<uint64_t, 4>& guest);
+	                         const std::array<uint64_t, 4>&                 guest);
 	void InitializeProgramDiskCache();
 	void InitializeShaderPrecompile();
 	void StopShaderPrecompile();
@@ -507,15 +548,12 @@ void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pi
 // Stops the emulator at a mesh (NGG) draw on a device without mesh shaders, naming the missing
 // extension and the device: such draws have no fallback.
 [[noreturn]] void ExitWithoutMeshShaders(const GraphicContext& graphics);
-void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-                            const PipelineRenderingState&          rendering,
-                            const PipelineVertexInputState&        vertex_input,
-                            std::span<const ShaderVertexInputInfo> vertex_info,
-                            const ShaderPixelInputInfo*            ps_input_info,
-                            const PipelineCache::GraphicsPrograms& programs,
-                            const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache,
-                            const GraphicsPipelineCreateHook*      create_hook = nullptr);
+void              CreatePipelineInternal(
+    GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
+    const PipelineRenderingState& rendering, const PipelineVertexInputState& vertex_input,
+    std::span<const ShaderVertexInputInfo> vertex_info, const ShaderPixelInputInfo* ps_input_info,
+    const PipelineCache::GraphicsPrograms& programs, const PipelineStaticParameters& static_params,
+    vk::PipelineCache driver_cache, const GraphicsPipelineCreateHook* create_hook = nullptr);
 // Creates a compute pipeline from the complete create info instead of vkCreateComputePipelines
 // (KYTY_PIPELINE_FAST_FIRST). The create info and its chained structures live only for the call.
 using ComputePipelineCreateHook =

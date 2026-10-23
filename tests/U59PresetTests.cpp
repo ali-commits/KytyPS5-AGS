@@ -1,4 +1,5 @@
 #include "common/stringUtils.h"
+#include "common/textureSparseResidency.h"
 #include "common/u59Preset.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 
@@ -127,6 +128,58 @@ void TestShippedPreset() {
 	const auto it = env.values.find("KYTY_SRT_VARIANT_READS");
 	Check(it == env.values.end() || it->second != "0",
 	      "the shipped preset does not turn KYTY_SRT_VARIANT_READS off");
+	// Draw reuse (int19.4 shipped without these three) and sparse residency only below 16 GB.
+	for (const char* key: {"KYTY_DRAW_RUN_RECALL", "KYTY_DRAW_RUN_ACQUIRE"}) {
+		const auto found = env.values.find(key);
+		Check(found != env.values.end() && found->second == "1",
+		      "the shipped preset turns supported draw-run recall and attachment acquisition on");
+	}
+	Check(!env.values.contains("KYTY_DRAW_RUN_MESH"), "the shipped preset leaves KYTY_DRAW_RUN_MESH unset");
+	const auto sparse = env.values.find("KYTY_TEXTURE_SPARSE_RESIDENCY");
+	Check(sparse != env.values.end() && sparse->second == "auto",
+	      "the shipped preset sets KYTY_TEXTURE_SPARSE_RESIDENCY=auto");
+}
+
+// KYTY_TEXTURE_SPARSE_RESIDENCY=auto: off from the 16 GB class (reported heap >= 15 GiB) up.
+void TestTextureSparseResidency() {
+	namespace Sparse = Common::TextureSparseResidency;
+	constexpr uint64_t MiB = 1ull << 20u;
+	Check(Sparse::Parse(nullptr) == Sparse::Mode::Off, "unset: off (code default)");
+	Check(Sparse::Parse("0") == Sparse::Mode::Off && Sparse::Parse("") == Sparse::Mode::Off,
+	      "0 and empty: off");
+	Check(Sparse::Parse("1") == Sparse::Mode::On && Sparse::Parse("on") == Sparse::Mode::On, "1: on");
+	Check(Sparse::Parse("auto") == Sparse::Mode::Auto, "auto parses");
+
+	const uint64_t rtx3090 = 24348 * MiB; // 23.8 GiB
+	const uint64_t card16  = 16076 * MiB; // a 16 GB card's heap (15.7 GiB)
+	const uint64_t card12  = 12010 * MiB; // 11.7 GiB
+	const uint64_t card8   = 8018 * MiB;
+	Check(!Sparse::Requested(Sparse::Mode::Auto, rtx3090), "auto: off on a 24 GB card");
+	Check(!Sparse::Requested(Sparse::Mode::Auto, card16), "auto: off on a 16 GB card");
+	Check(!Sparse::Requested(Sparse::Mode::Auto, Sparse::AutoOffMinHeapBytes), "auto: off at the cut");
+	Check(Sparse::Requested(Sparse::Mode::Auto, Sparse::AutoOffMinHeapBytes - 1), "auto: on below the cut");
+	Check(Sparse::Requested(Sparse::Mode::Auto, card12) && Sparse::Requested(Sparse::Mode::Auto, card8),
+	      "auto: on on 12 GB and 8 GB cards");
+	Check(Sparse::Requested(Sparse::Mode::Auto, 0), "auto: on when no device-local heap is reported");
+	Check(Sparse::Requested(Sparse::Mode::On, rtx3090) && !Sparse::Requested(Sparse::Mode::Off, card8),
+	      "explicit 1 and 0 ignore the VRAM size");
+
+	const auto off = Sparse::Describe("auto", Sparse::Mode::Auto, rtx3090, true);
+	Check(off == "Texture sparse residency (KYTY_TEXTURE_SPARSE_RESIDENCY=auto): off, 23.8 GiB VRAM "
+	             ">= 16 GiB class\n",
+	      "auto off line");
+	const auto on = Sparse::Describe("auto", Sparse::Mode::Auto, card12, true);
+	Check(Contains(on, "=auto): on, 11.7 GiB VRAM < 16 GiB class"), "auto on line");
+	const auto missing = Sparse::Describe("auto", Sparse::Mode::Auto, card8, false);
+	Check(Contains(missing, "unavailable"), "auto on without device support: unavailable");
+	const auto forced = Sparse::Describe("1", Sparse::Mode::On, rtx3090, true);
+	Check(Contains(forced, "=1): on, 23.8 GiB VRAM"), "explicit 1 line");
+	Check(Contains(Sparse::Describe(nullptr, Sparse::Mode::Off, card8, false), "=unset): off"),
+	      "unset line");
+	Check(std::string(Sparse::ResolvedName(Sparse::Mode::Auto, false)) == "auto:off" &&
+	          std::string(Sparse::ResolvedName(Sparse::Mode::Auto, true)) == "auto:on" &&
+	          std::string(Sparse::ResolvedName(Sparse::Mode::On, true)) == "on",
+	      "resolved names for the stability line");
 }
 
 void TestStartupWarnings() {
@@ -185,6 +238,7 @@ int main() {
 	TestParse();
 	TestLoad();
 	TestShippedPreset();
+	TestTextureSparseResidency();
 	TestStartupWarnings();
 	TestCodegenDefaults();
 	std::printf("U59PresetTests: all passed\n");

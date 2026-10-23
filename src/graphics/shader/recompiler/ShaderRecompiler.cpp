@@ -1019,8 +1019,10 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		    ShaderLanesPerInvocation(ir.stage, ir.wave_size, options.input_info) == 1u;
 		(void)IR::EliminateExecSelects(ir, per_invocation);
 	}
+	(void)IR::ResolvePlanIdentities(ir);
 	IR::RemoveIdentities(ir.blocks);
 	IR::EliminateDeadCode(ir.blocks);
+	(void)IR::DropDeadPlanReferences(ir);
 
 	// Copy the export at its original control-flow/EXEC site, not an interface placeholder.
 	// Iterate only original instructions: aliases are never recursively copied.

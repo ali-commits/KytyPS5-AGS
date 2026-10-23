@@ -1,17 +1,22 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
+#include "common/textureSparseResidency.h"
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/cache/uploadDma.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
+#include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
+#include "graphics/host_gpu/renderer/eopTimestamps.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 #include "graphics/host_gpu/renderer/gpuTiming.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineFastFirst.h"
@@ -1228,32 +1233,46 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 			device_features.sparseResidencyBuffer = VK_TRUE;
 		}
 	}
-	// KYTY_TEXTURE_SPARSE_RESIDENCY=1 (default off): a partially resident texture (only the levels
-	// its views can sample are resident, KYTY_TEXTURE_RESIDENT_MIPS) is a sparse residency image
-	// with memory only behind those levels instead of a full native mip chain (GraphicContext).
-	if (const auto* sparse = std::getenv("KYTY_TEXTURE_SPARSE_RESIDENCY");
-	    sparse != nullptr && std::strcmp(sparse, "1") == 0) {
-		uint32_t count = 0;
-		physical_device.getQueueFamilyProperties(&count, nullptr);
-		std::vector<vk::QueueFamilyProperties> families(count);
-		physical_device.getQueueFamilyProperties(&count, families.data());
-		const bool queue_binds =
-		    queue_family < count && static_cast<bool>(families[queue_family].queueFlags &
-		                                              vk::QueueFlagBits::eSparseBinding);
-		const auto sparse_properties = physical_device.getProperties().sparseProperties;
-		graphics.sparse_residency_image_enabled =
-		    supported_features2.features.sparseBinding == VK_TRUE &&
-		    supported_features2.features.sparseResidencyImage2D == VK_TRUE &&
-		    sparse_properties.residencyNonResidentStrict == VK_TRUE && queue_binds;
-		LOGF("Texture sparse residency (KYTY_TEXTURE_SPARSE_RESIDENCY): %s (sparseBinding=%u "
-		     "sparseResidencyImage2D=%u residencyNonResidentStrict=%u standard2DBlockShape=%u "
-		     "queue=%u)\n",
-		     graphics.sparse_residency_image_enabled ? "on" : "unavailable",
-		     static_cast<uint32_t>(supported_features2.features.sparseBinding),
-		     static_cast<uint32_t>(supported_features2.features.sparseResidencyImage2D),
-		     static_cast<uint32_t>(sparse_properties.residencyNonResidentStrict),
-		     static_cast<uint32_t>(sparse_properties.residencyStandard2DBlockShape),
-		     queue_binds ? 1u : 0u);
+	// KYTY_TEXTURE_SPARSE_RESIDENCY=1|auto (default off; auto in u59-preset.json: on below the 16
+	// GB class, common/textureSparseResidency.h): a partially resident texture (only the levels its
+	// views can sample are resident, KYTY_TEXTURE_RESIDENT_MIPS) is a sparse residency image with
+	// memory only behind those levels instead of a full native mip chain (GraphicContext). Resolved
+	// here once: every later reader (TextureCache, the side-queue binds) uses
+	// graphics.sparse_residency_image_enabled.
+	{
+		namespace Sparse        = Common::TextureSparseResidency;
+		const auto* sparse      = std::getenv("KYTY_TEXTURE_SPARSE_RESIDENCY");
+		const auto  sparse_mode = Sparse::Parse(sparse);
+		const auto  memory      = physical_device.getMemoryProperties();
+		uint64_t    vram_heap   = 0;
+		for (uint32_t heap = 0; heap < memory.memoryHeapCount; heap++) {
+			if (memory.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+				vram_heap = std::max<uint64_t>(vram_heap, memory.memoryHeaps[heap].size);
+			}
+		}
+		bool available = false;
+		if (Sparse::Requested(sparse_mode, vram_heap)) {
+			uint32_t count = 0;
+			physical_device.getQueueFamilyProperties(&count, nullptr);
+			std::vector<vk::QueueFamilyProperties> families(count);
+			physical_device.getQueueFamilyProperties(&count, families.data());
+			const bool queue_binds =
+			    queue_family < count && static_cast<bool>(families[queue_family].queueFlags &
+			                                              vk::QueueFlagBits::eSparseBinding);
+			const auto sparse_properties = physical_device.getProperties().sparseProperties;
+			available = supported_features2.features.sparseBinding == VK_TRUE &&
+			            supported_features2.features.sparseResidencyImage2D == VK_TRUE &&
+			            sparse_properties.residencyNonResidentStrict == VK_TRUE && queue_binds;
+			LOGF("Texture sparse residency support: sparseBinding=%u sparseResidencyImage2D=%u "
+			     "residencyNonResidentStrict=%u standard2DBlockShape=%u queue=%u\n",
+			     static_cast<uint32_t>(supported_features2.features.sparseBinding),
+			     static_cast<uint32_t>(supported_features2.features.sparseResidencyImage2D),
+			     static_cast<uint32_t>(sparse_properties.residencyNonResidentStrict),
+			     static_cast<uint32_t>(sparse_properties.residencyStandard2DBlockShape),
+			     queue_binds ? 1u : 0u);
+		}
+		graphics.sparse_residency_image_enabled = available;
+		Log::WriteToConsoleAndLog(Sparse::Describe(sparse, sparse_mode, vram_heap, available));
 		if (graphics.sparse_residency_image_enabled) {
 			device_features.sparseBinding          = VK_TRUE;
 			device_features.sparseResidencyImage2D = VK_TRUE;
@@ -1496,6 +1515,37 @@ static void PrintDeviceReport(const GraphicContext& graphics) {
 		    stage(clusters.vertex), stage(clusters.pixel), stage(clusters.mesh));
 	}
 	std::fflush(stdout);
+}
+
+// One line on the console and in the printf file (_kyty.txt), so a player's log answers "which
+// settings?" for the stability switches, with their effective values (after defaults and auto).
+static void LogStabilitySwitches(const GraphicContext& graphics) {
+	const auto  defer        = PageManager::DeferProtectsMode(); // bits: 1 on, 2 all, 4 verify
+	const char* defer_text   = defer == 0   ? "0"
+	                           : defer == 3 ? "all"
+	                           : defer == 5 ? "verify"
+	                           : defer == 7 ? "verify-all"
+	                                        : "1";
+	const auto  eop          = EopTimestamps::GetMode();
+	const char* eop_text     = eop == EopTimestamps::Mode::Gpu         ? "gpu"
+	                           : eop == EopTimestamps::Mode::GpuVerify ? "gpu-verify"
+	                                                                   : "record";
+	const auto  targets      = DrawRun::Detail::g_acquire.Get();
+	const char* targets_text = targets == 0   ? "0"
+	                           : targets == 2 ? "verify"
+	                           : targets == 3 ? "exit"
+	                                          : "1";
+	const auto  sparse_mode =
+	    Common::TextureSparseResidency::Parse(std::getenv("KYTY_TEXTURE_SPARSE_RESIDENCY"));
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "Kyty stability switches: KYTY_DEFER_PROTECTS={} KYTY_TEXTURE_SPARSE_RESIDENCY={} "
+	    "KYTY_DEVICE_FAULT_DIAGNOSTICS={} KYTY_EOP_TIMESTAMPS={} KYTY_DRAW_RUN_RECALL={} "
+	    "KYTY_DRAW_RUN_ACQUIRE={}\n",
+	    defer_text,
+	    Common::TextureSparseResidency::ResolvedName(sparse_mode,
+	                                                 graphics.sparse_residency_image_enabled),
+	    DeviceFaultDiagnosticsEnabled() ? 1 : 0, eop_text, DrawRun::RecallEnabled() ? 1 : 0,
+	    targets_text));
 }
 
 static void VulkanGetExtensions(VulkanExtensions& r) {
@@ -2096,6 +2146,7 @@ void WindowContext::CreateVulkan() {
 	if (DeviceFaultDiagnosticsEnabled()) {
 		PrintDeviceReport(graphic_ctx);
 	}
+	LogStabilitySwitches(graphic_ctx);
 
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");

@@ -695,6 +695,13 @@ if(LINUX)
 	target_link_libraries(live_switch_tests Threads::Threads)
 endif()
 
+add_executable(guest_probe_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestProbeTests.cpp")
+target_link_libraries(guest_probe_tests common)
+target_include_directories(guest_probe_tests PRIVATE ${inc_headers})
+if(LINUX)
+	target_link_libraries(guest_probe_tests Threads::Threads)
+endif()
+
 add_executable(lod_stats_report_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LodStatsReportTests.cpp"
 )
@@ -1266,6 +1273,10 @@ if(BUILD_TESTING)
 	add_test(NAME cpu_placement COMMAND $<TARGET_FILE:cpu_placement_tests>)
 	add_test(NAME cpu_placement_recorder COMMAND $<TARGET_FILE:cpu_placement_tests> --mode cp+recorder)
 	add_test(NAME live_switch COMMAND $<TARGET_FILE:live_switch_tests>)
+	add_test(NAME guest_probe_retire COMMAND $<TARGET_FILE:guest_probe_tests>)
+	add_test(NAME guest_probe_shared COMMAND $<TARGET_FILE:guest_probe_tests> --shared)
+	add_test(NAME guest_probe_equals COMMAND $<TARGET_FILE:guest_probe_tests> --equals)
+	set_tests_properties(guest_probe_retire guest_probe_shared guest_probe_equals PROPERTIES TIMEOUT 60)
 	add_test(NAME lod_stats_report COMMAND $<TARGET_FILE:lod_stats_report_tests>)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
 	add_test(NAME u59_preset COMMAND $<TARGET_FILE:u59_preset_tests>)
@@ -1426,6 +1437,11 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	add_test(NAME pipeline_skip_rendering
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(pipeline_skip_rendering PROPERTIES
+		ENVIRONMENT "KYTY_TEST_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP_WAIT_US=0;KYTY_PIPELINE_COLD_SALT=144"
+		TIMEOUT 180)
 	# KYTY_SKIP_INACTIVE_PS (upstream 6956b454f): a stale PS whose exports are all disabled.
 	add_test(NAME graphics_pipeline_rasterization_skip_inactive_ps
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
@@ -2318,6 +2334,11 @@ if(BUILD_TESTING)
 	# stay in the build directory, so later runs start warm).
 	add_test(NAME program_cache
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --program-cache-only)
+	add_test(NAME shader_parallel_compile
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --parallel-compile-only)
+	add_test(NAME split_label_overlay
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --split-labels-only)
+	set_tests_properties(split_label_overlay PROPERTIES ENVIRONMENT "KYTY_LABEL_MODE=split;KYTY_CP_SEQ=1")
 	add_test(NAME program_cache_gpu
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --program-cache-gpu-only)
 	add_test(NAME program_cache_gpu_verify
@@ -2482,6 +2503,7 @@ if(BUILD_TESTING)
 		image_gpu_keep_tests
 		clear_register_decode_tests
 		range_set_tests
+		guest_probe_tests
 		memory_tracker_tests
 		page_manager_tests
 		archive_file_tests
