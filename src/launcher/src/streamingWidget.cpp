@@ -47,10 +47,10 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	font.setBold(true);
 	title->setFont(font);
 	layout->addWidget(title);
-	auto* description =
-	    new QLabel(tr("Start hosting here, then choose a PC and game in Kyty TV. Video comes from "
-	                  "the game before local window scaling; only private game audio is captured."),
-	               content);
+	auto* description = new QLabel(
+	    tr("Start hosting here, then choose this host and a game on a client. Video comes from "
+	       "the game before local window scaling; only private game audio is captured."),
+	    content);
 	description->setWordWrap(true);
 	layout->addWidget(description);
 	auto* host      = new QGroupBox(tr("Host"), content);
@@ -129,20 +129,20 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->addRow(tr("Preferred output"), profile_row);
 	quality_form->setRowVisible(profile_row, false);
 	auto* hint = new QLabel(
-	    tr("Choose resolution, frame rate, quality and bitrate in Kyty TV. "
+	    tr("Choose resolution, frame rate, quality and bitrate on the client. "
 	       "The negotiated TV profile controls host capture and emulator streaming output. "
 	       "Local Library game settings stay separate. Streaming is headless."),
 	    m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
-	m_show_local = new QCheckBox(tr("Show game window on this PC"), m_quality);
+	m_show_local = new QCheckBox(tr("Show game window on this host"), m_quality);
 	m_show_local->setObjectName("streamShowLocal");
 	m_show_local->setChecked(settings.show_local);
 	quality_form->addRow(m_show_local);
 	quality_form->setRowVisible(m_show_local, false);
 	auto* display_hint =
 	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
-	                  "The PC still runs and renders the game."),
+	                  "The host still runs and renders the game."),
 	               m_quality);
 	display_hint->setWordWrap(true);
 	quality_form->addRow(display_hint);
@@ -156,18 +156,18 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_port->setRange(1024, 65514);
 	m_port->setValue(settings.port);
 	quality_form->addRow(tr("GameStream base port"), m_port);
-	m_monitor = new QCheckBox(tr("Also play game audio on this computer"), m_quality);
+	m_monitor = new QCheckBox(tr("Also play game audio on this host"), m_quality);
 	m_monitor->setObjectName("streamLocalAudio");
 	m_monitor->setChecked(settings.local_audio);
 	quality_form->addRow(m_monitor);
-	m_controller_audio = new QCheckBox(tr("Laptop controller audio companion"), m_quality);
+	m_controller_audio = new QCheckBox(tr("Client controller audio companion"), m_quality);
 	m_controller_audio->setObjectName("streamControllerAudio");
 	m_controller_audio->setChecked(settings.controller_audio);
 	m_controller_audio->setEnabled(true);
 	quality_form->addRow(m_controller_audio);
 	quality_form->setRowVisible(m_controller_audio, false); // not a daemon preference
 	auto* controller_hint =
-	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered laptop "
+	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered client "
 	                  "companion while video and game audio remain on Kyty TV."),
 	               m_quality);
 	controller_hint->setWordWrap(true);
@@ -429,7 +429,7 @@ void StreamingWidget::Update() {
 	} else if (state == "Starting") {
 		m_status->setText(tr("Starting · checking host and private audio…"));
 	} else if (state == "Ready") {
-		m_status->setText(tr("Hosting ready · choose a game in Kyty TV"));
+		m_status->setText(tr("Hosting ready · choose a game on a client"));
 	} else if (state == "Stopping") {
 		m_status->setText(tr("Stopping host and owned audio routes…"));
 	} else if (state == "Error") {
