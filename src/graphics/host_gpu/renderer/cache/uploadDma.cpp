@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/atomicNotify.h"
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
@@ -316,7 +317,7 @@ bool UploadDma::ClaimAndCopy(HostCopyTicket& ticket, bool cp) {
 		m_host_bytes_done.fetch_add(copied, std::memory_order_release);
 	}
 	ticket.state.store(2, std::memory_order_release);
-	ticket.state.notify_all();
+	Common::NotifyAllAfterStore(ticket.state);
 	return true;
 }
 

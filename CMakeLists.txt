@@ -981,6 +981,12 @@ add_executable(thread_service_tests EXCLUDE_FROM_ALL
 target_link_libraries(thread_service_tests common)
 target_include_directories(thread_service_tests PRIVATE ${inc_headers})
 
+add_executable(atomic_notify_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AtomicNotifyTests.cpp")
+target_include_directories(atomic_notify_tests PRIVATE ${inc_headers})
+if(TARGET Threads::Threads)
+	target_link_libraries(atomic_notify_tests Threads::Threads)
+endif()
+
 add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 target_link_libraries(kernel_file_system_tests ZArchive::zarchive)
@@ -1424,6 +1430,8 @@ if(BUILD_TESTING)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME event_queue_semantics COMMAND $<TARGET_FILE:event_queue_semantics_tests>)
 	add_test(NAME thread_service COMMAND $<TARGET_FILE:thread_service_tests>)
+	add_test(NAME atomic_notify COMMAND $<TARGET_FILE:atomic_notify_tests>)
+	set_tests_properties(atomic_notify PROPERTIES TIMEOUT 60)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
 	add_test(NAME sync_on_address COMMAND $<TARGET_FILE:sync_on_address_tests>)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
@@ -2578,6 +2586,7 @@ if(BUILD_TESTING)
 		event_queue_lifetime_tests
 		kernel_file_system_tests
 		sync_on_address_tests
+		atomic_notify_tests
 		shader_recompiler_compute_tests
 		virtual_memory_allocation_tests
 		audio_diag_tests

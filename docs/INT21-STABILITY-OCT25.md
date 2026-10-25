@@ -81,3 +81,41 @@ Neither complete level was replayed during this validation. The Trapped in Time 
 not claimed fixed: the automatic native capture is intended to resolve the missing evidence
 if it recurs. Saves, patches, trophies, controller pairing, graphics settings and other agents'
 worktrees must remain untouched during installation.
+
+## Live-freeze root cause found after the first candidate
+
+Run `20261025T030849.727482Z` on `88a597e4` reproduced repeated long freezes at
+the stage entrance. Automatic capture completed successfully, and additional live
+debugger observations established the command processor was sleeping in
+`UploadDma::ClaimAndCopy`, in `FUTEX_WAIT_PRIVATE` for ticket state 1, while the
+same word already contained completed state 2. The upload worker was idle.
+Interrupting the wait with the debugger briefly restored progress before another
+ticket stalled. The window/input loop remained responsive; no new NVIDIA Xid was
+recorded for this run. The user subsequently closed the game.
+
+The installed `gcc-libs 16.2.1+r23+gd564253eb6c8-1` has GCC libstdc++ bug
+[PR127757](https://gcc.gnu.org/PR127757). Its notifying implementation can observe
+zero waiters while the waiter still sees the previous publication value, because
+it lacks the necessary store/load fence. The installed binary disassembly and its
+matching source lack the fence. GCC fixed this upstream in
+[a971455d8f2b](https://github.com/gcc-mirror/gcc/commit/a971455d8f2b672d87297226f68e3a4f2019ec28).
+
+The emulator-side workaround preserves the release store and places a sequentially
+consistent fence before notifying ticket waiters. It uses the same ordering remedy
+as upstream, without updating system packages, changing shader codegen, discarding
+caches or redesigning ticket ownership. Recorder bell increments already use atomic
+read-modify-write operations; this change targets the observed plain completion store.
+
+An independent host regression exercises one million publications with cache
+contention, randomized timing and a bounded progress monitor. Its unfenced control
+reproduced a stalled receiver after publication; the production fenced path passed.
+A private run of GCC's original reproducer independently failed without the fence
+and passed with it. The progress monitor uses a generous five-second threshold;
+this remains a timing-dependent stress test, not an exhaustive concurrency proof.
+Failure cleanup also changes the publication value before joining the receiver.
+
+Live stacks, actual futex operands, completed ticket contents, syscall trace,
+runtime versions and reproducer outputs are retained under
+`~/.local/state/kytyps5-live-freeze-20261025/`. The earlier uncertainty about the
+Trapped in Time freeze is superseded for this captured upload-completion failure;
+other historical hangs are not automatically assigned the same cause.
