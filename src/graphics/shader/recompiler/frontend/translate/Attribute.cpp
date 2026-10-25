@@ -49,14 +49,14 @@ IR::ExportFlags Translator::AddExportInfo(const Decoder::Instruction& inst) {
 }
 
 void Translator::TranslateEmbeddedFetch(const Decoder::Instruction& inst, uint32_t attribute,
-                                        uint32_t component_count,
+                                        uint32_t                    component_count,
                                         const ShaderBufferResource& resource) {
 	const auto format = Format::GetFormatInfo(resource.Format());
 	for (uint32_t component = 0; component < component_count; component++) {
 		auto source = Format::FormattedSource {Format::FormattedSourceKind::Memory, component};
 		if (inst.formatted && !inst.typed) {
-			source = Format::ResolveFormattedSource(
-			    format, GetDstSel(resource.DstSelXYZW(), component));
+			source =
+			    Format::ResolveFormattedSource(format, GetDstSel(resource.DstSelXYZW(), component));
 			if (source.kind == Format::FormattedSourceKind::Invalid) {
 				EXIT("invalid formatted vertex input %u at pc 0x%08x: component=%u "
 				     "format=%u selector=%u descriptor=%08x,%08x,%08x,%08x",
@@ -67,8 +67,8 @@ void Translator::TranslateEmbeddedFetch(const Decoder::Instruction& inst, uint32
 		}
 		IR::Value value;
 		if (source.kind == Format::FormattedSourceKind::Memory) {
-			value = ir.Emit(IR::ValueOpcode::GetAttribute,
-			                {IR::Value(attribute), IR::Value(source.component)});
+			value          = ir.Emit(IR::ValueOpcode::GetAttribute,
+			                         {IR::Value(attribute), IR::Value(source.component)});
 			auto& required = program.info.vertex_fetch_components[attribute];
 			required = static_cast<uint8_t>(std::max<uint32_t>(required, source.component + 1u));
 		} else {
@@ -95,6 +95,15 @@ void Translator::V_INTERP_P2_F32(const Decoder::Instruction& inst) {
 	const auto value = ir.Emit(IR::ValueOpcode::GetAttribute,
 	                           {IR::Value(inst.src1.value), IR::Value(inst.src2.value)});
 	WriteOperand(inst.dst, value);
+}
+
+// Upstream d7c189664: FP16_INTERP_MODE packs two halves per dword; the host interpolates the
+// selected half of the per-vertex values (ShaderInfoCollection marks such inputs per-vertex).
+void Translator::V_INTERP_P2_F16(const Decoder::Instruction& inst) {
+	const auto value = ir.Emit(IR::ValueOpcode::GetAttributeF16,
+	                           {IR::Value(inst.src1.value), IR::Value(inst.src2.value),
+	                            IR::Value(uint32_t {inst.src1.op_sel})});
+	WriteF16(inst.dst, IR::F32(value));
 }
 
 void Translator::V_INTERP_MOV_F32(const Decoder::Instruction& inst) {
@@ -125,6 +134,9 @@ void Translator::EXP(const Decoder::Instruction& inst) {
 void Translator::EmitInterpolation(const Decoder::Instruction& inst) {
 	switch (inst.opcode) {
 		case Decoder::Opcode::V_INTERP_P1_F32: V_INTERP_P1_F32(); return;
+		// P2 interpolates the whole attribute, so the P1 half has nothing to compute.
+		case Decoder::Opcode::V_INTERP_P1LL_F16: return;
+		case Decoder::Opcode::V_INTERP_P2_F16: V_INTERP_P2_F16(inst); return;
 		case Decoder::Opcode::V_INTERP_P2_F32: V_INTERP_P2_F32(inst); return;
 		case Decoder::Opcode::V_INTERP_MOV_F32: V_INTERP_MOV_F32(inst); return;
 		default: return FailMissingTranslation(inst);

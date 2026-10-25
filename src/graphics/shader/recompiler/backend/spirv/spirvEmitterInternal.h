@@ -5,6 +5,7 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -27,11 +28,11 @@
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
-struct InputBinding : IR::StageInput {
+struct InputBinding: IR::StageInput {
 	uint32_t variable_id = 0;
 };
 
-struct OutputBinding : IR::StageOutput {
+struct OutputBinding: IR::StageOutput {
 	uint32_t variable_id        = 0;
 	uint32_t mesh_data_variable = 0;
 };
@@ -65,25 +66,25 @@ struct SpirvRequirements {
 	bool subgroup_shuffle             = false;
 	bool subgroup_local_invocation_id = false;
 	// Native subgroup reductions of DPP row scans (IR::MatchLaneReduction, KYTY_LANE_REDUCTIONS).
-	bool subgroup_arithmetic          = false;
-	bool compute_derivatives          = false;
-	bool image_gather_extended        = false;
-	bool function_lds                 = false;
-	bool function_scratch             = false;
-	bool pixel_valid_mask             = false;
+	bool subgroup_arithmetic   = false;
+	bool compute_derivatives   = false;
+	bool image_gather_extended = false;
+	bool function_lds          = false;
+	bool function_scratch      = false;
+	bool pixel_valid_mask      = false;
 	// A pixel shader's DS_APPEND/DS_CONSUME elect a non-helper lane (KYTY_PS_APPEND_LIVE_ELECTION).
-	bool helper_invocation            = false;
-	bool buffer_int64_atomics         = false;
-	bool buffer_u8                    = false;
-	bool buffer_u16                   = false;
-	bool shared_int64_atomics         = false;
-	bool coherent_buffers             = false;
+	bool helper_invocation    = false;
+	bool buffer_int64_atomics = false;
+	bool buffer_u8            = false;
+	bool buffer_u16           = false;
+	bool shared_int64_atomics = false;
+	bool coherent_buffers     = false;
 	// A buffer store or atomic anywhere in the program; without one (and without coherent loads)
 	// the storage buffers are declared NonWritable (CodegenOptions::readonly_buffers).
-	bool buffer_writes                = false;
-	bool float64                      = false;
+	bool buffer_writes = false;
+	bool float64       = false;
 	// S_MEMREALTIME reads the host shader clock (OpReadClockKHR, VK_KHR_shader_clock).
-	bool shader_clock                 = false;
+	bool shader_clock = false;
 };
 
 SpirvRequirements AnalyzeProgramRequirements(const IR::Program& program);
@@ -101,97 +102,117 @@ struct EmitterState {
 		}
 	}
 
-	Builder                                          builder;
-	const IR::Program&                               program;
-	ShaderStageInputInfo                             input_info;
-	uint32_t                                        void_type = 0;
-	uint32_t                                        bool_type = 0;
-	uint32_t                                        u32_type = 0;
-	uint32_t                                        u64_type = 0;
-	uint32_t                                        i32_type = 0;
-	uint32_t                                        f32_type = 0;
-	uint32_t                                        f64_type = 0;
-	uint32_t                                        u32_pair_type = 0;
-	uint32_t                                        i32_pair_type = 0;
-	uint32_t                                        function_type = 0;
-	std::array<uint32_t, 3>                          bool_vector_types {};
-	std::array<uint32_t, 3>                          u32_vector_types {};
-	std::array<uint32_t, 3>                          i32_vector_types {};
-	std::array<uint32_t, 3>                          f32_vector_types {};
-	std::array<uint32_t, 6>                          tess_variables {};
-	uint32_t                                         tess_inner_variable = 0;
-	uint32_t                                         tess_patch_base     = 0;
+	Builder              builder;
+	const IR::Program&   program;
+	ShaderStageInputInfo input_info;
+	// PA_CL_UCP planes the last pre-rasterization stage writes as clip distances (upstream
+	// feed075a9).
+	uint32_t                                            user_clip_planes = 0;
+	uint32_t                                            void_type        = 0;
+	uint32_t                                            bool_type        = 0;
+	uint32_t                                            u32_type         = 0;
+	uint32_t                                            u64_type         = 0;
+	uint32_t                                            i32_type         = 0;
+	uint32_t                                            f32_type         = 0;
+	uint32_t                                            f64_type         = 0;
+	uint32_t                                            u32_pair_type    = 0;
+	uint32_t                                            i32_pair_type    = 0;
+	uint32_t                                            function_type    = 0;
+	std::array<uint32_t, 3>                             bool_vector_types {};
+	std::array<uint32_t, 3>                             u32_vector_types {};
+	std::array<uint32_t, 3>                             i32_vector_types {};
+	std::array<uint32_t, 3>                             f32_vector_types {};
+	std::array<uint32_t, IR::NumTessellationAttributes> tess_variables {};
+	uint32_t                                            tess_inner_variable = 0;
 
-	const SpirvRequirements                          requirements;
-	uint32_t                                         lane_count              = 1;
-	uint32_t                                         lane_half               = 0;
-	// KYTY_WAVE32_CLUSTERS (Spirv::WaveClustersActive): a wave32 program on a host subgroup that may
-	// hold two guest waves keeps each to its own 32 lanes (EmitSubgroupLocalInvocationId,
+	const SpirvRequirements requirements;
+	uint32_t                lane_count = 1;
+	uint32_t                lane_half  = 0;
+	// KYTY_WAVE64_WARPS (split wave): a wave64 compute workgroup of one wave runs as two 32-wide
+	// host subgroups, one guest lane per invocation (lane_count 1). Cross-lane operations
+	// exchange the halves through workgroup memory (ExchangeWaveValue), and DS accesses
+	// synchronize the halves the guest ran in lockstep.
+	bool     split_wave             = false;
+	uint32_t wave_exchange_variable = 0;
+	uint32_t wave_exchange_parity   = 0;
+	// Blocks whose conditional branch each half decides on its own lanes (SplitWaveLocalBranches).
+	std::unordered_set<const IR::Block*> wave_local_branches;
+	// The probe emission: every branch is half-local, and wave_sync_blocks collects the blocks
+	// that synchronize the halves.
+	bool                                  wave_probe       = false;
+	std::unordered_set<const IR::Block*>* wave_sync_blocks = nullptr;
+	// DS instructions write the LDS, so DS reads must wait for the other half too.
+	bool ds_writes_lds = false;
+	// KYTY_WAVE32_CLUSTERS (Spirv::WaveClustersActive): a wave32 program on a host subgroup that
+	// may hold two guest waves keeps each to its own 32 lanes (EmitSubgroupLocalInvocationId,
 	// EmitHostLane, EmitWaveBallot).
-	bool                                             wave_clusters           = false;
-	uint32_t                                         storage_buffer_variable = 0;
-	uint32_t                                         storage_buffer_u8_variable = 0;
+	bool     wave_clusters           = false;
+	uint32_t storage_buffer_variable = 0;
+	// KYTY_UNIFORM_BUFFERS: the constant-only buffers (DescriptorBindingKind::UniformBuffers).
+	uint32_t                                         uniform_buffer_variable     = 0;
+	uint32_t                                         storage_buffer_u8_variable  = 0;
 	uint32_t                                         storage_buffer_u16_variable = 0;
 	uint32_t                                         storage_buffer_u64_variable = 0;
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};
-	uint32_t                                         bda_pagetable_variable  = 0;
-	uint32_t                                         fault_buffer_variable   = 0;
-	uint32_t                                         bda_pointer_function    = 0;
-	// KYTY_RT_FUNCTION: the module's one software BVH node test function (DefineBvhNodeTestFunction).
-	uint32_t                                         bvh_node_test_function  = 0;
-	uint32_t                                         gds_variable            = 0;
-	uint32_t                                         gds_length              = 0;
-	uint32_t                                         push_constant_variable  = 0;
-	uint32_t                                         shader_data_storage_variable = 0;
-	uint32_t                                         mip_stats_variable           = 0;
+	uint32_t                                         bda_pagetable_variable = 0;
+	uint32_t                                         fault_buffer_variable  = 0;
+	uint32_t                                         bda_pointer_function   = 0;
+	// KYTY_RT_FUNCTION: the module's one software BVH node test function
+	// (DefineBvhNodeTestFunction).
+	uint32_t bvh_node_test_function       = 0;
+	uint32_t gds_variable                 = 0;
+	uint32_t gds_length                   = 0;
+	uint32_t push_constant_variable       = 0;
+	uint32_t shader_data_storage_variable = 0;
+	uint32_t mip_stats_variable           = 0;
 	// False for the plain variant of an instrumented pixel shader (KYTY_LOD_STATS_PLAIN_VARIANT):
 	// the mip_stats binding stays declared, but no sample records GET_LOD_STATS feedback.
-	bool                                             mip_stats_records            = true;
-	uint32_t                                         flattened_srt_variable  = 0;
-	spv::StorageClass                                lds_storage_class = spv::StorageClassFunction;
-	// StorageBuffer LDS (KYTY_LDS_DEVICE_BUFFER), set at function entry: the workgroup's first dword
-	// in the buffer, and the bound of its accesses (LdsDwordCount, or 0 when the bound range holds
-	// no region for it).
-	uint32_t                                         lds_base_dwords         = 0;
-	uint32_t                                         lds_length              = 0;
-	uint32_t                                         lds_variable            = 0;
-	uint32_t                                         lds_u64_variable        = 0;
-	std::array<uint32_t, 2>                          scratch_variable {};
-	std::array<uint32_t, IR::ImageBindingCount>      image_variables {};
-	uint32_t                   sampler_variable                      = 0;
-	uint32_t                   main_func                             = 0;
-	uint32_t                   mesh_guest_func                       = 0;
-	uint32_t                   mesh_allocation                       = 0;
-	uint32_t                   mesh_primitive_data                   = 0;
-	uint32_t                   mesh_primitives                       = 0;
-	uint32_t                   mesh_cull                             = 0;
-	uint32_t                   entry_label                           = 0;
-	uint32_t                   current_label                         = 0;
-	const IR::Block*           current_block                         = nullptr;
-	uint32_t                   pixel_valid_mask_variable             = 0;
-	uint32_t                   subgroup_local_invocation_id_variable = 0;
-	uint32_t                   helper_invocation_variable            = 0;
+	bool              mip_stats_records      = true;
+	uint32_t          flattened_srt_variable = 0;
+	spv::StorageClass lds_storage_class      = spv::StorageClassFunction;
+	// StorageBuffer LDS (KYTY_LDS_DEVICE_BUFFER), set at function entry: the workgroup's first
+	// dword in the buffer, and the bound of its accesses (LdsDwordCount, or 0 when the bound range
+	// holds no region for it).
+	uint32_t                                    lds_base_dwords  = 0;
+	uint32_t                                    lds_length       = 0;
+	uint32_t                                    lds_variable     = 0;
+	uint32_t                                    lds_u64_variable = 0;
+	std::array<uint32_t, 2>                     scratch_variable {};
+	std::array<uint32_t, IR::ImageBindingCount> image_variables {};
+	uint32_t                                    sampler_variable                      = 0;
+	uint32_t                                    main_func                             = 0;
+	uint32_t                                    mesh_guest_func                       = 0;
+	uint32_t                                    mesh_allocation                       = 0;
+	uint32_t                                    mesh_primitive_data                   = 0;
+	uint32_t                                    mesh_primitives                       = 0;
+	uint32_t                                    mesh_cull                             = 0;
+	uint32_t                                    entry_label                           = 0;
+	uint32_t                                    current_label                         = 0;
+	const IR::Block*                            current_block                         = nullptr;
+	uint32_t                                    pixel_valid_mask_variable             = 0;
+	uint32_t                                    subgroup_local_invocation_id_variable = 0;
+	uint32_t                                    helper_invocation_variable            = 0;
 	// KYTY_LOOP_GUARD: the invocation's loop-iteration count (a Function variable).
-	uint32_t                   loop_guard_variable                   = 0;
+	uint32_t loop_guard_variable = 0;
 	// KYTY_RT_NODE_BUDGET / KYTY_RT_NODE_STATS: BVH instruction executions of this invocation
 	// (Function u32; both halves of a two-lane invocation add to it).
-	uint32_t                   bvh_node_count_variable               = 0;
-	uint32_t                   per_vertex_variable                   = 0;
-	uint32_t                   point_size_variable                   = 0;
-	uint32_t                   clip_distance_variable                = 0;
-	uint32_t                   invalid_position_clip_distance        = UINT32_MAX;
-	uint32_t                   cull_distance_variable                = 0;
-	uint32_t                   layer_variable                        = 0;
-	uint32_t                   viewport_index_variable               = 0;
-	uint32_t                   depth_variable                        = 0;
-	uint32_t                   sample_mask_variable                  = 0;
-	std::vector<InputBinding>  inputs;
-	std::vector<OutputBinding> outputs;
-	std::vector<uint32_t>      interface_variables;
+	uint32_t                                       bvh_node_count_variable        = 0;
+	uint32_t                                       per_vertex_variable            = 0;
+	uint32_t                                       point_size_variable            = 0;
+	uint32_t                                       clip_distance_variable         = 0;
+	uint32_t                                       invalid_position_clip_distance = UINT32_MAX;
+	uint32_t                                       cull_distance_variable         = 0;
+	uint32_t                                       layer_variable                 = 0;
+	uint32_t                                       viewport_index_variable        = 0;
+	uint32_t                                       depth_variable                 = 0;
+	uint32_t                                       sample_mask_variable           = 0;
+	std::vector<InputBinding>                      inputs;
+	std::vector<OutputBinding>                     outputs;
+	std::vector<uint32_t>                          interface_variables;
 	std::unordered_map<const IR::Block*, uint32_t> labels;
 	// Instructions whose values reach a position export (MadMode::Position), built on first use.
-	bool                                  position_slice_ready = false;
-	std::unordered_set<const IR::Inst*>   position_slice;
+	bool                                position_slice_ready = false;
+	std::unordered_set<const IR::Inst*> position_slice;
 	// Pixel inputs whose V_INTERP_P2 reads were all resolved to hardware I/J pairs of one
 	// perspective mode (KYTY_INTERP_MODES): variable -> sampling location its decoration selects.
 	std::unordered_map<uint32_t, IR::InterpolationMode> input_interpolation;
@@ -226,7 +247,7 @@ uint32_t TypeStorageBufferPointer(EmitterState& state, uint32_t bits = 32);
 uint32_t TypeStorageBufferElementPointer(EmitterState& state, uint32_t bits = 32);
 uint32_t TypePhysicalU32Pointer(EmitterState& state);
 // The module declares 64-bit integers and physical storage buffer addresses.
-bool UsesPhysicalAddresses(const EmitterState& state);
+bool     UsesPhysicalAddresses(const EmitterState& state);
 uint32_t TypePhysicalU64Pointer(EmitterState& state);
 uint32_t TypePushConstantElementPointer(EmitterState& state);
 uint32_t TypeU32ArrayPointer(EmitterState& state, spv::StorageClass storage_class, uint32_t dwords);
@@ -350,7 +371,6 @@ uint32_t VertexParameterComponentCount(const InputBinding& input);
 
 uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind kind);
 
-
 uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo& exp);
 
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
@@ -464,6 +484,35 @@ uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t ballot, uint32_t
 
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane);
 
+// Split waves (EmitterState::split_wave). Whether lane operations confined to 32-lane halves use
+// the host subgroup's lane (lane & 31): two lanes per invocation or a split wave.
+[[nodiscard]] inline bool HalfWaveHost(const EmitterState& state) {
+	return state.lane_count == 2 || state.split_wave;
+}
+// The invocation's lane in its host subgroup (0-31 for a split wave).
+uint32_t EmitHostSubgroupLane(EmitterState& state);
+// Records that the block being emitted synchronizes a split wave's halves.
+void NoteWaveSync(EmitterState& state);
+// Synchronizes a split wave's halves and makes their workgroup memory writes visible.
+void EmitWaveBarrier(EmitterState& state);
+// The value (u32) of guest lane `lane` (0-63) of a split wave, through workgroup memory.
+uint32_t ExchangeWaveValue(EmitterState& state, uint32_t value, uint32_t lane);
+// The 64-lane ballot of `predicate` in a split wave, as {low lanes, high lanes, 0, 0}.
+uint32_t ExchangeWaveBallot(EmitterState& state, uint32_t predicate);
+// The ballot word of `predicate` over the invocation's own host subgroup.
+uint32_t EmitHostBallotWord(EmitterState& state, uint32_t predicate);
+// The invocation's host-subgroup ballot placed as a wave ballot whose lane bits are right for
+// lanes of the invocation's own half: {word, word, 0, 0}.
+uint32_t EmitHalfBallot(EmitterState& state, uint32_t predicate);
+// Reads `value` (any 32-bit or bool type) from guest lane `lane` of the invocation's own half.
+uint32_t ReadHostSubgroupLane(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane);
+// The blocks whose conditional branch a split wave's halves may decide on their own: no block
+// the branch controls synchronizes the halves (sync_blocks), directly or through another branch
+// that stays whole-wave, and no such block ends the program.
+std::unordered_set<const IR::Block*>
+SplitWaveLocalBranches(const IR::Program&                          program,
+                       const std::unordered_set<const IR::Block*>& sync_blocks);
+
 inline constexpr auto EmitAddU32 = EmitNative<spv::OpIAdd, IR::Type::U32, uint32_t, uint32_t>;
 
 uint32_t EmitBinaryU32(EmitterState& state, spv::Op opcode, uint32_t lhs, uint32_t rhs);
@@ -478,7 +527,7 @@ uint32_t StorageBufferElementBits(const IR::Program& program, const IR::MemoryIn
 void EmitMemoryOffsets(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);
-void EnsureLdsStorage(EmitterState& state);
+void     EnsureLdsStorage(EmitterState& state);
 
 // LDS kept in a device buffer (b0bbaef1e, compute LDS past the device limit) is uniform memory.
 inline spv::MemorySemanticsMask LdsMemorySemantics(const EmitterState& state) {
@@ -490,6 +539,7 @@ inline spv::MemorySemanticsMask LdsMemorySemantics(const EmitterState& state) {
 struct MemoryResourceAccess {
 	IR::ResourceKind      kind             = IR::ResourceKind::None;
 	uint32_t              object_pointer   = 0;
+	uint32_t              descriptor_index = 0;
 	uint32_t              length           = 0;
 	uint32_t              byte_offset      = 0;
 	uint32_t              element_bits     = 32;
@@ -611,11 +661,11 @@ uint32_t EmitBdaDeviceAddress(ValueEmitContext& ctx, uint32_t guest_address);
 
 // These templates accept local lambdas from several emitter translation units.
 template <typename Fn>
-auto EmitIndexSwitch(EmitterState& state, uint32_t index, uint32_t count,
-                        uint32_t result_type, Fn&& emit) {
+auto EmitIndexSwitch(EmitterState& state, uint32_t index, uint32_t count, uint32_t result_type,
+                     Fn&& emit) {
 	constexpr bool has_result = !std::is_void_v<std::invoke_result_t<Fn, uint32_t>>;
 	EXIT_IF(count == 0u);
-	const auto merge_label = state.builder.AllocateId();
+	const auto            merge_label = state.builder.AllocateId();
 	std::vector<uint32_t> labels(count);
 	std::vector<uint32_t> words {spv::OpSwitch, index, merge_label};
 	for (uint32_t item = 0; item < count; item++) {
@@ -651,6 +701,10 @@ auto EmitIndexSwitch(EmitterState& state, uint32_t index, uint32_t count,
 
 template <typename Fn>
 void EmitIfCondition(EmitterState& state, uint32_t condition, Fn&& fn) {
+	if (condition == ConstantBool(state, true)) {
+		fn();
+		return;
+	}
 	const auto then_label  = state.builder.AllocateId();
 	const auto merge_label = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
@@ -664,8 +718,9 @@ void EmitIfCondition(EmitterState& state, uint32_t condition, Fn&& fn) {
 template <typename Fn>
 uint32_t EmitValueOrDefaultIfCondition(EmitterState& state, uint32_t condition, uint32_t type,
                                        uint32_t default_value, Fn&& fn) {
+	if (condition == ConstantBool(state, true)) return fn();
 	const auto then_label  = state.builder.AllocateId();
-	const auto header     = state.current_label;
+	const auto header      = state.current_label;
 	const auto merge_label = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, condition, then_label, merge_label);
@@ -704,7 +759,8 @@ inline uint32_t AtomicDecrement(EmitterState& state, uint32_t old, uint32_t limi
 }
 
 template <typename Fn>
-uint32_t AtomicUpdateLoop(EmitterState& state, uint32_t pointer, IR::ResourceKind kind, Fn&& desired) {
+uint32_t AtomicUpdateLoop(EmitterState& state, uint32_t pointer, IR::ResourceKind kind,
+                          Fn&& desired) {
 	const auto scope  = kind == IR::ResourceKind::Lds ? spv::ScopeWorkgroup : spv::ScopeDevice;
 	const auto memory = [&] {
 		switch (kind) {
@@ -746,20 +802,21 @@ uint32_t AtomicUpdateLoop(EmitterState& state, uint32_t pointer, IR::ResourceKin
 	return observed;
 }
 
-// KYTY_PS_HELPER_ATOMICS_SKIP (CodegenOptions::ps_helper_atomics_skip): whether a pixel shader's CAS
-// loops leave out helper invocations (gl_HelperInvocation declared, SpirvRequirements).
+// KYTY_PS_HELPER_ATOMICS_SKIP (CodegenOptions::ps_helper_atomics_skip): whether a pixel shader's
+// CAS loops leave out helper invocations (gl_HelperInvocation declared, SpirvRequirements).
 [[nodiscard]] bool PixelHelperAtomicsSkipped(const EmitterState& state);
 
 // A read-modify-write of one dword as a compare-exchange loop (sub-dword stores, float min/max,
 // INC/DEC). Vulkan does not perform a helper invocation's atomics and leaves their results
-// undefined, so in a helper lane the loop's exit test (exchanged == observed) depends on whatever the
-// driver returns and need never become true: the wave then spins until a device reset (an AMD-only
-// hang where helper lanes stay in the wave for derivatives). Helper lanes skip the loop and read
-// zero, which is what their discarded atomic may return anyway.
+// undefined, so in a helper lane the loop's exit test (exchanged == observed) depends on whatever
+// the driver returns and need never become true: the wave then spins until a device reset (an
+// AMD-only hang where helper lanes stay in the wave for derivatives). Helper lanes skip the loop
+// and read zero, which is what their discarded atomic may return anyway.
 template <typename Fn>
 uint32_t AtomicUpdate(EmitterState& state, uint32_t pointer, IR::ResourceKind kind, Fn&& desired) {
 	if (PixelHelperAtomicsSkipped(state)) {
-		const auto live = Unary(state, spv::OpLogicalNot, TypeBool(state), EmitIsHelperInvocation(state));
+		const auto live =
+		    Unary(state, spv::OpLogicalNot, TypeBool(state), EmitIsHelperInvocation(state));
 		return EmitValueOrZeroIfCondition(state, live, [&]() {
 			return AtomicUpdateLoop(state, pointer, kind, std::forward<Fn>(desired));
 		});

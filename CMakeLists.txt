@@ -554,7 +554,7 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus libzstd_static)
+set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus libzstd_static OpenXR::openxr_loader)
 
 # Linux system libraries.
 if(LINUX)
@@ -768,6 +768,14 @@ target_include_directories(pipeline_snapshot_tests PRIVATE ${inc_headers})
 
 # KYTY_PIPELINE_LIST: the KYPLST1 pipeline list (pipeline/pipelineList.h): format, export, merge,
 # resolve against game files, no-code verification.
+add_executable(shader_journal_migration_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderJournalMigrationTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderJournalMigration.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderPrecompile.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/shaderStaticKey.cpp")
+target_link_libraries(shader_journal_migration_tests xxhash)
+target_include_directories(shader_journal_migration_tests PRIVATE ${inc_headers})
+
 add_executable(pipeline_list_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PipelineListTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineList.cpp"
@@ -1336,6 +1344,7 @@ if(BUILD_TESTING)
 	add_test(NAME pipeline_fast_first COMMAND $<TARGET_FILE:pipeline_fast_first_tests>)
 	set_tests_properties(pipeline_fast_first PROPERTIES TIMEOUT 60)
 	add_test(NAME pipeline_list COMMAND $<TARGET_FILE:pipeline_list_tests>)
+	add_test(NAME shader_journal_migration COMMAND $<TARGET_FILE:shader_journal_migration_tests>)
 	set_tests_properties(pipeline_list PROPERTIES TIMEOUT 60)
 	add_test(NAME pipeline_snapshot COMMAND $<TARGET_FILE:pipeline_snapshot_tests>)
 	set_tests_properties(pipeline_snapshot PROPERTIES TIMEOUT 30)
@@ -1418,6 +1427,8 @@ if(BUILD_TESTING)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
 	add_test(NAME sync_on_address COMMAND $<TARGET_FILE:sync_on_address_tests>)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
+	add_test(NAME audio_out2_unlocked_push COMMAND $<TARGET_FILE:audio_out2_port_tests>)
+	set_tests_properties(audio_out2_unlocked_push PROPERTIES ENVIRONMENT "KYTY_AUDIO2_UNLOCKED_PUSH=1")
 	add_test(NAME audio_diag COMMAND $<TARGET_FILE:audio_diag_tests>)
 	add_test(NAME audio_mix COMMAND $<TARGET_FILE:audio_mix_tests>)
 	add_test(NAME audio_out_timing COMMAND $<TARGET_FILE:audio_out_timing_tests>)
@@ -1426,6 +1437,8 @@ if(BUILD_TESTING)
 	add_test(NAME unresolved_import_log COMMAND $<TARGET_FILE:unresolved_import_log_tests>)
 	add_test(NAME pad_haptics COMMAND $<TARGET_FILE:pad_haptics_tests>)
 	add_test(NAME controller_settings COMMAND $<TARGET_FILE:controller_settings_tests>)
+	add_test(NAME controller_state_coalescing COMMAND $<TARGET_FILE:controller_settings_tests>)
+	set_tests_properties(controller_state_coalescing PROPERTIES ENVIRONMENT "KYTY_PAD_STATE_COALESCE=1")
 	add_test(NAME host_input COMMAND $<TARGET_FILE:host_input_tests>)
 	add_test(NAME save_data_memory COMMAND $<TARGET_FILE:save_data_memory_tests>)
 	add_test(NAME png_enc COMMAND $<TARGET_FILE:png_enc_tests>)
@@ -1433,6 +1446,28 @@ if(BUILD_TESTING)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	add_test(NAME shader_recompiler_tessellation
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
+	add_test(NAME shader_int21_review
+		COMMAND $<TARGET_FILE:shader_cfg_tests> --int21-review-only)
+	foreach(mode IN ITEMS 0 inline 1)
+		add_test(NAME indirect_draw_index_${mode}
+			COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-index-review-only)
+		set_tests_properties(indirect_draw_index_${mode} PROPERTIES
+			ENVIRONMENT "KYTY_INDIRECT_DRAW_INDEX=1;KYTY_CP_SEQ=${mode};KYTY_CP_SEQ_VERIFY=2"
+			TIMEOUT 120)
+	endforeach()
+	add_test(NAME tiled_readback_preserves_draws
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tiled-readback-review-only)
+	set_tests_properties(tiled_readback_preserves_draws PROPERTIES
+		ENVIRONMENT "KYTY_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP_RECURRENT=1;KYTY_PIPELINE_SKIP_WAIT_US=0;KYTY_PIPELINE_PREFETCH=0;KYTY_PIPELINE_FAST_FIRST=0"
+		TIMEOUT 120)
+	add_test(NAME shader_int21_gpu
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --int21-gpu-only)
+	add_test(NAME shader_int21_gpu_split_wave
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --int21-gpu-only)
+	set_tests_properties(shader_int21_gpu_split_wave PROPERTIES
+		ENVIRONMENT "KYTY_WAVE64_WARPS=1;KYTY_TEST_SKIP_SPIRV_TEXT=1")
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
@@ -1440,7 +1475,7 @@ if(BUILD_TESTING)
 	add_test(NAME pipeline_skip_rendering
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
 	set_tests_properties(pipeline_skip_rendering PROPERTIES
-		ENVIRONMENT "KYTY_TEST_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP_WAIT_US=0;KYTY_PIPELINE_COLD_SALT=144"
+		ENVIRONMENT "KYTY_TEST_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP=1;KYTY_PIPELINE_SKIP_RECURRENT=0;KYTY_PIPELINE_SKIP_WAIT_US=0;KYTY_PIPELINE_COLD_SALT=144"
 		TIMEOUT 180)
 	# KYTY_SKIP_INACTIVE_PS (upstream 6956b454f): a stale PS whose exports are all disabled.
 	add_test(NAME graphics_pipeline_rasterization_skip_inactive_ps
@@ -1459,6 +1494,9 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --guest-stack-exit-only)
 	add_test(NAME virtual_memory_allocation
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)
+	add_test(NAME virtual_memory_region_epoch
+		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)
+	set_tests_properties(virtual_memory_region_epoch PROPERTIES ENVIRONMENT "KYTY_MAP_REGION_EPOCH=1")
 	add_test(NAME backing_cache_writes
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --backing-cache-only)
 	set_tests_properties(backing_cache_writes PROPERTIES

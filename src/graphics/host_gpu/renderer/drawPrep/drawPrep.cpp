@@ -1,12 +1,10 @@
 #include "graphics/host_gpu/renderer/drawPrep/drawPrep.h"
 
-#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
-
 #include "common/assert.h"
-#include "common/prepPhases.h"
 #include "common/cpuPlacement.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
+#include "common/prepPhases.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/cpOps.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -20,6 +18,7 @@
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
+#include "graphics/host_gpu/renderer/drawPrep/ownedCounters.h"
 #include "graphics/host_gpu/renderer/drawPrep/repeatTrace.h"
 #include "graphics/host_gpu/renderer/drawPrep/window.h"
 #include "graphics/host_gpu/renderer/drawPrep/workerGate.h"
@@ -88,25 +87,26 @@ Failure FromReadFailure(ReadFailure failure) {
 // The same decisions RenderExecutor makes from the command buffer's registers
 // (DrawHasActivePixelShader, RefreshShaders); the commit compares both.
 bool HasActivePixelShader(const RegisterSnapshot& registers) {
-	const auto& ctx     = registers.context;
-	const auto& sh_regs = ctx.GetShaderRegisters();
-	const auto& db      = sh_regs.db_shader_control;
+	const auto& ctx              = registers.context;
+	const auto& sh_regs          = ctx.GetShaderRegisters();
+	const auto& db               = sh_regs.db_shader_control;
 	const bool  has_color_output = SkipInactivePixelShadersEnabled()
 	                                   ? DrawColorOutputFilter(ctx) != 0
 	                                   : (ctx.GetRenderTargetMask() & sh_regs.m_cbShaderMask) != 0;
-	const bool  side_effects = db.shader_kill_enable || db.shader_z_export_enable ||
-	                          db.shader_mask_export_enable || db.shader_dual_export_enable ||
-	                          db.shader_execute_on_noop;
+	const bool  side_effects     = db.shader_kill_enable || db.shader_z_export_enable ||
+	                               db.shader_mask_export_enable || db.shader_dual_export_enable ||
+	                               db.shader_execute_on_noop;
 	return registers.shaders.GetPs().ps_regs.data_addr != 0 && (has_color_output || side_effects);
 }
 
 void TargetExportMapping(const HW::Context&                              ctx,
                          std::array<Prospero::ColorComponentMapping, 8>& mapping) {
-	mapping = {};
+	mapping                  = {};
 	const auto output_filter = DrawColorOutputFilter(ctx);
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		const auto& rt = ctx.GetRenderTarget(slot);
-		if (rt.base.addr != 0 && render_target_mask_slot(ctx.GetRenderTargetMask(), slot) != 0 &&
+		if (render_target_bound(rt) &&
+		    render_target_mask_slot(ctx.GetRenderTargetMask(), slot) != 0 &&
 		    (output_filter & (1u << slot)) != 0) {
 			mapping[slot] = TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
 			                                             rt.info.channel_order)
@@ -127,7 +127,7 @@ bool SameMapping(std::span<const Prospero::ColorComponentMapping, 8> a,
 
 // Every range a certificate covers (bytes and digests), sorted and merged, as the coherence log
 // check requires.
-std::span<const Coherence::Range> CertificateRanges(const ReadSet&                  reads,
+std::span<const Coherence::Range> CertificateRanges(const ReadSet&                 reads,
                                                     std::vector<Coherence::Range>& scratch) {
 	const auto digests = reads.DigestRanges();
 	if (digests.empty()) {
@@ -135,8 +135,9 @@ std::span<const Coherence::Range> CertificateRanges(const ReadSet&              
 	}
 	scratch.assign(reads.Ranges().begin(), reads.Ranges().end());
 	scratch.insert(scratch.end(), digests.begin(), digests.end());
-	std::sort(scratch.begin(), scratch.end(),
-	          [](const Coherence::Range& a, const Coherence::Range& b) { return a.begin < b.begin; });
+	std::sort(
+	    scratch.begin(), scratch.end(),
+	    [](const Coherence::Range& a, const Coherence::Range& b) { return a.begin < b.begin; });
 	size_t merged = 0;
 	for (const auto& range: scratch) {
 		if (merged != 0 && range.begin <= scratch[merged - 1].end) {
@@ -195,7 +196,8 @@ CertMode GetCertMode() {
 		// Log by default (Run A audit, CP-ARCHITECTURE-20260927.md: DrawPrepLogMissed 0 in every
 		// scene); KYTY_DRAW_PREP_CERT=value restores the byte and digest comparisons.
 		const auto* value = EnvValue("KYTY_DRAW_PREP_CERT");
-		return value != nullptr && std::strcmp(value, "value") == 0 ? CertMode::Value : CertMode::Log;
+		return value != nullptr && std::strcmp(value, "value") == 0 ? CertMode::Value
+		                                                            : CertMode::Log;
 	}();
 	return mode;
 }
@@ -247,8 +249,8 @@ static bool CertificateRangesUsed() {
 // (KYTY_DRAW_PREP_CERT_RANGES=worker) hands over its list; otherwise they are built here into
 // `scratch`, the path before this switch. KYTY_DRAW_PREP_CERT_RANGES_VERIFY rebuilds a handed-over
 // list with that commit-time function and compares the two.
-static std::span<const Coherence::Range> CommitCertificateRanges(
-    const PreparedDraw& prepared, std::vector<Coherence::Range>& scratch) {
+static std::span<const Coherence::Range>
+CommitCertificateRanges(const PreparedDraw& prepared, std::vector<Coherence::Range>& scratch) {
 	if (!prepared.certificate_built) {
 		return CertificateRanges(prepared.reads, scratch);
 	}
@@ -263,7 +265,8 @@ static std::span<const Coherence::Range> CommitCertificateRanges(
 			g_totals.cert_ranges_verify_mismatches.fetch_add(1, std::memory_order_relaxed);
 			static std::atomic<uint32_t> logged {0};
 			if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
-				LOGF("DrawPrepCertRangesVerify: prepared certificate has %zu ranges, the commit-time "
+				LOGF("DrawPrepCertRangesVerify: prepared certificate has %zu ranges, the "
+				     "commit-time "
 				     "list %zu (%zu byte ranges, %zu digest ranges)\n",
 				     prepared.certificate.size(), reference.size(), prepared.reads.Ranges().size(),
 				     prepared.reads.DigestRanges().size());
@@ -307,17 +310,20 @@ bool PacketHookActive() {
 	return passive && tracy::ProfilerAvailable() && TracyIsConnected;
 }
 
+static bool ReadsUntouched(const PreparedDraw& prepared);
+
 void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, bool eligible,
              bool exact, PreparedDraw& prepared) {
 	prepared.program_compile_ns = 0;
-	prepared.ok         = false;
-	prepared.failure    = Failure::None;
-	prepared.programs   = {};
-	prepared.pixel_info = {};
+	prepared.ok                 = false;
+	prepared.failure            = Failure::None;
+	prepared.programs           = {};
+	prepared.pixel_info         = {};
 	prepared.reads.Reset();
 	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
+	prepared.reads_untouched   = false;
 	if (!eligible) {
 		prepared.failure = Failure::Ineligible;
 		return;
@@ -368,6 +374,7 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 		prepared.reads.BuildCertificate(prepared.certificate);
 		prepared.certificate_built = true;
 	}
+	prepared.reads_untouched = ReadsUntouched(prepared);
 	Common::PrepPhases::Mark(Common::PrepPhases::Phase::Certificate);
 	prepared.ok = true;
 }
@@ -395,6 +402,60 @@ bool DirectReadsEnabled() {
 	return g_direct_reads.Get() != 0;
 }
 
+// KYTY_CLEAN_UNTOUCHED (live, default 0; needs KYTY_CP_SEQ=1, which maintains the sticky
+// GPU-touched pages, gpuTouchedPages.h): a guest range none of whose pages any GPU-side transition
+// ever touched (buffer GPU-dirty ranges, tracker GPU marks, GPU-modified images, backing
+// publications: the only state that can make the exact clean predicate refuse a range) is clean
+// without running that predicate. The pages are marked inside Coherence::Log::Append before the
+// transition becomes observable and are never cleared, so "never touched" read after a state
+// change was observable cannot miss it.
+// - A preparation records whether all its read and digest ranges were untouched when it finished
+//   (reads_untouched, checked on the preparing thread). A log-mode certificate whose log check
+//   finds no transition touching those ranges since the preparation began then skips the "every
+//   range clean now" pass: an unclean range would need a transition after the generation the
+//   preparation loaded (the log check would have seen it) or before it (the preparing thread's
+//   check, made after that load, would have seen its mark).
+// - The clean-verdict query (kernel/memory.cpp) and the workers' read hint answer untouched ranges
+//   directly.
+// - The certificate's log walk first tests each entry against the hull of the certificate ranges.
+// verify: every shortcut also runs the exact check, uses its answer and counts the ranges the
+// shortcut called clean that are not; exit stops at the first.
+static int64_t ParseUntouched(const char* value) {
+	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+		return 0;
+	}
+	if (std::strcmp(value, "verify") == 0) {
+		return 2;
+	}
+	return std::strcmp(value, "exit") == 0 ? 3 : 1;
+}
+static Live::Switch g_clean_untouched("KYTY_CLEAN_UNTOUCHED", ParseUntouched);
+
+int UntouchedMode() {
+	return static_cast<int>(g_clean_untouched.Get());
+}
+
+static bool RangesUntouched(std::span<const Coherence::Range> ranges) {
+	for (const auto& range: ranges) {
+		if (GpuTouched::g_pages.AnyTouched(range.begin, range.end)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// The preparing thread, after the read set is final (and its certificate built, if any).
+static bool ReadsUntouched(const PreparedDraw& prepared) {
+	if (g_clean_untouched.Get() == 0 || !GpuTouched::Enabled()) {
+		return false;
+	}
+	if (prepared.certificate_built) {
+		return RangesUntouched(prepared.certificate);
+	}
+	return RangesUntouched(prepared.reads.Ranges()) &&
+	       RangesUntouched(prepared.reads.DigestRanges());
+}
+
 // Live (common/liveSwitch.h): the sequencer reads it per dispatch it parses; the op carries the
 // decision to the resolver, so a change applies from the next parsed dispatch.
 static Live::Switch g_dispatch_prep("KYTY_DRAW_PREP_DISPATCH", Live::ParseDefaultOff);
@@ -406,21 +467,21 @@ bool DispatchPrepEnabled() {
 void MakeComputeInputInfo(const HW::ComputeShaderInfo& cs, const DispatchArgs& args,
                           ShaderComputeInputInfo& info) {
 	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
-	info                                  = {};
+	info                                                        = {};
 	if (args.indirect) {
 		return; // RenderExecutor::DispatchIndirect's lookup: no counts, no thread dimensions
 	}
-	const bool use_thread_dimensions      = (args.mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-	info.dispatch_thread_dimensions       = use_thread_dimensions;
-	info.workgroup_counts[0]              = args.x;
-	info.workgroup_counts[1]              = args.y;
-	info.workgroup_counts[2]              = args.z;
+	const bool use_thread_dimensions = (args.mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+	info.dispatch_thread_dimensions  = use_thread_dimensions;
+	info.workgroup_counts[0]         = args.x;
+	info.workgroup_counts[1]         = args.y;
+	info.workgroup_counts[2]         = args.z;
 	if (use_thread_dimensions) {
 		const uint32_t group_sizes[] = {cs.cs_regs.num_thread_x, cs.cs_regs.num_thread_y,
 		                                cs.cs_regs.num_thread_z};
 		for (uint32_t axis = 0; axis < 3u; ++axis) {
-			const auto size    = std::max(group_sizes[axis], 1u);
-			const auto threads = info.workgroup_counts[axis];
+			const auto size             = std::max(group_sizes[axis], 1u);
+			const auto threads          = info.workgroup_counts[axis];
 			info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
 		}
 	}
@@ -436,6 +497,7 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 	prepared.reads.SetCoalesce(DirectReadsEnabled());
 	prepared.certificate.clear();
 	prepared.certificate_built = false;
+	prepared.reads_untouched   = false;
 	if (!eligible) {
 		prepared.failure = Failure::Ineligible;
 		return;
@@ -444,13 +506,13 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 	// Loaded before any read: every coherence transition after this point is newer.
 	prepared.coherence_generation  = Coherence::Generation();
 	prepared.shader_map_generation = ShaderMapGeneration();
-	const auto& cs = registers.shaders.GetCs();
+	const auto& cs                 = registers.shaders.GetCs();
 	MakeComputeInputInfo(cs, args, prepared.compute_info);
 	Recorder    recorder {&prepared.reads, exact};
 	RecordScope scope(recorder);
 	const auto  result = pipeline_cache.PrepareComputeProgramSpeculative(
-        cs, registers.context.GetShaderRegisters(), prepared.compute_info, prepared.compute_prep,
-        prepared.compute_program, &prepared.program_compile_ns);
+	    cs, registers.context.GetShaderRegisters(), prepared.compute_info, prepared.compute_prep,
+	    prepared.compute_program, &prepared.program_compile_ns);
 	switch (result) {
 		case PipelineCache::SpeculativeResult::Ok: break;
 		case PipelineCache::SpeculativeResult::Ineligible:
@@ -473,7 +535,8 @@ void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& regi
 		prepared.reads.BuildCertificate(prepared.certificate);
 		prepared.certificate_built = true;
 	}
-	prepared.ok = true;
+	prepared.reads_untouched = ReadsUntouched(prepared);
+	prepared.ok              = true;
 }
 
 // KYTY_BACKING_INPLACE_VERIFY=1|exit: every in-place validation is repeated with copies and the two
@@ -494,19 +557,21 @@ static int InPlaceVerifyMode() {
 // The value certificate check (readSet.h), in place (KYTY_BACKING_INPLACE) or on copies.
 static ValidateResult ValidateValues(const ReadSet& reads) {
 	static thread_local std::vector<uint8_t> scratch;
-	const auto copied = [&] {
+	const auto                               copied = [&] {
 		return reads.Validate(LibKernel::Memory::TryReadGpuCleanBacking, scratch);
 	};
 	if (!LibKernel::Memory::BackingInPlaceEnabled()) {
 		return copied();
 	}
 	LibKernel::Memory::InPlaceStats stats;
-	const auto in_place = [&] {
+	const auto                      in_place = [&] {
 		return reads.ValidateInPlace(
 		    [&](uint64_t address, const uint8_t* expected, uint64_t size) {
-			    switch (LibKernel::Memory::CompareGpuCleanBacking(address, expected, size, &stats)) {
+			    switch (
+			        LibKernel::Memory::CompareGpuCleanBacking(address, expected, size, &stats)) {
 				    case LibKernel::Memory::BackingCompare::Equal: return ValidateResult::Ok;
-				    case LibKernel::Memory::BackingCompare::Different: return ValidateResult::Changed;
+				    case LibKernel::Memory::BackingCompare::Different:
+					    return ValidateResult::Changed;
 				    case LibKernel::Memory::BackingCompare::Unavailable: break;
 			    }
 			    return ValidateResult::Unclean;
@@ -528,13 +593,15 @@ static ValidateResult ValidateValues(const ReadSet& reads) {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepValidateVerifyMismatches);
 				static std::atomic<uint32_t> logged {0};
 				if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
-					LOGF("DrawPrepValidateVerify: in-place verdict %d, copied verdict %d (%zu ranges, "
+					LOGF("DrawPrepValidateVerify: in-place verdict %d, copied verdict %d (%zu "
+					     "ranges, "
 					     "%zu digests)\n",
-					     static_cast<int>(result), static_cast<int>(reference), reads.Ranges().size(),
-					     reads.DigestRanges().size());
+					     static_cast<int>(result), static_cast<int>(reference),
+					     reads.Ranges().size(), reads.DigestRanges().size());
 				}
 				if (InPlaceVerifyMode() == 2) {
-					EXIT("DrawPrepValidateVerify: in-place validation differs from the copied one\n");
+					EXIT("DrawPrepValidateVerify: in-place validation differs from the copied "
+					     "one\n");
 				}
 			}
 		}
@@ -542,7 +609,8 @@ static ValidateResult ValidateValues(const ReadSet& reads) {
 	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepValidateInPlaceRanges, stats.inspected);
 	if (stats.locked != 0) {
-		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepValidateInPlaceLocked, stats.locked);
+		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepValidateInPlaceLocked,
+		                          stats.locked);
 	}
 	return result;
 }
@@ -579,16 +647,54 @@ static int64_t ParseCleanSince(const char* value) {
 	}
 	return std::strcmp(value, "exit") == 0 ? 3 : 1;
 }
-static Live::Switch g_clean_since("KYTY_DRAW_PREP_CLEAN_SINCE", ParseCleanSince);
+static Live::Switch          g_clean_since("KYTY_DRAW_PREP_CLEAN_SINCE", ParseCleanSince);
 static std::atomic<uint64_t> g_clean_since_checks {0};
 static std::atomic<uint64_t> g_clean_since_mismatches {0};
 
+static std::atomic<uint64_t> g_untouched_checks {0};
+static std::atomic<uint64_t> g_untouched_hits {0};
+static std::atomic<uint64_t> g_untouched_mismatches {0};
+
 static bool AllCleanAfterLog(const PreparedDraw& prepared) {
+	if (const auto untouched = g_clean_untouched.Get(); untouched != 0) {
+		if (untouched == 1) {
+			if (prepared.reads_untouched) {
+				return true;
+			}
+		} else {
+			// verify: the exact pass decides; count how often the shortcut applies and errs.
+			const bool exact  = prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
+			const auto checks = g_untouched_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (prepared.reads_untouched) {
+				g_untouched_hits.fetch_add(1, std::memory_order_relaxed);
+				if (!exact) {
+					const auto count =
+					    g_untouched_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+					if (count <= 16) {
+						std::printf(
+						    "CleanUntouched: a certificate with untouched ranges is not clean "
+						    "(%zu ranges)\n",
+						    prepared.reads.Ranges().size());
+					}
+					if (untouched == 3) {
+						EXIT("CleanUntouched: a certificate with untouched ranges is not clean\n");
+					}
+				}
+			}
+			if ((checks & 0x3ffffu) == 0) {
+				std::printf("CleanUntouched verify: %" PRIu64 " certificates, %" PRIu64
+				            " untouched, %" PRIu64 " mismatches\n",
+				            checks, g_untouched_hits.load(std::memory_order_relaxed),
+				            g_untouched_mismatches.load(std::memory_order_relaxed));
+			}
+			return exact;
+		}
+	}
 	const auto mode = g_clean_since.Get();
 	if (mode == 0) {
 		return prepared.reads.AllClean(LibKernel::Memory::IsGpuCleanForRead);
 	}
-	const auto since = prepared.coherence_generation;
+	const auto since    = prepared.coherence_generation;
 	const auto shortcut = [since](uint64_t address, uint64_t size) {
 		return LibKernel::Memory::IsGpuCleanForReadSince(address, size, since);
 	};
@@ -601,7 +707,8 @@ static bool AllCleanAfterLog(const PreparedDraw& prepared) {
 	if (fast && !exact) {
 		const auto count = g_clean_since_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
 		if (count <= 16) {
-			LOGF("DrawPrepCleanSince: a read the page verdicts called clean is not (%zu ranges, since "
+			LOGF("DrawPrepCleanSince: a read the page verdicts called clean is not (%zu ranges, "
+			     "since "
 			     "generation %" PRIu64 ")\n",
 			     prepared.reads.Ranges().size(), since);
 		}
@@ -627,14 +734,14 @@ static bool CertificateHolds(PreparedDraw& prepared, Failure& failure) {
 	if (ShaderMapGeneration() != prepared.shader_map_generation) {
 		return fail(Failure::ShaderMap);
 	}
-	Profiler::ScopedFrameWait wait(Profiler::FrameWait::DrawPrepValidate);
+	Profiler::ScopedFrameWait                         wait(Profiler::FrameWait::DrawPrepValidate);
 	static thread_local std::vector<Coherence::Range> log_scratch;
 	if (GetCertMode() == CertMode::Log) {
 		const auto stats_start = CommitStats::StepsEnabled() ? CommitStats::Now() : 0;
 		const auto cert_ranges = CommitCertificateRanges(prepared, log_scratch);
 		const auto outcome =
 		    Coherence::g_log.Check(prepared.coherence_generation, Coherence::Generation(),
-		                           cert_ranges);
+		                           cert_ranges, g_clean_untouched.Get() != 0);
 		if (stats_start != 0) {
 			CommitStats::AddSub(CommitStats::Sub::ValLog, CommitStats::Now() - stats_start);
 			CommitStats::AddItems(CommitStats::Item::LogEntries, outcome.entries);
@@ -740,12 +847,13 @@ bool Validate(PreparedDraw& prepared, bool pixel_active,
 }
 
 // KYTY_DRAW_PREP_DISPATCH: per-reason fallback counts of dispatch preparations (the 10 s line).
-std::array<std::atomic<uint64_t>, static_cast<size_t>(Failure::Mismatch) + 1u> g_dispatch_fallback_reasons;
+std::array<std::atomic<uint64_t>, static_cast<size_t>(Failure::Mismatch) + 1u>
+    g_dispatch_fallback_reasons;
 
 bool ValidateDispatch(PreparedDraw& prepared, const ShaderComputeInputInfo& input_info) {
 	const auto fail = [&](Failure failure) {
-		g_dispatch_fallback_reasons[static_cast<size_t>(failure)].fetch_add(1,
-		                                                                    std::memory_order_relaxed);
+		g_dispatch_fallback_reasons[static_cast<size_t>(failure)].fetch_add(
+		    1, std::memory_order_relaxed);
 		prepared.failure = failure;
 		g_totals.dispatch_fallbacks.fetch_add(1, std::memory_order_relaxed);
 		return false;
@@ -826,11 +934,12 @@ bool SamePixelInfo(const ShaderPixelInputInfo& a, const ShaderPixelInputInfo& b)
 } // namespace
 
 bool VerifyCommitted(bool pixel_active, const PipelineCache::GraphicsPrograms& programs,
-                     const ShaderVertexInputInfo& vertex_info, const ShaderPixelInputInfo& pixel_info,
+                     const ShaderVertexInputInfo&             vertex_info,
+                     const ShaderPixelInputInfo&              pixel_info,
                      const PipelineCache::GraphicsStagePreps& preps,
-                     const PipelineCache::GraphicsPrograms& serial_programs,
-                     const ShaderVertexInputInfo&            serial_vertex_info,
-                     const ShaderPixelInputInfo&             serial_pixel_info,
+                     const PipelineCache::GraphicsPrograms&   serial_programs,
+                     const ShaderVertexInputInfo&             serial_vertex_info,
+                     const ShaderPixelInputInfo&              serial_pixel_info,
                      const PipelineCache::GraphicsStagePreps& serial_preps) {
 	Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepVerifyChecks);
 	const bool programs_equal = programs.pixel.id == serial_programs.pixel.id &&
@@ -838,8 +947,8 @@ bool VerifyCommitted(bool pixel_active, const PipelineCache::GraphicsPrograms& p
 	                            programs.vertex[1].id == serial_programs.vertex[1].id;
 	// Without an active pixel shader neither path writes the pixel prep (the draw state keeps
 	// an earlier draw's, which nothing reads).
-	const bool pixel_equal = SamePixelInfo(pixel_info, serial_pixel_info) &&
-	                         (!pixel_active || SamePrep(preps.pixel, serial_preps.pixel));
+	const bool pixel_equal  = SamePixelInfo(pixel_info, serial_pixel_info) &&
+	                          (!pixel_active || SamePrep(preps.pixel, serial_preps.pixel));
 	const bool vertex_equal = SamePrep(preps.vertex[0], serial_preps.vertex[0]) &&
 	                          SameVertexInfo(vertex_info, serial_vertex_info);
 	if (programs_equal && pixel_equal && vertex_equal) {
@@ -862,19 +971,18 @@ bool VerifyCommitted(bool pixel_active, const PipelineCache::GraphicsPrograms& p
 bool VerifyDispatch(const PreparedDraw& prepared, const ShaderProgram& program,
                     const ShaderComputeInputInfo& info, const PipelineCache::StagePrep& prep) {
 	g_totals.dispatch_verify_checks.fetch_add(1, std::memory_order_relaxed);
-	const auto& a = prepared.compute_info;
+	const auto&           a = prepared.compute_info;
 	std::vector<uint32_t> key_a;
 	std::vector<uint32_t> key_b;
 	BuildStageStaticKey(a, key_a);
 	BuildStageStaticKey(info, key_b);
-	const bool program_equal = prepared.compute_program.id == program.id &&
-	                           a.stage.program == info.stage.program;
-	const bool info_equal =
-	    key_a == key_b && a.lds_storage == info.lds_storage &&
-	    a.host_subgroup_size == info.host_subgroup_size &&
-	    a.dispatch_thread_dimensions == info.dispatch_thread_dimensions &&
-	    std::equal(std::begin(a.workgroup_counts), std::end(a.workgroup_counts),
-	               std::begin(info.workgroup_counts));
+	const bool program_equal =
+	    prepared.compute_program.id == program.id && a.stage.program == info.stage.program;
+	const bool info_equal = key_a == key_b && a.lds_storage == info.lds_storage &&
+	                        a.host_subgroup_size == info.host_subgroup_size &&
+	                        a.dispatch_thread_dimensions == info.dispatch_thread_dimensions &&
+	                        std::equal(std::begin(a.workgroup_counts), std::end(a.workgroup_counts),
+	                                   std::begin(info.workgroup_counts));
 	const bool prep_equal = SamePrep(prepared.compute_prep, prep);
 	if (program_equal && info_equal && prep_equal) {
 		return true;
@@ -906,20 +1014,20 @@ struct Engine::Slot {
 	// KYTY_DRAW_PREP_BINDINGS (bindingPlan.h): computed with `prepared` by the preparing thread,
 	// published with it by Complete; used at commit only if Validate accepts `prepared`. Reset
 	// after every commit.
-	BindingPlan      plan;
-	bool             eligible        = false; // DrawReachesPrograms, decided at submission
-	bool             worker_prepared = false;
+	BindingPlan plan;
+	bool        eligible        = false; // DrawReachesPrograms, decided at submission
+	bool        worker_prepared = false;
 	// P3b diagnostics: the first draw the sequencer published after one of its stops
 	// (Engine::NoteStop: 1 a barrier, 2 another stop); classifies a commit wait on this slot
 	// (DrawPrepCommitWaitsBarrier / DrawPrepCommitWaitsStart).
-	uint8_t          after_stop = 0;
+	uint8_t after_stop = 0;
 	// P3c (Engine::PublishSpeculative): published by a speculative parse; the packets and the hash
 	// of the bytes it consumed from its wait to this draw (the adoption key).
-	bool             speculative   = false;
-	uint64_t         spec_packets  = 0;
-	uint64_t         spec_inputs   = 0;
-	// KYTY_CP_REPEAT_TRACE (repeatTrace.h): the draw's input hashes, filled by the preparing thread,
-	// and the guest address of its draw packet.
+	bool     speculative  = false;
+	uint64_t spec_packets = 0;
+	uint64_t spec_inputs  = 0;
+	// KYTY_CP_REPEAT_TRACE (repeatTrace.h): the draw's input hashes, filled by the preparing
+	// thread, and the guest address of its draw packet.
 	RepeatTrace::DrawRecord repeat;
 	uint64_t                repeat_packet = 0;
 	// KYTY_DRAW_RUN (drawRun.h): the structure key of the preparation, by the preparing thread.
@@ -935,10 +1043,10 @@ void HashForRepeatTrace(Engine::Slot& slot) {
 		slot.run_key = 0; // not a draw: no run, not in the draw repeat trace
 		return;
 	}
-	slot.run_key = DrawRun::Enabled() ? DrawRun::StructureKey(slot.registers.context,
-	                                                          slot.registers.user_config,
-	                                                          slot.prepared)
-	                                  : 0;
+	slot.run_key = DrawRun::Enabled()
+	                   ? DrawRun::StructureKey(slot.registers.context, slot.registers.user_config,
+	                                           slot.prepared)
+	                   : 0;
 	if (!RepeatTrace::Enabled()) [[likely]] {
 		return;
 	}
@@ -954,7 +1062,8 @@ void PlanBindings(Engine::Slot& slot, const BindingPlanContext& context) {
 	}
 	if (context.pipelines->PipelinePrefetchEnabled()) {
 		PrefetchBindingPipeline(context, slot.registers,
-		    slot.kind == DrawKind::Index ? &slot.index_args : nullptr, slot.prepared);
+		                        slot.kind == DrawKind::Index ? &slot.index_args : nullptr,
+		                        slot.prepared);
 	}
 	if (BindingParts() == 0) [[likely]] {
 		return;
@@ -1089,9 +1198,9 @@ struct Engine::Workers {
 		char name[32];
 		std::snprintf(name, sizeof(name), "DrawPrep#%u", index + 1u);
 		Profiler::SetThreadName(name);
-		t_worker_thread = true;
+		t_worker_thread          = true;
 		uint32_t placement_count = 0; // placement samples (common/cpuPlacement.h), every 64th slot
-		t_worker_number = index + 1u;
+		t_worker_number          = index + 1u;
 		RunPreparationWorker(
 		    gate, window, index, spin_ns, cold_spin_ns, stop,
 		    [this, &placement_count](Slot& slot, uint64_t seq) {
@@ -1139,9 +1248,9 @@ Engine::Engine(RenderContext& renderer, std::function<void()> service_commands,
 		// most of the CP's idle spin but not wall time (a stolen preparation that outlasts the
 		// head delays the commits behind it).
 		StealPolicy steal;
-		steal.min_unclaimed  = EnvUnsigned("KYTY_DRAW_PREP_STEAL", 0, 0, 1024);
-		const auto steal_us  = EnvUnsigned("KYTY_DRAW_PREP_STEAL_AFTER_US", 0, 0, 1000000);
-		steal.after_ns       = uint64_t {steal_us} * 1000u;
+		steal.min_unclaimed = EnvUnsigned("KYTY_DRAW_PREP_STEAL", 0, 0, 1024);
+		const auto steal_us = EnvUnsigned("KYTY_DRAW_PREP_STEAL_AFTER_US", 0, 0, 1000000);
+		steal.after_ns      = uint64_t {steal_us} * 1000u;
 		// KYTY_DRAW_PREP_COLD_TOKEN=1: the cold-wake protocol whose wakes cannot stick
 		// (workerGate.h); with the default one the cold workers stop waking after a race.
 		const bool cold_token = EnvUnsigned("KYTY_DRAW_PREP_COLD_TOKEN", 0, 0, 1) != 0;
@@ -1169,8 +1278,8 @@ bool Engine::Pending() const noexcept {
 void Engine::FillSlot(Slot& slot, uint64_t submit_id, const DrawIndexArgs* index_args,
                       const DrawAutoArgs* auto_args, const HW::Context& context,
                       const HW::UserConfig& user_config, const HW::Shader& shaders) {
-	slot.submit_id = submit_id;
-	uint32_t count = 0;
+	slot.submit_id     = submit_id;
+	uint32_t count     = 0;
 	uint32_t instances = 0;
 	if (index_args != nullptr) {
 		slot.kind       = DrawKind::Index;
@@ -1297,8 +1406,7 @@ Engine::Adoption Engine::TryAdopt(uint64_t packets, uint64_t inputs, uint64_t& p
 	auto& window = m_workers->window;
 	// The slot's key fields were written by this thread (the speculative publish).
 	const auto& slot = window.PayloadAt(m_real_tail);
-	if (slot.spec_packets == packets && slot.spec_inputs == inputs &&
-	    CpSeq::PrefetchMode() != 2) {
+	if (slot.spec_packets == packets && slot.spec_inputs == inputs && CpSeq::PrefetchMode() != 2) {
 		position = m_real_tail++;
 		// Diagnostics: the first draw after the stop was prepared ahead (not a burst start).
 		m_stop_pending = 0;
@@ -1395,7 +1503,7 @@ Engine::Slot& Engine::ReadyHead() {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaits);
 		const CpGaps::Scope gap(CpGaps::Cat::HeadWait);
 		// Diagnostics: what the wait began with (the window's depth, a waiting unclaimed slot).
-		const auto occupancy = window.Occupancy();
+		const auto          occupancy = window.Occupancy();
 		HangWatchdog::Scope wait("draw-prep-head", reinterpret_cast<uint64_t>(&window),
 		                         HangWatchdog::Enabled() ? window.Head() : 0, occupancy);
 		if (window.Unclaimed() != 0) {
@@ -1414,7 +1522,8 @@ Engine::Slot& Engine::ReadyHead() {
 			    Profiler::ScopedFrameWait steal_time(Profiler::FrameWait::DrawPrepSteal);
 			    const WorkerThreadScope   as_worker;
 			    m_workers->PrepareClaimed(claimed, seq);
-			    m_renderer.GetPipelineCache().NoteProgramPrefetchWait(claimed.prepared.program_compile_ns);
+			    m_renderer.GetPipelineCache().NoteProgramPrefetchWait(
+			        claimed.prepared.program_compile_ns);
 		    },
 		    [this](uint32_t spins, uint64_t spin_start) {
 			    CpuRelax();
@@ -1446,13 +1555,15 @@ Engine::Slot& Engine::ReadyHead() {
 		                                       : CpGaps::Cat::HeadWaitDeep);
 		if (slot.after_stop == 1) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaitsBarrier);
-			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitBarrier, 1, stats.spin_ns);
+			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitBarrier, 1,
+			                       stats.spin_ns);
 		} else if (slot.after_stop == 2) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaitsStart);
 			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitStart, 1, stats.spin_ns);
 		} else if (occupancy <= 2) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaitsShallow);
-			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitShallow, 1, stats.spin_ns);
+			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitShallow, 1,
+			                       stats.spin_ns);
 		} else {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepCommitWaitsDeep);
 			Profiler::AddFrameWait(Profiler::FrameWait::DrawPrepCommitWaitDeep, 1, stats.spin_ns);
@@ -1506,18 +1617,18 @@ uint64_t Engine::PublishDispatch(const DispatchArgs& args, const HW::Context& co
 			return UINT64_MAX;
 		}
 	}
-	const auto position = window.Tail();
-	m_real_tail         = position + 1u;
-	auto& slot          = window.Reserve();
-	slot.submit_id      = 0;
-	slot.kind           = DrawKind::Dispatch;
-	slot.dispatch_args  = args;
+	const auto position        = window.Tail();
+	m_real_tail                = position + 1u;
+	auto& slot                 = window.Reserve();
+	slot.submit_id             = 0;
+	slot.kind                  = DrawKind::Dispatch;
+	slot.dispatch_args         = args;
 	slot.registers.context     = context;
 	slot.registers.user_config = user_config;
 	slot.registers.shaders     = shaders;
 	// RenderExecutor::DispatchDirect returns before its program lookup for the others.
 	slot.eligible        = shaders.GetCs().cs_regs.data_addr != 0 &&
-	                (args.indirect || (args.x != 0 && args.y != 0 && args.z != 0));
+	                       (args.indirect || (args.x != 0 && args.y != 0 && args.z != 0));
 	slot.worker_prepared = false;
 	slot.after_stop      = m_stop_pending;
 	slot.speculative     = false;
@@ -1552,8 +1663,8 @@ void Engine::ExecuteIndirect(uint64_t position, const std::function<void()>& dra
 	auto& slot     = ReadyHead();
 	auto& executor = m_renderer.GetRenderExecutor();
 	// KYTY_DRAW_RUN_INDIRECT (drawRun.h): an engine commit with the slot's run key and binding
-	// plan, but not the plan's vertex ranges, which come from the placeholder counts. Otherwise only
-	// the programs are offered and the draw is never a draw-run commit.
+	// plan, but not the plan's vertex ranges, which come from the placeholder counts. Otherwise
+	// only the programs are offered and the draw is never a draw-run commit.
 	const bool commit = DrawRun::IndirectRunsEnabled();
 	if (commit && slot.plan.valid) {
 		slot.plan.vertex_ranges.valid = false;
@@ -1603,9 +1714,9 @@ void Engine::Drain() {
 // program preparation on the command processor, so the ratio says how much of it is avoidable.
 namespace {
 void PrintDrawPrepSummary() {
-	static uint64_t last_ns        = 0;
-	static uint64_t last_committed = 0;
-	static uint64_t last_fallbacks = 0;
+	static uint64_t                                                          last_ns        = 0;
+	static uint64_t                                                          last_committed = 0;
+	static uint64_t                                                          last_fallbacks = 0;
 	static std::array<uint64_t, static_cast<size_t>(Failure::Mismatch) + 1u> last_reasons {};
 	// KYTY_CP_COMMIT=draws: the clock is read every 256th commit (the line is due every 10 s).
 	static uint32_t calls = 0;
@@ -1620,13 +1731,13 @@ void PrintDrawPrepSummary() {
 	if (now - last_ns < 10'000'000'000ull) {
 		return;
 	}
-	const auto committed = g_totals.committed.load(std::memory_order_relaxed);
-	const auto fallbacks = g_totals.fallbacks.load(std::memory_order_relaxed);
-	static const char* const names[] = {"none",       "ineligible", "unclean",     "backing",
-	                                    "overflow",   "inconsistent", "uncertified", "notpublished",
-	                                    "shadermap",  "certunclean", "certchanged", "coherencelog",
+	const auto               committed = g_totals.committed.load(std::memory_order_relaxed);
+	const auto               fallbacks = g_totals.fallbacks.load(std::memory_order_relaxed);
+	static const char* const names[] = {"none",      "ineligible",   "unclean",     "backing",
+	                                    "overflow",  "inconsistent", "uncertified", "notpublished",
+	                                    "shadermap", "certunclean",  "certchanged", "coherencelog",
 	                                    "mismatch"};
-	std::string reasons;
+	std::string              reasons;
 	for (size_t i = 1; i < last_reasons.size(); i++) {
 		const auto value = g_fallback_reasons[i].load(std::memory_order_relaxed);
 		if (value != last_reasons[i]) {
@@ -1638,12 +1749,14 @@ void PrintDrawPrepSummary() {
 	if (DispatchPrepEnabled()) {
 		// KYTY_DRAW_PREP_DISPATCH: dispatch preparations taken, refused (and why), unused.
 		static uint64_t last_dispatch[5] {};
-		static std::array<uint64_t, static_cast<size_t>(Failure::Mismatch) + 1u> last_dispatch_reasons {};
-		const uint64_t values[5] = {g_totals.dispatch_committed.load(std::memory_order_relaxed),
-		                            g_totals.dispatch_fallbacks.load(std::memory_order_relaxed),
-		                            g_totals.dispatch_unused.load(std::memory_order_relaxed),
-		                            g_totals.dispatch_verify_checks.load(std::memory_order_relaxed),
-		                            g_totals.dispatch_verify_mismatches.load(std::memory_order_relaxed)};
+		static std::array<uint64_t, static_cast<size_t>(Failure::Mismatch) + 1u>
+		               last_dispatch_reasons {};
+		const uint64_t values[5] = {
+		    g_totals.dispatch_committed.load(std::memory_order_relaxed),
+		    g_totals.dispatch_fallbacks.load(std::memory_order_relaxed),
+		    g_totals.dispatch_unused.load(std::memory_order_relaxed),
+		    g_totals.dispatch_verify_checks.load(std::memory_order_relaxed),
+		    g_totals.dispatch_verify_mismatches.load(std::memory_order_relaxed)};
 		std::string dispatch_reasons;
 		for (size_t i = 1; i < last_dispatch_reasons.size(); i++) {
 			const auto value = g_dispatch_fallback_reasons[i].load(std::memory_order_relaxed);
@@ -1653,12 +1766,13 @@ void PrintDrawPrepSummary() {
 				last_dispatch_reasons[i] = value;
 			}
 		}
-		dispatches = " | dispatches: " + std::to_string(values[0] - last_dispatch[0]) +
-		             " prepared, " + std::to_string(values[1] - last_dispatch[1]) + " serial" +
-		             (dispatch_reasons.empty() ? std::string() : " (" + dispatch_reasons.substr(1) + ")") +
-		             ", " + std::to_string(values[2] - last_dispatch[2]) + " unused; verify " +
-		             std::to_string(values[3] - last_dispatch[3]) + " checks, " +
-		             std::to_string(values[4] - last_dispatch[4]) + " mismatches";
+		dispatches =
+		    " | dispatches: " + std::to_string(values[0] - last_dispatch[0]) + " prepared, " +
+		    std::to_string(values[1] - last_dispatch[1]) + " serial" +
+		    (dispatch_reasons.empty() ? std::string() : " (" + dispatch_reasons.substr(1) + ")") +
+		    ", " + std::to_string(values[2] - last_dispatch[2]) + " unused; verify " +
+		    std::to_string(values[3] - last_dispatch[3]) + " checks, " +
+		    std::to_string(values[4] - last_dispatch[4]) + " mismatches";
 		std::copy(std::begin(values), std::end(values), std::begin(last_dispatch));
 	}
 	if (g_clean_since.Get() >= 2) {
@@ -1687,9 +1801,8 @@ void Engine::Commit(Slot& slot) {
 	}
 	auto&      scheduler = m_renderer.GetCommandScheduler();
 	auto&      executor  = m_renderer.GetRenderExecutor();
-	const auto previous  = scheduler.BindRegisters(slot.registers.context,
-	                                               slot.registers.user_config,
-	                                               slot.registers.shaders);
+	const auto previous  = scheduler.BindRegisters(
+	    slot.registers.context, slot.registers.user_config, slot.registers.shaders);
 	executor.m_prepared_draw = &slot.prepared;
 	// KYTY_DRAW_PREP_BINDINGS: the slot's plan, which RefreshShaders activates once Validate
 	// accepted the preparation it was computed from.
@@ -1713,7 +1826,7 @@ void Engine::Commit(Slot& slot) {
 	}
 	executor.m_binding_plan        = nullptr;
 	executor.m_binding_plan_active = false;
-	const bool taken = executor.m_prepared_draw == nullptr;
+	const bool taken               = executor.m_prepared_draw == nullptr;
 	if (executor.m_prepared_draw != nullptr) {
 		// The draw returned before preparing its programs (nothing to draw, a metadata
 		// operation, no targets): the preparation is simply dropped.
@@ -1743,14 +1856,14 @@ void Engine::NoteFence() {
 	Profiler::CountFrameEvent(Profiler::FrameEvent::DrawPrepFences);
 	using E          = Profiler::FrameEvent;
 	const auto draws = m_draws_since_fence;
-	const auto event = draws == 0    ? E::DrawPrepFenceDraws0
-	                   : draws == 1  ? E::DrawPrepFenceDraws1
-	                   : draws < 4   ? E::DrawPrepFenceDraws2To3
-	                   : draws < 8   ? E::DrawPrepFenceDraws4To7
-	                   : draws < 16  ? E::DrawPrepFenceDraws8To15
-	                   : draws < 32  ? E::DrawPrepFenceDraws16To31
-	                   : draws < 64  ? E::DrawPrepFenceDraws32To63
-	                                 : E::DrawPrepFenceDraws64Plus;
+	const auto event = draws == 0   ? E::DrawPrepFenceDraws0
+	                   : draws == 1 ? E::DrawPrepFenceDraws1
+	                   : draws < 4  ? E::DrawPrepFenceDraws2To3
+	                   : draws < 8  ? E::DrawPrepFenceDraws4To7
+	                   : draws < 16 ? E::DrawPrepFenceDraws8To15
+	                   : draws < 32 ? E::DrawPrepFenceDraws16To31
+	                   : draws < 64 ? E::DrawPrepFenceDraws32To63
+	                                : E::DrawPrepFenceDraws64Plus;
 	Profiler::CountFrameEvent(event);
 	m_draws_since_fence = 0;
 }
@@ -1768,11 +1881,11 @@ void Engine::OnPacket(PacketClass packet_class, FenceKind fence_kind) {
 		case PacketClass::Fence: {
 			using E = Profiler::FrameEvent;
 			static constexpr std::array<E, static_cast<size_t>(FenceKind::Count)> events {
-			    E::DrawPrepFenceRegIndirect, E::DrawPrepFenceEventWrite,
-			    E::DrawPrepFenceEndOfPipe,   E::DrawPrepFenceAcquireMem,
-			    E::DrawPrepFenceWait,        E::DrawPrepFenceDataWrite,
+			    E::DrawPrepFenceRegIndirect,    E::DrawPrepFenceEventWrite,
+			    E::DrawPrepFenceEndOfPipe,      E::DrawPrepFenceAcquireMem,
+			    E::DrawPrepFenceWait,           E::DrawPrepFenceDataWrite,
 			    E::DrawPrepFenceConstantEngine, E::DrawPrepFenceMarker,
-			    E::DrawPrepFenceDispatch,    E::DrawPrepFenceIndirectDraw,
+			    E::DrawPrepFenceDispatch,       E::DrawPrepFenceIndirectDraw,
 			    E::DrawPrepFenceContextControl, E::DrawPrepFenceOther,
 			};
 			if (static_cast<size_t>(fence_kind) < events.size()) {

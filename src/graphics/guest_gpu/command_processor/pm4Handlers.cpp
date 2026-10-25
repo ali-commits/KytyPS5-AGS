@@ -7,6 +7,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
@@ -197,9 +198,8 @@ static HW::RenderControl DecodeRenderControl(uint32_t value) {
 	r.stencil_compress_disable =
 	    KYTY_PM4_GET(value, DB_RENDER_CONTROL, STENCIL_COMPRESS_DISABLE) != 0;
 	r.depth_compress_disable = KYTY_PM4_GET(value, DB_RENDER_CONTROL, DEPTH_COMPRESS_DISABLE) != 0;
-	r.copy_depth_to_color = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_DEPTH_TO_COLOR) != 0;
-	r.copy_stencil_to_color =
-	    KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_STENCIL_TO_COLOR) != 0;
+	r.copy_depth_to_color    = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_DEPTH_TO_COLOR) != 0;
+	r.copy_stencil_to_color  = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_STENCIL_TO_COLOR) != 0;
 	r.copy_centroid          = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_CENTROID) != 0;
 	r.copy_sample            = KYTY_PM4_GET(value, DB_RENDER_CONTROL, COPY_SAMPLE);
 
@@ -307,10 +307,14 @@ KYTY_HW_CTX_PARSER(HwCtxSetCentroidPriority) {
 static void HwCtxIgnoreAaMaskRegister([[maybe_unused]] uint32_t cmd_offset,
                                       [[maybe_unused]] uint32_t value) {}
 
-static void HwCtxIgnoreAlphaToMaskRegister([[maybe_unused]] uint32_t value) {}
-
-static void HwCtxIgnoreDisabledUserClipPlane(CommandProcessor& cp, uint32_t value) {
-	EXIT_NOT_IMPLEMENTED(value != 0 || cp.GetCtx().GetClipControl().user_clip_planes != 0);
+// DB_ALPHA_TO_MASK as alpha-to-coverage (upstream 13b291f99). KYTY_ALPHA_TO_MASK=0 ignores the
+// register as before (no coverage from alpha, early depth tests kept).
+static bool AlphaToMaskHonoured() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_ALPHA_TO_MASK");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
 }
 
 static void HwCtxIgnoreDrawPayloadControl([[maybe_unused]] uint32_t value) {}
@@ -333,7 +337,7 @@ static void HwCtxSetDepthBoundsRegister(CommandProcessor& cp, uint32_t cmd_offse
 }
 
 static void HwCtxSetDepthMetadataRegister(CommandProcessor& cp, uint32_t cmd_offset,
-                                         uint32_t value) {
+                                          uint32_t value) {
 	if (cmd_offset == Pm4::DB_COUNT_CONTROL) {
 		cp.GetCtx().SetDepthCountControl(value);
 		return;
@@ -460,16 +464,6 @@ KYTY_HW_CTX_PARSER(HwCtxSetPointState) {
 
 	for (uint32_t i = 0; i < num_values; i++) {
 		HwCtxIgnorePointState(cmd_offset + i, buffer[i]);
-	}
-
-	return num_values;
-}
-
-KYTY_HW_CTX_PARSER(HwCtxSetAlphaToMask) {
-	auto num_values = KYTY_PM4_LEN(cmd_id) - 2u;
-
-	for (uint32_t i = 0; i < num_values; i++) {
-		HwCtxIgnoreAlphaToMaskRegister(buffer[i]);
 	}
 
 	return num_values;
@@ -623,9 +617,9 @@ static void HwCtxSetDepthShadingRateEncodingRegister(CommandProcessor& cp, uint3
 	    KYTY_PM4_GET(value, DB_SHADING_RATE_ENCODING, SHADING_RATE_ENCODING);
 	EXIT_NOT_IMPLEMENTED(shading_rate_encoding > 2u);
 
-	auto& ctx                       = cp.GetCtx();
-	auto  target                    = ctx.GetDepthRenderTarget();
-	target.shading_rate_encoding    = static_cast<uint8_t>(shading_rate_encoding);
+	auto& ctx                    = cp.GetCtx();
+	auto  target                 = ctx.GetDepthRenderTarget();
+	target.shading_rate_encoding = static_cast<uint8_t>(shading_rate_encoding);
 	ctx.SetDepthRenderTarget(target);
 }
 
@@ -1038,8 +1032,8 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 		case Pm4::COMPUTE_PGM_RSRC1:
 			cs_regs.vgprs =
 			    (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
-			cs_regs.priority = (value >> Pm4::COMPUTE_PGM_RSRC1_PRIORITY_SHIFT) &
-			                   Pm4::COMPUTE_PGM_RSRC1_PRIORITY_MASK;
+			cs_regs.priority      = (value >> Pm4::COMPUTE_PGM_RSRC1_PRIORITY_SHIFT) &
+			                        Pm4::COMPUTE_PGM_RSRC1_PRIORITY_MASK;
 			cs_regs.float_mode    = (value >> Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT) &
 			                        Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_MASK;
 			cs_regs.dx10_clamp    = ((value >> Pm4::COMPUTE_PGM_RSRC1_DX10_CLAMP_SHIFT) &
@@ -1061,10 +1055,11 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			if (cs_regs.float_mode != 0xc0u || !cs_regs.dx10_clamp || cs_regs.ieee_mode) {
 				static std::atomic<uint32_t> reported {0};
 				if (reported.fetch_add(1, std::memory_order_relaxed) < 8u) {
-					LOGF("Compute: COMPUTE_PGM_RSRC1 float_mode=0x%02x dx10_clamp=%u ieee=%u is not "
-					     "modelled (shader at 0x%016" PRIx64 ")\n",
-					     cs_regs.float_mode, cs_regs.dx10_clamp ? 1u : 0u,
-					     cs_regs.ieee_mode ? 1u : 0u, cs_regs.data_addr);
+					LOGF(
+					    "Compute: COMPUTE_PGM_RSRC1 float_mode=0x%02x dx10_clamp=%u ieee=%u is not "
+					    "modelled (shader at 0x%016" PRIx64 ")\n",
+					    cs_regs.float_mode, cs_regs.dx10_clamp ? 1u : 0u,
+					    cs_regs.ieee_mode ? 1u : 0u, cs_regs.data_addr);
 				}
 			}
 			break;
@@ -1087,9 +1082,8 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			                         Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
 			break;
 		case Pm4::COMPUTE_PGM_RSRC3:
-			cs_regs.shared_vgprs =
-			    (value >> Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_SHIFT) &
-			    Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_MASK;
+			cs_regs.shared_vgprs = (value >> Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_SHIFT) &
+			                       Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_MASK;
 			break;
 		case Pm4::COMPUTE_NUM_THREAD_X: cs_regs.num_thread_x = value; break;
 		case Pm4::COMPUTE_NUM_THREAD_Y: cs_regs.num_thread_y = value; break;
@@ -1201,7 +1195,7 @@ static bool HwShIsUserAccumulatorRange(uint32_t first, uint32_t count, uint32_t 
 }
 
 static void HwShIgnoreUserAccumulatorRegister([[maybe_unused]] uint32_t cmd_offset,
-                                               uint32_t value) {
+                                              uint32_t                  value) {
 	EXIT_NOT_IMPLEMENTED((value & ~0x7fu) != 0);
 }
 
@@ -1518,8 +1512,8 @@ KYTY_CP_OP_PARSER(CpOpBranch) {
 	const bool take_then =
 	    cp.Branch(reinterpret_cast<uint64_t>(compare_addr), mask, reference, function);
 	if (!cp.IsReferenceFront()) {
-		LOGF("\t branch: take=%u then=0x%016" PRIx64 "/%" PRIu32 " else=0x%016" PRIx64
-		     "/%" PRIu32 "\n",
+		LOGF("\t branch: take=%u then=0x%016" PRIx64 "/%" PRIu32 " else=0x%016" PRIx64 "/%" PRIu32
+		     "\n",
 		     take_then ? 1u : 0u, reinterpret_cast<uint64_t>(then_buffer), then_num_dw,
 		     reinterpret_cast<uint64_t>(else_buffer), else_num_dw);
 	}
@@ -1636,6 +1630,15 @@ KYTY_CP_OP_PARSER(CpOpDmaData) {
 	return 6;
 }
 
+// The first stage's user SGPR at an SH register location: the GS user SGPR, 32 + the HS user SGPR
+// for a tessellated draw (LS-HS), -1 for another register.
+static int32_t FirstStageUserSgprAt(uint32_t location) {
+	const auto id = location - Pm4::SPI_SHADER_USER_DATA_GS_0;
+	if (id < 32u) return static_cast<int32_t>(id);
+	const auto hs = location - Pm4::SPI_SHADER_USER_DATA_HS_0;
+	return hs < 32u ? static_cast<int32_t>(32u + hs) : -1;
+}
+
 // The GS user SGPR at an SH register location, -1 for another register.
 // KYTY_START_INSTANCE_SGPR=0: indirect draws name no start-instance SGPR (the shaders still count
 // the instance ID from 0, as the GPU does).
@@ -1722,7 +1725,7 @@ KYTY_CP_OP_PARSER(CpOpDrawIndirectMulti) {
 
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0082c00 && cmd_id != 0xc0083800);
 
-	const auto data_offset        = buffer[0];
+	const auto data_offset = buffer[0];
 	cp.GetShCtx().SetStartInstanceUserSgpr(GsUserSgprAt(buffer[2] & 0xffffu));
 	const auto count_indirect     = (buffer[3] >> 30u) & 0x1u;
 	const auto max_count_or_count = buffer[4];
@@ -1736,12 +1739,17 @@ KYTY_CP_OP_PARSER(CpOpDrawIndirectMulti) {
 	    buffer[1] & 0xffffu, buffer[2] & 0xffffu,
 	    indexed && (buffer[3] & (1u << 28u)) != 0 ? buffer[1] >> 16u : Pm4::SH_NOP};
 
+	// DRAW_INDEX_ENABLE (word 3 bit 31): the CP writes each record's index into the user SGPR at
+	// DRAW_INDEX_LOC (bits 0..15) before drawing it (Insomniac mesh draws index a per-draw table).
+	const int32_t draw_index_sgpr =
+	    (buffer[3] >> 31u) != 0u ? FirstStageUserSgprAt(buffer[3] & 0xffffu) : -1;
+
 	if (count_indirect == 0) {
 		count_addr = nullptr;
 	}
 
-	cp.DrawIndirectMulti(data_offset, max_count_or_count, count_addr, stride_in_bytes,
-	                     registers, draw_initiator, indexed);
+	cp.DrawIndirectMulti(data_offset, max_count_or_count, count_addr, stride_in_bytes, registers,
+	                     draw_initiator, indexed, draw_index_sgpr);
 
 	return 9;
 }
@@ -2086,8 +2094,8 @@ KYTY_CP_OP_PARSER(CpOpIndirectCxRegs) {
 			if (raw_cmd_offset == 0x24au && value == 0u) {
 				static std::atomic_flag logged = ATOMIC_FLAG_INIT;
 				if (!logged.test_and_set(std::memory_order_relaxed)) {
-					Log::WriteToConsoleAndLog(
-					    "\t diagnostic: ignoring indirect CX {0x24a, 0}; hardware effect unresolved\n");
+					Log::WriteToConsoleAndLog("\t diagnostic: ignoring indirect CX {0x24a, 0}; "
+					                          "hardware effect unresolved\n");
 				}
 				continue;
 			}
@@ -2118,7 +2126,7 @@ KYTY_CP_OP_PARSER(CpOpIndirectShRegs) {
 		EXIT("indirect SH registers have null address, num_regs = %" PRIu32 "\n", indirect_num_dw);
 	}
 	const auto indirect_address = reinterpret_cast<uint64_t>(indirect_buffer);
-	indirect_buffer = ReadIndirectRegisterPairs(cp, indirect_buffer, indirect_num_dw);
+	indirect_buffer             = ReadIndirectRegisterPairs(cp, indirect_buffer, indirect_num_dw);
 
 	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2) {
 		auto raw_cmd_offset = indirect_buffer[0];
@@ -2508,7 +2516,7 @@ template <typename T>
 static uint32_t CpOpWaitRegMemSized(CommandProcessor& cp, uint32_t cmd_id, const uint32_t* buffer) {
 	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
 
-	constexpr auto value_dw = static_cast<uint32_t>(sizeof(T) / sizeof(uint32_t));
+	constexpr auto value_dw   = static_cast<uint32_t>(sizeof(T) / sizeof(uint32_t));
 	constexpr auto payload_dw = 4u + value_dw * 2u;
 	constexpr auto packet_dw  = payload_dw + 1u;
 	constexpr auto opcode =
@@ -2518,7 +2526,7 @@ static uint32_t CpOpWaitRegMemSized(CommandProcessor& cp, uint32_t cmd_id, const
 	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != packet_dw);
 
 	constexpr auto address_align_mask = (sizeof(T) == sizeof(uint32_t) ? 0x3u : 0x7u);
-	auto  ctrl = buffer[0];
+	auto           ctrl               = buffer[0];
 	auto* addr = reinterpret_cast<const T*>((buffer[1] & ~address_align_mask) |
 	                                        (static_cast<uint64_t>(buffer[2] & 0x3ffffu) << 32u));
 	auto  ref  = CpOpWaitRegMemReadValue<T>(buffer + 3u);
@@ -2631,8 +2639,8 @@ void CommandProcessor::ExecReleaseMem(const CpSeq::ReleaseMemOp& op) {
 	uint32_t event_write_dest   = 0;
 	uint32_t data_sel           = (body[1] >> 29u) & 0x7u;
 	uint32_t interrupt_selector = (body[1] >> 24u) & 0x7u;
-	auto*    dst_gpu_addr = reinterpret_cast<void*>(body[2] | (static_cast<uint64_t>(body[3]) << 32u));
-	uint64_t value                = body[4] | (static_cast<uint64_t>(body[5]) << 32u);
+	auto* dst_gpu_addr = reinterpret_cast<void*>(body[2] | (static_cast<uint64_t>(body[3]) << 32u));
+	uint64_t value     = body[4] | (static_cast<uint64_t>(body[5]) << 32u);
 	uint32_t interrupt_context_id = body[6] & 0x07ffffffu;
 
 	constexpr uint32_t ReleaseMemDstMemory = 0;
@@ -2756,8 +2764,8 @@ void CommandProcessor::ExecReleaseMem(const CpSeq::ReleaseMemOp& op) {
 void CommandProcessor::ExecLodStats(const CpSeq::LodStatsOp& op) {
 	const auto* body        = op.body;
 	const auto  buffer_size = body[0];
-	auto*       dst         = reinterpret_cast<void*>((body[1] & 0xffffffc0u) |
-	                                                  (static_cast<uint64_t>(body[2]) << 32u));
+	auto*       dst =
+	    reinterpret_cast<void*>((body[1] & 0xffffffc0u) | (static_cast<uint64_t>(body[2]) << 32u));
 
 	HangTrace::DisarmLodReportWatch();
 	HangTrace::RecordLodStats(dst, buffer_size, body[3]);
@@ -2795,6 +2803,7 @@ void CommandProcessor::ExecLodStats(const CpSeq::LodStatsOp& op) {
 	if (lod_mode == 4) {
 		ReportLodStats(reinterpret_cast<uint64_t>(dst), buffer_size, body[3]);
 	} else if (dst != nullptr && buffer_size != 0 && lod_mode != 2) {
+		StreamCopyDefer::NoteGpuOnlyWrite(reinterpret_cast<uint64_t>(dst), buffer_size);
 		memset(dst, lod_mode == 3 ? 0xff : 0, buffer_size);
 		if ((lod_mode == 0 || lod_mode == 3) && buffer_size >= sizeof(uint32_t)) {
 			auto* label = static_cast<uint32_t*>(dst);
@@ -2804,7 +2813,6 @@ void CommandProcessor::ExecLodStats(const CpSeq::LodStatsOp& op) {
 	}
 	HangTrace::ArmLodReportWatch(dst, buffer_size);
 }
-
 
 void GraphicsInitJmpTablesCxIndirect() {
 	for (auto& func: g_hw_ctx_indirect_func) {
@@ -2913,10 +2921,9 @@ void GraphicsInitJmpTablesCxIndirect() {
 			    KYTY_PM4_GET(value, CB_COLOR0_DCC_CONTROL, INDEPENDENT_128B_BLOCKS) != 0;
 			EXIT_NOT_IMPLEMENTED(independent_64b && independent_128b);
 			dcc.independent_block_size =
-			    independent_64b
-			        ? HW::ColorDccControl::IndependentBlockSize::Bytes64
-			        : independent_128b ? HW::ColorDccControl::IndependentBlockSize::Bytes128
-			                           : HW::ColorDccControl::IndependentBlockSize::Disabled;
+			    independent_64b    ? HW::ColorDccControl::IndependentBlockSize::Bytes64
+			    : independent_128b ? HW::ColorDccControl::IndependentBlockSize::Bytes128
+			                       : HW::ColorDccControl::IndependentBlockSize::Disabled;
 			cp.GetCtx().SetColorDccControl(slot, dcc);
 		};
 	}
@@ -3090,7 +3097,7 @@ void GraphicsInitJmpTablesCxIndirect() {
 
 	for (auto cmd_offset = Pm4::PA_CL_UCP_0_X; cmd_offset <= Pm4::PA_CL_UCP_5_W; cmd_offset++) {
 		g_hw_ctx_indirect_func[cmd_offset] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
-			HwCtxIgnoreDisabledUserClipPlane(cp, value);
+			cp.GetCtx().SetUserClipPlane(cmd_offset - Pm4::PA_CL_UCP_0_X, value);
 		};
 	}
 
@@ -3682,7 +3689,9 @@ void GraphicsInitJmpTablesCxIndirect() {
 	g_hw_ctx_indirect_func[Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL] =
 	    [](KYTY_HW_CTX_INDIRECT_ARGS) { HwCtxIgnorePaScExtendedControl(cmd_offset, value); };
 	g_hw_ctx_indirect_func[Pm4::DB_ALPHA_TO_MASK] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
-		HwCtxIgnoreAlphaToMaskRegister(value);
+		cp.GetCtx().SetAlphaToMaskEnable(
+		    AlphaToMaskHonoured() &&
+		    KYTY_PM4_GET(value, DB_ALPHA_TO_MASK, ALPHA_TO_MASK_ENABLE) != 0);
 	};
 	g_hw_ctx_indirect_func[Pm4::CB_COLOR_CONTROL] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
 		cp.GetCtx().SetColorControl(DecodeColorControl(value));
@@ -3779,17 +3788,11 @@ void GraphicsInitJmpTablesShIndirect() {
 	}
 	for (uint32_t slot = 0; slot < 4; slot++) {
 		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_ACCUM_PS_0 + slot] =
-		    [](KYTY_HW_SH_INDIRECT_ARGS) {
-			    HwShIgnoreUserAccumulatorRegister(cmd_offset, value);
-		    };
+		    [](KYTY_HW_SH_INDIRECT_ARGS) { HwShIgnoreUserAccumulatorRegister(cmd_offset, value); };
 		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_ACCUM_ESGS_0 + slot] =
-		    [](KYTY_HW_SH_INDIRECT_ARGS) {
-			    HwShIgnoreUserAccumulatorRegister(cmd_offset, value);
-		    };
+		    [](KYTY_HW_SH_INDIRECT_ARGS) { HwShIgnoreUserAccumulatorRegister(cmd_offset, value); };
 		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_ACCUM_LSHS_0 + slot] =
-		    [](KYTY_HW_SH_INDIRECT_ARGS) {
-			    HwShIgnoreUserAccumulatorRegister(cmd_offset, value);
-		    };
+		    [](KYTY_HW_SH_INDIRECT_ARGS) { HwShIgnoreUserAccumulatorRegister(cmd_offset, value); };
 	}
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PACE_ID_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) {
 		HwShIgnoreShaderRegister(cmd_offset, value);

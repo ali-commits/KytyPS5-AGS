@@ -148,11 +148,11 @@ void CheckLdsDeviceBufferCodegen() {
                 std::to_string(plan.dwords) + (plan.storage ? " storage" : "") +
                 (plan.clamped ? " clamped" : ""));
   }
-  // Upstream's stride: every stage group spans DescriptorBindingKind::Count (57) bindings.
+  // Every stage group spans DescriptorBindingKind::Count (58, with UniformBuffers) bindings.
   Require(name, "binding ABI",
           IR::NativeBinding(ShaderType::Compute, IR::DescriptorBindingKind::SharedMemory) == 56u &&
-              IR::NativeBinding(ShaderType::Pixel, IR::DescriptorBindingKind::Buffers) == 57u &&
-              IR::NativeBinding(ShaderType::Pixel, IR::DescriptorBindingKind::MipStats) == 112u,
+              IR::NativeBinding(ShaderType::Pixel, IR::DescriptorBindingKind::Buffers) == 58u &&
+              IR::NativeBinding(ShaderType::Pixel, IR::DescriptorBindingKind::MipStats) == 113u,
           "the SharedMemory binding or the stage group stride changed");
   {
     // The static key tells the placements apart (the program cache keeps both).

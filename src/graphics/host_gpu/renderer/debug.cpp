@@ -66,8 +66,8 @@ CheckLogState g_check_log;
 // A condition CheckRun stops the emulator on (EXIT_NOT_IMPLEMENTED keeps its text and location).
 #define KYTY_CHECK_EXIT(policy, condition)                                                         \
 	do {                                                                                           \
-		if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                       \
-			(policy).loud = (policy).loud || static_cast<bool>(condition);                        \
+		if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                        \
+			(policy).loud = (policy).loud || static_cast<bool>(condition);                         \
 		} else {                                                                                   \
 			EXIT_NOT_IMPLEMENTED(condition);                                                       \
 		}                                                                                          \
@@ -76,7 +76,7 @@ CheckLogState g_check_log;
 #define KYTY_CHECK_FAIL(policy, condition, ...)                                                    \
 	do {                                                                                           \
 		if (condition) {                                                                           \
-			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                   \
+			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                    \
 				(policy).loud = true;                                                              \
 			} else {                                                                               \
 				EXIT(__VA_ARGS__);                                                                 \
@@ -87,7 +87,7 @@ CheckLogState g_check_log;
 #define KYTY_CHECK_LOG_ONCE(policy, flag, condition, ...)                                          \
 	do {                                                                                           \
 		if (condition) {                                                                           \
-			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                   \
+			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                    \
 				(policy).loud = (policy).loud || !(flag).load(std::memory_order_relaxed);          \
 			} else if (!(flag).load(std::memory_order_relaxed)) {                                  \
 				LOGF(__VA_ARGS__);                                                                 \
@@ -99,7 +99,7 @@ CheckLogState g_check_log;
 #define KYTY_CHECK_LOG_COUNTED(policy, counter, limit, condition, ...)                             \
 	do {                                                                                           \
 		if (condition) {                                                                           \
-			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                   \
+			if constexpr (std::remove_reference_t<decltype(policy)>::Predict) {                    \
 				(policy).loud =                                                                    \
 				    (policy).loud || (counter).load(std::memory_order_relaxed) < (limit);          \
 			} else if ((counter).fetch_add(1, std::memory_order_relaxed) < (limit)) {              \
@@ -116,7 +116,7 @@ uint32_t render_target_mask_slot(uint32_t mask, uint32_t slot) {
 
 bool SkipInactivePixelShadersEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
+	const auto                  enabled = static_cast<bool>(Common::Once(enabled_once, [] {
 		const char* value = std::getenv("KYTY_SKIP_INACTIVE_PS");
 		return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
 	}));
@@ -127,17 +127,18 @@ uint32_t DrawColorOutputFilter(const HW::Context& ctx) {
 	if (!SkipInactivePixelShadersEnabled()) {
 		return 0xffu;
 	}
-	const auto& sh_regs     = ctx.GetShaderRegisters();
-	const auto  write_mask  = ctx.GetRenderTargetMask() & sh_regs.m_cbShaderMask;
+	const auto& sh_regs    = ctx.GetShaderRegisters();
+	const auto  write_mask = ctx.GetRenderTargetMask() & sh_regs.m_cbShaderMask;
 	// The export format is per export; KYTY_CB_SHADER_MASK_EXPORTS maps export i to its target.
-	const auto  shader_mask = ShaderCbShaderMaskExports() ? sh_regs.m_cbShaderMask : UINT32_MAX;
-	uint32_t    output_mask = 0;
+	const auto shader_mask = ShaderCbShaderMaskExports() ? sh_regs.m_cbShaderMask : UINT32_MAX;
+	uint32_t   output_mask = 0;
 	for (uint32_t index = 0; index < RENDER_COLOR_ATTACHMENTS_MAX; index++) {
 		const auto slot = ShaderPixelExportTarget(shader_mask, index);
 		if (slot >= RENDER_COLOR_ATTACHMENTS_MAX) {
 			break;
 		}
-		if (sh_regs.target_output_mode[index] != 0 && render_target_mask_slot(write_mask, slot) != 0) {
+		if (sh_regs.target_output_mode[index] != 0 &&
+		    render_target_mask_slot(write_mask, slot) != 0) {
 			output_mask |= 1u << slot;
 		}
 	}
@@ -157,7 +158,7 @@ static bool RenderTargetMaskHasBoundMrt(const HW::Context& hw) {
 
 	uint32_t bound_targets = 0;
 	for (uint32_t i = 0; i < 8; i++) {
-		if (render_target_mask_slot(mask, i) != 0 && hw.GetRenderTarget(i).base.addr != 0) {
+		if (render_target_mask_slot(mask, i) != 0 && render_target_bound(hw.GetRenderTarget(i))) {
 			bound_targets++;
 		}
 	}
@@ -168,12 +169,16 @@ static bool RenderTargetMaskHasBoundMrt(const HW::Context& hw) {
 static uint32_t RenderTargetFirstBoundSlot(const HW::Context& hw) {
 	const auto mask = hw.GetRenderTargetMask();
 	for (uint32_t i = 0; i < 8; i++) {
-		if (render_target_mask_slot(mask, i) != 0 && hw.GetRenderTarget(i).base.addr != 0) {
+		if (render_target_mask_slot(mask, i) != 0 && render_target_bound(hw.GetRenderTarget(i))) {
 			return i;
 		}
 	}
 
 	return 0;
+}
+
+bool render_target_bound(const HW::RenderTarget& rt) {
+	return rt.base.addr != 0 && rt.info.format != Prospero::ChannelLayout::kInvalid;
 }
 
 uint32_t render_target_first_bound_slot(const CommandBuffer& buffer) {
@@ -228,62 +233,64 @@ std::string rt_print(const char* func, const HW::RenderTarget& rt) {
 
 	dst += fmt::format("\t base.addr                       = 0x{:016x}\n", rt.base.addr);
 	dst += fmt::format("\t view.base_array_slice_index     = 0x{:08x}\n",
-	                  rt.view.base_array_slice_index);
+	                   rt.view.base_array_slice_index);
 	dst += fmt::format("\t view.last_array_slice_index     = 0x{:08x}\n",
-	                  rt.view.last_array_slice_index);
-	dst += fmt::format("\t view.current_mip_level          = 0x{:08x}\n", rt.view.current_mip_level);
+	                   rt.view.last_array_slice_index);
+	dst +=
+	    fmt::format("\t view.current_mip_level          = 0x{:08x}\n", rt.view.current_mip_level);
 	dst += fmt::format("\t info.fmask_compression_enable   = {}\n",
-	                  rt.info.fmask_compression_enable ? "true" : "false");
+	                   rt.info.fmask_compression_enable ? "true" : "false");
 
 	dst += fmt::format("\t info.fmask_data_compression_disable = {}\n",
-	                  rt.info.fmask_data_compression_disable ? "true" : "false");
+	                   rt.info.fmask_data_compression_disable ? "true" : "false");
 	dst += fmt::format("\t info.fmask_one_frag_mode        = {}\n",
-	                  rt.info.fmask_one_frag_mode ? "true" : "false");
+	                   rt.info.fmask_one_frag_mode ? "true" : "false");
 
 	dst += fmt::format("\t info.cmask_fast_clear_enable    = {}\n",
-	                  rt.info.cmask_fast_clear_enable ? "true" : "false");
+	                   rt.info.cmask_fast_clear_enable ? "true" : "false");
 	dst += fmt::format("\t info.dcc_compression_enable     = {}\n",
-	                  rt.info.dcc_compression_enable ? "true" : "false");
+	                   rt.info.dcc_compression_enable ? "true" : "false");
 	dst += fmt::format("\t info.format                     = 0x{:08x}\n",
-	                  static_cast<uint32_t>(rt.info.format));
+	                   static_cast<uint32_t>(rt.info.format));
 	dst += fmt::format("\t info.channel_type               = 0x{:08x}\n",
-	                  static_cast<uint32_t>(rt.info.channel_type));
+	                   static_cast<uint32_t>(rt.info.channel_type));
 	dst += fmt::format("\t info.channel_order              = 0x{:08x}\n",
-	                  static_cast<uint32_t>(rt.info.channel_order));
+	                   static_cast<uint32_t>(rt.info.channel_order));
 	dst += fmt::format("\t info.blend_bypa                 = {}\n",
-	                  rt.info.blend_bypass ? "true" : "false");
+	                   rt.info.blend_bypass ? "true" : "false");
 	dst += fmt::format("\t info.blend_clamp                = {}\n",
-	                  rt.info.blend_clamp ? "true" : "false");
+	                   rt.info.blend_clamp ? "true" : "false");
 	dst += fmt::format("\t info.round_mode                 = {}\n",
-	                  rt.info.round_mode ? "true" : "false");
+	                   rt.info.round_mode ? "true" : "false");
 	dst += fmt::format("\t attrib.force_dest_alpha_to_one  = {}\n",
-	                  rt.attrib.force_dest_alpha_to_one ? "true" : "false");
+	                   rt.attrib.force_dest_alpha_to_one ? "true" : "false");
 	dst += fmt::format("\t attrib.num_samples              = 0x{:08x}\n", rt.attrib.num_samples);
 	dst += fmt::format("\t attrib.num_fragments            = 0x{:08x}\n", rt.attrib.num_fragments);
 	dst += fmt::format("\t attrib2.width                   = 0x{:08x}\n", rt.attrib2.width);
 	dst += fmt::format("\t attrib2.height                  = 0x{:08x}\n", rt.attrib2.height);
-	dst += fmt::format("\t attrib2.num_mip_levels          = 0x{:08x}\n", rt.attrib2.num_mip_levels);
+	dst +=
+	    fmt::format("\t attrib2.num_mip_levels          = 0x{:08x}\n", rt.attrib2.num_mip_levels);
 	dst += fmt::format("\t attrib3.depth                   = 0x{:08x}\n", rt.attrib3.depth);
 	dst += fmt::format("\t attrib3.tile_mode               = 0x{:08x}\n",
-	                  static_cast<uint32_t>(rt.attrib3.tile_mode));
+	                   static_cast<uint32_t>(rt.attrib3.tile_mode));
 	dst += fmt::format("\t attrib3.dimension               = 0x{:08x}\n", rt.attrib3.dimension);
 	dst += fmt::format("\t attrib3.metadata_pipe_aligned   = {}\n",
-	                  rt.attrib3.metadata_pipe_aligned ? "true" : "false");
+	                   rt.attrib3.metadata_pipe_aligned ? "true" : "false");
 	dst += fmt::format("\t attrib3.write_vrs_rate_hint_to_cmask = {}\n",
-	                  rt.attrib3.write_vrs_rate_hint_to_cmask ? "true" : "false");
+	                   rt.attrib3.write_vrs_rate_hint_to_cmask ? "true" : "false");
 	dst += fmt::format("\t dcc.max_uncompressed_block_size = 0x{:08x}\n",
-	                  rt.dcc.max_uncompressed_block_size);
+	                   rt.dcc.max_uncompressed_block_size);
 	dst += fmt::format("\t dcc.max_compressed_block_size   = 0x{:08x}\n",
-	                  rt.dcc.max_compressed_block_size);
+	                   rt.dcc.max_compressed_block_size);
 	dst += fmt::format("\t dcc.color_transform             = 0x{:08x}\n", rt.dcc.color_transform);
 	dst += fmt::format("\t dcc.overwrite_combiner_disable  = {}\n",
-	                  rt.dcc.overwrite_combiner_disable ? "true" : "false");
+	                   rt.dcc.overwrite_combiner_disable ? "true" : "false");
 	dst += fmt::format("\t dcc.independent_block_size      = 0x{:02x}\n",
-	                  static_cast<uint8_t>(rt.dcc.independent_block_size));
+	                   static_cast<uint8_t>(rt.dcc.independent_block_size));
 	dst += fmt::format("\t data_write_on_dcc_clear_to_reg  = {}\n",
-	                  rt.dcc.data_write_on_dcc_clear_to_reg ? "true" : "false");
+	                   rt.dcc.data_write_on_dcc_clear_to_reg ? "true" : "false");
 	dst += fmt::format("\t dcc.dcc_clear_key_enable        = {}\n",
-	                  rt.dcc.dcc_clear_key_enable ? "true" : "false");
+	                   rt.dcc.dcc_clear_key_enable ? "true" : "false");
 	dst += fmt::format("\t cmask.addr                      = 0x{:016x}\n", rt.cmask.addr);
 	dst += fmt::format("\t fmask.addr                      = 0x{:016x}\n", rt.fmask.addr);
 	dst += fmt::format("\t clear_word0.word0               = 0x{:08x}\n", rt.clear_word0.word0);
@@ -343,13 +350,12 @@ static void RtCheck(P& p, const HW::RenderTarget& rt) {
 		                    rt.fmask.addr);
 	}
 
-	KYTY_CHECK_LOG_ONCE(p, log.rt_metadata,
-	                    rt.info.cmask_fast_clear_enable || rt.info.dcc_compression_enable,
-	                    "RenderTarget: temporary: ignoring PS5 color metadata fast_clear=%s dcc=%s "
-	                    "cmask=0x%016" PRIx64 " dcc_addr=0x%016" PRIx64 "\n",
-	                    rt.info.cmask_fast_clear_enable ? "true" : "false",
-	                    rt.info.dcc_compression_enable ? "true" : "false", rt.cmask.addr,
-	                    rt.dcc_addr.addr);
+	KYTY_CHECK_LOG_ONCE(
+	    p, log.rt_metadata, rt.info.cmask_fast_clear_enable || rt.info.dcc_compression_enable,
+	    "RenderTarget: temporary: ignoring PS5 color metadata fast_clear=%s dcc=%s "
+	    "cmask=0x%016" PRIx64 " dcc_addr=0x%016" PRIx64 "\n",
+	    rt.info.cmask_fast_clear_enable ? "true" : "false",
+	    rt.info.dcc_compression_enable ? "true" : "false", rt.cmask.addr, rt.dcc_addr.addr);
 	KYTY_CHECK_LOG_ONCE(p, log.rt_blend_bypass, rt.info.blend_bypass,
 	                    "RenderTarget: temporary: using PS5 blend bypass as disabled Vulkan "
 	                    "blending\n");
@@ -362,7 +368,8 @@ static void RtCheck(P& p, const HW::RenderTarget& rt) {
 	KYTY_CHECK_LOG_ONCE(p, log.rt_dest_alpha, rt.attrib.force_dest_alpha_to_one,
 	                    "RenderTarget: temporary: accepting PS5 force destination alpha-to-one\n");
 	KYTY_CHECK_LOG_ONCE(p, log.rt_msaa,
-	                    rt.attrib.num_samples != 0x00000000 || rt.attrib.num_fragments != 0x00000000,
+	                    rt.attrib.num_samples != 0x00000000 ||
+	                        rt.attrib.num_fragments != 0x00000000,
 	                    "RenderTarget: using native PS5 MSAA color target, "
 	                    "samples=0x%08" PRIx32 " fragments=0x%08" PRIx32 "\n",
 	                    rt.attrib.num_samples, rt.attrib.num_fragments);
@@ -390,12 +397,13 @@ static void RtCheck(P& p, const HW::RenderTarget& rt) {
 	KYTY_CHECK_EXIT(p, rt.dcc.overwrite_combiner_disable != false);
 	// EXIT_NOT_IMPLEMENTED(rt.dcc.data_write_on_dcc_clear_to_reg != false);
 	KYTY_CHECK_EXIT(p, rt.dcc.dcc_clear_key_enable != false);
-	KYTY_CHECK_LOG_ONCE(p, log.rt_metadata_addresses,
-	                    rt.cmask.addr != 0x0000000000000000 || rt.fmask.addr != 0x0000000000000000 ||
-	                        rt.dcc_addr.addr != 0x0000000000000000,
-	                    "RenderTarget: temporary: ignoring PS5 metadata addresses cmask=0x%016" PRIx64
-	                    " fmask=0x%016" PRIx64 " dcc=0x%016" PRIx64 "\n",
-	                    rt.cmask.addr, rt.fmask.addr, rt.dcc_addr.addr);
+	KYTY_CHECK_LOG_ONCE(
+	    p, log.rt_metadata_addresses,
+	    rt.cmask.addr != 0x0000000000000000 || rt.fmask.addr != 0x0000000000000000 ||
+	        rt.dcc_addr.addr != 0x0000000000000000,
+	    "RenderTarget: temporary: ignoring PS5 metadata addresses cmask=0x%016" PRIx64
+	    " fmask=0x%016" PRIx64 " dcc=0x%016" PRIx64 "\n",
+	    rt.cmask.addr, rt.fmask.addr, rt.dcc_addr.addr);
 }
 
 static void ZPrint(const char* func, const HW::DepthRenderTarget& z) {
@@ -475,9 +483,9 @@ template <typename P>
 static void ClipCheck(P& p, const HW::ClipControl& c) {
 	// dx_linear_attr_clip_enable preserves linear (noperspective) attributes at clip-generated
 	// vertices, which Vulkan provides as part of clipping and interpolation.
-	KYTY_CHECK_EXIT(p, c.user_clip_planes != 0 || c.user_clip_plane_mode != 0 ||
-	                       c.vertex_kill_any || c.user_clip_plane_negate_y ||
-	                       c.user_clip_plane_cull_only || c.cull_on_clipping_error_disable ||
+	KYTY_CHECK_EXIT(p, c.user_clip_plane_mode != 0 || c.vertex_kill_any ||
+	                       c.user_clip_plane_negate_y || c.user_clip_plane_cull_only ||
+	                       c.cull_on_clipping_error_disable ||
 	                       c.force_viewport_index_from_vs_enable);
 }
 
@@ -567,17 +575,16 @@ static void BcPrint(const char* func, const HW::BlendControl& c, const HW::Blend
 template <typename P>
 static void BcCheck(P& p, const HW::BlendColor& color, const HW::ColorControl& cc) {
 	auto& log = g_check_log;
-	KYTY_CHECK_LOG_ONCE(p, log.bc_constants,
-	                    color.red != 0.0f || color.green != 0.0f || color.blue != 0.0f ||
-	                        color.alpha != 0.0f,
-	                    "BlendControl: temporary: accepting nonzero blend constants (%f, %f, %f, %f)\n",
-	                    color.red, color.green, color.blue, color.alpha);
-	KYTY_CHECK_LOG_ONCE(p, log.bc_mode,
-	                    cc.mode != 1 && cc.mode != 0 && cc.mode != 2 && cc.mode != 3 &&
-	                        cc.mode != 5 && cc.mode != 6,
-	                    "BlendControl: temporary: accepting unsupported color-control mode %" PRIu8
-	                    "\n",
-	                    cc.mode);
+	KYTY_CHECK_LOG_ONCE(
+	    p, log.bc_constants,
+	    color.red != 0.0f || color.green != 0.0f || color.blue != 0.0f || color.alpha != 0.0f,
+	    "BlendControl: temporary: accepting nonzero blend constants (%f, %f, %f, %f)\n", color.red,
+	    color.green, color.blue, color.alpha);
+	KYTY_CHECK_LOG_ONCE(
+	    p, log.bc_mode,
+	    cc.mode != 1 && cc.mode != 0 && cc.mode != 2 && cc.mode != 3 && cc.mode != 5 &&
+	        cc.mode != 6,
+	    "BlendControl: temporary: accepting unsupported color-control mode %" PRIu8 "\n", cc.mode);
 	KYTY_CHECK_LOG_ONCE(p, log.bc_raster_op, cc.op != 0xCC,
 	                    "BlendControl: temporary: accepting unsupported raster op 0x%02" PRIx8 "\n",
 	                    cc.op);
@@ -672,13 +679,13 @@ static void AaCheck(P& p, const HW::AaSampleControl& c, const HW::AaConfig& cf) 
 		non_default_locations |= (l != 0);
 	}
 
-	KYTY_CHECK_LOG_COUNTED(p, g_check_log.aa, 16u,
-	                       non_default_locations || cf.msaa_num_samples != 0 ||
-	                           cf.aa_mask_centroid_dtmn || cf.max_sample_dist != 0 ||
-	                           cf.msaa_exposed_samples != 0,
-	                       "\t warning: unsupported PS5 sample locations use native Vulkan locations: "
-	                       "samples=%" PRIu8 ", exposed=%" PRIu8 ", max_dist=%" PRIu8 "\n",
-	                       cf.msaa_num_samples, cf.msaa_exposed_samples, cf.max_sample_dist);
+	KYTY_CHECK_LOG_COUNTED(
+	    p, g_check_log.aa, 16u,
+	    non_default_locations || cf.msaa_num_samples != 0 || cf.aa_mask_centroid_dtmn ||
+	        cf.max_sample_dist != 0 || cf.msaa_exposed_samples != 0,
+	    "\t warning: unsupported PS5 sample locations use native Vulkan locations: "
+	    "samples=%" PRIu8 ", exposed=%" PRIu8 ", max_dist=%" PRIu8 "\n",
+	    cf.msaa_num_samples, cf.msaa_exposed_samples, cf.max_sample_dist);
 }
 
 void LogDrawPhase(const char* draw_name, const char* phase) {
@@ -812,8 +819,8 @@ static ScissorRect ScissorRectOffset(ScissorRect r, int x, int y) {
 }
 
 static ScissorRect ScissorRectIntersect(const ScissorRect& a, const ScissorRect& b) {
-	return {std::max(a.left, b.left), std::max(a.top, b.top),
-	        std::min(a.right, b.right), std::min(a.bottom, b.bottom)};
+	return {std::max(a.left, b.left), std::max(a.top, b.top), std::min(a.right, b.right),
+	        std::min(a.bottom, b.bottom)};
 }
 
 static ScissorRect ScissorRectClamp(ScissorRect r, uint32_t width, uint32_t height) {
@@ -864,16 +871,18 @@ bool calc_scissor_unclamped(const HW::ScreenViewport& vp, const HW::ScanModeCont
 	EXIT_IF(viewport_index >= std::size(vp.viewports));
 	ScissorRect final {vp.screen_scissor_left, vp.screen_scissor_top, vp.screen_scissor_right,
 	                   vp.screen_scissor_bottom};
-	const auto intersect = [&](ScissorRect rect, bool window_offset) {
+	const auto  intersect = [&](ScissorRect rect, bool window_offset) {
 		if (window_offset) {
 			rect = ScissorRectOffset(rect, vp.window_offset_x, vp.window_offset_y);
 		}
 		final = ScissorRectIntersect(final, rect);
 	};
 	intersect({vp.window_scissor_left, vp.window_scissor_top, vp.window_scissor_right,
-	           vp.window_scissor_bottom}, vp.window_scissor_window_offset_enable);
+	           vp.window_scissor_bottom},
+	          vp.window_scissor_window_offset_enable);
 	intersect({vp.generic_scissor_left, vp.generic_scissor_top, vp.generic_scissor_right,
-	           vp.generic_scissor_bottom}, vp.generic_scissor_window_offset_enable);
+	           vp.generic_scissor_bottom},
+	          vp.generic_scissor_window_offset_enable);
 
 	const auto& viewport = vp.viewports[viewport_index];
 	if (smc.vport_scissor_enable) {
@@ -894,7 +903,8 @@ bool calc_scissor_unclamped(const HW::ScreenViewport& vp, const HW::ScanModeCont
 				}
 
 				intersect({vp.clip_rect_left[i], vp.clip_rect_top[i], vp.clip_rect_right[i],
-				           vp.clip_rect_bottom[i]}, vp.clip_rect_window_offset_enable[i]);
+				           vp.clip_rect_bottom[i]},
+				          vp.clip_rect_window_offset_enable[i]);
 			}
 		} else {
 			supported = false; // the scissor stays as it is (calc_final_scissor logs it)
@@ -941,7 +951,7 @@ static void HwCheck(P& p, const HW::Context& hw) {
 
 	const bool debug_dump = graphics_debug_dump_enabled();
 	auto       log_phase  = [&](const char* phase) {
-        KYTY_CHECK_LOG_COUNTED(p, log.phases, 512u, debug_dump, "HwCheckPhase: %s\n", phase);
+		KYTY_CHECK_LOG_COUNTED(p, log.phases, 512u, debug_dump, "HwCheckPhase: %s\n", phase);
 	};
 
 	log_phase("rt");
@@ -978,11 +988,10 @@ static void HwCheck(P& p, const HW::Context& hw) {
 			}
 		}
 	}
-	KYTY_CHECK_LOG_COUNTED(p, log.depth_clear, 16u,
-	                       rc.depth_clear_enable && hw.GetDepthClearValue() != 0.0f &&
-	                           hw.GetDepthClearValue() != 1.0f,
-	                       "\t temporary: accepting non-default depth clear value %f\n",
-	                       hw.GetDepthClearValue());
+	KYTY_CHECK_LOG_COUNTED(
+	    p, log.depth_clear, 16u,
+	    rc.depth_clear_enable && hw.GetDepthClearValue() != 0.0f && hw.GetDepthClearValue() != 1.0f,
+	    "\t temporary: accepting non-default depth clear value %f\n", hw.GetDepthClearValue());
 	// EXIT_NOT_IMPLEMENTED(hw.GetStencilClearValue() != 0);
 }
 

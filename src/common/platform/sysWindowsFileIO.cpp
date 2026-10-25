@@ -207,6 +207,15 @@ sys_file_t* SysFileCreate(const std::filesystem::path& file_name) {
 	return ret;
 }
 
+sys_file_t* SysFileCreateExclusive(const std::filesystem::path& file_name) {
+	auto* ret = new sys_file_t;
+	ret->handle =
+	    CreateFileW(file_name.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_POSIX,
+	                nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+	ret->type = ret->handle == INVALID_HANDLE_VALUE ? SYS_FILE_ERROR : SYS_FILE_FILE;
+	return ret;
+}
+
 sys_file_t* SysFileOpenR(const std::filesystem::path& file_name, sys_file_cache_type_t cache_type) {
 	auto* ret = new sys_file_t;
 
@@ -338,7 +347,7 @@ bool SysFileGetInfo(const std::filesystem::path& name, bool* is_file, uint64_t* 
 }
 
 uint64_t SysFileSize(const std::filesystem::path& file_name) {
-	bool is_file;
+	bool     is_file;
 	uint64_t size = 0;
 	SysFileGetInfo(file_name, &is_file, &size);
 	return size;
@@ -409,13 +418,13 @@ bool SysFileIsError(sys_file_t& f) {
 }
 
 bool SysFileIsDirectoryExisting(const std::filesystem::path& path) {
-	bool is_file;
+	bool     is_file;
 	uint64_t size;
 	return SysFileGetInfo(path, &is_file, &size) && !is_file;
 }
 
 bool SysFileIsFileExisting(const std::filesystem::path& name) {
-	bool is_file;
+	bool     is_file;
 	uint64_t size;
 	return SysFileGetInfo(name, &is_file, &size) && is_file;
 }
@@ -541,7 +550,7 @@ void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entr
 	const auto pattern = path / L"*";
 
 	WIN32_FIND_DATAW data {};
-	HANDLE h = FindFirstFileW(pattern.c_str(), &data);
+	HANDLE           h = FindFirstFileW(pattern.c_str(), &data);
 
 	if (h == INVALID_HANDLE_VALUE) {
 		return;

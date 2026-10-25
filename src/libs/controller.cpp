@@ -20,24 +20,21 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 namespace Libs::Controller {
 
 LIB_NAME("Pad", "Pad");
 
-constexpr int PAD_ERROR_INVALID_ARG    = -2137915391; /* 0x80920001 */
-constexpr int PAD_ERROR_INVALID_HANDLE = -2137915389; /* 0x80920003 */
-
-constexpr int PAD_ERROR_ALREADY_OPENED  = -2137915388;
-constexpr int PAD_ERROR_NOT_INITIALIZED = -2137915387;
-constexpr int PAD_ERROR_NO_HANDLE       = -2137915384;
-constexpr int PAD_HANDLE                = 1;
+constexpr int PAD_HANDLE = 1;
+static_assert(PAD_HANDLE + Config::MAX_PLAYERS <= PAD_HANDLE_VR_LEFT);
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
@@ -152,7 +149,10 @@ public:
 	int   ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
 
 private:
-	static constexpr uint32_t STATES_MAX = 64;
+	static constexpr uint32_t             STATES_MAX         = 64;
+	uint64_t                              m_dropped_states   = 0;
+	uint64_t                              m_unreported_drops = 0;
+	std::chrono::steady_clock::time_point m_drops_reported {};
 	enum class PortState { Uninitialized, Closed, Open };
 
 	int                CheckPortHandleLocked(int handle) const;
@@ -232,9 +232,11 @@ static GameController* PlayerForDevice(int id) {
 }
 
 static GameController* PlayerForHandle(int handle) {
-	return handle >= PAD_HANDLE && handle < PAD_HANDLE + Config::MAX_PLAYERS
-	           ? g_players[handle - PAD_HANDLE].get()
-	           : nullptr;
+	if (handle >= PAD_HANDLE && handle < PAD_HANDLE + Config::MAX_PLAYERS) {
+		return g_players[handle - PAD_HANDLE].get();
+	}
+	// The Sense controller ports belong to the initial user.
+	return PadVrHand(handle) >= 0 ? g_players[0].get() : nullptr;
 }
 
 // A trigger's travel, 0..255. An L2/R2 that arrives as a button only (input remapping, pads or
@@ -584,8 +586,49 @@ void GameController::SetDevices(int active_id) {
 	m_state_effect       = {};
 }
 
+// KYTY_PAD_STATE_COALESCE=1 (default off): an input event that changes no button and no touch
+// (a stick or trigger step, a finger moving) updates the newest state while no read has taken it,
+// instead of adding a state. scePadRead returns the unread states oldest first; a moving stick
+// adds one per report, so more than 63 events between two reads (a frame hitch) pushed an unread
+// press, or a whole tap, out of the 64-state history. With it every press and release keeps a
+// state of its own and the newest state has the latest sticks. Unread states dropped are counted
+// and reported on stdout at most every 5 s, with the switch on or off.
+// Ported from chenxiao07/KytyPS5 167ed5886 (Stefano Scalfari).
+static bool PadStateCoalescing() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_STATE_COALESCE");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	return on;
+}
+
 void GameController::AddState() {
+	if (m_states_num != 0 && PadStateCoalescing()) {
+		const auto  newest = (m_first_state + m_states_num - 1) % STATES_MAX;
+		const auto& last   = m_states[newest];
+		if (!m_obtained[newest] && last.buttons == m_state.buttons &&
+		    last.touch[0].down == m_state.touch[0].down &&
+		    last.touch[0].id == m_state.touch[0].id &&
+		    last.touch[1].down == m_state.touch[1].down &&
+		    last.touch[1].id == m_state.touch[1].id) {
+			m_states[newest] = m_state;
+			return;
+		}
+	}
 	if (m_states_num >= STATES_MAX) {
+		if (!m_obtained[m_first_state]) {
+			++m_dropped_states;
+			++m_unreported_drops;
+			const auto now = std::chrono::steady_clock::now();
+			if (now - m_drops_reported >= std::chrono::seconds(5)) {
+				std::printf("Pad: %llu input states dropped unread (the 64-state history was full; "
+				            "%llu in all)\n",
+				            static_cast<unsigned long long>(m_unreported_drops),
+				            static_cast<unsigned long long>(m_dropped_states));
+				m_unreported_drops = 0;
+				m_drops_reported   = now;
+			}
+		}
 		m_states_num  = STATES_MAX - 1;
 		m_first_state = (m_first_state + 1) % STATES_MAX;
 	}
@@ -1419,8 +1462,16 @@ int PadCheckHandle(int handle) {
 	if (g_players[0] == nullptr) {
 		return PAD_ERROR_NOT_INITIALIZED;
 	}
+	if (PadVrHand(handle) >= 0) {
+		return PadVrCheckHandle(handle);
+	}
 	auto* player = PlayerForHandle(handle);
 	return player != nullptr ? player->CheckPortHandle(handle) : PAD_ERROR_INVALID_HANDLE;
+}
+
+// Handle 0 is never valid, so this only reports whether scePadInit has run.
+bool PadInitialized() {
+	return g_players[0] != nullptr && g_players[0]->CheckPortHandle(0) != PAD_ERROR_NOT_INITIALIZED;
 }
 
 int KYTY_SYSV_ABI PadInit() {
@@ -1440,6 +1491,9 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param) {
 	     "\t param   = 0x%016" PRIx64 "\n",
 	     user_id, type, index, reinterpret_cast<uint64_t>(param));
 
+	if (const int hand = PadVrPortHand(type); hand >= 0) {
+		return PadVrPort(user_id, hand, index, true);
+	}
 	const int player = user_id == 0xff && type == 16 ? 0 : Config::GetPlayerFromUserId(user_id);
 	return player >= 0 ? g_players[player]->OpenPort(user_id, type, index) : PAD_ERROR_INVALID_ARG;
 }
@@ -1452,6 +1506,9 @@ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
 	     "\t index   = %d\n",
 	     user_id, type, index);
 
+	if (const int hand = PadVrPortHand(type); hand >= 0) {
+		return PadVrPort(user_id, hand, index, false);
+	}
 	const int player = user_id == 0xff && type == 16 ? 0 : Config::GetPlayerFromUserId(user_id);
 	return player >= 0 ? g_players[player]->GetPortHandle(user_id, type, index)
 	                   : PAD_ERROR_NO_HANDLE;
@@ -1460,6 +1517,9 @@ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
 int KYTY_SYSV_ABI PadClose(int handle) {
 	PRINT_NAME();
 	LOGF("\t handle = %d\n", handle);
+	if (PadVrHand(handle) >= 0) {
+		return PadVrClose(handle);
+	}
 	auto* player = PlayerForHandle(handle);
 	if (player == nullptr) {
 		return PAD_ERROR_INVALID_HANDLE;

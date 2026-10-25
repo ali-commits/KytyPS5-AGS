@@ -581,6 +581,7 @@ private slots:
             file.setValue("perf_overlay_enabled", true);
             file.setValue("network_connected", true);
             file.setValue("support_zmask", true);
+            file.setValue("readback_tiled_images", true);
             file.setValue("trophy_duration_seconds", 8);
             file.endArray();
         }
@@ -614,6 +615,7 @@ private slots:
         QCOMPARE(Value(local_args, "--perf-overlay"), "true");
         QCOMPARE(Value(local_args, "--network-connected"), "true");
         QCOMPARE(Value(local_args,"--support-zmask"),"true");
+        QCOMPARE(Value(local_args,"--readback-tiled-images"),"true");
         QCOMPARE(Value(local_args,"--trophy-duration"),"8");
         QCOMPARE(Value(local_args, "--keyboard-player"), "3");
         QCOMPARE(Value(local_args, "--addcont-dir"), temp.filePath("Additional Content"));

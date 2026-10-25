@@ -5,15 +5,18 @@
 #include <bit>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
+uint32_t EmitIdentity(ValueEmitContext& ctx, uint32_t value);
+
 // Operand signatures distinguish SPIR-V IDs (uint32_t), raw literals/values
 // (IR::Value), and instructions whose metadata or operand loads must stay lazy.
 #define EMIT_NATIVE(name, opcode, type, ...)                                                       \
 	inline constexpr auto Emit##name = EmitNative<spv::opcode, IR::Type::type, __VA_ARGS__>;
-EMIT_NATIVE(BitCastU16F16, OpBitcast, U32, uint32_t)
+// U8, U16 and F16 are represented by U32 IDs; these IR conversions preserve the ID.
+inline constexpr auto EmitBitCastU16F16 = EmitIdentity;
 inline constexpr auto EmitBitCastF16U16 = EmitBitCastU16F16;
 inline constexpr auto EmitConvertU32U16 = EmitBitCastU16F16;
 inline constexpr auto EmitConvertU32U8  = EmitBitCastU16F16;
-inline constexpr auto EmitBitCastU32F32 = EmitBitCastU16F16;
+EMIT_NATIVE(BitCastU32F32, OpBitcast, U32, uint32_t)
 EMIT_NATIVE(BitCastF32U32, OpBitcast, F32, uint32_t)
 EMIT_NATIVE(BitCastU64F64, OpBitcast, U64, uint32_t)
 EMIT_NATIVE(BitCastF64U64, OpBitcast, F64, uint32_t)
@@ -207,7 +210,6 @@ uint32_t              EmitFPSin(EmitterState& state, uint32_t arg0);
 uint32_t              EmitFPCos(EmitterState& state, uint32_t arg0);
 #undef EMIT_NATIVE
 
-uint32_t              EmitIdentity(ValueEmitContext& ctx, uint32_t value);
 void                  EmitVoid(ValueEmitContext&);
 inline constexpr auto EmitReference    = EmitVoid;
 inline constexpr auto EmitReferenceU32 = EmitVoid;
@@ -243,6 +245,7 @@ uint32_t              EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst)
 uint32_t              EmitPermlane16U32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitGetAttribute(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitGetAttributeWithBary(ValueEmitContext& ctx, const IR::Inst& inst);
+uint32_t              EmitGetAttributeF16(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitGetInterpolationParameter(ValueEmitContext& ctx, const IR::Inst& inst);
 void                  EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitGetShaderBase(ValueEmitContext& ctx);

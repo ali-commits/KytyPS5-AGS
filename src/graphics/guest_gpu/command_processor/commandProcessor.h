@@ -143,7 +143,7 @@ public:
 	void            BufferWait();
 	// Early submit when the GPU ran out of submitted work (KYTY_IDLE_FLUSH_DRAWS). Call after
 	// recording a draw or dispatch, at a packet boundary.
-	void            MaybeFlushIdleGpu();
+	void MaybeFlushIdleGpu();
 	// Graphics queue: after KYTY_GFX_SLICE_DRAWS draws in a slice, end the slice after the
 	// current packet when another queue has runnable work. Call after recording a draw.
 	void            MaybeYieldSlice();
@@ -169,7 +169,8 @@ public:
 	                  uint32_t draw_initiator, bool indexed);
 	void DrawIndirectMulti(uint32_t data_offset, uint32_t max_count_or_count,
 	                       const volatile uint32_t* count_addr, uint32_t stride_in_bytes,
-	                       IndirectDrawRegisters registers, uint32_t draw_initiator, bool indexed);
+	                       IndirectDrawRegisters registers, uint32_t draw_initiator, bool indexed,
+	                       int32_t draw_index_sgpr = -1);
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest,
 	                        uint32_t eop_event_type, uint32_t cache_action, uint32_t event_index,
 	                        uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
@@ -247,7 +248,7 @@ public:
 	// ---- P3b, KYTY_CP_SEQ=1 (cpSequencer.h) ----
 	// GuestGpu, before any submission: the graphics processor's front moves to the sequencer's
 	// thread. Creates the draw-prep engine (its producer is then the sequencer).
-	void AttachSequencer(CpSeq::Sequencer* sequencer);
+	void               AttachSequencer(CpSeq::Sequencer* sequencer);
 	[[nodiscard]] bool Sequenced() const noexcept { return m_sequencer != nullptr; }
 	// Resolver (GPU thread): executes the ops of graphics submission `submission` (admission
 	// sequence) until its end (Complete), a suspended op, a slice yield, or an empty op ring
@@ -259,7 +260,7 @@ public:
 	void             BeginHandoff();
 	void             EndHandoff(uint64_t submission);
 	// Tests: back to Direct once the sequencer is stopped and its ops are executed.
-	void             DetachSequencer();
+	void DetachSequencer();
 
 private:
 	friend class CpSeq::Verifier;
@@ -296,8 +297,8 @@ private:
 	// Sequencer thread: the oldest of `ops` still pending, as a wake threshold (op + 1).
 	[[nodiscard]] uint64_t OldestPendingOp(std::deque<uint64_t>& ops) const;
 	// The guest range a CP-write op writes (empty when none), for the pending-write set.
-	[[nodiscard]] static bool CpWriteRange(CpSeq::OpKind kind, const void* payload,
-	                                       uint64_t& begin, uint64_t& end);
+	[[nodiscard]] static bool CpWriteRange(CpSeq::OpKind kind, const void* payload, uint64_t& begin,
+	                                       uint64_t& end);
 	// Resolver: register state for an op with a snapshot (bound around its execution).
 	[[nodiscard]] CpSeq::RegisterState* OpSnapshot(CpSeq::OpKind kind, const void* payload);
 
@@ -333,14 +334,14 @@ private:
 	void               StopPrefetch(Profiler::FrameEvent reason);
 	// The speculative front takes the sequencer's front state (not the constant RAM, which the
 	// thread-mode stream never changes and draws never read).
-	void CopyFrontStateForPrefetch(const CommandProcessor& from);
+	void          CopyFrontStateForPrefetch(const CommandProcessor& from);
 	CpSeq::Result ExecLockstepRead(const CpSeq::LockstepReadOp& op);
 	// The back: executes one op with today's code (the direct path's bodies).
 	CpSeq::Result ExecuteOp(CpSeq::OpKind kind, const void* payload, const void* data);
 	void          ExecDrawIndex(const CpSeq::DrawIndexOp& op);
 	void          ExecDrawAuto(const CpSeq::DrawAutoOp& op);
 	void          ExecDrawIndirect(const CpSeq::DrawIndirectOp& op);
-	void          ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op);
+	uint32_t      ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op);
 	void          ExecDispatchDirect(const CpSeq::DispatchDirectOp& op);
 	void          ExecDispatchIndirect(const CpSeq::DispatchIndirectOp& op);
 	void          ExecEndOfPipe(const CpSeq::EndOfPipeOp& op);
@@ -396,6 +397,8 @@ private:
 	[[nodiscard]] bool TryDeferLabel(void* dst, uint64_t value, uint32_t size, bool interrupt,
 	                                 uint32_t interrupt_context_id,
 	                                 uint32_t timestamp_slot = UINT32_MAX);
+	// A flip's label in completion/split label mode (KYTY_LABEL_SPLIT_FLIPS). False: write it now.
+	[[nodiscard]] bool DeferFlipLabel(void* dst, uint32_t value, bool interrupt);
 	// KYTY_EOP_TIMESTAMPS=gpu, at an end-of-pipe clock write (a fence: the draw-prep window is
 	// empty): publishes the completed timestamps, then records a query at this point. Returns its
 	// slot, or UINT32_MAX in record mode or without a free slot.
@@ -411,7 +414,7 @@ private:
 	// `counter`). Returns true when a deferred write took over raising the interrupt.
 	// timestamp: `value` is the reference clock (KYTY_EOP_TIMESTAMPS).
 	[[nodiscard]] bool WriteDroppedLabel(void* dst, uint64_t value, uint32_t size, bool interrupt,
-	                                     uint32_t interrupt_context_id,
+	                                     uint32_t             interrupt_context_id,
 	                                     Profiler::FrameEvent counter, bool timestamp = false);
 	// RELEASE_MEM with INT_SEL=4 and DATA_SEL != 0 (previously no data was written): writes the
 	// data (1: 32-bit, 2: 64-bit, 3: reference clock). Returns true when a deferred write took
@@ -421,18 +424,18 @@ private:
 
 	// The source's index state (index_base_addr, index_buffer_size, index_type_and_size) is the
 	// packet's (front state carried by the op).
-	[[nodiscard]] bool  TryDrawIndirectNative(DrawIndirectSource source);
-	void                ValidateIndirectSource(const DrawIndirectSource& source);
+	[[nodiscard]] bool     TryDrawIndirectNative(DrawIndirectSource source);
+	void                   ValidateIndirectSource(const DrawIndirectSource& source);
 	[[nodiscard]] uint32_t NumInstances();
 	// Draw-prep (drawPrep.h): the engine of the graphics processor, created on first use when
 	// KYTY_DRAW_PREP (or the S0 histogram) is enabled; null otherwise.
 	[[nodiscard]] DrawPrep::Engine* DrawPrepEngine();
-	[[nodiscard]] bool TrySubmitPreparedDraw(const DrawIndexArgs* index_args,
-	                                         const DrawAutoArgs*  auto_args);
-	void               DrainPreparedDraws();
-	void               NoteRepeatTraceDrawPacket();
-	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
-	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
+	[[nodiscard]] bool              TrySubmitPreparedDraw(const DrawIndexArgs* index_args,
+	                                                      const DrawAutoArgs*  auto_args);
+	void                            DrainPreparedDraws();
+	void                            NoteRepeatTraceDrawPacket();
+	CommandScheduler& GetScheduler() const { return m_renderer.GetCommandScheduler(); }
+	CommandBuffer&    CurrentBuffer() { return GetScheduler().Current(); }
 
 	RenderContext&   m_renderer;
 	HW::Context      m_ctx;
@@ -463,10 +466,10 @@ private:
 	// GPU count that may be zero, older sources remain candidates, newest last. Empty whenever
 	// m_num_instances is current; SetNumInstances and CPU-read indirect draws clear it.
 	struct PendingNumInstances {
-		uint64_t args_addr  = 0;
-		uint32_t stride     = 0;
-		uint32_t max_count  = 0;
-		uint64_t count_addr = 0;
+		uint64_t args_addr    = 0;
+		uint32_t stride       = 0;
+		uint32_t max_count    = 0;
+		uint64_t count_addr   = 0;
 		bool     has_expected = false; // KYTY_INDIRECT_VALIDATE: value read at the draw
 		uint32_t expected     = 0;
 	};
@@ -486,14 +489,14 @@ private:
 	uint32_t  m_deferred_eop_flushes        = 0;
 	uint32_t  m_packets_since_eop_request   = 0;
 	// A visibility-proxy end dump was recorded: defer the next end-of-pipe label (defer-label).
-	bool      m_defer_next_label            = false;
+	bool m_defer_next_label = false;
 	// The current WAIT_FLIP_DONE packet already flushed and suspended (retries skip the flush).
-	bool      m_flip_wait_suspended         = false;
+	bool m_flip_wait_suspended = false;
 	// MaybeFlushIdleGpu: recording tick being counted and its draws/dispatches so far.
-	uint64_t  m_idle_flush_tick             = 0;
-	uint32_t  m_idle_flush_draws            = 0;
+	uint64_t m_idle_flush_tick  = 0;
+	uint32_t m_idle_flush_draws = 0;
 	// Draws recorded in the current graphics slice (MaybeYieldSlice).
-	uint32_t  m_slice_draws                 = 0;
+	uint32_t m_slice_draws = 0;
 
 	struct DrawPrepDeleter {
 		void operator()(DrawPrep::Engine* engine) const noexcept;
@@ -505,9 +508,9 @@ private:
 	// ---- P3 (cpOps.h) ----
 	FrontMode m_front_mode = FrontMode::Direct;
 	// Inline: an op is being executed (ops never emit ops).
-	bool      m_executing  = false;
+	bool m_executing = false;
 	// Streams started on this processor (Pm4Execution::m_stream_id).
-	uint64_t  m_next_stream_id = 0;
+	uint64_t m_next_stream_id = 0;
 	struct OpStreamDeleter {
 		void operator()(CpSeq::OpStream* stream) const noexcept;
 	};
@@ -550,11 +553,11 @@ private:
 		void operator()(CommandProcessor* processor) const noexcept;
 	};
 	std::unique_ptr<CommandProcessor, PrefetchDeleter> m_prefetch;
-	CommandProcessor*         m_prefetch_owner = nullptr;
-	uint64_t                  m_prefetch_wait  = 0;
-	std::vector<PendingWrite> m_prefetch_writes;
-	bool                      m_prefetch_stop  = false;
-	uint32_t                  m_prefetch_draws = 0;
+	CommandProcessor*                                  m_prefetch_owner = nullptr;
+	uint64_t                                           m_prefetch_wait  = 0;
+	std::vector<PendingWrite>                          m_prefetch_writes;
+	bool                                               m_prefetch_stop  = false;
+	uint32_t                                           m_prefetch_draws = 0;
 	// Both fronts after a wait (P3c): the adoption key so far. skip_one: the wait packet itself
 	// completes first and is not counted.
 	bool     m_adopt_tracking = false;

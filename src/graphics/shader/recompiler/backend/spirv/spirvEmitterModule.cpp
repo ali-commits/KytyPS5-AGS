@@ -1,7 +1,6 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
-
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
 #include <algorithm>
 #include <bit>
@@ -24,7 +23,8 @@ void NoteMissingComputeDerivatives(uint64_t shader_hash) {
 		return;
 	}
 	std::fprintf(stderr,
-	             "Warning: compute shader 0x%016" PRIx64 " uses derivatives (IMAGE_GET_LOD), but the "
+	             "Warning: compute shader 0x%016" PRIx64
+	             " uses derivatives (IMAGE_GET_LOD), but the "
 	             "Vulkan device has neither VK_KHR_compute_shader_derivatives nor "
 	             "VK_NV_compute_shader_derivatives; the driver may reject its pipeline\n",
 	             shader_hash);
@@ -78,7 +78,7 @@ uint32_t TypeU64(EmitterState& state) {
 
 uint32_t TypeU32Pair(EmitterState& state) {
 	if (state.u32_pair_type == 0) {
-		const auto element = TypeU32(state);
+		const auto element  = TypeU32(state);
 		state.u32_pair_type = state.builder.Type(spv::OpTypeStruct, element, element);
 	}
 	return state.u32_pair_type;
@@ -93,7 +93,7 @@ uint32_t TypeI32(EmitterState& state) {
 
 uint32_t TypeI32Pair(EmitterState& state) {
 	if (state.i32_pair_type == 0) {
-		const auto element = TypeI32(state);
+		const auto element  = TypeI32(state);
 		state.i32_pair_type = state.builder.Type(spv::OpTypeStruct, element, element);
 	}
 	return state.i32_pair_type;
@@ -161,10 +161,9 @@ uint32_t TypeStorageBufferElement(EmitterState& state, uint32_t bits) {
 }
 
 uint32_t StorageRuntimeArrayType(EmitterState& state, uint32_t bits) {
-	return state.builder.DecoratedType(
-	    spv::OpTypeRuntimeArray,
-	    {{spv::OpDecorate, {spv::DecorationArrayStride, bits / 8u}}},
-	    TypeStorageBufferElement(state, bits));
+	return state.builder.DecoratedType(spv::OpTypeRuntimeArray,
+	                                   {{spv::OpDecorate, {spv::DecorationArrayStride, bits / 8u}}},
+	                                   TypeStorageBufferElement(state, bits));
 }
 
 uint32_t StorageBufferType(EmitterState& state, uint32_t bits = 32) {
@@ -179,7 +178,8 @@ uint32_t TypeStorageBufferPointer(EmitterState& state, uint32_t bits) {
 }
 
 uint32_t TypeStorageBufferElementPointer(EmitterState& state, uint32_t bits) {
-	return TypePointer(state, spv::StorageClassStorageBuffer, TypeStorageBufferElement(state, bits));
+	return TypePointer(state, spv::StorageClassStorageBuffer,
+	                   TypeStorageBufferElement(state, bits));
 }
 
 uint32_t TypePhysicalU32Pointer(EmitterState& state) {
@@ -248,7 +248,11 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 }
 
 void DefineDescriptors(EmitterState& state) {
-	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh) {
+	const bool user_clip_planes =
+	    state.program.stage != ShaderType::Pixel && state.program.stage != ShaderType::Compute &&
+	    state.input_info.vertex != nullptr && state.input_info.vertex->user_clip_planes != 0;
+	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
+	    user_clip_planes) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
 		    TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);
@@ -295,26 +299,47 @@ void DefineDescriptors(EmitterState& state) {
 				const bool read_only = GetCodegenOptions().readonly_buffers &&
 				                       !state.requirements.buffer_writes &&
 				                       !state.requirements.coherent_buffers;
-				for (const auto variable: {state.storage_buffer_variable, state.storage_buffer_u8_variable,
-				                           state.storage_buffer_u16_variable, state.storage_buffer_u64_variable}) {
+				for (const auto variable:
+				     {state.storage_buffer_variable, state.storage_buffer_u8_variable,
+				      state.storage_buffer_u16_variable, state.storage_buffer_u64_variable}) {
 					if (variable == 0) continue;
-					if (state.storage_buffer_u8_variable != 0 || state.storage_buffer_u16_variable != 0 ||
+					if (state.storage_buffer_u8_variable != 0 ||
+					    state.storage_buffer_u16_variable != 0 ||
 					    state.storage_buffer_u64_variable != 0) {
-						state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
+						state.builder.AddAnnotation(spv::OpDecorate, variable,
+						                            spv::DecorationAliased);
 					}
 					if (read_only) {
-						state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationNonWritable);
+						state.builder.AddAnnotation(spv::OpDecorate, variable,
+						                            spv::DecorationNonWritable);
 					}
 					// RDNA2 stores publish to L2 even without GLC; every alias of the buffer
 					// must participate in visibility for cache-bypassing polling loads.
 					if (state.requirements.coherent_buffers) {
-						state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationCoherent);
+						state.builder.AddAnnotation(spv::OpDecorate, variable,
+						                            spv::DecorationCoherent);
 					}
 				}
 				break;
 			}
+			case IR::DescriptorBindingKind::UniformBuffers: {
+				// std430-style dword array (uniformBufferStandardLayout) of the whole binding
+				// range.
+				const auto array = state.builder.DecoratedType(
+				    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, 4u}}},
+				    TypeU32(state), ConstantU32(state, IR::UniformBufferBytes / 4u));
+				const auto block = state.builder.DecoratedType(
+				    spv::OpTypeStruct,
+				    {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+				     {spv::OpDecorate, {spv::DecorationBlock}}},
+				    array);
+				state.uniform_buffer_variable =
+				    Define(ArrayType(block), "uniform_buffers", spv::StorageClassUniform);
+				break;
+			}
 			case IR::DescriptorBindingKind::BdaPagetable:
-				state.bda_pagetable_variable = Define(StorageBufferType(state, 64), "bda_pagetable");
+				state.bda_pagetable_variable =
+				    Define(StorageBufferType(state, 64), "bda_pagetable");
 				break;
 			case IR::DescriptorBindingKind::FaultBuffer:
 				state.fault_buffer_variable = Define(StorageBufferType(state), "fault_buffer");
@@ -338,12 +363,15 @@ void DefineDescriptors(EmitterState& state) {
 				break;
 			case IR::DescriptorBindingKind::SharedMemory:
 				state.lds_variable = Define(StorageBufferType(state), "lds_dwords");
-				state.builder.AddAnnotation(spv::OpDecorate, state.lds_variable, spv::DecorationCoherent);
+				state.builder.AddAnnotation(spv::OpDecorate, state.lds_variable,
+				                            spv::DecorationCoherent);
 				if (state.requirements.shared_int64_atomics) {
 					state.lds_u64_variable = Define(StorageBufferType(state, 64), "lds_qwords");
-					state.builder.AddAnnotation(spv::OpDecorate, state.lds_u64_variable, spv::DecorationCoherent);
+					state.builder.AddAnnotation(spv::OpDecorate, state.lds_u64_variable,
+					                            spv::DecorationCoherent);
 					for (const auto variable: {state.lds_variable, state.lds_u64_variable}) {
-						state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
+						state.builder.AddAnnotation(spv::OpDecorate, variable,
+						                            spv::DecorationAliased);
 					}
 				}
 				break;
@@ -398,7 +426,7 @@ uint32_t ConstantU64(EmitterState& state, uint64_t value) {
 
 uint32_t ConstantU32CompositeZero(EmitterState& state, uint32_t components) {
 	EXIT_IF(components < 1u || components > 4u);
-	const auto            zero = ConstantU32(state, 0);
+	const auto zero = ConstantU32(state, 0);
 	if (components == 1u) return zero;
 	std::vector<uint32_t> values(components, zero);
 	return state.builder.Constant(spv::OpConstantComposite, TypeU32Composite(state, components),
@@ -526,8 +554,8 @@ IR::InterpolationMode InputInterpolation(const EmitterState& state, uint32_t loc
 			if (mode == IR::InterpolationMode::Unknown) {
 				return IR::InterpolationMode::Unknown;
 			}
-			any = true;
-			(IsLinearMode(mode) ? linear : perspective) = true;
+			any                                                                      = true;
+			(IsLinearMode(mode) ? linear : perspective)                              = true;
 			(IsCentroidMode(mode) ? centroid : IsSampleMode(mode) ? sample : center) = true;
 		}
 	}
@@ -535,7 +563,8 @@ IR::InterpolationMode InputInterpolation(const EmitterState& state, uint32_t loc
 		return IR::InterpolationMode::Unknown;
 	}
 	if (sample) {
-		return linear ? IR::InterpolationMode::LinearSample : IR::InterpolationMode::PerspectiveSample;
+		return linear ? IR::InterpolationMode::LinearSample
+		              : IR::InterpolationMode::PerspectiveSample;
 	}
 	if (centroid && !center) {
 		return linear ? IR::InterpolationMode::LinearCentroid
@@ -549,15 +578,14 @@ void DefineInputs(EmitterState& state) {
 	for (const auto& input: state.program.info.inputs) {
 		state.inputs.push_back({input});
 	}
-	const auto add_builtin = [&](IR::StageInputKind kind, uint32_t components,
-	                             const char* name) {
-		if (std::ranges::none_of(state.inputs, [kind](const InputBinding& input) {
-			    return input.kind == kind;
-		    })) {
+	const auto add_builtin = [&](IR::StageInputKind kind, uint32_t components, const char* name) {
+		if (std::ranges::none_of(
+		        state.inputs, [kind](const InputBinding& input) { return input.kind == kind; })) {
 			state.inputs.push_back({{kind, 0, components, name}});
 		}
 	};
-	if (IR::FindBinding(state.program.bindings, IR::DescriptorBindingKind::SharedMemory) != nullptr) {
+	if (IR::FindBinding(state.program.bindings, IR::DescriptorBindingKind::SharedMemory) !=
+	    nullptr) {
 		add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		add_builtin(IR::StageInputKind::NumWorkgroups, 3, "gl_NumWorkGroups");
 	}
@@ -568,6 +596,9 @@ void DefineInputs(EmitterState& state) {
 		    })) {
 			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		}
+	} else if (state.split_wave) {
+		// KYTY_WAVE64_WARPS uses the workgroup index as the guest lane and exchange slot.
+		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 	}
 	for (auto& input: state.inputs) {
 		if (state.program.stage == ShaderType::Pixel &&
@@ -663,7 +694,7 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.requirements.subgroup_local_invocation_id) {
+	if (state.requirements.subgroup_local_invocation_id || state.split_wave) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -674,8 +705,8 @@ void DefineInputs(EmitterState& state) {
 		}
 	}
 	if (state.requirements.helper_invocation) {
-		const auto variable = DefineInterfaceVariable(state, TypeBool(state),
-		                                              spv::StorageClassInput, "gl_HelperInvocation");
+		const auto variable = DefineInterfaceVariable(
+		    state, TypeBool(state), spv::StorageClassInput, "gl_HelperInvocation");
 		state.helper_invocation_variable = variable;
 		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
 		                            spv::BuiltInHelperInvocation);
@@ -694,6 +725,21 @@ void DefineOutputs(EmitterState& state) {
 			cull_distance_count = std::max(cull_distance_count, output.index + 1);
 		}
 	}
+	const bool has_position = std::ranges::any_of(state.outputs, [](const OutputBinding& output) {
+		return output.kind == IR::StageOutputKind::Position;
+	});
+	if (has_position && state.program.stage != ShaderType::Pixel &&
+	    state.input_info.vertex != nullptr && state.input_info.vertex->user_clip_planes != 0) {
+		// Upstream feed075a9: PipelineCache rejects UCP_ENA with shader clip or cull distances.
+		EXIT_IF(clip_distance_count + cull_distance_count != 0);
+		state.user_clip_planes = state.input_info.vertex->user_clip_planes;
+		for (uint32_t plane = 0; plane < 32u; plane++) {
+			if ((state.user_clip_planes & (1u << plane)) != 0) {
+				state.outputs.push_back({{IR::StageOutputKind::ClipDistance, clip_distance_count++,
+				                          0, "gl_ClipDistance"}});
+			}
+		}
+	}
 	if (state.program.stage == ShaderType::Mesh) {
 		DefineMeshOutputs(state, clip_distance_count, cull_distance_count);
 		return;
@@ -701,9 +747,11 @@ void DefineOutputs(EmitterState& state) {
 	// KYTY_CLIP_GUARD=0: no plane reserved (an AMD test 3 diagnostic).
 	if (state.program.stage == ShaderType::Vertex && GetCodegenOptions().clip_guard &&
 	    clip_distance_count + cull_distance_count < 8u &&
-	    std::ranges::any_of(state.outputs, [](const OutputBinding& output) {
-		    return output.kind == IR::StageOutputKind::Position;
-	    })) {
+	    std::ranges::any_of(
+	        state.outputs,
+	        [](const OutputBinding& output) {
+		        return output.kind == IR::StageOutputKind::Position;
+	        })) {
 		// Reserve one plane for the enabled PA_CL_CLIP_CNTL clipping-error cull.
 		state.invalid_position_clip_distance = clip_distance_count++;
 		state.outputs.push_back({{IR::StageOutputKind::ClipDistance,
@@ -795,6 +843,14 @@ void DefineModule(EmitterState& state) {
 	DefineOutputs(state);
 	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);
+	if (state.split_wave) {
+		// Two alternating halves of one dword per guest lane (ExchangeWaveValue).
+		state.wave_exchange_variable = state.builder.DefineGlobalVariable(
+		    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 128),
+		    spv::StorageClassWorkgroup);
+		state.builder.AddName(state.wave_exchange_variable, "wave_exchange");
+		state.wave_exchange_parity = state.builder.AllocateId();
+	}
 	if (state.requirements.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
 	}
@@ -868,15 +924,15 @@ void DefineModule(EmitterState& state) {
 	if (state.requirements.image_gather_extended) {
 		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
 	}
-	if (state.lane_count == 2 || state.requirements.subgroup_barrier ||
+	if (state.lane_count == 2 || state.split_wave || state.requirements.subgroup_barrier ||
 	    state.requirements.subgroup_ballot || state.requirements.subgroup_shuffle ||
 	    state.requirements.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.requirements.subgroup_ballot) {
+	if (state.lane_count == 2 || state.split_wave || state.requirements.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}
-	if (state.requirements.subgroup_shuffle) {
+	if (state.requirements.subgroup_shuffle || state.split_wave) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
 	}
 	if (state.requirements.subgroup_arithmetic) {
@@ -919,8 +975,8 @@ void DefineModule(EmitterState& state) {
 	// FLOAT_MODE 0xC0 flushes f32 denormals (inputs and outputs) and keeps f16/f64 ones.
 	// Declare only what the device supports; otherwise host defaults stay in effect.
 	const auto float_controls = GetHostFloatControls();
-	const auto denorm_mode = [&](spv::ExecutionMode mode, spv::Capability capability,
-	                             uint32_t width) {
+	const auto denorm_mode    = [&](spv::ExecutionMode mode, spv::Capability capability,
+	                                uint32_t width) {
 		state.builder.RequireCapability(capability);
 		state.builder.AddExecutionMode(state.main_func, mode, width);
 	};
@@ -947,12 +1003,12 @@ void DefineModule(EmitterState& state) {
 		// state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeDenormPreserve, 64u);
 	}
 	if (const auto* cs = ShaderWorkgroupInput(state.program.stage, state.input_info)) {
-		uint32_t    local_x = state.requirements.compute_derivatives ? 2u : 1u;
-		uint32_t    local_y = state.requirements.compute_derivatives ? 2u : 1u;
-		uint32_t    local_z = 1u;
-		local_x             = cs->threads_num[0] != 0u ? cs->threads_num[0] : local_x;
-		local_y             = cs->threads_num[1] != 0u ? cs->threads_num[1] : local_y;
-		local_z             = cs->threads_num[2] != 0u ? cs->threads_num[2] : local_z;
+		uint32_t local_x = state.requirements.compute_derivatives ? 2u : 1u;
+		uint32_t local_y = state.requirements.compute_derivatives ? 2u : 1u;
+		uint32_t local_z = 1u;
+		local_x          = cs->threads_num[0] != 0u ? cs->threads_num[0] : local_x;
+		local_y          = cs->threads_num[1] != 0u ? cs->threads_num[1] : local_y;
+		local_z          = cs->threads_num[2] != 0u ? cs->threads_num[2] : local_z;
 		if (state.lane_count == 2) {
 			local_x = ((local_x * local_y * local_z + 63u) / 64u) * 32u;
 			local_y = local_z = 1u;

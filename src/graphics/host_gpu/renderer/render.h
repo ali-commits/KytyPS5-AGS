@@ -75,6 +75,9 @@ enum class DrawOffsetSource : uint8_t {
 	IndirectArgs,
 };
 
+// KYTY_ORDERED_APPEND (renderCompute.cpp).
+[[nodiscard]] bool OrderedAppendSplitEnabled();
+
 struct DrawIndexArgs {
 	uint32_t         index_count                = 0;
 	const void*      index_addr                 = nullptr;
@@ -310,7 +313,7 @@ public:
 	[[nodiscard]] uint32_t OcclusionControl() const { return m_occlusion_control; }
 	// Image barriers queued for the next flush point (inspection).
 	[[nodiscard]] size_t PendingImageBarriers() const { return m_pending.images.size(); }
-	void BindPipeline(vk::PipelineBindPoint point, vk::Pipeline pipeline);
+	void                 BindPipeline(vk::PipelineBindPoint point, vk::Pipeline pipeline);
 	// The pipeline last bound through BindPipeline since Begin (null after Begin).
 	[[nodiscard]] vk::Pipeline BoundPipeline(vk::PipelineBindPoint point) const {
 		return m_bound_pipelines[point == vk::PipelineBindPoint::eCompute ? 1u : 0u];
@@ -329,7 +332,7 @@ public:
 	int32_t PushDescriptors(vk::PipelineBindPoint point, vk::PipelineLayout layout, uint32_t set,
 	                        uint32_t count, const vk::WriteDescriptorSet* writes,
 	                        bool known_miss = false);
-	void InvalidateDescriptors(vk::PipelineBindPoint point);
+	void    InvalidateDescriptors(vk::PipelineBindPoint point);
 	// Advances whenever a descriptor command is recorded for the bind point (a push or a set bind),
 	// its state is forgotten, or the command buffer begins. Unchanged since a push: the descriptors
 	// it pushed are still in effect (descriptor commands go through this class only, see
@@ -390,7 +393,7 @@ private:
 		// Queued upload copies (RequestUploadCopy), recorded first when the batch is flushed.
 		std::vector<PendingUpload>  uploads;
 		std::vector<vk::BufferCopy> upload_regions;
-		uint32_t                              origins = 0; // bit per BarrierOrigin
+		uint32_t                    origins = 0; // bit per BarrierOrigin
 
 		[[nodiscard]] bool Empty() const {
 			return !has_memory && images.empty() && buffers.empty() && uploads.empty();
@@ -417,31 +420,31 @@ private:
 	void               NoteDrawRecorded() const;
 	void               ResetBarrierState() const;
 
-	RenderContext&      m_context;
-	GraphicContext&     m_graphics;
-	vk::CommandBuffer   m_buffer          = nullptr;
-	uint32_t            m_debug_op        = 0;
-	uint64_t            m_debug_submit_id = 0;
-	uint32_t            m_debug_arg0      = 0;
-	uint32_t            m_debug_arg1      = 0;
-	uint32_t            m_debug_arg2      = 0;
-	uint32_t            m_debug_arg3      = 0;
-	uint64_t            m_debug_arg4      = 0;
-	mutable RenderState m_render_state;
-	mutable bool        m_rendering   = false;
-	mutable uint64_t    m_rendering_serial  = 0;
-	mutable uint32_t    m_occlusion_control = 0;
-	HW::Context*        m_registers   = nullptr;
-	HW::UserConfig*     m_user_config = nullptr;
-	HW::Shader*         m_shaders     = nullptr;
+	RenderContext&              m_context;
+	GraphicContext&             m_graphics;
+	vk::CommandBuffer           m_buffer          = nullptr;
+	uint32_t                    m_debug_op        = 0;
+	uint64_t                    m_debug_submit_id = 0;
+	uint32_t                    m_debug_arg0      = 0;
+	uint32_t                    m_debug_arg1      = 0;
+	uint32_t                    m_debug_arg2      = 0;
+	uint32_t                    m_debug_arg3      = 0;
+	uint64_t                    m_debug_arg4      = 0;
+	mutable RenderState         m_render_state;
+	mutable bool                m_rendering         = false;
+	mutable uint64_t            m_rendering_serial  = 0;
+	mutable uint32_t            m_occlusion_control = 0;
+	HW::Context*                m_registers         = nullptr;
+	HW::UserConfig*             m_user_config       = nullptr;
+	HW::Shader*                 m_shaders           = nullptr;
 	std::array<vk::Pipeline, 2> m_bound_pipelines {};
 	struct DescriptorState {
 		vk::PipelineLayout layout = nullptr;
 		// Non-null: set 0 is this bound descriptor set (the push contents below are unused).
-		vk::DescriptorSet bound_set = nullptr;
-		std::vector<vk::WriteDescriptorSet> writes;
+		vk::DescriptorSet                     bound_set = nullptr;
+		std::vector<vk::WriteDescriptorSet>   writes;
 		std::vector<vk::DescriptorBufferInfo> buffers;
-		std::vector<vk::DescriptorImageInfo> images;
+		std::vector<vk::DescriptorImageInfo>  images;
 	};
 	std::array<DescriptorState, 2> m_descriptor_states;
 	std::array<uint64_t, 2>        m_descriptor_epochs {};
@@ -601,7 +604,8 @@ public:
 		}
 	}
 	// vkUpdateDescriptorSets of `set` (every write's dstSet): a device call, made at once natively,
-	// or by the recorder thread before the packets encoded after this one (a later bind of the set).
+	// or by the recorder thread before the packets encoded after this one (a later bind of the
+	// set).
 	void updateDescriptorSets(vk::Device device, vk::DescriptorSet set, uint32_t count,
 	                          const vk::WriteDescriptorSet* writes) const {
 		if (m_owner->Encoding()) {
@@ -863,6 +867,14 @@ public:
 			m_owner->m_buffer.dispatch(x, y, z);
 		}
 	}
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y,
+	                  uint32_t z) const {
+		if (m_owner->Encoding()) {
+			m_owner->m_encoder->dispatchBase(bx, by, bz, x, y, z);
+		} else {
+			m_owner->m_buffer.dispatchBase(bx, by, bz, x, y, z);
+		}
+	}
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {
 		if (m_owner->Encoding()) {
 			m_owner->m_encoder->dispatchIndirect(buffer, offset);
@@ -909,13 +921,24 @@ public:
 			m_owner->m_buffer.writeTimestamp2(stage, pool, query);
 		}
 	}
-	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
-	                          uint32_t marker) const {
+	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
+	                          vk::DeviceSize offset, uint32_t marker) const {
 		if (m_owner->Encoding()) {
 			m_owner->m_encoder->writeBufferMarkerAMD(stage, buffer, offset, marker);
 		} else {
 			m_owner->m_buffer.writeBufferMarkerAMD(stage, buffer, offset, marker);
 		}
+	}
+	// KYTY_STREAM_COPY_DEFER: encodes a host copy of guest bytes for the recorder thread (in stream
+	// order, before the next Submit). False (nothing encoded) outside recorder encoding (recorder
+	// off or a direct window open): the caller then copies itself. Not a command: construct the
+	// sink directly (CommandSink(buffer)); Sink() would also flush the barrier batch.
+	[[nodiscard]] bool hostCopy(void* destination, uint64_t source, uint64_t size) const {
+		if (!m_owner->Encoding()) {
+			return false;
+		}
+		m_owner->m_encoder->hostCopy(destination, source, size);
+		return true;
 	}
 
 private:
@@ -931,29 +954,29 @@ private:
 struct GraphicsDynamicStateShadow {
 	static constexpr uint32_t MaxViewports = 16;
 
-	vk::CommandBuffer command  = nullptr;
-	vk::Pipeline      pipeline = nullptr;
-	bool              valid    = false;
-	uint32_t          viewport_count = 0;
-	std::array<vk::Viewport, MaxViewports> viewports {};
-	std::array<vk::Rect2D, MaxViewports>   scissors {};
-	float                line_width = 0.0f;
-	std::array<float, 4> blend_constants {};
-	vk::Bool32           depth_test_enable  = VK_FALSE;
-	vk::Bool32           depth_write_enable = VK_FALSE;
-	vk::CompareOp        depth_compare_op   = vk::CompareOp::eNever;
-	vk::Bool32           depth_bias_enable  = VK_FALSE;
-	bool                 depth_bias_valid   = false;
-	std::array<float, 3> depth_bias {};
-	vk::Bool32           stencil_test_enable = VK_FALSE;
-	bool                 stencil_valid       = false;
-	vk::StencilOpState   stencil_front {};
-	vk::StencilOpState   stencil_back {};
-	bool                 color_write_valid = false;
-	uint32_t             color_write_count = 0;
+	vk::CommandBuffer                                    command        = nullptr;
+	vk::Pipeline                                         pipeline       = nullptr;
+	bool                                                 valid          = false;
+	uint32_t                                             viewport_count = 0;
+	std::array<vk::Viewport, MaxViewports>               viewports {};
+	std::array<vk::Rect2D, MaxViewports>                 scissors {};
+	float                                                line_width = 0.0f;
+	std::array<float, 4>                                 blend_constants {};
+	vk::Bool32                                           depth_test_enable  = VK_FALSE;
+	vk::Bool32                                           depth_write_enable = VK_FALSE;
+	vk::CompareOp                                        depth_compare_op   = vk::CompareOp::eNever;
+	vk::Bool32                                           depth_bias_enable  = VK_FALSE;
+	bool                                                 depth_bias_valid   = false;
+	std::array<float, 3>                                 depth_bias {};
+	vk::Bool32                                           stencil_test_enable = VK_FALSE;
+	bool                                                 stencil_valid       = false;
+	vk::StencilOpState                                   stencil_front {};
+	vk::StencilOpState                                   stencil_back {};
+	bool                                                 color_write_valid = false;
+	uint32_t                                             color_write_count = 0;
 	std::array<vk::Bool32, RENDER_COLOR_ATTACHMENTS_MAX> color_write {};
-	bool                 feedback_valid = false;
-	vk::ImageAspectFlags feedback;
+	bool                                                 feedback_valid = false;
+	vk::ImageAspectFlags                                 feedback;
 	// KYTY_PIPELINE_DYNAMIC_STATE (PipelineDynamicRasterStateEnabled).
 	vk::CullModeFlags    cull_mode;
 	vk::FrontFace        front_face               = vk::FrontFace::eCounterClockwise;
@@ -961,6 +984,10 @@ struct GraphicsDynamicStateShadow {
 	bool                 depth_bounds_valid       = false;
 	std::array<float, 2> depth_bounds {};
 };
+
+// KYTY_REBIND_AFTER_JOIN (descriptors.cpp).
+[[nodiscard]] bool RebindAfterJoinEnabled();
+void               NoteRebindAfterJoin(const char* kind, const char* name);
 
 class RenderExecutor {
 public:
@@ -978,11 +1005,11 @@ public:
 	// previous draw's, kept as they are; only the per-draw data is prepared.
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared,
 	                     DrawPrep::StagePlan* plan = nullptr, bool keep_images = false);
-	void                           FindBuffers(PreparedBindings& bindings);
+	void FindBuffers(PreparedBindings& bindings);
 	// Each stage's FindBuffers in order (upstream's form of the call).
-	void                           FindBuffers(std::span<PreparedBindings* const> stages);
-	void                           RebindBuffers(PreparedBindings& bindings);
-	void                           RebindImages(PreparedBindings& bindings);
+	void FindBuffers(std::span<PreparedBindings* const> stages);
+	void RebindBuffers(PreparedBindings& bindings);
+	void RebindImages(PreparedBindings& bindings);
 	// keep_images (KYTY_DRAW_RUN continuation): no image transition is recorded; the images are in
 	// the states the previous draw left them in (DrawRunImagesUnchanged).
 	void CommitBindings(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point,
@@ -1002,11 +1029,13 @@ public:
 		return m_binding_plan;
 	}
 	void ActivateBindingPlan() noexcept { m_binding_plan_active = m_binding_plan != nullptr; }
-	// KYTY_DRAW_RUN: RefreshShaders accepted the committed draw's preparation (the structure key the
-	// preparing thread computed describes the draw).
+	// KYTY_DRAW_RUN: RefreshShaders accepted the committed draw's preparation (the structure key
+	// the preparing thread computed describes the draw).
 	void NotePreparedValidated() noexcept { m_prepared_validated = true; }
 	// KYTY_DRAW_PREP_BINDINGS texturememo: the memo draw-prep threads read hints from (FindHint).
-	[[nodiscard]] const TextureBindingMemo& GetTextureMemo() const noexcept { return m_texture_memo; }
+	[[nodiscard]] const TextureBindingMemo& GetTextureMemo() const noexcept {
+		return m_texture_memo;
+	}
 
 private:
 	void DrawIndex(uint64_t submit_id, CommandBuffer& buffer, const DrawIndexArgs& args);
@@ -1032,7 +1061,7 @@ private:
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 	// ResolveTexture's full resolution (no memo lookup); `memo` records the answer.
 	void ResolveTextureFull(const ShaderRecompiler::IR::ImageResource& resource,
-	                        const ShaderTextureResource& descriptor,
+	                        const ShaderTextureResource&               descriptor,
 	                        const TextureBindingMemo::Key& memo_key, uint64_t hash, bool memo,
 	                        TextureBinding& binding);
 	// KYTY_DRAW_SEQUENCE_FAST (textures): PrepareBindings' texture resolution of a stage whose
@@ -1041,16 +1070,17 @@ private:
 	// performs what those resolutions would do (their bookkeeping, BindImage) and returns true.
 	[[nodiscard]] bool RepeatStageTextures(const ShaderRecompiler::IR::CompiledShaderInfo& program,
 	                                       const ShaderRecompiler::IR::ResourceSnapshot&   snapshot,
-	                                       PreparedBindings&                               prepared);
+	                                       PreparedBindings& prepared);
 	// KYTY_XFRAME_REUSE (drawPrep/xframeReuse.h), RepeatStageTextures for new words: moves the set
 	// in `prepared` (the one that fell out of the stage's history; none: null program) into the
 	// cross-frame store and, when the store holds a set of `program` with these T# words, makes it
 	// the current set (true; not yet revalidated). Otherwise `prepared` holds storage vectors.
 	[[nodiscard]] bool TakeStoredTextureSet(const ShaderRecompiler::IR::CompiledShaderInfo& program,
-	                                        const ShaderRecompiler::IR::ResourceSnapshot&   snapshot,
-	                                        PreparedBindings&                               prepared);
-	using XFrameTextureSets = TextureSetCache<ShaderRecompiler::IR::CompiledShaderInfo,
-	                                          ShaderRecompiler::IR::DescriptorValue, TextureBinding>;
+	                                        const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+	                                        PreparedBindings&                             prepared);
+	using XFrameTextureSets =
+	    TextureSetCache<ShaderRecompiler::IR::CompiledShaderInfo,
+	                    ShaderRecompiler::IR::DescriptorValue, TextureBinding>;
 	std::unique_ptr<XFrameTextureSets> m_xframe_sets;
 	[[nodiscard]] vk::Sampler NativeSampler(const ShaderRecompiler::IR::CompiledShaderInfo& program,
 	                                        uint32_t                                        index,
@@ -1064,9 +1094,8 @@ private:
 	                              bool ignore_target_mask = false, bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
-	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer,
-	                                          const DrawCallInfo& draw,
-	                                          uint32_t            render_target_slice_offset,
+	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
@@ -1079,15 +1108,15 @@ private:
 	                                               std::span<PreparedBindings* const> stages = {},
 	                                               const vk::Rect2D* written = nullptr);
 	[[nodiscard]] bool        ResolveColorTargets(CommandBuffer& buffer,
-	                                              uint32_t render_target_slice_offset);
+	                                              uint32_t       render_target_slice_offset);
 	// A fast-clear-eliminate / FMASK or DCC decompress draw (CB_COLOR_CONTROL.MODE): consumed
 	// without drawing. KYTY_CB_METADATA_MATERIALIZE=1 first materializes the target's tracked DCC
 	// fast clear (renderDraw.cpp).
-	[[nodiscard]] bool        ConsumeMetadataColorOperation(CommandBuffer& buffer,
-	                                                        uint32_t render_target_slice_offset);
-	void                      BindImage(ImageId id, bool storage);
-	void                      BindRenderTarget(ImageId id);
-	void                      ResetBindings();
+	[[nodiscard]] bool ConsumeMetadataColorOperation(CommandBuffer& buffer,
+	                                                 uint32_t       render_target_slice_offset);
+	void               BindImage(ImageId id, bool storage);
+	void               BindRenderTarget(ImageId id);
+	void               ResetBindings();
 	// `site` names the caller's stage and table kind; it only selects the entry checked first.
 	// *fresh (optional): set when the returned range was allocated by this call (no earlier upload
 	// of the current recording had these bytes), i.e. no descriptor written before refers to it.
@@ -1097,27 +1126,26 @@ private:
 	// fresh: the writes refer to an upload made for this command (KYTY_SET_REUSE_FRESH).
 	void CommitDescriptorSet(CommandBuffer& buffer, vk::PipelineBindPoint point,
 	                         const PipelineCache::Pipeline& pipeline, bool fresh);
-	void UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
-	                             const CommandBuffer&          buffer);
+	void UpdateComputeMetaClears(const ShaderComputeInputInfo& input, const CommandBuffer& buffer);
 	[[nodiscard]] bool TryConsumeComputeFill(const ShaderComputeInputInfo& input,
-	                                        CommandBuffer& command, uint32_t group_x,
-	                                        uint32_t group_y, uint32_t group_z, uint32_t mode);
+	                                         CommandBuffer& command, uint32_t group_x,
+	                                         uint32_t group_y, uint32_t group_z, uint32_t mode);
 
-	// KYTY_LDS_DEVICE_BUFFER: binds the LDS regions of a compute program whose LDS lives in a device
-	// buffer (a SharedMemory binding): one region per workgroup of `groups` (null: an indirect
-	// dispatch, whose count the CPU does not know; it gets the buffer as it is, at least
+	// KYTY_LDS_DEVICE_BUFFER: binds the LDS regions of a compute program whose LDS lives in a
+	// device buffer (a SharedMemory binding): one region per workgroup of `groups` (null: an
+	// indirect dispatch, whose count the CPU does not know; it gets the buffer as it is, at least
 	// LdsIndirectBytes). Returns false when the program has no such binding.
 	bool BindComputeLds(const ShaderComputeInputInfo& input, PreparedBindings& bindings,
 	                    const uint32_t* groups);
 
-	RenderContext&                        m_context;
-	GraphicsBindings                     m_graphics_bindings;
-	PreparedBindings                     m_compute_bindings;
+	RenderContext&   m_context;
+	GraphicsBindings m_graphics_bindings;
+	PreparedBindings m_compute_bindings;
 	// Reused by every draw (all draws hold the render mutex); DrawRenderState::Reset restores
 	// only what the previous draw changed. Owns the draw's per-stage program preparation.
-	std::unique_ptr<DrawRenderState>      m_draw_state;
+	std::unique_ptr<DrawRenderState> m_draw_state;
 	// Program preparation output of the current dispatch; its stage runtime points here.
-	PipelineCache::StagePrep              m_compute_prep;
+	PipelineCache::StagePrep m_compute_prep;
 	// KYTY_LDS_DEVICE_BUFFER: device-local buffer of compute LDS regions (BindComputeLds), grown
 	// on demand; a replaced one is released once the tick that used it has completed.
 	std::unique_ptr<Buffer>               m_compute_lds;
@@ -1127,10 +1155,10 @@ private:
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
 	std::vector<uint32_t>                 m_image_occurrences;
 	struct ShaderUploadEntry {
-		uint64_t tick = 0;
-		uint64_t hash = 0;
+		uint64_t                 tick = 0;
+		uint64_t                 hash = 0;
 		vk::DescriptorBufferInfo allocation;
-		std::vector<uint32_t> words;
+		std::vector<uint32_t>    words;
 	};
 	std::array<ShaderUploadEntry, 64> m_shader_uploads;
 	// KYTY_UPLOAD_DEDUP: same-tick content dedup of shader-data/flattened-SRT uploads. By default
@@ -1162,26 +1190,26 @@ private:
 	// (source slot, first use pc, indirect-image tables) is excluded, so one texture bound from
 	// different shaders shares an entry.
 	struct TextureDescriptionKey {
-		ShaderRecompiler::IR::ImageResourceClass resource_class {};
-		Prospero::TextureNumericClass            numeric_class {};
+		ShaderRecompiler::IR::ImageResourceClass  resource_class {};
+		Prospero::TextureNumericClass             numeric_class {};
 		ShaderRecompiler::Decoder::ImageDimension dimension {};
-		ShaderRecompiler::IR::ImageMipMode       mip_mode {};
-		uint32_t                                 mip_count         = 0;
-		Prospero::BufferFormat                   conversion_format {};
-		uint32_t                                 shader_swizzle    = 0;
-		bool                                     read              = false;
-		bool                                     written           = false;
-		bool                                     atomic            = false;
-		bool                                     depth_compare     = false;
-		bool                                     cube              = false;
-		bool                                     r128              = false;
-		bool                                     atomic64          = false;
+		ShaderRecompiler::IR::ImageMipMode        mip_mode {};
+		uint32_t                                  mip_count = 0;
+		Prospero::BufferFormat                    conversion_format {};
+		uint32_t                                  shader_swizzle = 0;
+		bool                                      read           = false;
+		bool                                      written        = false;
+		bool                                      atomic         = false;
+		bool                                      depth_compare  = false;
+		bool                                      cube           = false;
+		bool                                      r128           = false;
+		bool                                      atomic64       = false;
 
 		bool operator==(const TextureDescriptionKey&) const = default;
 	};
 	struct TextureDescriptionEntry {
-		bool valid = false;
-		TextureDescriptionKey key;
+		bool                    valid = false;
+		TextureDescriptionKey   key;
 		std::array<uint32_t, 8> words {};
 		TextureCache::ImageDesc desc;
 	};
@@ -1193,16 +1221,16 @@ private:
 	// KYTY_DRAW_SEQUENCE_FAST outcomes, always counted (the DrawSequence* frame events need a
 	// connected profiler); read by tests.
 	struct DrawSequenceTotals {
-		uint64_t target_repeats    = 0;
-		uint64_t target_misses     = 0;
-		uint64_t target_records    = 0;
-		uint64_t texture_repeats   = 0;
-		uint64_t texture_misses    = 0;
+		uint64_t target_repeats       = 0;
+		uint64_t target_misses        = 0;
+		uint64_t target_records       = 0;
+		uint64_t texture_repeats      = 0;
+		uint64_t texture_misses       = 0;
 		uint64_t texture_history_hits = 0;
-		uint64_t view_repeats      = 0;
-		uint64_t verify_checks     = 0;
-		uint64_t verify_mismatches = 0;
-		uint64_t verify_races      = 0;
+		uint64_t view_repeats         = 0;
+		uint64_t verify_checks        = 0;
+		uint64_t verify_mismatches    = 0;
+		uint64_t verify_races         = 0;
 	};
 	DrawSequenceTotals m_draw_sequence_totals;
 	// KYTY_SAMPLER_MEMO: final sampler dwords -> native sampler. The sampler cache never evicts,
@@ -1213,7 +1241,7 @@ private:
 		bool                    integer_border = false;
 		vk::Sampler             sampler        = nullptr;
 	};
-	static constexpr uint32_t SamplerMemoWays = 4;
+	static constexpr uint32_t                          SamplerMemoWays = 4;
 	std::array<SamplerMemoEntry, 64 * SamplerMemoWays> m_sampler_memo {};
 	// KYTY_TARGET_DESC_MEMO: target descriptions are pure functions of the target registers
 	// (and constant device format support). Keyed on the exact register bytes; FindImage and
@@ -1237,12 +1265,12 @@ private:
 		TextureCache::ImageDesc    desc;
 		TextureCache::RepeatLookup lookup;
 	};
-	DepthTargetDescMemo        m_depth_target_memo {};
+	DepthTargetDescMemo m_depth_target_memo {};
 	// A target lookup of `desc` (equal to the description `record` was made for, if it is valid):
 	// the proven repeat of the recorded lookup (TextureCache::TryRepeatLookup), otherwise
 	// FindImage, recording into `record`. Null `record`: FindImage (colorRenderTarget.cpp).
-	[[nodiscard]] ImageId FindTargetImage(TextureCache::ImageDesc& desc, bool exact_format,
-	                                      TextureCache::RepeatLookup* record);
+	[[nodiscard]] ImageId      FindTargetImage(TextureCache::ImageDesc& desc, bool exact_format,
+	                                           TextureCache::RepeatLookup* record);
 	GraphicsDynamicStateShadow m_dynamic_state {};
 	// Draw-prep (drawPrep.h): the preparation of the draw the engine is committing, taken by
 	// RefreshShaders in place of GetGraphicsPrograms when its certificate holds. Null otherwise.
@@ -1290,8 +1318,8 @@ private:
 		uint32_t          color_count      = 0;
 		uint32_t          color_slots      = 0;
 		RenderState       rendering;
-		// The textures of the recorded stages, then the attachments (from attachments_begin), as the
-		// draw left them.
+		// The textures of the recorded stages, then the attachments (from attachments_begin), as
+		// the draw left them.
 		std::vector<DrawRunImage> images;
 		uint32_t                  attachments_begin = 0;
 		// KYTY_DRAW_RUN_ACQUIRE and verify mode: the resolved targets (depth: one entry) and the
@@ -1312,9 +1340,9 @@ private:
 		bool writes = false;
 		// KYTY_DRAW_RUN_CONT_ELIGIBLE: the KYTY_DRAW_RUN_WRITES value the record was made under.
 		bool record_writes_ok = false;
-		// KYTY_DRAW_RUN_RECALL: the texture bindings each stage committed (the vertex stage's first)
-		// and its samplers: a recall takes each stage's set back from its texture history only when it
-		// still holds exactly these.
+		// KYTY_DRAW_RUN_RECALL: the texture bindings each stage committed (the vertex stage's
+		// first) and its samplers: a recall takes each stage's set back from its texture history
+		// only when it still holds exactly these.
 		struct RecallTexture {
 			ImageId         id {};
 			vk::ImageView   view   = nullptr;
@@ -1334,32 +1362,32 @@ private:
 		std::vector<vk::Sampler>             samplers;
 		std::vector<vk::DescriptorImageInfo> pushed_images; // image and sampler descriptors
 	};
-	// DrawIndex/DrawAuto under the render mutex: the previous run's validity is taken for this draw,
-	// and a draw the draw-prep engine does not commit counts as other command-processor work.
+	// DrawIndex/DrawAuto under the render mutex: the previous run's validity is taken for this
+	// draw, and a draw the draw-prep engine does not commit counts as other command-processor work.
 	void                       BeginDrawRun();
-	[[nodiscard]] bool DrawRunCommandUnchanged(const CommandBuffer& buffer) const;
+	[[nodiscard]] bool         DrawRunCommandUnchanged(const CommandBuffer& buffer) const;
 	[[nodiscard]] DrawRunImage MakeDrawRunImage(ImageId id, bool texture) const;
 	// attachments_only: the textures of the record are not checked (KYTY_DRAW_RUN_ACQUIRE).
 	// DrawRunImagesChange: 0 when unchanged, else the first difference (verify-mode detail).
 	// attachment_serials: false compares the content serials of the textures only (a recall).
-	[[nodiscard]] uint32_t DrawRunImagesChange(bool compare_serials,
-	                                           bool attachments_only = false, bool log_change = false,
+	[[nodiscard]] uint32_t DrawRunImagesChange(bool compare_serials, bool attachments_only = false,
+	                                           bool log_change         = false,
 	                                           bool attachment_serials = true) const;
-	[[nodiscard]] bool DrawRunImagesUnchanged(bool compare_serials,
-	                                          bool attachments_only = false) const;
+	[[nodiscard]] bool     DrawRunImagesUnchanged(bool compare_serials,
+	                                              bool attachments_only = false) const;
 	// Whether a guest range lies over one of the marked attachments.
 	[[nodiscard]] static bool DrawRunOverAttachment(std::span<const DrawRunImage> marks,
 	                                                uint64_t address, uint64_t size);
-	// KYTY_DRAW_RUN_ACQUIRE: a draw that does not continue the run but resolved the recorded targets
-	// for the same scissor union, in the same rendering instance right after the recorded draw, with
-	// no texture over an attachment's memory, keeps the recorded attachment acquisition.
+	// KYTY_DRAW_RUN_ACQUIRE: a draw that does not continue the run but resolved the recorded
+	// targets for the same scissor union, in the same rendering instance right after the recorded
+	// draw, with no texture over an attachment's memory, keeps the recorded attachment acquisition.
 	[[nodiscard]] bool DrawRunAcquireCandidate(const CommandBuffer&               buffer,
 	                                           const DrawRenderState&             state,
 	                                           std::span<PreparedBindings* const> stages,
 	                                           const vk::Rect2D*                  written) const;
 	// A continuation's kept textures and attachments are marked bound for the draw as their
 	// resolution marks them (BindImage, BindRenderTarget), before the draw's buffer work.
-	void                       DrawRunMarkBindings();
+	void DrawRunMarkBindings();
 	// Whether the committed draw continues the recorded run (the certificate without the images),
 	// PrepareDrawRenderState after the program refresh.
 	[[nodiscard]] bool DrawRunCandidate(const CommandBuffer& buffer, const DrawRenderState& state,
@@ -1368,8 +1396,8 @@ private:
 	// range lies over an image of the run (2; 0: no writes).
 	[[nodiscard]] static uint32_t DrawRunWritesOverRun(const ShaderStageRuntime&     runtime,
 	                                                   std::span<const DrawRunImage> images);
-	void               DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& draw,
-	                                  uint32_t render_target_slice_offset, DrawRenderState& state);
+	void DrawRunTargets(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                    uint32_t render_target_slice_offset, DrawRenderState& state);
 	// written: the scissor union the attachments were acquired for (null: unbounded claims).
 	void DrawRunRecordDraw(const CommandBuffer& buffer, const DrawRenderState& state,
 	                       uint32_t render_target_slice_offset, const RenderState& rendering,
@@ -1379,12 +1407,12 @@ private:
 	// descriptors (the previous draw's image and sampler descriptors still in effect).
 	[[nodiscard]] bool DrawRunPartialPush(const CommandBuffer&           buffer,
 	                                      const PipelineCache::Pipeline& pipeline) const;
-	void DrawRunVerify(const DrawRenderState& state, const RenderState& rendering,
-	                   vk::ImageAspectFlags feedback_aspects,
-	                   std::span<PreparedBindings* const> stages);
-	DrawRunRecord m_run;
-	// KYTY_DRAW_RUN_RECALL: earlier records of the instance (DrawRunKeep), whether the committed draw
-	// recalls one, and whether m_run holds a complete record that is kept when it is replaced.
+	void               DrawRunVerify(const DrawRenderState& state, const RenderState& rendering,
+	                                 vk::ImageAspectFlags               feedback_aspects,
+	                                 std::span<PreparedBindings* const> stages);
+	DrawRunRecord      m_run;
+	// KYTY_DRAW_RUN_RECALL: earlier records of the instance (DrawRunKeep), whether the committed
+	// draw recalls one, and whether m_run holds a complete record that is kept when it is replaced.
 	[[nodiscard]] bool DrawRunRecallCandidate(const CommandBuffer& buffer, DrawRenderState& state,
 	                                          uint32_t render_target_slice_offset);
 	void               DrawRunKeep();
@@ -1397,16 +1425,17 @@ private:
 		}
 	}
 	std::array<DrawRunRecord, 32> m_run_kept;
-	uint32_t                     m_run_kept_next = 0;
-	bool                         m_run_recall    = false;
-	bool                         m_run_keepable  = false;
-	bool          m_run_prev_valid     = false; // m_run.valid when the committed draw began
-	bool          m_run_active         = false; // the draw takes the delta path
-	bool          m_run_verify         = false; // verify mode: the draw would have continued
-	uint64_t      m_run_key            = 0;     // the committed draw's structure key (the engine)
-	bool          m_in_engine_commit   = false;
-	bool          m_prepared_validated = false; // RefreshShaders accepted the draw's preparation
-	uint32_t      m_run_slice_offset   = 0;
+	uint32_t                      m_run_kept_next = 0;
+	bool                          m_run_recall    = false;
+	bool                          m_run_keepable  = false;
+	bool     m_run_prev_valid     = false; // m_run.valid when the committed draw began
+	bool     m_run_active         = false; // the draw takes the delta path
+	uint64_t m_rebind_epoch       = 0;     // KYTY_REBIND_AFTER_JOIN: UnregisterEpoch at resolution
+	bool     m_run_verify         = false; // verify mode: the draw would have continued
+	uint64_t m_run_key            = 0;     // the committed draw's structure key (the engine)
+	bool     m_in_engine_commit   = false;
+	bool     m_prepared_validated = false; // RefreshShaders accepted the draw's preparation
+	uint32_t m_run_slice_offset   = 0;
 
 	friend class CommandProcessor;
 	friend class DrawPrep::Engine;

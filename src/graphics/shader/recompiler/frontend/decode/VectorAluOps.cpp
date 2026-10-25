@@ -246,46 +246,43 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0x8au, Opcode::V_CMP_EQ_I16},         {0x8bu, Opcode::V_CMP_LE_I16},
     {0x8cu, Opcode::V_CMP_GT_I16},         {0x8du, Opcode::V_CMP_NE_I16},
     {0x8eu, Opcode::V_CMP_GE_I16},         {0x8fu, Opcode::V_CMP_CLASS_F16, false},
-    {0x91u, Opcode::V_CMPX_LT_I32},
-    {0x92u, Opcode::V_CMPX_EQ_I32},        {0x93u, Opcode::V_CMPX_LE_I32},
-    {0x94u, Opcode::V_CMPX_GT_I32},        {0x95u, Opcode::V_CMPX_NE_I32},
-    {0x96u, Opcode::V_CMPX_GE_I32},        {0x98u, Opcode::V_CMPX_CLASS_F32},
-    {0x99u, Opcode::V_CMPX_LT_I16, false}, {0x9au, Opcode::V_CMPX_EQ_I16, false},
-    {0x9bu, Opcode::V_CMPX_LE_I16, false}, {0x9cu, Opcode::V_CMPX_GT_I16, false},
-    {0x9du, Opcode::V_CMPX_NE_I16, false}, {0x9eu, Opcode::V_CMPX_GE_I16, false},
-    {0x9fu, Opcode::V_CMPX_CLASS_F16, false},
+    {0x91u, Opcode::V_CMPX_LT_I32},        {0x92u, Opcode::V_CMPX_EQ_I32},
+    {0x93u, Opcode::V_CMPX_LE_I32},        {0x94u, Opcode::V_CMPX_GT_I32},
+    {0x95u, Opcode::V_CMPX_NE_I32},        {0x96u, Opcode::V_CMPX_GE_I32},
+    {0x98u, Opcode::V_CMPX_CLASS_F32},     {0x99u, Opcode::V_CMPX_LT_I16, false},
+    {0x9au, Opcode::V_CMPX_EQ_I16, false}, {0x9bu, Opcode::V_CMPX_LE_I16, false},
+    {0x9cu, Opcode::V_CMPX_GT_I16, false}, {0x9du, Opcode::V_CMPX_NE_I16, false},
+    {0x9eu, Opcode::V_CMPX_GE_I16, false}, {0x9fu, Opcode::V_CMPX_CLASS_F16, false},
     {0xa9u, Opcode::V_CMP_LT_U16},         {0xaau, Opcode::V_CMP_EQ_U16},
     {0xabu, Opcode::V_CMP_LE_U16},         {0xacu, Opcode::V_CMP_GT_U16},
     {0xadu, Opcode::V_CMP_NE_U16},         {0xaeu, Opcode::V_CMP_GE_U16},
     {0xb9u, Opcode::V_CMPX_LT_U16, false}, {0xbau, Opcode::V_CMPX_EQ_U16, false},
     {0xbcu, Opcode::V_CMPX_GT_U16},        {0xbdu, Opcode::V_CMPX_NE_U16, false},
-    {0xc0u, Opcode::V_CMP_F_U32},
-    {0xc1u, Opcode::V_CMP_LT_U32},         {0xc2u, Opcode::V_CMP_EQ_U32},
-    {0xc3u, Opcode::V_CMP_LE_U32},         {0xc4u, Opcode::V_CMP_GT_U32},
-    {0xc5u, Opcode::V_CMP_NE_U32},         {0xc6u, Opcode::V_CMP_GE_U32},
-    {0xc7u, Opcode::V_CMP_T_U32},          {0xa2u, Opcode::V_CMP_EQ_I64, false},
-    {0xa1u, Opcode::V_CMP_LT_I64, false},  {0xa3u, Opcode::V_CMP_LE_I64, false},
-    {0xa5u, Opcode::V_CMP_NE_I64, false},
+    {0xc0u, Opcode::V_CMP_F_U32},          {0xc1u, Opcode::V_CMP_LT_U32},
+    {0xc2u, Opcode::V_CMP_EQ_U32},         {0xc3u, Opcode::V_CMP_LE_U32},
+    {0xc4u, Opcode::V_CMP_GT_U32},         {0xc5u, Opcode::V_CMP_NE_U32},
+    {0xc6u, Opcode::V_CMP_GE_U32},         {0xc7u, Opcode::V_CMP_T_U32},
+    {0xa2u, Opcode::V_CMP_EQ_I64, false},  {0xa1u, Opcode::V_CMP_LT_I64, false},
+    {0xa3u, Opcode::V_CMP_LE_I64, false},  {0xa5u, Opcode::V_CMP_NE_I64, false},
     {0xa0u, Opcode::V_CMP_F_I64, false},   {0xa7u, Opcode::V_CMP_T_I64, false},
     {0xb0u, Opcode::V_CMPX_F_I64, false},  {0xb1u, Opcode::V_CMPX_LT_I64, false},
     {0xb2u, Opcode::V_CMPX_EQ_I64, false}, {0xb3u, Opcode::V_CMPX_LE_I64, false},
-    {0xb7u, Opcode::V_CMPX_T_I64, false},
-    {0xb5u, Opcode::V_CMPX_NE_I64, false}, {0xd1u, Opcode::V_CMPX_LT_U32},
-    {0xd2u, Opcode::V_CMPX_EQ_U32},        {0xd3u, Opcode::V_CMPX_LE_U32},
-    {0xd4u, Opcode::V_CMPX_GT_U32},        {0xd5u, Opcode::V_CMPX_NE_U32},
-    {0xd6u, Opcode::V_CMPX_GE_U32},        {0xe1u, Opcode::V_CMP_LT_U64, false},
-    {0xe0u, Opcode::V_CMP_F_U64, false},   {0xe7u, Opcode::V_CMP_T_U64, false},
-    {0xf0u, Opcode::V_CMPX_F_U64, false},  {0xf1u, Opcode::V_CMPX_LT_U64, false},
-    {0xf2u, Opcode::V_CMPX_EQ_U64, false}, {0xf4u, Opcode::V_CMPX_GT_U64, false},
-    {0xf6u, Opcode::V_CMPX_GE_U64, false}, {0xf7u, Opcode::V_CMPX_T_U64, false},
-    {0xe2u, Opcode::V_CMP_EQ_U64, false},  {0xe3u, Opcode::V_CMP_LE_U64, false},
-    {0xe4u, Opcode::V_CMP_GT_U64, false},  {0xe5u, Opcode::V_CMP_NE_U64, false},
-    {0xe6u, Opcode::V_CMP_GE_U64, false},  {0xf3u, Opcode::V_CMPX_LE_U64, false},
-    {0xf5u, Opcode::V_CMPX_NE_U64, false}, {0xc9u, Opcode::V_CMP_LT_F16},
-    {0xcau, Opcode::V_CMP_EQ_F16},         {0xcbu, Opcode::V_CMP_LE_F16},
-    {0xccu, Opcode::V_CMP_GT_F16},         {0xcdu, Opcode::V_CMP_LG_F16},
-    {0xceu, Opcode::V_CMP_GE_F16},         {0xe9u, Opcode::V_CMP_NGE_F16},
-    {0xebu, Opcode::V_CMP_NGT_F16},
+    {0xb7u, Opcode::V_CMPX_T_I64, false},  {0xb5u, Opcode::V_CMPX_NE_I64, false},
+    {0xd1u, Opcode::V_CMPX_LT_U32},        {0xd2u, Opcode::V_CMPX_EQ_U32},
+    {0xd3u, Opcode::V_CMPX_LE_U32},        {0xd4u, Opcode::V_CMPX_GT_U32},
+    {0xd5u, Opcode::V_CMPX_NE_U32},        {0xd6u, Opcode::V_CMPX_GE_U32},
+    {0xe1u, Opcode::V_CMP_LT_U64, false},  {0xe0u, Opcode::V_CMP_F_U64, false},
+    {0xe7u, Opcode::V_CMP_T_U64, false},   {0xf0u, Opcode::V_CMPX_F_U64, false},
+    {0xf1u, Opcode::V_CMPX_LT_U64, false}, {0xf2u, Opcode::V_CMPX_EQ_U64, false},
+    {0xf4u, Opcode::V_CMPX_GT_U64, false}, {0xf6u, Opcode::V_CMPX_GE_U64, false},
+    {0xf7u, Opcode::V_CMPX_T_U64, false},  {0xe2u, Opcode::V_CMP_EQ_U64, false},
+    {0xe3u, Opcode::V_CMP_LE_U64, false},  {0xe4u, Opcode::V_CMP_GT_U64, false},
+    {0xe5u, Opcode::V_CMP_NE_U64, false},  {0xe6u, Opcode::V_CMP_GE_U64, false},
+    {0xf3u, Opcode::V_CMPX_LE_U64, false}, {0xf5u, Opcode::V_CMPX_NE_U64, false},
+    {0xc9u, Opcode::V_CMP_LT_F16},         {0xcau, Opcode::V_CMP_EQ_F16},
+    {0xcbu, Opcode::V_CMP_LE_F16},         {0xccu, Opcode::V_CMP_GT_F16},
+    {0xcdu, Opcode::V_CMP_LG_F16},         {0xceu, Opcode::V_CMP_GE_F16},
+    {0xe9u, Opcode::V_CMP_NGE_F16},        {0xebu, Opcode::V_CMP_NGT_F16},
     {0xedu, Opcode::V_CMP_NEQ_F16},        {0xeeu, Opcode::V_CMP_NLT_F16},
     {0xd9u, Opcode::V_CMPX_LT_F16},        {0xdau, Opcode::V_CMPX_EQ_F16},
     {0xdbu, Opcode::V_CMPX_LE_F16},        {0xdcu, Opcode::V_CMPX_GT_F16},
@@ -377,6 +374,8 @@ constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
     {0x377u, Opcode::V_PERMLANE16_B32},
     {0x378u, Opcode::V_PERMLANEX16_B32},
     {0x34bu, Opcode::V_FMA_F16},
+    {0x342u, Opcode::V_INTERP_P1LL_F16},
+    {0x35au, Opcode::V_INTERP_P2_F16},
     {0x36du, Opcode::V_ADD3_U32},
     {0x14fu, Opcode::V_ALIGNBYTE_B32},
 };
@@ -404,8 +403,7 @@ bool IsVop2LiteralMadOpcode(uint32_t opcode) {
 }
 
 bool IsUnsupportedVop3EncodedVop2Alias(uint32_t opcode) {
-	return IsVop2LiteralMadOpcode(opcode) || opcode == 0x02u || opcode == 0x39u ||
-	       opcode == 0x3au;
+	return IsVop2LiteralMadOpcode(opcode) || opcode == 0x02u || opcode == 0x39u || opcode == 0x3au;
 }
 
 Opcode LookupVop3Opcode(uint32_t opcode) {
@@ -579,15 +577,15 @@ struct Vop1SdwaRule {
 };
 
 constexpr Vop1SdwaRule VOP1_SDWA_RULES[] = {
-    {Opcode::V_MOV_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelBytes() | SdwaSelWords(),
-     SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
+    {Opcode::V_MOV_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(),
+     SdwaSelBytes() | SdwaSelWords(), SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
     {Opcode::V_CVT_F32_U32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_I32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_UBYTE0, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     // The source field extract and the destination insert are independent (Translate.cpp), so a
     // partial destination may combine with any source selector.
-    {Opcode::V_NOT_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelBytes() | SdwaSelWords(),
-     SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
+    {Opcode::V_NOT_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(),
+     SdwaSelBytes() | SdwaSelWords(), SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
     {Opcode::V_BFREV_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_FFBL_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_FFBH_U32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
@@ -1210,9 +1208,8 @@ VopcSdwaFields DecodeVopcSdwaFields(uint32_t modifier) {
 
 bool SupportsVopcSdwa(Opcode opcode) {
 	return opcode != Opcode::UNSUPPORTED && opcode != Opcode::V_CMP_NE_I64 &&
-	       opcode != Opcode::V_CMP_EQ_F64 &&
-	       opcode != Opcode::V_CMP_LE_F64 && opcode != Opcode::V_CMPX_LE_F64 &&
-	       opcode != Opcode::V_CMPX_GE_F64;
+	       opcode != Opcode::V_CMP_EQ_F64 && opcode != Opcode::V_CMP_LE_F64 &&
+	       opcode != Opcode::V_CMPX_LE_F64 && opcode != Opcode::V_CMPX_GE_F64;
 }
 
 void DecodeVopcSdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
@@ -1519,6 +1516,9 @@ bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mi
 	}
 	switch (opcode) {
 		case Opcode::V_LDEXP_F32: return (abs & ~1u) != 0u || op_sel != 0u || (neg & ~1u) != 0u;
+		case Opcode::V_INTERP_P1LL_F16:
+		case Opcode::V_INTERP_P2_F16:
+			return abs != 0u || (op_sel & 0x7u) != 0u || clamp != 0u || omod != 0u || neg != 0u;
 		case Opcode::V_CNDMASK_B32:
 			return (abs & ~0x3u) != 0u || op_sel != 0u || clamp != 0u || omod != 0u ||
 			       (neg & ~0x3u) != 0u;
@@ -1780,6 +1780,24 @@ void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	if (inst.opcode == Opcode::V_NOP) {
 		inst.dst.kind  = OperandKind::Null;
 		inst.src_count = 0;
+		return;
+	}
+	if (inst.opcode == Opcode::V_INTERP_P1LL_F16 || inst.opcode == Opcode::V_INTERP_P2_F16) {
+		// SRC0 packs {attr_word, attr_chan, attr}; attr_word selects the high f16 of the dword.
+		// The VINTRP layout: src0 = I/J VGPR, src1 = attr, src2 = chan.
+		DecodeVectorGpr(vdst, inst.dst);
+		DecodeScalarSource(src1, pc, inst.src0);
+		const uint32_t attr  = src0 & 0x3fu;
+		const uint32_t chan  = (src0 >> 6u) & 0x3u;
+		inst.src1.kind       = OperandKind::IntegerInlineConstant;
+		inst.src1.value      = attr;
+		inst.src1.signed_val = static_cast<int32_t>(attr);
+		inst.src2.kind       = OperandKind::IntegerInlineConstant;
+		inst.src2.value      = chan;
+		inst.src2.signed_val = static_cast<int32_t>(chan);
+		inst.src_count       = 3;
+		inst.src1.op_sel     = (src0 & 0x100u) != 0u;
+		inst.dst.sdwa_sel    = (op_sel & 0x8u) != 0u ? 5u : 4u;
 		return;
 	}
 	if (compare_exec) {

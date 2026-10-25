@@ -1,9 +1,9 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_TEXTURECACHE_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_TEXTURECACHE_H_
 
-#include "common/hangTrace.h"
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/hangTrace.h"
 #include "common/lruCache.h"
 #include "common/profiler.h"
 #include "common/slotVector.h"
@@ -75,21 +75,21 @@ public:
 		static constexpr uint32_t MaxGpuRanges = 4;
 		static constexpr uint32_t MaxGuestKeys = 4;
 
-		bool                                 provable        = false;
-		uint64_t                             first_page      = 0;
-		uint32_t                             page_count      = 0;
-		std::array<uint64_t, MaxPages>       page_versions   {};
+		bool                                 provable   = false;
+		uint64_t                             first_page = 0;
+		uint32_t                             page_count = 0;
+		std::array<uint64_t, MaxPages>       page_versions {};
 		uint64_t                             fill_generation = 0;
 		uint32_t                             gpu_range_count = 0;
-		std::array<GuestRange, MaxGpuRanges> gpu_ranges      {};
-		// KYTY_CP_COMMIT=dccguest: a DCC decision on metadata the GPU had not written, none of whose
-		// slices' first key decoded to a clear (so nothing else of the slice was read). It stays the
-		// same decision while `guest_range` is still not GPU-dirty and every recorded first key
-		// still reads as recorded (guest_key_count keys; 0: no such certificate).
-		GuestRange                             guest_range     {};
-		uint32_t                               guest_key_count = 0;
-		std::array<uint64_t, MaxGuestKeys>     guest_key_addresses {};
-		std::array<uint8_t, MaxGuestKeys>      guest_key_codes {};
+		std::array<GuestRange, MaxGpuRanges> gpu_ranges {};
+		// KYTY_CP_COMMIT=dccguest: a DCC decision on metadata the GPU had not written, none of
+		// whose slices' first key decoded to a clear (so nothing else of the slice was read). It
+		// stays the same decision while `guest_range` is still not GPU-dirty and every recorded
+		// first key still reads as recorded (guest_key_count keys; 0: no such certificate).
+		GuestRange                         guest_range {};
+		uint32_t                           guest_key_count = 0;
+		std::array<uint64_t, MaxGuestKeys> guest_key_addresses {};
+		std::array<uint8_t, MaxGuestKeys>  guest_key_codes {};
 	};
 	// KYTY_DRAW_SEQUENCE_FAST: what a FindImage of a description returned, and why the same
 	// lookup would return it again with nothing to do but its access bookkeeping (see
@@ -121,32 +121,32 @@ public:
 	KYTY_CLASS_NO_COPY(TextureCache);
 
 	// `record` (optional): filled as described at RepeatLookup.
-	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false,
-	                                      RepeatLookup* record = nullptr);
+	[[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_format = false,
+	                                RepeatLookup* record = nullptr);
 	// The lookup `record` describes, repeated for the same `desc` and `exact_format` (the caller
 	// guarantees the description is equal to the recorded lookup's): true when every recorded proof
 	// still holds, so FindImage would return record.image and do nothing else but its access
 	// bookkeeping; with `apply` that bookkeeping (and the metadata bookkeeping of a DCC
 	// description) is performed as FindImage performs it. `apply` false only checks.
-	[[nodiscard]] bool          TryRepeatLookup(const ImageDesc& desc, bool exact_format,
-	                                            const RepeatLookup& record, bool apply);
+	[[nodiscard]] bool TryRepeatLookup(const ImageDesc& desc, bool exact_format,
+	                                   const RepeatLookup& record, bool apply);
 	// Diagnostics (KYTY_DRAW_SEQUENCE_VERIFY): residency extensions and alias synchronizations
 	// FindImage has performed; a repeat must add none.
-	[[nodiscard]] uint64_t      LookupSideEffects() const noexcept { return m_lookup_side_effects; }
+	[[nodiscard]] uint64_t LookupSideEffects() const noexcept { return m_lookup_side_effects; }
 	// Diagnostics (KYTY_CP_COMMIT=texdcc verify): DCC decisions of MaterializeDccClear that did
-	// something (a slice clear, or a native GPU inspection); a memo hit's full resolution adds none.
-	[[nodiscard]] uint64_t      DccDecisionEffects() const noexcept { return m_dcc_decision_effects; }
+	// something (a slice clear, or a native GPU inspection); a memo hit's full resolution adds
+	// none.
+	[[nodiscard]] uint64_t DccDecisionEffects() const noexcept { return m_dcc_decision_effects; }
 	// KYTY_DRAW_SEQUENCE_VERIFY: a GPU-owned metadata range `record` relied on is no longer
 	// GPU-modified. FindImage never ends GPU ownership of such a range before a decision that
 	// differs from the recorded one, so after a repeat check this means another thread (a guest
 	// write fault's flush, a side readback) changed it: the full lookup raced the check.
-	[[nodiscard]] bool          RepeatGpuRangesLost(const RepeatLookup& record);
-	void                        UpdateImage(ImageId id);
+	[[nodiscard]] bool RepeatGpuRangesLost(const RepeatLookup& record);
+	void               UpdateImage(ImageId id);
 	// buffer_sync: the caller copies the image into the buffer at its own range (texel reads),
 	// where GPU-dirty bytes it supersedes do not block it (SafeToSyncIntoBuffer).
-	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
-	                                               bool ensure_valid = true,
-	                                               bool buffer_sync  = false);
+	[[nodiscard]] ImageId FindImageFromRange(uint64_t address, uint64_t size,
+	                                         bool ensure_valid = true, bool buffer_sync = false);
 	// FindImageFromRange's selection among the images FindImagesInRegion finds for
 	// [address, address + query_size) (KYTY_TEXEL_IMAGE_LOOKUP). Caller holds m_lock.
 	[[nodiscard]] ImageId       FindImageFromRangeLocked(uint64_t address, uint64_t size,
@@ -164,6 +164,8 @@ public:
 		return image;
 	}
 	void MarkGpuWritten(ImageId id);
+	// CPU-visible targets cannot lose draws while a pipeline is being compiled.
+	[[nodiscard]] bool NeedsCpuReadback(const ImageInfo& info) const;
 
 	// Content identity around an attachment binding (see Image::ContentSerial). Take a mark
 	// before FindDepthTarget; once the draw is known not to write the attachment, restoring it
@@ -195,14 +197,14 @@ public:
 	// invalidate but that no range in `written` overlaps.
 	[[nodiscard]] uint32_t CountImagesOutsideGpuWrite(uint64_t address, uint64_t size,
 	                                                  std::span<const GuestRange> written);
-	[[nodiscard]] bool IsRegionGpuModified(uint64_t address, uint64_t size);
+	[[nodiscard]] bool     IsRegionGpuModified(uint64_t address, uint64_t size);
 	// Whether any cached image overlaps the range (RenderContext::UnmapMemory: CPU-only unmaps skip
 	// the GPU drain).
 	[[nodiscard]] bool IsRegionRegistered(uint64_t address, uint64_t size);
 
 	[[nodiscard]] bool IsMeta(uint64_t address);
-	// KYTY_META_CLEAR_MEMO=1 (default off; BryanKAdams/KytyPS5 c36bbff): the last answer is kept for
-	// its address while m_surface_meta_generation holds, without m_lock. Called by the GPU (CP)
+	// KYTY_META_CLEAR_MEMO=1 (default off; BryanKAdams/KytyPS5 c36bbff): the last answer is kept
+	// for its address while m_surface_meta_generation holds, without m_lock. Called by the GPU (CP)
 	// thread only (the depth-target resolution of draws).
 	[[nodiscard]] bool IsMetaCleared(uint64_t address, uint32_t slice);
 	[[nodiscard]] bool ClearMeta(uint64_t address);
@@ -214,7 +216,12 @@ public:
 	// a frame spans hundreds of scheduler ticks, so tick age alone treats every alias used
 	// earlier in the same frame as stale.
 	void AdvanceFrame() noexcept { m_frame.fetch_add(1, std::memory_order_relaxed); }
-	void RunGarbageCollector();
+	[[nodiscard]] uint64_t Frame() const noexcept {
+		return m_frame.load(std::memory_order_relaxed);
+	}
+	// The image of a slot id, or nullptr when the slot is free (GPU thread).
+	[[nodiscard]] Image* TryGetImage(ImageId id) noexcept { return m_slot_images.try_get(id); }
+	void                 RunGarbageCollector();
 	// KYTY_VRAM_STATS report lines (vramStats.h): images by binding kind, frame age, residency,
 	// render-target sizes and aliases, the largest images, the GC thresholds (GPU thread).
 	void ReportVram();
@@ -259,7 +266,7 @@ private:
 	};
 
 	struct GpuDccInspection {
-		GuestRange metadata;
+		GuestRange            metadata;
 		BufferContentRevision revision;
 		// Clear codes (DccClearHelper::ClearCodes bits) the inspected interpretation accepted.
 		uint32_t decodable_mask = 0;
@@ -271,9 +278,9 @@ private:
 	// Callers have validated the nonempty 40-bit range with TryGetPageRange.
 	template <typename Func>
 	static void ForEachPage(uint64_t address, size_t size, Func&& func) {
-		using FuncReturn = typename std::invoke_result<Func, uint64_t>::type;
+		using FuncReturn                   = typename std::invoke_result<Func, uint64_t>::type;
 		static constexpr bool RETURNS_BOOL = std::is_same_v<FuncReturn, bool>;
-		const uint64_t page_end = (address + size - 1) >> ImagePageTable::kPageBits;
+		const uint64_t        page_end     = (address + size - 1) >> ImagePageTable::kPageBits;
 		for (uint64_t page = address >> ImagePageTable::kPageBits; page <= page_end; ++page) {
 			if constexpr (RETURNS_BOOL) {
 				if (func(page)) {
@@ -287,34 +294,34 @@ private:
 
 	// resident_first > 0: register only the prefix holding levels [resident_first, levels)
 	// (resident_prefix bytes, computed when 0); stays fully resident when not applicable.
-	[[nodiscard]] ImageId     InsertImage(const ImageInfo& info, uint32_t resident_first = 0,
-	                                      uint64_t resident_prefix = 0);
+	[[nodiscard]] ImageId InsertImage(const ImageInfo& info, uint32_t resident_first = 0,
+	                                  uint64_t resident_prefix = 0);
 	// Resident mip levels (Image::live, KYTY_TEXTURE_RESIDENT_MIPS). Caller holds m_lock.
 	// The finest level a view of `desc` can read, for an image with `levels` levels.
-	[[nodiscard]] uint32_t    RequestedFirstLevel(const ImageDesc& desc, uint32_t levels) const;
-	[[nodiscard]] uint64_t    ResidentPrefixSize(const ImageInfo& info, uint32_t first_level) const;
+	[[nodiscard]] uint32_t RequestedFirstLevel(const ImageDesc& desc, uint32_t levels) const;
+	[[nodiscard]] uint64_t ResidentPrefixSize(const ImageInfo& info, uint32_t first_level) const;
 	// Makes levels >= first_level resident (re-registration; the next refresh uploads them).
 	// `sampling`: requested by a sampled view (counted as an extension, else a fallback).
-	void                      EnsureResidency(ImageId id, uint32_t first_level, bool sampling);
+	void EnsureResidency(ImageId id, uint32_t first_level, bool sampling);
 	// Whole chain resident and refreshed now, before a non-sampling use records anything.
-	void                      RequireFullResidency(ImageId id);
-	void                      PoisonNonResidentLevels(Image& image);
-	void                      RetireIdlePartialImages();
-	[[nodiscard]] ImageId     GetNullImage(const ImageDesc& desc);
-	void                      RegisterImage(ImageId id);
-	void                      UnregisterImage(ImageId id);
-	void                      DeleteImage(ImageId id);
-	void                      FreeImage(ImageId id, HangTrace::ImageFreeReason reason =
-	                                                    HangTrace::ImageFreeReason::Other);
-	void                      TouchImage(Image& image);
-	void                      SyncAliasFromOwner(ImageId id);
-	void                      TrackImage(ImageId id);
+	void                  RequireFullResidency(ImageId id);
+	void                  PoisonNonResidentLevels(Image& image);
+	void                  RetireIdlePartialImages();
+	[[nodiscard]] ImageId GetNullImage(const ImageDesc& desc);
+	void                  RegisterImage(ImageId id);
+	void                  UnregisterImage(ImageId id);
+	void                  DeleteImage(ImageId id);
+	void FreeImage(ImageId                    id,
+	               HangTrace::ImageFreeReason reason = HangTrace::ImageFreeReason::Other);
+	void TouchImage(Image& image);
+	void SyncAliasFromOwner(ImageId id);
+	void TrackImage(ImageId id);
 	// Chunk-granular tracking (Image::ChunkState). Caller holds m_lock.
-	[[nodiscard]] bool        ChunkTrackingEligible(const Image& image) const;
-	void                      TrackChunkImage(Image& image);
+	[[nodiscard]] bool ChunkTrackingEligible(const Image& image) const;
+	void               TrackChunkImage(Image& image);
 	template <bool track>
-	uint32_t                  UpdateChunkWatchers(Image& image, uint32_t first, uint32_t last);
-	void                      InvalidateChunks(Image& image, uint64_t address, uint64_t size);
+	uint32_t UpdateChunkWatchers(Image& image, uint32_t first, uint32_t last);
+	void     InvalidateChunks(Image& image, uint64_t address, uint64_t size);
 	struct PartialUploadResult {
 		bool     done        = false;
 		uint64_t bytes       = 0; // tiled guest bytes detiled and uploaded
@@ -327,30 +334,30 @@ private:
 	// KeepEligible: the state the partial refresh needs. KeepGpuBytes marks [address, address +
 	// size) (CPU write: widened to KeptWriteGranule, those pages released; unmap: exact, pages kept
 	// watched) and returns false where the caller must take the whole-image path.
-	[[nodiscard]] bool        KeepEligible(const Image& image) const;
-	[[nodiscard]] bool        KeepGpuBytes(Image& image, uint64_t address, uint64_t size, bool unmap);
+	[[nodiscard]] bool KeepEligible(const Image& image) const;
+	[[nodiscard]] bool KeepGpuBytes(Image& image, uint64_t address, uint64_t size, bool unmap);
 	// Uploads the subresources over image.kept_dirty from guest memory; false: nothing recorded,
 	// the caller uploads the whole image.
 	[[nodiscard]] PartialUploadResult UploadKeptRanges(Image& image);
-	[[nodiscard]] bool        UploadKeptDepthLayers(Image& image, PartialUploadResult& result);
+	[[nodiscard]] bool UploadKeptDepthLayers(Image& image, PartialUploadResult& result);
 	// Whole-image refresh of a tiled sampled texture whose guest bytes are copied to staging
 	// by m_staging_copier. False when the ordinary refresh path must be used.
-	[[nodiscard]] bool        TryAsyncFullUpload(Image& image);
-	void                      RecordChunkHashes(Image& image);
-	[[nodiscard]] bool        VerifyCleanChunks(Image& image);
-	[[nodiscard]] bool        KeepOverlappedImage(const Image& cached, uint64_t current_frame) const;
-	void                      TrackImageHead(ImageId id);
-	void                      TrackImageTail(ImageId id);
-	void                      UntrackImage(ImageId id);
-	void                      UntrackImageHead(ImageId id);
-	void                      UntrackImageTail(ImageId id);
-	void                      MarkAsMaybeDirty(ImageId id, Image& image);
+	[[nodiscard]] bool TryAsyncFullUpload(Image& image);
+	void               RecordChunkHashes(Image& image);
+	[[nodiscard]] bool VerifyCleanChunks(Image& image);
+	[[nodiscard]] bool KeepOverlappedImage(const Image& cached, uint64_t current_frame) const;
+	void               TrackImageHead(ImageId id);
+	void               TrackImageTail(ImageId id);
+	void               UntrackImage(ImageId id);
+	void               UntrackImageHead(ImageId id);
+	void               UntrackImageTail(ImageId id);
+	void               MarkAsMaybeDirty(ImageId id, Image& image);
 	// All callers hold m_lock; negative ownership proofs contain no guest values.
-	void                      MarkImageGpuModified(Image& image);
+	void MarkImageGpuModified(Image& image);
 	// Logs [address, address + size) to the coherence log (all memory by default).
 	void InvalidateCleanImageProofs(uint64_t address = 0, uint64_t size = UINT64_MAX,
 	                                Coherence::Source source = Coherence::Source::Universe);
-	void                      TrackImageDownload(ImageId id, Image& image);
+	void TrackImageDownload(ImageId id, Image& image);
 	[[nodiscard]] static bool SameBacking(const ImageInfo& cached, const ImageInfo& requested,
 	                                      bool exact_format);
 	[[nodiscard]] static BindingType UploadBinding(const Image& image);
@@ -361,28 +368,25 @@ private:
 	[[nodiscard]] bool SafeToSyncIntoBuffer(const Image& image);
 
 	// Caller holds m_lock; it also serializes the per-image query epoch.
-	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
-	                                               bool page_overlap) const;
+	[[nodiscard]] ImageIds FindImagesInRegion(uint64_t address, uint64_t size,
+	                                          bool page_overlap) const;
 	// Caller holds m_lock. Equal backing ranges must begin in the same indexed page.
 	[[nodiscard]] ImageId       FindImageWithSameBacking(const ImageInfo& requested,
-	                                                     bool exact_format) const;
+	                                                     bool             exact_format) const;
 	[[nodiscard]] OverlapResult ResolveOverlap(const ImageInfo& requested, BindingType binding,
 	                                           ImageId cached, ImageId merged);
 	[[nodiscard]] ImageId       ResolveDepthOverlap(const ImageInfo& requested, BindingType binding,
 	                                                ImageId cached);
 	[[nodiscard]] ImageId       ExpandImage(const ImageInfo& info, ImageId source);
-	void                        RefreshImage(ImageId id,
-	                                         RefreshIntent intent = RefreshIntent::Read);
+	void RefreshImage(ImageId id, RefreshIntent intent = RefreshIntent::Read);
 	// `noop` (optional): how the decision can be repeated (MetadataNoop), reset first.
-	void                        MaterializeDccClear(ImageId id, const ImageDesc& desc,
-	                                                uint32_t metadata_base_layer,
-	                                                MetadataNoop* noop = nullptr);
+	void MaterializeDccClear(ImageId id, const ImageDesc& desc, uint32_t metadata_base_layer,
+	                         MetadataNoop* noop = nullptr);
 	// A render-target binding whose CMASK marks every tile of a bound slice fast-cleared: clears
 	// the slice to the CLEAR_WORD colour and leaves the CMASK expanded, as the colour block's
 	// reads and the fast-clear eliminate would (KYTY_CMASK_FAST_CLEAR).
-	void                        MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
-	                                                  uint32_t metadata_base_layer,
-	                                                  MetadataNoop* noop = nullptr);
+	void MaterializeCmaskClear(ImageId id, const ImageDesc& desc, uint32_t metadata_base_layer,
+	                           MetadataNoop* noop = nullptr);
 	// MetadataNoop helpers. Caller holds m_lock: the page versions over `range` (false when it
 	// covers more than MetadataNoop::MaxPages pages).
 	[[nodiscard]] bool CaptureMetadataPages(GuestRange range, MetadataNoop& noop) const;
@@ -407,12 +411,12 @@ private:
 	// bytes select a clear value (values/decodable in DccClearHelper::ClearCodes order): clears
 	// the bound slices whose bytes all equal an accepted code and leaves those bytes 0xFF. cmask:
 	// CMASK bytes (only code 0x00), not counted as DCC work.
-	[[nodiscard]] Profiler::FrameEvent TryMaterializeGpuMetadataClear(
-	    DccClearHelper& helper, ImageId id, const ImageDesc& desc, GuestRange range,
-	    uint32_t metadata_base_layer, const DccClearHelper::ClearValues& values, uint32_t decodable,
-	    bool cmask);
-	void                        InitializeImage(ImageId id,
-	                                            RefreshIntent intent = RefreshIntent::Read);
+	[[nodiscard]] Profiler::FrameEvent
+	TryMaterializeGpuMetadataClear(DccClearHelper& helper, ImageId id, const ImageDesc& desc,
+	                               GuestRange range, uint32_t metadata_base_layer,
+	                               const DccClearHelper::ClearValues& values, uint32_t decodable,
+	                               bool cmask);
+	void InitializeImage(ImageId id, RefreshIntent intent = RefreshIntent::Read);
 	// KYTY_ALIAS_BYTES. Moves the bytes of `range` that GPU-modified images own into the buffer
 	// cache: each owner is tiled into a scratch copy of its owned ranges' buffer bytes, which are
 	// copied back; the buffer then owns them (GPU-dirty) and the image no longer does. only:
@@ -429,21 +433,22 @@ private:
 	// The 64 KiB blocks of a single-level, single-layer render target (64 KiB render-target
 	// tiling) under `rect` (level-0 texels, clamped to the extent). False: not such a target, or
 	// the rectangle covers the whole image (claim it all).
-	[[nodiscard]] bool BlocksUnderRect(const Image& image, vk::Rect2D& rect, RangeSet& blocks) const;
+	[[nodiscard]] bool BlocksUnderRect(const Image& image, vk::Rect2D& rect,
+	                                   RangeSet& blocks) const;
 	// The destination of a copy owns what the source owned there (and the source no longer).
-	void TakeOverOwnedBytes(Image& destination, Image& source);
-	[[nodiscard]] TextureTransfer
-	BuildTextureTransfer(const Image& image, BindingType binding, TransferDirection direction) const;
-	[[nodiscard]] static TextureTransfer BuildTextureTransfer(const ImageInfo& info,
-	                                                          uint32_t backing_samples,
-	                                                          BindingType binding,
+	void                          TakeOverOwnedBytes(Image& destination, Image& source);
+	[[nodiscard]] TextureTransfer BuildTextureTransfer(const Image& image, BindingType binding,
+	                                                   TransferDirection direction) const;
+	[[nodiscard]] static TextureTransfer BuildTextureTransfer(const ImageInfo&  info,
+	                                                          uint32_t          backing_samples,
+	                                                          BindingType       binding,
 	                                                          TransferDirection direction);
 	// Drops the regions (and tiles) of non-resident levels and packs the detiled scratch.
 	void RestrictToResidentLevels(const Image& image, TextureTransfer& transfer) const;
 	[[nodiscard]] ImageDownload BuildDownload(const Image& image) const;
-	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
+	void                        UploadImage(Image& image, Buffer& source, uint64_t source_offset);
 	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
-	                       uint64_t destination_size, ImageDownload transfer);
+	                   uint64_t destination_size, ImageDownload transfer);
 	// The same into any device buffer with `destination_capacity` bytes from destination_offset.
 	void DownloadImageTo(Image& image, vk::Buffer destination, uint64_t destination_offset,
 	                     uint64_t destination_capacity, uint64_t destination_size,
@@ -459,8 +464,8 @@ private:
 	[[nodiscard]] bool ClearImage(CommandBuffer& command, ImageId id, vk::Format format,
 	                              const vk::ImageSubresourceRange& range,
 	                              const vk::ClearValue& clear, const char* site);
-	void PrepareImageCopy(Image& image);
-	void RefreshCopySource(ImageId id);
+	void               PrepareImageCopy(Image& image);
+	void               RefreshCopySource(ImageId id);
 	[[nodiscard]] bool CopyD16(Image& destination, Image& source);
 	// Depth <-> color reinterpretation without a staging buffer (VK_KHR_maintenance8 copy or a
 	// one-pass shader). Returns the path name, or nullptr when nothing was recorded.
@@ -491,20 +496,25 @@ private:
 	void RunPressureGarbageCollector(uint64_t tick);
 	// KYTY_VRAM_IDLE_FRAMES=N (default 0: off): once every 32 frames, registered images unused for
 	// more than N presented frames that the submission-age collector frees without a download (not
-	// GPU-modified, not bound, a target, a stencil association or a presentation surface) are freed,
-	// whatever the memory usage, so earlier scenes' images do not stay until the budget runs out.
-	// A later use recreates and refreshes the image.
-	// KYTY_VRAM_PRESSURE_FRAMES=K (default 0: off): above the collection trigger, instead of the
-	// submission-age collection (images unused for 16-160 completed submissions, a fraction of a
-	// frame, are freed and recreated by the next frame; it also stops at the first LRU entries it
-	// may not free), images unused for K frames are freed the same way, once per frame, oldest
-	// first, until usage is under the trigger (K/4, at least 2, above the critical mark).
-	// m_frame_ticks: the GC tick each recent frame began at (LRU ticks are GC ticks).
+	// GPU-modified, not bound, a target, a stencil association or a presentation surface) are
+	// freed, whatever the memory usage, so earlier scenes' images do not stay until the budget runs
+	// out. A later use recreates and refreshes the image. KYTY_VRAM_PRESSURE_FRAMES=K (default 0:
+	// off): above the collection trigger, instead of the submission-age collection (images unused
+	// for 16-160 completed submissions, a fraction of a frame, are freed and recreated by the next
+	// frame; it also stops at the first LRU entries it may not free), images unused for K frames
+	// are freed the same way, once per frame, oldest first, until usage is under the trigger (K/4,
+	// at least 2, above the critical mark). m_frame_ticks: the GC tick each recent frame began at
+	// (LRU ticks are GC ticks).
 	[[nodiscard]] bool IdleRetirable(const Image& image, uint64_t frame, uint64_t min_age) const;
 	void               NoteFrameTick(uint64_t frame, uint64_t tick);
 	// Returns the AccountedSize bytes freed (stops past `enough`).
-	uint64_t           RetireUnusedImages(uint64_t frame, uint64_t min_age, size_t max_count,
-	                                      uint64_t enough);
+	uint64_t RetireUnusedImages(uint64_t frame, uint64_t min_age, size_t max_count, uint64_t enough,
+	                            bool idle_pass = false);
+	// KYTY_VRAM_IDLE_KEEP_POOLS_MB=<n> (default 0: off): the idle pass (KYTY_VRAM_IDLE_FRAMES)
+	// passes over sampled-only one-level texture arrays of n MiB and more while the device budget
+	// is 12 GiB or more; pressure and budget collection still take them.
+	[[nodiscard]] bool KeptIdlePool(const Image& image) const;
+	uint64_t           m_idle_keep_pool_bytes = 0;
 	uint64_t           m_idle_frames          = 0;
 	uint64_t           m_idle_next_frame      = 0;
 	uint64_t           m_idle_freed           = 0;
@@ -513,34 +523,35 @@ private:
 	uint64_t           m_pressure_freed_bytes = 0;
 	// KYTY_VRAM_GC_BUDGET (graphics/host_gpu/vramBudget.h): frame-aged collection against the
 	// budget once per frame. Returns true when it handled this collection.
-	bool               RunBudgetGarbageCollector(uint64_t frame);
-	uint64_t           m_budget_frame       = UINT64_MAX;
-	uint64_t           m_budget_freed_bytes = 0;
-	uint64_t           m_budget_freed       = 0;
-	uint64_t           m_budget_last        = 0; // planning budget at the last collection
+	bool     RunBudgetGarbageCollector(uint64_t frame);
+	uint64_t m_budget_frame       = UINT64_MAX;
+	uint64_t m_budget_freed_bytes = 0;
+	uint64_t m_budget_freed       = 0;
+	uint64_t m_budget_last        = 0; // planning budget at the last collection
 	std::deque<std::pair<uint64_t, uint64_t>> m_frame_ticks;
 	// KYTY_VRAM_STATS: images created and freed (per HangTrace::ImageFreeReason) since the last
 	// report, {count, native bytes}.
 	void NoteVramFree(const Image& image, HangTrace::ImageFreeReason reason);
-	std::array<std::pair<uint64_t, uint64_t>, static_cast<size_t>(HangTrace::ImageFreeReason::Count)>
+	std::array<std::pair<uint64_t, uint64_t>,
+	           static_cast<size_t>(HangTrace::ImageFreeReason::Count)>
 	                              m_vram_frees {};
 	std::pair<uint64_t, uint64_t> m_vram_creates {};
 
-	GraphicContext&                                   m_graphics;
-	CommandScheduler&                                 m_scheduler;
-	TrackingSpinLock                                  m_lock;
-	PageManager&                                      m_page_manager;
-	BlitHelper                                        m_blit_helper;
-	TileManager                                       m_tiler;
-	BufferCache&                                      m_buffer_cache;
-	std::unique_ptr<DccClearHelper>                    m_dcc_clear;
+	GraphicContext&                 m_graphics;
+	CommandScheduler&               m_scheduler;
+	TrackingSpinLock                m_lock;
+	PageManager&                    m_page_manager;
+	BlitHelper                      m_blit_helper;
+	TileManager                     m_tiler;
+	BufferCache&                    m_buffer_cache;
+	std::unique_ptr<DccClearHelper> m_dcc_clear;
 	// Native CMASK inspection when KYTY_DCC_GPU does not create m_dcc_clear (created on first use).
-	std::unique_ptr<DccClearHelper>                    m_cmask_clear;
-	std::unordered_map<uint64_t, GpuDccInspection>      m_gpu_dcc_inspections;
-	uint64_t m_gpu_dcc_attempts = 0;
-	uint64_t m_gpu_dcc_records = 0;
-	uint64_t m_gpu_dcc_reuses = 0;
-	uint64_t m_gpu_dcc_fallbacks = 0;
+	std::unique_ptr<DccClearHelper>                   m_cmask_clear;
+	std::unordered_map<uint64_t, GpuDccInspection>    m_gpu_dcc_inspections;
+	uint64_t                                          m_gpu_dcc_attempts  = 0;
+	uint64_t                                          m_gpu_dcc_records   = 0;
+	uint64_t                                          m_gpu_dcc_reuses    = 0;
+	uint64_t                                          m_gpu_dcc_fallbacks = 0;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
 	std::unordered_map<vk::Format, ImageId>           m_null_images;
@@ -555,10 +566,10 @@ private:
 		uint64_t address = UINT64_MAX;
 		uint64_t inserts = 0;
 	};
-	uint64_t                                          m_surface_meta_inserts = 0;
-	std::array<MetaErase, 64>                         m_meta_erases {};
+	uint64_t                  m_surface_meta_inserts = 0;
+	std::array<MetaErase, 64> m_meta_erases {};
 	// KYTY_CP_COMMIT=targetalloc: FindRenderTarget's bounded-claim block list (m_lock held).
-	RangeSet                                          m_claim_blocks;
+	RangeSet m_claim_blocks;
 	// Bumped under m_lock after every change of m_surface_metas (an entry added or removed, a
 	// clear_mask changed): validates m_meta_clear_memo (IsMetaCleared).
 	std::atomic<uint64_t> m_surface_meta_generation {0};
@@ -572,58 +583,59 @@ private:
 		bool     found      = false;
 		bool     valid      = false;
 	} m_meta_clear_memo;
-	uint64_t                                          m_total_used_memory  = 0;
-	uint64_t                                          m_registered_image_memory = 0;
-	uint64_t                                          m_trigger_gc_memory  = 0;
-	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
-	uint64_t         m_critical_gc_memory     = 3ull * 1024 * 1024 * 1024;
-	uint64_t         m_gc_tick                = 0;
+	uint64_t           m_total_used_memory       = 0;
+	uint64_t           m_registered_image_memory = 0;
+	uint64_t           m_trigger_gc_memory       = 0;
+	uint64_t           m_pressure_gc_memory      = 1536ull * 1024 * 1024;
+	uint64_t           m_critical_gc_memory      = 3ull * 1024 * 1024 * 1024;
+	uint64_t           m_gc_tick                 = 0;
 	ImageCacheGcPolicy m_pressure_gc_policy;
-	bool             m_pressure_gc_enabled   = false;
+	bool               m_pressure_gc_enabled = false;
 	// KYTY_IMAGE_GC_FILTER (RunGarbageCollector's submission-age walk).
-	bool             m_gc_filter_candidates  = true;
+	bool                                                      m_gc_filter_candidates = true;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t>::Cursor m_pressure_gc_cursor;
-	uint64_t m_pressure_retirement_bytes = 0;
-	mutable uint32_t m_image_query_epoch      = 0;
-	bool             m_direct_dirty_image_query = false;
+	uint64_t                                                  m_pressure_retirement_bytes = 0;
+	mutable uint32_t                                          m_image_query_epoch         = 0;
+	bool                                                      m_direct_dirty_image_query  = false;
 	struct CleanImagePageProof {
-		uint64_t page = 0;
+		uint64_t page  = 0;
 		uint64_t epoch = 0;
 	};
 	std::array<CleanImagePageProof, 256> m_clean_image_pages {};
-	uint64_t m_clean_image_epoch = 1;
-	bool m_clean_image_proofs = false;
-	ImageLookupMode  m_image_lookup_mode = ImageLookupMode::FirstPage;
-	uint64_t         m_image_lookup_checks = 0;
-	uint64_t         m_image_lookup_mismatches = 0;
+	uint64_t                             m_clean_image_epoch       = 1;
+	bool                                 m_clean_image_proofs      = false;
+	ImageLookupMode                      m_image_lookup_mode       = ImageLookupMode::FirstPage;
+	uint64_t                             m_image_lookup_checks     = 0;
+	uint64_t                             m_image_lookup_mismatches = 0;
 	// LookupSideEffects (GPU thread).
-	uint64_t         m_lookup_side_effects = 0;
+	uint64_t m_lookup_side_effects = 0;
 	// DccDecisionEffects (GPU thread).
-	uint64_t         m_dcc_decision_effects = 0;
-	bool             m_readback_linear_images = false;
+	uint64_t m_dcc_decision_effects   = 0;
+	bool     m_readback_linear_images = false;
+	bool     m_readback_tiled_images  = false;
 	// Texture streaming (see TextureCache constructor for the environment switches).
-	bool             m_partial_upload      = true;
-	bool             m_partial_bands       = true;
-	bool             m_partial_verify      = false;
-	uint32_t         m_chunk_shift         = 16;
+	bool     m_partial_upload = true;
+	bool     m_partial_bands  = true;
+	bool     m_partial_verify = false;
+	uint32_t m_chunk_shift    = 16;
 	// KYTY_IMAGE_GPU_KEEP (see KeepEligible).
-	bool             m_gpu_keep            = true;
+	bool m_gpu_keep = true;
 	// KYTY_IMAGE_WRITEBACK_GUARD (see WriteBackImageBytes). Lock order: m_lock, then
 	// m_writeback_mutex; the priority worker takes only the latter.
-	bool             m_writeback_guard     = true;
-	std::mutex       m_writeback_mutex;
+	bool                                           m_writeback_guard = true;
+	std::mutex                                     m_writeback_mutex;
 	std::vector<std::shared_ptr<PendingWriteback>> m_pending_writebacks;
-	std::atomic<size_t> m_pending_writeback_count {0};
-	uint64_t         m_overlap_keep_frames = 0;
+	std::atomic<size_t>                            m_pending_writeback_count {0};
+	uint64_t                                       m_overlap_keep_frames = 0;
 	// Set by FindImage for the ResolveOverlap calls of one lookup: many live overlapping
 	// images already share the requested range, so overlapped images are not kept.
-	bool             m_overlap_crowded     = false;
-	uint64_t         m_partial_verify_mismatches = 0;
+	bool     m_overlap_crowded           = false;
+	uint64_t m_partial_verify_mismatches = 0;
 	// KYTY_TEXTURE_ASYNC_STAGING=0: null, staging copies stay on the GPU thread.
 	std::unique_ptr<StagingCopier> m_staging_copier;
 	// Device-local host-visible (resizable BAR) staging ring for StagingCopier jobs, so detile
 	// reads VRAM instead of system memory over PCIe (KYTY_TEXTURE_STAGING_REBAR=0: none).
-	std::unique_ptr<StreamBuffer>  m_texture_staging;
+	std::unique_ptr<StreamBuffer> m_texture_staging;
 	// Registered images per ImagePageTable page, readable without m_lock
 	// (KYTY_TEXTURE_FAULT_FAST_PATH=0 always takes the lock). RegisterImage counts a page before
 	// the image enters its owner list, UnregisterImage uncounts it after the image left it (all
@@ -657,10 +669,10 @@ private:
 	};
 	ExactRangeTotals m_exact_range_totals;
 	ExactRangeTotals m_exact_range_printed;
-	uint64_t         m_exact_range_print_ns = 0;
-	uint32_t         m_exact_range_logged   = 0;
-	bool m_gpu_write_skip        = true;
-	int  m_gpu_write_skip_verify = 0;
+	uint64_t         m_exact_range_print_ns  = 0;
+	uint32_t         m_exact_range_logged    = 0;
+	bool             m_gpu_write_skip        = true;
+	int              m_gpu_write_skip_verify = 0;
 	// Why TryMaterializeGpuMetadataClear last refused an image (DccImageState* FrameEvent).
 	Profiler::FrameEvent m_image_state_reason = Profiler::FrameEvent::DccImageStateUnregistered;
 	// Why the last MaterializeDccClear / MaterializeCmaskClear decision was not a provable no-op
@@ -708,8 +720,8 @@ private:
 	// touch) and is counted and logged (exit stops). FrameEvents ImageLruTouchSkips,
 	// ImageLruVerify{Checks,Mismatches}.
 	[[nodiscard]] bool LruMirrorHolds(Image& image, bool skip);
-	bool m_lru_touch_skip        = true;
-	int  m_lru_touch_skip_verify = 0;
+	bool               m_lru_touch_skip        = true;
+	int                m_lru_touch_skip_verify = 0;
 	// Written by the thread that touches images (the GPU thread; GetImage touches without m_lock)
 	// with a relaxed load and store, read by tests.
 	struct LruTouchTotals {
@@ -720,17 +732,17 @@ private:
 	};
 	LruTouchTotals m_lru_touch_totals;
 	enum class ResidencyMode : uint8_t { Off, On, Poison };
-	ResidencyMode                            m_residency            = ResidencyMode::On;
+	ResidencyMode m_residency = ResidencyMode::On;
 	// KYTY_TEXTURE_SPARSE_RESIDENCY: partially resident textures are sparse residency images.
-	bool                                     m_sparse_textures      = false;
-	uint64_t                                 m_residency_violations = 0;
-	uint64_t                                 m_residency_overlap_logs = 0;
+	bool     m_sparse_textures        = false;
+	uint64_t m_residency_violations   = 0;
+	uint64_t m_residency_overlap_logs = 0;
 	// Partially resident images (stale ids are dropped by the once-per-frame scan).
-	std::vector<ImageId>                     m_partial_images;
-	uint64_t                                 m_partial_scan_frame   = 0;
-	uint64_t                                 m_resident_idle_frames = 30;
+	std::vector<ImageId> m_partial_images;
+	uint64_t             m_partial_scan_frame   = 0;
+	uint64_t             m_resident_idle_frames = 30;
 	// KYTY_TEXEL_SYNC_SKIP=0 downloads image contents for every texel-buffer read.
-	bool                                     m_texel_sync_skip = true;
+	bool                        m_texel_sync_skip = true;
 	[[nodiscard]] StreamBuffer& StagingRing();
 	// Structural generations for TextureBindingMemo (pipeline/textureBindingMemo.h), one per
 	// ImagePageTable page: NoteStructureChange(image) bumps every page the image's registered
@@ -740,7 +752,7 @@ private:
 	// registered image's SameBacking fields (address, size, extent, resources, samples, block
 	// size, tile mode, format, type) in place must call it too. Caller holds m_lock.
 	std::unique_ptr<uint64_t[]> m_page_versions;
-	void NoteStructureChange(const Image& image) {
+	void                        NoteStructureChange(const Image& image) {
 		ImagePageTable::PageRange pages {};
 		if (!ImagePageTable::TryGetPageRange(image.live.address, image.live.size, pages)) {
 			return;

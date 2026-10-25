@@ -75,6 +75,11 @@ struct MemoryInfo {
 	bool                    coherent                 = false;
 	bool                    planning_only            = false;
 
+	[[nodiscard]] bool IsCoherentBufferPairLoad(ValueOpcode opcode) const {
+		return kind == ResourceKind::Buffer && opcode == ValueOpcode::LoadBufferU32x2 && coherent &&
+		       !typed && !formatted && data_bits == 32u;
+	}
+
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
 		// ReadConstBuffer: one dword of an S_BUFFER_LOAD (no formats, RDNA2 ISA 7.2.1).
 		return !formatted && !typed && data_bits == 32u &&
@@ -239,8 +244,11 @@ enum class TessellationAttribute {
 	ControlOutput,
 	EvaluationInput,
 	PatchOutput,
+	PatchInput,
 	Factor
 };
+constexpr uint32_t NumTessellationAttributes =
+    static_cast<uint32_t>(TessellationAttribute::Factor) + 1u;
 
 enum class StageInputKind {
 	VertexIndex,
@@ -379,11 +387,20 @@ enum class DescriptorBindingKind : uint32_t {
 	ShaderData,
 	MipStats,
 	SharedMemory,
+	// Buffers only ever read by ReadConstBuffer at immediate offsets (UniformBufferResources):
+	// bound as uniform buffers instead of in Buffers, so the reads go through the constant cache.
+	UniformBuffers,
 	Count,
 };
 
+// The uniform buffer range a UniformBuffers element binds (maxUniformBufferRange is at least
+// 64 KiB on the GPUs that run the emulator). Constant reads stay below it with the base
+// adjustment (< UniformBufferBaseSlack bytes).
+inline constexpr uint32_t UniformBufferBytes     = 65536u;
+inline constexpr uint32_t UniformBufferBaseSlack = 256u;
+
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 58u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount         = 32;
@@ -394,6 +411,19 @@ struct PushData {
 	static constexpr uint32_t               MeshFirstGroupDword = MeshDrawDwordCount;
 	[[nodiscard]] static constexpr uint32_t MeshDrawDwords(bool split_groups) {
 		return MeshDrawDwordCount + (split_groups ? 1u : 0u);
+	}
+	// PA_CL_UCP user clip planes (upstream feed075a9): planes 0..N of UCP_ENA, four float dwords
+	// each, after the mesh draw dwords (also for vertex shaders, whose draws push nothing else).
+	static constexpr uint32_t               UserClipPlaneDword = MeshDrawDwordCount + 1u;
+	[[nodiscard]] static constexpr uint32_t GraphicsPushStart(uint32_t mesh_dwords,
+	                                                          uint32_t user_clip_planes) {
+		uint32_t planes_end = 0;
+		for (uint32_t mask = user_clip_planes; mask != 0; mask >>= 1u) {
+			planes_end += 4u;
+		}
+		return user_clip_planes != 0 && UserClipPlaneDword + planes_end > mesh_dwords
+		           ? UserClipPlaneDword + planes_end
+		           : mesh_dwords;
 	}
 	// Mesh draw dword 3 (the index size: 0, 1, 2 or 4 when pushed by the CPU) marking a native
 	// indirect mesh draw: dwords 0-1 then hold the device address of the dispatch's parameter

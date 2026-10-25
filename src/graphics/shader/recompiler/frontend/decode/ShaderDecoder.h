@@ -524,11 +524,17 @@ enum class Opcode {
 	BUFFER_LOAD_FORMAT_XYZ,
 	BUFFER_LOAD_FORMAT_XYZW,
 	BUFFER_LOAD_FORMAT_D16_X,
+	BUFFER_LOAD_FORMAT_D16_XY,
+	BUFFER_LOAD_FORMAT_D16_XYZ,
+	BUFFER_LOAD_FORMAT_D16_XYZW,
 	BUFFER_STORE_FORMAT_X,
 	BUFFER_STORE_FORMAT_XY,
 	BUFFER_STORE_FORMAT_XYZ,
 	BUFFER_STORE_FORMAT_XYZW,
 	BUFFER_STORE_FORMAT_D16_X,
+	BUFFER_STORE_FORMAT_D16_XY,
+	BUFFER_STORE_FORMAT_D16_XYZ,
+	BUFFER_STORE_FORMAT_D16_XYZW,
 	BUFFER_LOAD_UBYTE,
 	BUFFER_LOAD_SBYTE,
 	BUFFER_LOAD_USHORT,
@@ -555,6 +561,7 @@ enum class Opcode {
 	BUFFER_ATOMIC_CMPSWAP,
 	BUFFER_ATOMIC_SWAP_X2,
 	BUFFER_ATOMIC_ADD,
+	BUFFER_ATOMIC_ADD_X2,
 	BUFFER_ATOMIC_SUB,
 	BUFFER_ATOMIC_SMIN,
 	BUFFER_ATOMIC_UMIN,
@@ -568,7 +575,6 @@ enum class Opcode {
 	BUFFER_ATOMIC_INC,
 	BUFFER_ATOMIC_DEC,
 	BUFFER_ATOMIC_CMPSWAP_X2,
-	BUFFER_ATOMIC_ADD_X2,
 	BUFFER_ATOMIC_SUB_X2,
 	BUFFER_ATOMIC_SMIN_X2,
 	BUFFER_ATOMIC_UMIN_X2,
@@ -693,6 +699,8 @@ enum class Opcode {
 	V_INTERP_P1_F32,
 	V_INTERP_P2_F32,
 	V_INTERP_MOV_F32,
+	V_INTERP_P1LL_F16,
+	V_INTERP_P2_F16,
 
 	S_NOP,
 	S_WAITCNT,
@@ -864,6 +872,7 @@ void DecodeProgram(std::span<const uint32_t> code, Program& program, bool decode
 [[nodiscard]] bool IsBvhIntersect(const Instruction& inst);
 bool               IsConditionalBranch(Opcode opcode);
 bool               IsDirectBranch(Opcode opcode);
+bool               IsDsWriteOpcode(Opcode opcode);
 
 void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand);
 void DecodeScalarDestination(uint32_t code, uint32_t pc, Operand& operand);

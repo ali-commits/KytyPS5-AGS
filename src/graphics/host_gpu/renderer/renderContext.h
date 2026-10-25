@@ -95,8 +95,8 @@ private:
 	bool     m_owner_locked = false; // its outermost acquisition took the mutex
 	// The requesters' (under the mutex): one holds the mutex and waits for the owner to leave.
 	alignas(64) std::atomic<uint32_t> m_requested {0};
-	bool m_owner_exists = false;
-	bool m_asymmetric   = false;
+	bool                                m_owner_exists    = false;
+	bool                                m_asymmetric      = false;
 	inline static thread_local bool     t_owner           = false;
 	inline static thread_local uint32_t t_requester_depth = 0;
 };
@@ -118,28 +118,32 @@ public:
 	~RenderContext();
 	KYTY_CLASS_NO_COPY(RenderContext);
 
-	[[nodiscard]] GraphicContext&           GetGraphics() const noexcept { return m_graphics; }
-	void                                    InitializeGpu(VideoOut::VideoOutDriver* video_out);
-	void                                    ShutdownGpu();
-	[[nodiscard]] GuestGpu&                 GetGpu() const;
+	[[nodiscard]] GraphicContext& GetGraphics() const noexcept { return m_graphics; }
+	void                          InitializeGpu(VideoOut::VideoOutDriver* video_out);
+	void                          ShutdownGpu();
+	[[nodiscard]] GuestGpu&       GetGpu() const;
 	// Wakes guest queues suspended on external progress (e.g. a completed flip). Any thread;
 	// a no-op before InitializeGpu and after ShutdownGpu has begun.
 	void                                    NotifyGpuProgress();
 	[[nodiscard]] VideoOut::VideoOutDriver& GetVideoOut() const;
 
-	RenderMutex&        GetMutex() { return m_mutex; }
-	CommandScheduler&   GetCommandScheduler() { return m_command_scheduler; }
-	PipelineCache&      GetPipelineCache() { return m_pipeline_cache; }
-	DescriptorHeap&     GetDescriptorHeap() { return m_descriptor_heap; }
-	SamplerCache&       GetSamplerCache() { return m_sampler_cache; }
-	BufferCache&        GetBufferCache() { return m_buffer_cache; }
-	TextureCache&       GetTextureCache() { return m_texture_cache; }
-	RenderExecutor&     GetRenderExecutor() { return m_render_executor; }
-	OcclusionCounter&   GetOcclusionCounter() { return m_occlusion_counter; }
-	LodStatsCounter&    GetLodStats() { return m_lod_stats; }
+	RenderMutex&      GetMutex() { return m_mutex; }
+	CommandScheduler& GetCommandScheduler() { return m_command_scheduler; }
+	PipelineCache&    GetPipelineCache() { return m_pipeline_cache; }
+	DescriptorHeap&   GetDescriptorHeap() { return m_descriptor_heap; }
+	SamplerCache&     GetSamplerCache() { return m_sampler_cache; }
+	BufferCache&      GetBufferCache() { return m_buffer_cache; }
+	TextureCache&     GetTextureCache() { return m_texture_cache; }
+	RenderExecutor&   GetRenderExecutor() { return m_render_executor; }
+	OcclusionCounter& GetOcclusionCounter() { return m_occlusion_counter; }
+	LodStatsCounter&  GetLodStats() { return m_lod_stats; }
 
 	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// A host write of the whole of [vaddr, vaddr + size) is about to happen (an APR file read):
+	// when resource tracking watches any of its pages, one invalidation of the range (as the
+	// kernel's file reads make) instead of a write fault per page. False: nothing watched.
+	bool               PrepareHostOverwrite(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	// GPU preparation only, outside texture-cache/tracker locks. Does not download dirty images.
 	[[nodiscard]] bool SynchronizeGpuBackingForRead(uint64_t vaddr, uint64_t size);
@@ -150,10 +154,10 @@ public:
 	void ResyncHostProtection(uint64_t vaddr, uint64_t size) {
 		m_page_manager.ResyncHostProtection(vaddr, size);
 	}
-	void               PrepareBda();
-	void               RunGarbageCollector();
+	void PrepareBda();
+	void RunGarbageCollector();
 	// KYTY_VRAM_STATS (vramStats.h): one GPU memory report (GPU thread).
-	void               ReportVram();
+	void ReportVram();
 
 	// Detectors for guest-memory changes resource tracking does not see. They only count
 	// (FrameEvent.HostBackingWrite*, GuestProtect*) and log the first occurrences to stderr.
@@ -204,10 +208,10 @@ private:
 	std::unique_ptr<GuestGpu> m_gpu;
 	// Guards m_gpu_notify against GPU teardown (NotifyGpuProgress holds it shared).
 	std::shared_mutex         m_gpu_notify_mutex;
-	GuestGpu*                 m_gpu_notify = nullptr;
-	VideoOut::VideoOutDriver* m_video_out = nullptr;
+	GuestGpu*                 m_gpu_notify            = nullptr;
+	VideoOut::VideoOutDriver* m_video_out             = nullptr;
 	bool                      m_fault_process_pending = false;
-	bool                      m_bda_logged = false;
+	bool                      m_bda_logged            = false;
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;

@@ -1,7 +1,8 @@
 #include "graphics/host_gpu/renderer/commandStream.h"
-#include "common/ramStats.h"
 
 #include "common/hangWatchdog.h"
+#include "common/ramStats.h"
+#include "common/spinGate.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
 
 #include <chrono>
@@ -223,6 +224,7 @@ const char* OpName(Op op) noexcept {
 	    "DrawIndexedIndirectCount",
 	    "Dispatch",
 	    "DispatchIndirect",
+	    "DispatchBase",
 	    "ResetQueryPool",
 	    "BeginQuery",
 	    "EndQuery",
@@ -230,6 +232,7 @@ const char* OpName(Op op) noexcept {
 	    "WriteTimestamp2",
 	    "UpdateDescriptorSets",
 	    "WriteBufferMarker",
+	    "HostCopy",
 	};
 	static_assert(std::size(names) == static_cast<size_t>(Op::Count));
 	const auto index = static_cast<size_t>(op);
@@ -752,10 +755,11 @@ bool Ring::WaitPublished(const std::atomic<bool>& stop, const WaitPolicy& policy
 	}
 	HangWatchdog::Scope wait("recorder-ring-published", reinterpret_cast<uint64_t>(this), m_read,
 	                         m_published_cache);
-	const auto start = NowNs();
+	const auto          start = NowNs();
 	stats.spins++;
-	const bool spun =
-	    Spin(policy.spin_ns, [&] { return available() || stop.load(std::memory_order_acquire); });
+	// KYTY_SPIN_GATE: the consumer's idle spin only while the PC keeps CPUs idle.
+	const bool spun = Spin(Common::SpinGate::SpinAllowed() ? policy.spin_ns : 0,
+	                       [&] { return available() || stop.load(std::memory_order_acquire); });
 	if (!spun) {
 		stats.blocks++;
 		for (;;) {
@@ -1301,6 +1305,14 @@ void Encoder::dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) {
 	                          : 0);
 }
 
+void Encoder::dispatchBase(uint32_t base_x, uint32_t base_y, uint32_t base_z, uint32_t x,
+                           uint32_t y, uint32_t z) {
+	auto w = Open(Op::DispatchBase, Sz<DispatchBasePacket>(), false);
+	w.Put(DispatchBasePacket {base_x, base_y, base_z, x, y, z});
+	Close(w, m_options.verify ? VerifyHash::Value(Op::DispatchBase, base_x, base_y, base_z, x, y, z)
+	                          : 0);
+}
+
 void Encoder::resetQueryPool(vk::QueryPool pool, uint32_t first, uint32_t count) {
 	auto w = Open(Op::ResetQueryPool, Sz<QueryRangePacket>(), false);
 	w.Put(QueryRangePacket {pool, first, count});
@@ -1346,14 +1358,22 @@ void Encoder::writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool,
 	             : 0);
 }
 
+void Encoder::hostCopy(void* destination, uint64_t source, uint64_t size) {
+	const auto destination_bits = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(destination));
+	auto       w                = Open(Op::HostCopy, Sz<HostCopyPacket>(), false);
+	w.Put(HostCopyPacket {destination_bits, source, size});
+	Close(w,
+	      m_options.verify ? VerifyHash::Value(Op::HostCopy, destination_bits, source, size) : 0);
+}
+
 void Encoder::writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
                                    vk::DeviceSize offset, uint32_t marker) {
 	const auto stage_bits = static_cast<uint32_t>(static_cast<VkPipelineStageFlagBits>(stage));
 	auto       w          = Open(Op::WriteBufferMarker, Sz<WriteBufferMarkerPacket>(), false);
 	w.Put(WriteBufferMarkerPacket {buffer, offset, stage_bits, marker});
-	Close(w, m_options.verify
-	             ? VerifyHash::Value(Op::WriteBufferMarker, HandleBits(buffer), offset, stage_bits, marker)
-	             : 0);
+	Close(w, m_options.verify ? VerifyHash::Value(Op::WriteBufferMarker, HandleBits(buffer), offset,
+	                                              stage_bits, marker)
+	                          : 0);
 }
 
 } // namespace Libs::Graphics::CommandStream

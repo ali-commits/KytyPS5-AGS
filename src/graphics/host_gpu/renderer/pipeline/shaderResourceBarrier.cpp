@@ -1,10 +1,10 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 
 #include "common/assert.h"
-#include "graphics/shader/shader.h"
-#include "graphics/shader/shaderBindings.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/shader/shader.h"
+#include "graphics/shader/shaderBindings.h"
 
 #include <cstring>
 
@@ -51,12 +51,12 @@ vk::PipelineStageFlags ShaderPipelineStages(vk::ShaderStageFlags stages) {
 vk::MemoryBarrier MakeShaderWriteDependency() {
 	vk::MemoryBarrier barrier {};
 	barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-	barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite |
-	                        vk::AccessFlagBits::eVertexAttributeRead |
-	                        vk::AccessFlagBits::eIndexRead | vk::AccessFlagBits::eUniformRead |
-	                        vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite |
-	                        vk::AccessFlagBits::eColorAttachmentRead |
-	                        vk::AccessFlagBits::eColorAttachmentWrite;
+	barrier.dstAccessMask =
+	    vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite |
+	    vk::AccessFlagBits::eVertexAttributeRead | vk::AccessFlagBits::eIndexRead |
+	    vk::AccessFlagBits::eUniformRead | vk::AccessFlagBits::eIndirectCommandRead |
+	    vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite |
+	    vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite;
 	return barrier;
 }
 
@@ -94,7 +94,8 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 	const auto& program   = *runtime.program;
 	const auto& resources = *runtime.resources;
 	EXIT_IF(resources.buffers.size() != program.info.buffers.size());
-	bool has_writes = false;
+	// Address writes reach memory outside the bound buffer descriptors.
+	bool has_writes = program.has_address_writes;
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		if (!program.info.buffers[i].written) {
 			continue;
@@ -112,8 +113,8 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 
 // Sync1 masks share their bit values with the synchronization2 ones.
 static vk::PipelineStageFlags2 Stages2(vk::PipelineStageFlags stages) {
-	return vk::PipelineStageFlags2(static_cast<VkPipelineStageFlags2>(
-	    static_cast<VkPipelineStageFlags>(stages)));
+	return vk::PipelineStageFlags2(
+	    static_cast<VkPipelineStageFlags2>(static_cast<VkPipelineStageFlags>(stages)));
 }
 
 static vk::AccessFlags2 Access2(vk::AccessFlags access) {
@@ -121,7 +122,7 @@ static vk::AccessFlags2 Access2(vk::AccessFlags access) {
 }
 
 static void RecordShaderBarrier(const CommandBuffer& buffer, vk::PipelineStageFlags source_stages,
-                                vk::PipelineStageFlags destination_stages,
+                                vk::PipelineStageFlags   destination_stages,
                                 const vk::MemoryBarrier& barrier, BarrierOrigin origin) {
 	if (BarrierBatchEnabled()) {
 		buffer.RequestMemoryBarrier(Stages2(source_stages), Access2(barrier.srcAccessMask),

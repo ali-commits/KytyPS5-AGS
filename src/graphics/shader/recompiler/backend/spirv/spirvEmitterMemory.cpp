@@ -16,7 +16,8 @@ uint32_t AndCondition(EmitterState& state, uint32_t lhs, uint32_t rhs) {
 
 uint32_t EmitDsMaskedLaneRead(EmitterState& state, uint32_t source, uint32_t target,
                               uint32_t exec) {
-	if (state.lane_count == 2) {
+	// These reads stay within 32-lane halves of the wave: a split wave's host subgroups.
+	if (HalfWaveHost(state)) {
 		target = Binary(state, spv::OpBitwiseAnd, TypeU32(state), target, ConstantU32(state, 31));
 	}
 	const auto host_target = EmitHostLane(state, target);
@@ -272,9 +273,9 @@ uint32_t LoadBda(ValueEmitContext& ctx, uint32_t address, uint32_t active, uint3
 
 uint32_t ByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	if (mem.kind == IR::ResourceKind::Buffer) {
-		const auto resource =
-		    ResourceForDescriptor(ctx.state, IR::DescriptorBindingKind::Buffers, mem.resource);
-		const auto prefix  = ctx.state.memory_byte_offsets[resource];
+		(void)ResourceForDescriptor(ctx.state, IR::DescriptorBindingKind::Buffers, mem.resource);
+		// Shader-data byte offsets are per tracked buffer (memory_offset_count == buffers).
+		const auto prefix  = ctx.state.memory_byte_offsets[mem.resource];
 		const auto address = Binary(ctx.state, spv::OpIAdd, TypeU32(ctx.state),
 		                            BufferByteAddress(ctx, inst, mem), prefix);
 		// The host binding prefix must not wrap an out-of-range guest address into the buffer.
@@ -755,12 +756,71 @@ uint32_t FormattedOutOfBoundsValue(ValueEmitContext& ctx, const IR::MemoryInfo& 
 	return ConstructU32Composite(ctx.state, components, values);
 }
 
+// Formatted loads pack D16 component pairs into dwords, including XY in a single VGPR.
+uint32_t LoadFormattedPrepared(ValueEmitContext& ctx, const IR::Inst& inst,
+                               const IR::MemoryInfo& mem, const MemoryResourceAccess& resource,
+                               const Format::BufferFormatInfo& info, uint32_t components) {
+	auto&      state = ctx.state;
+	const auto count = mem.data_bits == 16u ? mem.component_count : components;
+	const auto plan  = PrepareFormattedMemory(ctx, inst, mem, resource, info);
+	const auto value = EmitValueOrDefaultIfCondition(
+	    state, plan.in_bounds, TypeU32Composite(state, count),
+	    FormattedOutOfBoundsValue(ctx, mem, plan, count), [&]() {
+		    std::array<uint32_t, 4> values {};
+		    for (uint32_t component = 0; component < count; component++) {
+			    values[component] = LoadFormattedInBounds(ctx, mem, plan, component);
+		    }
+		    return ConstructU32Composite(state, count, values);
+	    });
+	if (mem.data_bits != 16u) return value;
+	const bool integer =
+	    info.type == Format::ComponentType::Uint || info.type == Format::ComponentType::Sint;
+	const auto scalar = [&](uint32_t component) {
+		if (component >= count) return integer ? ConstantU32(state, 0u) : ConstantF32(state, 0);
+		auto result = value;
+		if (count != 1u) {
+			result = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), result, value,
+			                          component);
+		}
+		if (info.type == Format::ComponentType::Uint) {
+			return EmitUMin32(state, result, ConstantU32(state, 0xffffu));
+		}
+		if (info.type == Format::ComponentType::Sint) {
+			const auto lower = EmitSMax32(state, result, ConstantU32(state, 0xffff8000u));
+			return EmitSMin32(state, lower, ConstantU32(state, 0x7fffu));
+		}
+		return EmitBitCastF32U32(state, result);
+	};
+	std::array<uint32_t, 4> packed {};
+	for (uint32_t word = 0; word < components; word++) {
+		const auto low  = scalar(word * 2u);
+		const auto high = scalar(word * 2u + 1u);
+		if (integer) {
+			packed[word] = Binary(
+			    state, spv::OpBitwiseOr, TypeU32(state),
+			    Binary(state, spv::OpBitwiseAnd, TypeU32(state), low, ConstantU32(state, 0xffffu)),
+			    Binary(state, spv::OpShiftLeftLogical, TypeU32(state), high,
+			           ConstantU32(state, 16u)));
+		} else {
+			const auto pair = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, low,
+			                          high);
+			packed[word] = EmitPackHalf2x16(state, pair);
+		}
+	}
+	return ConstructU32Composite(state, components, packed);
+}
+
 uint32_t FormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
 		const auto info     = Format::GetFormatInfo(BufferFormat(ctx, mem));
 		if (info.type == Format::ComponentType::Unknown) {
 			return LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, 0u), resource);
+		}
+		if (mem.data_bits == 16u && mem.component_count > 1u) {
+			return LoadFormattedPrepared(ctx, inst, mem, resource, info, 1u);
 		}
 		const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
 		const auto value =
@@ -829,18 +889,23 @@ void StoreFormattedPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const I
                             const Format::BufferFormatInfo& info, uint32_t data,
                             uint32_t components) {
 	// RDNA2 formatted stores transfer the entire format, zero-filling missing VGPRs.
-	const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
+	const auto count = mem.data_bits == 16u ? mem.component_count : components;
+	const auto plan  = PrepareFormattedMemory(ctx, inst, mem, resource, info);
 	EmitIfCondition(ctx.state, plan.in_bounds, [&]() {
 		auto packed = ConstantU32(ctx.state, 0);
 		for (uint32_t component = 0; component < info.component_count; component++) {
 			auto value = ConstantU32(ctx.state, 0);
-			if (component < components) {
-				value = data;
+			if (component < count) {
+				const auto word = mem.data_bits == 16u ? component / 2u : component;
+				value           = data;
 				if (components != 1u) {
 					value = ctx.state.builder.AllocateId();
 					ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state),
-					                              value, data, component);
+					                              value, data, word);
 				}
+				if (mem.data_bits == 16u && (component & 1u) != 0u)
+					value = Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), value,
+					               ConstantU32(ctx.state, 16u));
 			}
 			value = EncodeFormattedStoreComponent(ctx, info, component, value, mem.data_bits);
 			const auto bits = info.component_bits[component];
@@ -1347,16 +1412,7 @@ uint32_t LoadWideBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t co
 		    const auto info     = Format::GetFormatInfo(
 		        mem.formatted ? BufferFormat(ctx, mem) : Prospero::BufferFormat::kInvalid);
 		    if (info.type != Format::ComponentType::Unknown) {
-			    const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
-			    return EmitValueOrDefaultIfCondition(
-			        state, plan.in_bounds, TypeU32Composite(state, components),
-			        FormattedOutOfBoundsValue(ctx, mem, plan, components), [&]() {
-				        std::array<uint32_t, 4> values {};
-				        for (uint32_t component = 0; component < components; component++) {
-					        values[component] = LoadFormattedInBounds(ctx, mem, plan, component);
-				        }
-				        return ConstructU32Composite(state, components, values);
-			        });
+			    return LoadFormattedPrepared(ctx, inst, mem, resource, info, components);
 		    }
 		    std::array<uint32_t, 4> values {};
 		    for (uint32_t component = 0; component < components; component++) {
@@ -1700,13 +1756,14 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	        ? Binary(state, spv::OpINotEqual, TypeBool(state), size, ConstantU32(state, 0))
 	        : Binary(state, spv::OpULessThan, TypeBool(state),
 	                 ConstantU32(state, ctx.Memory(inst).offset + 3u), size);
-	const auto condition = AndCondition(
-	    state, is_first,
-	    AndCondition(state,
-	                 state.lane_count == 2 ? Binary(state, spv::OpINotEqual, TypeBool(state), count,
-	                                                ConstantU32(state, 0))
-	                                       : lane_guard,
-	                 AndCondition(state, storage_bounds, m0_bounds)));
+	const auto condition =
+	    AndCondition(state, is_first,
+	                 AndCondition(state,
+	                              state.lane_count == 2 || state.split_wave
+	                                  ? Binary(state, spv::OpINotEqual, TypeBool(state), count,
+	                                           ConstantU32(state, 0))
+	                                  : lane_guard,
+	                              AndCondition(state, storage_bounds, m0_bounds)));
 	const auto atomic = EmitValueOrZeroIfCondition(state, condition, [&]() {
 		const auto value = state.builder.AllocateId();
 		state.builder.AddFunction(append ? spv::OpAtomicIAdd : spv::OpAtomicISub, TypeU32(state),
@@ -1717,6 +1774,10 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                          ConstantU32(state, spv::MemorySemanticsMaskNone), count);
 		return value;
 	});
+	// A split wave's first active lane may be in the other host subgroup.
+	if (state.split_wave) {
+		return ExchangeWaveValue(state, atomic, source_lane);
+	}
 	const auto result = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), result,
 	                          ConstantU32(state, spv::ScopeSubgroup), atomic,
@@ -1788,6 +1849,25 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	                            ConstantU32(state, mem.offset));
 	const auto index =
 	    Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2));
+	if (const auto* uniform =
+	        IR::FindBinding(state.program.bindings, IR::DescriptorBindingKind::UniformBuffers);
+	    uniform != nullptr && std::ranges::binary_search(uniform->resources, mem.resource)) {
+		// KYTY_UNIFORM_BUFFERS: the uniform view shares the storage view's base adjustment, and
+		// the device reads zero past its dword-aligned range (robustBufferAccess2).
+		const auto array_index =
+		    ResourceForDescriptor(state, IR::DescriptorBindingKind::UniformBuffers, mem.resource);
+		const auto element =
+		    Binary(state, spv::OpIAdd, TypeU32(state), index,
+		           Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+		                  state.memory_byte_offsets[mem.resource], ConstantU32(state, 2)));
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassUniform, TypeU32(state)),
+		                          pointer, state.uniform_buffer_variable,
+		                          ConstantU32(state, array_index), ConstantU32(state, 0), element);
+		ctx.Define(inst, EmitNative<spv::OpLoad, IR::Type::U32>(state, pointer));
+		return;
+	}
 	const auto access = PrepareMemoryResourceAccess(state, mem);
 	// Scalar buffer addressing aligns the base and each offset independently.
 	const auto element = Binary(state, spv::OpIAdd, TypeU32(state), index,
@@ -1895,7 +1975,7 @@ uint32_t EmitSwizzleU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 uint32_t EmitPermuteU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	auto  lane  = EmitSubgroupLocalInvocationId(state);
-	if (state.lane_count == 2) {
+	if (HalfWaveHost(state)) {
 		lane = Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31));
 	}
 	const auto address = ctx.Arg(inst, 1);

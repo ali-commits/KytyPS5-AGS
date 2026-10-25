@@ -34,6 +34,7 @@
 #include "graphics/host_gpu/renderer/pipeline/programDiskCache.h"
 #include "graphics/host_gpu/renderer/pipeline/rtSession.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderCodeSnapshot.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderJournalMigration.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
 #include "graphics/host_gpu/renderer/pipeline/stagePrepWorker.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -5934,10 +5935,10 @@ void PipelineCache::RunListPrepare() {
 	if (m_shader_precompiler != nullptr) {
 		for (;;) {
 			const auto state = m_shader_precompiler->GetProgress();
-			progress("shaders", state.done, state.total, state.failed);
+			progress("shaders", state.done, state.total, state.failed + state.skipped);
 			if (state.finished) {
 				shader_total = state.total;
-				failures += state.failed;
+				failures += state.failed + state.skipped;
 				break;
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -6256,8 +6257,8 @@ void PipelineCache::InitializeDriverCache() {
 	}
 	m_driver_cache_loaded = !initial_data.empty();
 	if (!initial_data.empty()) {
-		PipelineCacheLog("Vulkan pipeline cache: loaded {} bytes from {}", initial_data.size(),
-		                 path);
+		PipelineCacheLog("Vulkan pipeline cache: loaded {:.2f} MB from {}",
+		                 static_cast<double>(initial_data.size()) / 1'000'000.0, path);
 	} else {
 		PipelineCacheLog("Vulkan pipeline cache: initialized empty");
 	}
@@ -6587,14 +6588,18 @@ void PipelineCache::InitializeShaderPrecompile() {
 		// (subgroup and mesh limits are part of the stage input infos) and the sizes of the input
 		// structs. The translator is not part of it: the journal holds inputs, not outputs.
 		const auto& properties = m_graphics.GetPhysicalDeviceProperties();
-		const auto  identity   = fmt::format(
-		    "kyty shader journal; device {:08x}:{:08x}; input infos {} {} {}", properties.vendorID,
-		    properties.deviceID, ShaderStoredInputInfoSize<ShaderVertexInputInfo>(),
-		    ShaderStoredInputInfoSize<ShaderPixelInputInfo>(),
-		    ShaderStoredInputInfoSize<ShaderComputeInputInfo>());
+		const auto  migration  = ShaderJournalMigration::MigrateInt20(
+		    path, properties.vendorID, properties.deviceID,
+		    [](const std::string& message) { PipelineCacheLog("{}", message); });
+		if (!migration.usable) {
+			PipelineCacheLog("Shader precompile: disabled to preserve an incompatible journal");
+			return;
+		}
+		const auto identity =
+		    ShaderJournalMigration::CurrentIdentity(properties.vendorID, properties.deviceID);
 		ShaderJournal::Settings settings;
 		settings.path     = path;
-		settings.identity = std::vector<uint8_t>(identity.begin(), identity.end());
+		settings.identity = identity;
 		settings.log      = [](const std::string& message) { PipelineCacheLog("{}", message); };
 		m_shader_journal  = std::make_unique<ShaderJournal>(std::move(settings));
 		m_program_cache->journal = m_shader_journal.get();
@@ -6620,6 +6625,13 @@ void PipelineCache::InitializeShaderPrecompile() {
 		PipelineCacheLog("Shader precompile: the pipeline list adds {} sources and {} permutations "
 		                 "to the replay",
 		                 added.sources, added.entries);
+	}
+	if (const auto recovered =
+	        ShaderJournalMigration::ExcludeRecoveredUnavailable(*m_shader_journal);
+	    recovered != 0) {
+		PipelineCacheLog(
+		    "Shader journal migration: {} unavailable permutations replaced by live captures",
+		    recovered);
 	}
 	if (EnvU64("KYTY_SHADER_PRECOMPILE_REPLAY", 1) == 0 || m_shader_journal->Entries().empty()) {
 		return;
@@ -6944,8 +6956,18 @@ void ApplyDualSourceBlending(const HW::Context& context, ShaderPixelInputInfo& p
 }
 
 void ApplyClipSpace(const GraphicContext& graphics, const HW::Context& context,
-                    ShaderVertexInputInfo& last_vertex_stage) {
-	if (!context.GetClipControl().clip_disable) {
+                    ShaderVertexInputInfo& last_vertex_stage, bool tess_active = false,
+                    bool rect_list = false) {
+	const auto& clip_control = context.GetClipControl();
+	if (!clip_control.clip_disable) {
+		if (clip_control.user_clip_planes != 0) {
+			// Upstream feed075a9. CLIP_DISABLE also disables user planes. How they combine with
+			// shader clip and cull distances is unverified; draw push constants reach VS/mesh and
+			// PS only, and the generated RECTLIST stages do not forward clip distances.
+			EXIT_NOT_IMPLEMENTED((last_vertex_stage.pa_cl_vs_out_cntl & 0xffffu) != 0 ||
+			                     tess_active || rect_list);
+			last_vertex_stage.user_clip_planes = clip_control.user_clip_planes;
+		}
 		return;
 	}
 	const auto& viewport = context.GetScreenViewport().viewports[0];
@@ -7009,15 +7031,17 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		ApplyDualSourceBlending(context, pixel_info);
 	}
-	ApplyClipSpace(m_graphics, context, vertex_info[tess_active ? 2u : 0u]);
+	ApplyClipSpace(m_graphics, context, vertex_info[tess_active ? 2u : 0u], tess_active,
+	               Prospero::IsRectList(user_config.GetPrimType()));
 	static_zone.End();
 	// The program cache locks internally, so no pipeline lock is held across materialization.
-	auto&          scratch    = ProgramCache::ThreadScratch();
-	auto&          evaluation = ShaderRecompiler::IR::ThreadEvaluationScratch();
-	const uint32_t push_data_start =
+	auto&          scratch         = ProgramCache::ThreadScratch();
+	auto&          evaluation      = ShaderRecompiler::IR::ThreadEvaluationScratch();
+	const uint32_t push_data_start = ShaderRecompiler::IR::PushData::GraphicsPushStart(
 	    mesh_active
 	        ? ShaderRecompiler::IR::PushData::MeshDrawDwords(vertex_info[0].mesh.split_groups != 0)
-	        : 0;
+	        : 0,
+	    vertex_info[tess_active ? 2u : 0u].user_clip_planes);
 	const auto serial = [&](std::array<ShaderVertexInputInfo, 3>& vertex_inputs,
 	                        ShaderPixelInputInfo&                 pixel_input,
 	                        GraphicsStagePreps&                   preps) -> GraphicsPrograms {
@@ -7099,7 +7123,11 @@ PipelineCache::SpeculativeResult PipelineCache::PrepareGraphicsProgramsSpeculati
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		ApplyDualSourceBlending(context, pixel_info);
 	}
-	ApplyClipSpace(m_graphics, context, vertex_info);
+	ApplyClipSpace(m_graphics, context, vertex_info, false,
+	               Prospero::IsRectList(user_config.GetPrimType()));
+	if (vertex_info.user_clip_planes != 0) {
+		return SpeculativeResult::Ineligible; // the serial path places the plane dwords
+	}
 	if (read_failed()) {
 		return SpeculativeResult::ReadFailed;
 	}
@@ -7432,6 +7460,7 @@ bool PipelineCache::BuildGraphicsPipelineKey(
 		}
 		return false;
 	}
+	static_params.alpha_to_coverage_enable = ps_active && ctx.GetShaderRegisters().AlphaToMask();
 	static_params.depth_bounds_test_enable = targets.depth_bounds_test_enable;
 	static_params.depth_min_bounds         = targets.depth_min_bounds;
 	static_params.depth_max_bounds         = targets.depth_max_bounds;

@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/CodegenOptions.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -20,23 +21,28 @@ bool EnvFlag(const char* name, bool default_value) {
 
 CodegenOptions FromEnvironment() {
 	CodegenOptions options;
-	options.movrel_range = EnvFlag("KYTY_MOVREL_RANGE", options.movrel_range);
-	options.movrel_known_zeros = EnvFlag("KYTY_MOVREL_KNOWN_ZEROS", options.movrel_known_zeros);
-	options.movrel_switch      = EnvFlag("KYTY_MOVREL_SWITCH", options.movrel_switch);
-	options.uniform_lane_reads = EnvFlag("KYTY_UNIFORM_LANE_READS", options.uniform_lane_reads);
-	options.short_f32_helpers  = EnvFlag("KYTY_SHORT_F32_HELPERS", options.short_f32_helpers);
-	options.fast_float_min_max = EnvFlag("KYTY_FAST_FMINMAX", options.fast_float_min_max);
-	options.fast_pkrtz         = EnvFlag("KYTY_FAST_PKRTZ", options.fast_pkrtz);
+	options.movrel_range         = EnvFlag("KYTY_MOVREL_RANGE", options.movrel_range);
+	options.movrel_known_zeros   = EnvFlag("KYTY_MOVREL_KNOWN_ZEROS", options.movrel_known_zeros);
+	options.movrel_switch        = EnvFlag("KYTY_MOVREL_SWITCH", options.movrel_switch);
+	options.uniform_lane_reads   = EnvFlag("KYTY_UNIFORM_LANE_READS", options.uniform_lane_reads);
+	options.short_f32_helpers    = EnvFlag("KYTY_SHORT_F32_HELPERS", options.short_f32_helpers);
+	options.fast_float_min_max   = EnvFlag("KYTY_FAST_FMINMAX", options.fast_float_min_max);
+	options.native_float_min_max = EnvFlag("KYTY_NATIVE_FMINMAX", options.native_float_min_max);
+	options.readfirstlane_exec_zero =
+	    EnvFlag("KYTY_READFIRSTLANE_EXEC0", options.readfirstlane_exec_zero);
+	options.uniform_buffers = EnvFlag("KYTY_UNIFORM_BUFFERS", options.uniform_buffers);
+	options.wave64_warps    = EnvFlag("KYTY_WAVE64_WARPS", options.wave64_warps);
+	options.fast_pkrtz      = EnvFlag("KYTY_FAST_PKRTZ", options.fast_pkrtz);
 	options.single_f2i_saturation =
 	    EnvFlag("KYTY_SINGLE_F2I_SATURATION", options.single_f2i_saturation);
-	options.lod_stats_gate = EnvFlag("KYTY_LOD_STATS_GATE", options.lod_stats_gate);
+	options.lod_stats_gate      = EnvFlag("KYTY_LOD_STATS_GATE", options.lod_stats_gate);
 	options.robust_buffer_loads = EnvFlag("KYTY_ROBUST_BUFFER_LOADS", options.robust_buffer_loads);
 	options.readonly_buffers    = EnvFlag("KYTY_READONLY_BUFFERS", options.readonly_buffers);
-	options.interp_modes = EnvFlag("KYTY_INTERP_MODES", options.interp_modes);
-	options.sample_offsets = EnvFlag("KYTY_SAMPLE_OFFSETS", options.sample_offsets);
-	options.sample_lod_clamp = EnvFlag("KYTY_SAMPLE_LOD_CLAMP", options.sample_lod_clamp);
-	options.host_ftz_inputs  = EnvFlag("KYTY_HOST_FTZ_INPUTS", options.host_ftz_inputs);
-	options.exec_selects     = EnvFlag("KYTY_EXEC_SELECTS", options.exec_selects);
+	options.interp_modes        = EnvFlag("KYTY_INTERP_MODES", options.interp_modes);
+	options.sample_offsets      = EnvFlag("KYTY_SAMPLE_OFFSETS", options.sample_offsets);
+	options.sample_lod_clamp    = EnvFlag("KYTY_SAMPLE_LOD_CLAMP", options.sample_lod_clamp);
+	options.host_ftz_inputs     = EnvFlag("KYTY_HOST_FTZ_INPUTS", options.host_ftz_inputs);
+	options.exec_selects        = EnvFlag("KYTY_EXEC_SELECTS", options.exec_selects);
 	options.ps_append_live_election =
 	    EnvFlag("KYTY_PS_APPEND_LIVE_ELECTION", options.ps_append_live_election);
 	if (const auto* mode = std::getenv("KYTY_PS_LIVE_EXEC"); mode != nullptr && mode[0] != '\0') {
@@ -49,7 +55,8 @@ CodegenOptions FromEnvironment() {
 	}
 	options.ps_helper_atomics_skip =
 	    EnvFlag("KYTY_PS_HELPER_ATOMICS_SKIP", options.ps_helper_atomics_skip);
-	options.volatile_loads         = EnvFlag("KYTY_VOLATILE_LOADS", options.volatile_loads);
+	options.volatile_loads  = EnvFlag("KYTY_VOLATILE_LOADS", options.volatile_loads);
+	options.cfg_clone_exits = EnvFlag("KYTY_CFG_CLONE_EXITS", options.cfg_clone_exits);
 	if (const auto* list = std::getenv("KYTY_LOOP_GUARD_SHADERS"); list != nullptr) {
 		options.loop_guard_all = std::strcmp(list, "all") == 0 || std::strcmp(list, "*") == 0;
 		std::string_view text(options.loop_guard_all ? "" : list);
@@ -74,9 +81,9 @@ CodegenOptions FromEnvironment() {
 	if (const auto* cap = std::getenv("KYTY_DISPATCHER_CAP"); cap != nullptr && cap[0] != '\0') {
 		options.dispatcher_cap = static_cast<uint32_t>(std::strtoul(cap, nullptr, 0));
 	}
-	// KYTY_NATIVE_INDIRECT_MESH=1|on|verify|exit, or unset/empty (the default, renderer/meshIndirect.h:
-	// GPU-converted indirect mesh draws); 0 and "empty" keep the pushed-dword-only mesh draw
-	// parameters.
+	// KYTY_NATIVE_INDIRECT_MESH=1|on|verify|exit, or unset/empty (the default,
+	// renderer/meshIndirect.h: GPU-converted indirect mesh draws); 0 and "empty" keep the
+	// pushed-dword-only mesh draw parameters.
 	{
 		const auto* mode = std::getenv("KYTY_NATIVE_INDIRECT_MESH");
 		options.mesh_indirect_params =
@@ -84,42 +91,47 @@ CodegenOptions FromEnvironment() {
 		    std::strcmp(mode, "on") == 0 || std::strcmp(mode, "verify") == 0 ||
 		    std::strcmp(mode, "exit") == 0;
 	}
-	options.rt_stub      = EnvFlag("KYTY_RT_STUB", options.rt_stub);
+	options.rt_stub = EnvFlag("KYTY_RT_STUB", options.rt_stub);
 	if (const auto* mode = std::getenv("KYTY_RT_SOFTWARE");
 	    mode != nullptr && mode[0] != '\0' && std::strcmp(mode, "auto") != 0) {
 		options.rt_software      = std::strcmp(mode, "0") != 0;
 		options.rt_software_auto = false;
 	}
 	if (const auto* mode = std::getenv("KYTY_RT_FUNCTION"); mode != nullptr && mode[0] != '\0') {
-		options.rt_function = std::min<uint32_t>(static_cast<uint32_t>(std::strtoul(mode, nullptr, 10)), 2u);
+		options.rt_function =
+		    std::min<uint32_t>(static_cast<uint32_t>(std::strtoul(mode, nullptr, 10)), 2u);
 	}
-	options.rt_type6     = EnvFlag("KYTY_RT_TYPE6", options.rt_type6);
-	options.bda_writes        = EnvFlag("KYTY_BDA_WRITES", options.bda_writes);
-	options.bda_store_log     = EnvFlag("KYTY_BDA_STORE_LOG", options.bda_store_log);
+	options.rt_type6      = EnvFlag("KYTY_RT_TYPE6", options.rt_type6);
+	options.bda_writes    = EnvFlag("KYTY_BDA_WRITES", options.bda_writes);
+	options.bda_store_log = EnvFlag("KYTY_BDA_STORE_LOG", options.bda_store_log);
 	if (const auto* budget = std::getenv("KYTY_RT_NODE_BUDGET");
 	    budget != nullptr && budget[0] != '\0') {
 		options.rt_node_budget = static_cast<uint32_t>(std::strtoul(budget, nullptr, 0));
 	}
 	options.rt_node_stats = EnvFlag("KYTY_RT_NODE_STATS", options.rt_node_stats);
-	if (const auto* mode = std::getenv("KYTY_LDS_WAITCNT_BARRIER"); mode != nullptr && mode[0] != '\0') {
-		options.lds_waitcnt_barrier = std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0
-		                                  ? LdsWaitcntBarrier::Off
-		                              : std::strcmp(mode, "workgroup") == 0 ? LdsWaitcntBarrier::Workgroup
-		                                                                    : LdsWaitcntBarrier::Subgroup;
+	if (const auto* mode = std::getenv("KYTY_LDS_WAITCNT_BARRIER");
+	    mode != nullptr && mode[0] != '\0') {
+		options.lds_waitcnt_barrier =
+		    std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0 ? LdsWaitcntBarrier::Off
+		    : std::strcmp(mode, "workgroup") == 0 ? LdsWaitcntBarrier::Workgroup
+		                                          : LdsWaitcntBarrier::Subgroup;
 	}
-	if (const auto* mode = std::getenv("KYTY_WAVE32_CLUSTERS"); mode != nullptr && mode[0] != '\0') {
+	if (const auto* mode = std::getenv("KYTY_WAVE32_CLUSTERS");
+	    mode != nullptr && mode[0] != '\0') {
 		options.wave32_clusters = std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0
 		                              ? Wave32Clusters::Off
 		                          : std::strcmp(mode, "force") == 0 ? Wave32Clusters::Force
 		                                                            : Wave32Clusters::Auto;
 	}
-	if (const auto* mode = std::getenv("KYTY_LDS_DEVICE_BUFFER"); mode != nullptr && mode[0] != '\0') {
+	if (const auto* mode = std::getenv("KYTY_LDS_DEVICE_BUFFER");
+	    mode != nullptr && mode[0] != '\0') {
 		options.lds_device_buffer = std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0
 		                                ? LdsDeviceBuffer::Off
 		                            : std::strcmp(mode, "force") == 0 ? LdsDeviceBuffer::Force
 		                                                              : LdsDeviceBuffer::Auto;
 	}
-	if (const auto* limit = std::getenv("KYTY_LDS_LIMIT_OVERRIDE"); limit != nullptr && limit[0] != '\0') {
+	if (const auto* limit = std::getenv("KYTY_LDS_LIMIT_OVERRIDE");
+	    limit != nullptr && limit[0] != '\0') {
 		options.lds_limit_override = static_cast<uint32_t>(std::strtoul(limit, nullptr, 0));
 	}
 	options.ps_per_vertex = EnvFlag("KYTY_PS_PER_VERTEX", options.ps_per_vertex);
@@ -142,6 +154,18 @@ CodegenOptions& Storage() {
 }
 
 } // namespace
+
+namespace {
+std::atomic<bool> g_host_uniform_buffer_robust {false};
+} // namespace
+
+void SetHostUniformBufferRobust(bool robust) {
+	g_host_uniform_buffer_robust.store(robust, std::memory_order_relaxed);
+}
+
+bool GetHostUniformBufferRobust() {
+	return g_host_uniform_buffer_robust.load(std::memory_order_relaxed);
+}
 
 const CodegenOptions& GetCodegenOptions() {
 	return Storage();
@@ -172,11 +196,11 @@ void SetThreadRtFunctionOverride(int mode) {
 }
 
 ComputeLdsPlan PlanComputeLds(uint32_t requested_dwords, uint32_t device_limit_bytes) {
-	const auto& options = Storage();
+	const auto&    options = Storage();
 	ComputeLdsPlan plan;
-	plan.limit_bytes = options.lds_limit_override != 0
-	                       ? std::min(device_limit_bytes, options.lds_limit_override)
-	                       : device_limit_bytes;
+	plan.limit_bytes        = options.lds_limit_override != 0
+	                              ? std::min(device_limit_bytes, options.lds_limit_override)
+	                              : device_limit_bytes;
 	const auto limit_dwords = plan.limit_bytes / 4u;
 	plan.dwords             = requested_dwords;
 	switch (options.lds_device_buffer) {

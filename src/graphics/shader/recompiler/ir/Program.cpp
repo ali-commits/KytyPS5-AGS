@@ -507,8 +507,13 @@ void ValidateProgram(const Program& program, bool require_ssa) {
 				      memory.SupportsIndirectRawWrite(inst.GetOpcode()))) {
 					return Fail("indirect buffer requires a raw DWORD x2/x3/x4 load");
 				}
+				const auto access = BufferAccessOf(inst.GetOpcode());
+				const bool packed_formatted =
+				    (access == BufferAccess::Read || access == BufferAccess::Write) &&
+				    memory.formatted && memory.data_bits == 16u &&
+				    (memory.component_count + 1u) / 2u == buffer_components;
 				if (buffer_components > 1u &&
-				    (!vector_buffer || memory.data_bits != 32u ||
+				    (!vector_buffer || (memory.data_bits != 32u && !packed_formatted) ||
 				     memory.data_dwords != buffer_components || memory.component_index != 0u)) {
 					return Fail(fmt::format("{} has inconsistent native-wide metadata",
 					                        ValueOpcodeName(inst.GetOpcode())));

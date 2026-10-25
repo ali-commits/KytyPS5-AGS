@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
+#include "common/paceLog.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -122,7 +123,8 @@ void KernelEqueueApplyTrigger(KernelEqueueEvent* event, const KernelEvent& next)
 	    KernelEqueueCoalesceMode() == EqueueCoalesceMode::Verify) {
 		std::printf("Equeue coalesce verify: ident=0x%" PRIx64 " filter=%d udata=0x%016" PRIx64
 		            " has %" PRIu64 " triggers pending as one\n",
-		            static_cast<uint64_t>(event->event.ident), static_cast<int>(event->event.filter),
+		            static_cast<uint64_t>(event->event.ident),
+		            static_cast<int>(event->event.filter),
 		            reinterpret_cast<uint64_t>(event->event.udata), merged + 1u);
 		std::fflush(stdout);
 	}
@@ -249,8 +251,8 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
 }
 
 void KernelEqueuePrivate::NoteDelivery(KernelEqueueEvent& event) {
-	const auto merged      = event.coalesced;
-	const bool data_change = event.coalesced_data_change;
+	const auto merged           = event.coalesced;
+	const bool data_change      = event.coalesced_data_change;
 	event.coalesced             = 0;
 	event.coalesced_data_change = false;
 	if (merged == 0) {
@@ -328,8 +330,9 @@ void KernelEqueuePrivate::TriggerExpiredTimers(uint64_t now_ns) {
 		if (event.event.filter != KERNEL_EVFILT_TIMER) {
 			return;
 		}
-		const auto count = event.interval_ns == 0 ? (event.triggered ? 0 : 1)
-		                                          : 1 + (now_ns - event.deadline_ns) / event.interval_ns;
+		const auto count = event.interval_ns == 0
+		                       ? (event.triggered ? 0 : 1)
+		                       : 1 + (now_ns - event.deadline_ns) / event.interval_ns;
 		event.event.data += static_cast<intptr_t>(count);
 		event.deadline_ns += count * event.interval_ns;
 	};
@@ -398,8 +401,8 @@ int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros
 
 		HangWatchdog::Scope wait("guest-equeue", reinterpret_cast<uint64_t>(this), num, 0, 0,
 		                         micros);
-		uint32_t   timer_wait = 0;
-		const bool has_timer  = GetNextTimerWaitMicros(MonotonicTimeNs(), &timer_wait);
+		uint32_t            timer_wait = 0;
+		const bool          has_timer  = GetNextTimerWaitMicros(MonotonicTimeNs(), &timer_wait);
 		if (micros == 0 && !has_timer) {
 			m_cond_var.Wait(&m_mutex);
 		} else {
@@ -457,7 +460,7 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 		return e.event.ident == ident && e.event.filter == filter;
 	});
 	if (it != m_events.end()) {
-		auto&      event          = *it;
+		auto&      event         = *it;
 		const bool was_triggered = event.triggered;
 
 		if (event.filter.trigger_func != nullptr) {
@@ -490,8 +493,8 @@ static void UserEventTriggerFunc(KernelEqueueEvent* event, void* trigger_data) {
 static void AmprEventTriggerFunc(KernelEqueueEvent* event, void* trigger_data) {
 	EXIT_IF(event == nullptr);
 	KernelEqueueApplyTrigger(
-	    event, AmprNextState(event->event, static_cast<uint64_t>(
-	                                           reinterpret_cast<uintptr_t>(trigger_data))));
+	    event, AmprNextState(event->event,
+	                         static_cast<uint64_t>(reinterpret_cast<uintptr_t>(trigger_data))));
 }
 
 static void UserEventResetFunc(KernelEqueueEvent* event) {
@@ -637,6 +640,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     (timo == nullptr ? "inf" : fmt::format("{}", *timo).c_str()),
 	     Common::Thread::GetThreadIdUnique());
 
+	const uint64_t pace_begin = PaceLog::Enabled() ? PaceLog::NowNs() : 0;
 	if (timo == nullptr) {
 		*out = owner->WaitForEvents(ev, num, 0);
 	}
@@ -647,6 +651,12 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		} else {
 			*out = owner->WaitForEvents(ev, num, *timo);
 		}
+	}
+	if (pace_begin != 0) {
+		const bool got = *out > 0;
+		PaceLog::NoteWait(pace_begin, PaceLog::NowNs(), Common::Thread::GetThreadIdUnique(),
+		                  got ? ev[0].filter : 0, got ? static_cast<uint64_t>(ev[0].ident) : 0,
+		                  *out, owner->GetName().c_str());
 	}
 
 	if (*out == KERNEL_ERROR_EBADF) {
@@ -740,7 +750,7 @@ int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id) {
 }
 
 static int AddTimerEvent(KernelEqueue eq, int id, uint64_t delay_ns, bool periodic, void* udata) {
-	const auto now_ns = MonotonicTimeNs();
+	const auto        now_ns = MonotonicTimeNs();
 	KernelEqueueEvent event {};
 	event.deadline_ns  = delay_ns <= UINT64_MAX - now_ns ? now_ns + delay_ns : UINT64_MAX;
 	event.interval_ns  = periodic ? delay_ns : 0;

@@ -2,16 +2,19 @@
 #include "common/logging/log.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -21,9 +24,10 @@ namespace {
 constexpr size_t CHECKPOINT_RING_SIZE = 1u << 16u;
 
 std::array<DiagnosticCheckpoint, CHECKPOINT_RING_SIZE> g_checkpoints {};
-uint64_t g_checkpoint_sequence = 0;
-std::mutex g_checkpoint_mutex;
-std::atomic_flag g_dumping = ATOMIC_FLAG_INIT;
+uint64_t                                               g_checkpoint_sequence = 0;
+std::mutex                                             g_checkpoint_mutex;
+std::atomic_flag                                       g_dumping = ATOMIC_FLAG_INIT;
+std::atomic<bool>                                      g_dump_done {false};
 
 const char* OpName(uint32_t op) {
 	switch (op) {
@@ -47,21 +51,22 @@ const char* OpName(uint32_t op) {
 }
 
 void Print(const char* stage, const DiagnosticCheckpoint& checkpoint) {
-	std::printf("  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64
-	            "\n",
-	            stage, checkpoint.sequence, OpName(checkpoint.op), checkpoint.submit_id,
-	            checkpoint.arg0, checkpoint.arg1, checkpoint.arg2, checkpoint.arg3,
-	            checkpoint.arg4);
-	std::printf("    tick=%" PRIu64 " shader VS=0x%016" PRIx64 " PS=0x%016" PRIx64 " CS=0x%016" PRIx64 "\n",
+	std::printf(
+	    "  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
+	    stage, checkpoint.sequence, OpName(checkpoint.op), checkpoint.submit_id, checkpoint.arg0,
+	    checkpoint.arg1, checkpoint.arg2, checkpoint.arg3, checkpoint.arg4);
+	std::printf("    tick=%" PRIu64 " shader VS=0x%016" PRIx64 " PS=0x%016" PRIx64
+	            " CS=0x%016" PRIx64 "\n",
 	            checkpoint.tick, checkpoint.vs, checkpoint.ps, checkpoint.cs);
-	LOGF("    tick=%" PRIu64 " shader VS=0x%016" PRIx64 " PS=0x%016" PRIx64 " CS=0x%016" PRIx64 "\n",
+	LOGF("    tick=%" PRIu64 " shader VS=0x%016" PRIx64 " PS=0x%016" PRIx64 " CS=0x%016" PRIx64
+	     "\n",
 	     checkpoint.tick, checkpoint.vs, checkpoint.ps, checkpoint.cs);
 	LOGF("  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
 	     stage, checkpoint.sequence, OpName(checkpoint.op), checkpoint.submit_id, checkpoint.arg0,
 	     checkpoint.arg1, checkpoint.arg2, checkpoint.arg3, checkpoint.arg4);
 }
 
-}
+} // namespace
 
 const char* DiagnosticOpName(uint32_t op) {
 	return OpName(op);
@@ -69,16 +74,16 @@ const char* DiagnosticOpName(uint32_t op) {
 
 uint64_t RecordDiagnosticSequence(const DiagnosticCheckpoint& checkpoint) {
 	const std::lock_guard lock(g_checkpoint_mutex);
-	const auto sequence = ++g_checkpoint_sequence;
-	auto& slot = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
-	slot = checkpoint;
-	slot.sequence = sequence;
+	const auto            sequence = ++g_checkpoint_sequence;
+	auto&                 slot     = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
+	slot                           = checkpoint;
+	slot.sequence                  = sequence;
 	return sequence;
 }
 
 bool LookupDiagnosticCheckpoint(uint64_t sequence, DiagnosticCheckpoint* checkpoint) {
 	const std::lock_guard lock(g_checkpoint_mutex);
-	const auto& slot = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
+	const auto&           slot = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
 	if (sequence == 0 || slot.sequence != sequence) {
 		return false;
 	}
@@ -101,10 +106,10 @@ bool DeviceFaultDiagnosticsEnabled() {
 
 const void* RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint) {
 	const std::lock_guard lock(g_checkpoint_mutex);
-	const auto sequence = ++g_checkpoint_sequence;
-	auto& slot = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
-	slot = checkpoint;
-	slot.sequence = sequence;
+	const auto            sequence = ++g_checkpoint_sequence;
+	auto&                 slot     = g_checkpoints[sequence % CHECKPOINT_RING_SIZE];
+	slot                           = checkpoint;
+	slot.sequence                  = sequence;
 	// Vulkan treats this as an opaque token. Never hand it a pointer to a reusable ring slot.
 	return reinterpret_cast<const void*>(static_cast<uintptr_t>(sequence));
 }
@@ -114,23 +119,25 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 		return;
 	}
 	vk::DeviceFaultCountsEXT counts {};
-	auto result = graphics.device.getFaultInfoEXT(&counts, nullptr);
+	auto                     result = graphics.device.getFaultInfoEXT(&counts, nullptr);
 	if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
 		std::printf("--- Device fault: query failed: %s ---\n", vk::to_string(result).c_str());
 		return;
 	}
-	if (counts.addressInfoCount > 4096 || counts.vendorInfoCount > 4096 || counts.vendorBinarySize > 64u * 1024u * 1024u) {
-		std::printf("--- Device fault: driver returned oversized counts; skipping allocation ---\n");
+	if (counts.addressInfoCount > 4096 || counts.vendorInfoCount > 4096 ||
+	    counts.vendorBinarySize > 64u * 1024u * 1024u) {
+		std::printf(
+		    "--- Device fault: driver returned oversized counts; skipping allocation ---\n");
 		return;
 	}
 	std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
 	std::vector<vk::DeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
 	std::vector<uint8_t>                       binary(static_cast<size_t>(counts.vendorBinarySize));
 	vk::DeviceFaultInfoEXT                     info {};
-	info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
-	info.pVendorInfos  = vendors.empty() ? nullptr : vendors.data();
+	info.pAddressInfos     = addresses.empty() ? nullptr : addresses.data();
+	info.pVendorInfos      = vendors.empty() ? nullptr : vendors.data();
 	info.pVendorBinaryData = binary.empty() ? nullptr : binary.data();
-	result = graphics.device.getFaultInfoEXT(&counts, &info);
+	result                 = graphics.device.getFaultInfoEXT(&counts, &info);
 	std::printf("--- Device fault (%s): \"%s\" addresses=%u vendor=%u binary=%" PRIu64 " ---\n",
 	            vk::to_string(result).c_str(), info.description.data(), counts.addressInfoCount,
 	            counts.vendorInfoCount, static_cast<uint64_t>(counts.vendorBinarySize));
@@ -139,7 +146,9 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 	     counts.vendorInfoCount, static_cast<uint64_t>(counts.vendorBinarySize));
 	if (!binary.empty()) {
 		if (auto* file = std::fopen("_device_fault.nv-gpudmp", "wb"); file != nullptr) {
-			std::fwrite(binary.data(), 1, std::min<size_t>(binary.size(), counts.vendorBinarySize), file);
+			std::fwrite(binary.data(), 1, std::min<size_t>(binary.size(), counts.vendorBinarySize),
+			            file);
+			std::fflush(file);
 			std::fclose(file);
 			std::printf("  vendor binary written to _device_fault.nv-gpudmp\n");
 		}
@@ -167,19 +176,49 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 	std::fflush(stdout);
 }
 
+void WaitForDeviceLossDiagnostics(uint32_t start_ms) {
+	using Clock      = std::chrono::steady_clock;
+	const auto start = Clock::now();
+	while (!g_dumping.test(std::memory_order_acquire)) {
+		if (Clock::now() - start > std::chrono::milliseconds(start_ms)) {
+			return; // nobody is reporting
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	const auto begun = Clock::now();
+	while (!g_dump_done.load(std::memory_order_acquire) &&
+	       Clock::now() - begun < std::chrono::seconds(10)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+}
+
 void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool queue_locked) {
 	HangWatchdog::Scope diagnostics(
 	    "device-loss-diagnostics",
 	    reinterpret_cast<uint64_t>(static_cast<VkDevice>(graphics.device)), tick);
 	if (g_dumping.test_and_set(std::memory_order_acquire)) return;
-	std::printf("--- Device loss: submission/wait tick=%" PRIu64 ", KYTY_DEVICE_FAULT_DIAGNOSTICS=%d ---\n",
+	// Exiting threads wait for this (WaitForDeviceLossDiagnostics) so the report is complete.
+	struct Done {
+		~Done() {
+			std::fflush(stdout);
+			g_dump_done.store(true, std::memory_order_release);
+		}
+	} done;
+	std::printf("--- Device loss: submission/wait tick=%" PRIu64
+	            ", KYTY_DEVICE_FAULT_DIAGNOSTICS=%d ---\n",
 	            tick, DeviceFaultDiagnosticsEnabled());
 	LOGF("--- Device loss: submission/wait tick=%" PRIu64 " ---\n", tick);
 	DumpDeviceFault(graphics);
+	if (const auto violations = CommandRecorder::GuardViolations(); violations != 0) {
+		std::printf("  Kyty command guard (KYTY_CMD_GUARD): %" PRIu64
+		            " violation(s) before the loss\n",
+		            violations);
+	}
 	GpuBreadcrumbs::Dump();
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {
 		if (!GpuBreadcrumbs::Active()) {
-			std::printf("  No GPU breadcrumbs: NV checkpoints and VK_AMD_buffer_marker breadcrumbs are off (KYTY_DEVICE_FAULT_DIAGNOSTICS=1, KYTY_GPU_BREADCRUMBS).\n");
+			std::printf("  No GPU breadcrumbs: NV checkpoints and VK_AMD_buffer_marker breadcrumbs "
+			            "are off (KYTY_DEVICE_FAULT_DIAGNOSTICS=1, KYTY_GPU_BREADCRUMBS).\n");
 		}
 		std::fflush(stdout);
 		return;
@@ -192,7 +231,8 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool que
 		graphics.queue_mutex.Unlock();
 	} else {
 		// Fatal reporting must not wait behind another stalled driver submission.
-		std::printf("  Queue busy: NV checkpoint query skipped; latest CPU breadcrumb follows (not GPU completion).\n");
+		std::printf("  Queue busy: NV checkpoint query skipped; latest CPU breadcrumb follows (not "
+		            "GPU completion).\n");
 		DiagnosticCheckpoint latest;
 		{
 			const std::lock_guard lock(g_checkpoint_mutex);
@@ -204,7 +244,8 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool que
 	}
 	std::printf("--- Diagnostic checkpoints (%zu) ---\n", data.size());
 	for (const auto& entry: data) {
-		const auto sequence = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(entry.pCheckpointMarker));
+		const auto sequence =
+		    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(entry.pCheckpointMarker));
 		DiagnosticCheckpoint checkpoint;
 		{
 			const std::lock_guard lock(g_checkpoint_mutex);
@@ -212,7 +253,8 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick, bool que
 		}
 		const auto stage = vk::to_string(entry.stage);
 		if (sequence == 0 || checkpoint.sequence != sequence) {
-			std::printf("  [%s] breadcrumb seq=%" PRIu64 " retired from bounded history\n", stage.c_str(), sequence);
+			std::printf("  [%s] breadcrumb seq=%" PRIu64 " retired from bounded history\n",
+			            stage.c_str(), sequence);
 			continue;
 		}
 		Print(stage.c_str(), checkpoint);

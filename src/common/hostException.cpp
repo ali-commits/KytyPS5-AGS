@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h> // IWYU pragma: keep
@@ -25,6 +26,12 @@
 // IWYU pragma: no_include <wtypes.h>
 
 namespace Common::HostException {
+
+// KYTY_GUEST_TEB_STACK_RANGE (hostException.h): read once at start-up, before any guest code runs.
+int32_t g_guest_teb_stack_range = [] {
+	const char* value = std::getenv("KYTY_GUEST_TEB_STACK_RANGE");
+	return value != nullptr && value[0] == '1' ? 1 : 0;
+}();
 
 #if !defined(__APPLE__)
 
@@ -167,7 +174,7 @@ static LONG WINAPI FirstExceptionFilter(PEXCEPTION_POINTERS exception) noexcept 
 	if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-	const auto handler = g_first_handler.load(std::memory_order_acquire);
+	const auto    handler = g_first_handler.load(std::memory_order_acquire);
 	ExceptionInfo info {};
 	if (handler == nullptr || !DescribeException(exception, info)) {
 		return EXCEPTION_CONTINUE_SEARCH;

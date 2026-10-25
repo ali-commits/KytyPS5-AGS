@@ -46,6 +46,10 @@ struct GraphicContext;
 [[nodiscard]] bool        DeviceFaultDiagnosticsEnabled();
 void                      DumpDeviceLossDiagnostics(GraphicContext& graphics, uint64_t tick = 0,
                                                     bool queue_locked = false);
+// A thread about to exit on a device loss: lets a device-loss report another thread is writing
+// (the VK_EXT_device_fault vendor dump, _device_fault.nv-gpudmp) finish first. Waits up to
+// `start_ms` for one to begin and then up to 10 s for it to end.
+void WaitForDeviceLossDiagnostics(uint32_t start_ms = 500);
 // Breadcrumb ring access (GpuBreadcrumbs): records and returns the sequence number; looks one up
 // (false once it left the bounded history); the newest sequence; an operation's name.
 [[nodiscard]] uint64_t RecordDiagnosticSequence(const DiagnosticCheckpoint& checkpoint);
@@ -87,8 +91,9 @@ struct GraphicContext {
 	bool color_write_enable_enabled = false;
 	// VK_EXT_depth_clip_enable: depth clipping set apart from the always-on depth clamp (the DB's
 	// behaviour). Without it, pipelines clamp only where the guest turns Z clipping off.
-	bool depth_clip_enable_enabled = false;
-	bool supports_block_texel_view = false;
+	bool depth_clip_enable_enabled     = false;
+	bool conditional_rendering_enabled = false;
+	bool supports_block_texel_view     = false;
 	// shaderStorageImageReadWithoutFormat (TileManager::TileFromImage).
 	bool storage_image_read_without_format_enabled = false;
 	// Vulkan 1.2 samplerFilterMinmax: S# FILTER_MODE min/max (SamplerCache).

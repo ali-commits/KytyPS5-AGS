@@ -55,9 +55,9 @@ public:
 	static constexpr uint32_t MaxReads = 2048;
 	// Room for the code of both stages (headerless shaders are hashed through the recorder, see
 	// shader.cpp) besides the metadata and resource reads.
-	static constexpr uint32_t MaxBytes = 256u * 1024u;
+	static constexpr uint32_t MaxBytes   = 256u * 1024u;
 	static constexpr uint32_t MaxDigests = 64;
-	static constexpr uint64_t PageSize = 4096;
+	static constexpr uint64_t PageSize   = 4096;
 
 	void Reset() noexcept {
 		m_reads.clear();
@@ -257,13 +257,13 @@ public:
 	// Validate, so the same result for the same guest bytes.
 	template <typename Compare, typename Hash>
 	[[nodiscard]] ValidateResult ValidateInPlace(Compare&& compare, Hash&& hash) const {
-		static_assert(std::is_invocable_r_v<ValidateResult, Compare&, uint64_t, const uint8_t*,
-		                                    uint64_t>);
+		static_assert(
+		    std::is_invocable_r_v<ValidateResult, Compare&, uint64_t, const uint8_t*, uint64_t>);
 		static_assert(std::is_invocable_r_v<bool, Hash&, uint64_t, uint64_t, uint64_t&>);
 		for (size_t index = 0; index < m_ranges.size(); index++) {
-			const auto bytes  = RangeBytes(index);
-			const auto result = compare(m_ranges[index].begin, bytes.data(),
-			                            static_cast<uint64_t>(bytes.size()));
+			const auto bytes = RangeBytes(index);
+			const auto result =
+			    compare(m_ranges[index].begin, bytes.data(), static_cast<uint64_t>(bytes.size()));
 			if (result != ValidateResult::Ok) {
 				return result;
 			}
@@ -341,6 +341,8 @@ inline thread_local Recorder* t_recorder = nullptr;
 // KYTY_DRAW_PREP_DIRECT_READS (drawPrep.cpp, kernel/memory.cpp): 0 off, 1 on, 2 verify, 3 exit.
 [[nodiscard]] int  DirectReadsMode();
 [[nodiscard]] bool DirectReadsEnabled();
+// KYTY_CLEAN_UNTOUCHED (drawPrep.cpp, kernel/memory.cpp): 0 off, 1 on, 2 verify, 3 exit.
+[[nodiscard]] int UntouchedMode();
 
 // Set on DrawPrep worker threads, which must never reach the scheduler or the caches
 // (CommandScheduler::CheckActive stops the emulator if one does).

@@ -118,6 +118,14 @@ bool IsPlainConstant(const F32Operand& operand) {
 // A constant operand drops what cannot apply: a non-NaN constant cannot be the NaN operand, and a
 // non-zero constant never forms two zeros.
 F32Operand EmitFastMinMaxF32(EmitterState& state, F32Operand lhs, F32Operand rhs, bool max_value) {
+	if (GetCodegenOptions().native_float_min_max) {
+		// KYTY_NATIVE_FMINMAX: NMin/NMax return the other operand for one NaN, as the guest does;
+		// which zero min/max(-0, +0) returns is left to the host.
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), result, GlslStd450(state),
+		                          max_value ? GLSLstd450NMax : GLSLstd450NMin, lhs.id, rhs.id);
+		return {.id = result};
+	}
 	auto pick = Binary(state, max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
 	                   TypeBool(state), lhs.id, rhs.id);
 	if (!IsNonNanConstant(rhs)) {
@@ -385,11 +393,10 @@ uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1)
 }
 
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
-	// The clamp modifier runs in DX10 clamp mode: NaN becomes 0. FClamp leaves NaN undefined.
-	const auto clamped = EmitExt(state, TypeF32(state), GLSLstd450FClamp,
-	                             {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
-	return Select(state, TypeF32(state), EmitClassifyF32(state, arg0).nan, ConstantF32(state, 0),
-	              clamped);
+	// The clamp modifier runs in DX10 clamp mode: NaN becomes 0, as NClamp's NMax step does
+	// (upstream 4f1f3b1bb).
+	return EmitExt(state, TypeF32(state), GLSLstd450NClamp,
+	               {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
 }
 
 uint32_t EmitSMulHi(EmitterState& state, uint32_t arg0, uint32_t arg1) {

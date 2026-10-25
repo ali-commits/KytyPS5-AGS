@@ -227,6 +227,11 @@ sys_file_t* SysFileCreate(const std::filesystem::path& file_name) {
 	return ret;
 }
 
+sys_file_t* SysFileCreateExclusive(const std::filesystem::path& file_name) {
+	// C11's x mode uses O_CREAT | O_EXCL, including rejection of dangling symlinks.
+	return OpenHostFile(file_name, "w+x", SYS_FILE_CACHE_AUTO);
+}
+
 sys_file_t* SysFileOpenR(const std::filesystem::path& file_name, sys_file_cache_type_t cache_type) {
 	return OpenHostFile(file_name, "r", cache_type);
 }

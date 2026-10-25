@@ -4,25 +4,55 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace Common {
 
 template <typename Object, typename Tick>
 class LeastRecentlyUsedCache {
 	struct Item {
-		Object object {};
-		Tick   tick {};
-		Item*  next = nullptr;
-		Item*  prev = nullptr;
+		Object   object {};
+		Tick     tick {};
+		Item*    next       = nullptr;
+		Item*    prev       = nullptr;
 		uint64_t generation = 0;
-		bool linked = false;
+		bool     linked     = false;
+	};
+
+	// Items in fixed chunks that never move (Item pointers link them): one indexed load per access.
+	// (A std::deque of 40-byte items holds one item per block in MSVC's library, so every access
+	// was a block-map lookup and another heap line; chenxiao07/KytyPS5 02041c814.)
+	class Items {
+	public:
+		static constexpr size_t ChunkBits = 10;
+		static constexpr size_t ChunkSize = size_t {1} << ChunkBits;
+
+		[[nodiscard]] Item& operator[](size_t id) noexcept {
+			return m_chunks[id >> ChunkBits][id & (ChunkSize - 1)];
+		}
+		[[nodiscard]] const Item& operator[](size_t id) const noexcept {
+			return m_chunks[id >> ChunkBits][id & (ChunkSize - 1)];
+		}
+		[[nodiscard]] size_t size() const noexcept { return m_size; }
+		[[nodiscard]] bool   empty() const noexcept { return m_size == 0; }
+		void                 emplace_back() {
+			if ((m_size >> ChunkBits) == m_chunks.size()) {
+				m_chunks.push_back(std::make_unique<Item[]>(ChunkSize));
+			}
+			m_size++;
+		}
+
+	private:
+		std::vector<std::unique_ptr<Item[]>> m_chunks;
+		size_t                               m_size = 0;
 	};
 
 public:
 	struct Cursor {
-		size_t id = static_cast<size_t>(-1);
+		size_t   id         = static_cast<size_t>(-1);
 		uint64_t generation = 0;
 	};
 
@@ -32,7 +62,7 @@ public:
 		item.object     = std::move(object);
 		item.tick       = tick;
 		++item.generation;
-		item.linked     = true;
+		item.linked = true;
 		Attach(item);
 		return id;
 	}
@@ -57,8 +87,8 @@ public:
 	void Free(size_t id) {
 		auto& item = m_items[id];
 		Detach(item);
-		item.next = nullptr;
-		item.prev = nullptr;
+		item.next   = nullptr;
+		item.prev   = nullptr;
 		item.linked = false;
 		m_free.push_back(id);
 	}
@@ -93,7 +123,7 @@ public:
 			cursor = {};
 			return;
 		}
-		auto index = cursor.id < m_items.size() ? cursor.id : size_t {0};
+		auto       index = cursor.id < m_items.size() ? cursor.id : size_t {0};
 		const auto count = limit < m_items.size() ? limit : m_items.size();
 		for (size_t visited = 0; visited < count; ++visited) {
 			auto& item = m_items[index];
@@ -146,7 +176,7 @@ private:
 		}
 	}
 
-	std::deque<Item>   m_items;
+	Items              m_items;
 	std::deque<size_t> m_free;
 	Item*              m_first = nullptr;
 	Item*              m_last  = nullptr;

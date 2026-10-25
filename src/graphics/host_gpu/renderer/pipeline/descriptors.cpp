@@ -94,6 +94,7 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::ShaderData:
 		case BindingKind::MipStats:
 		case BindingKind::SharedMemory: return vk::DescriptorType::eStorageBuffer;
+		case BindingKind::UniformBuffers: return vk::DescriptorType::eUniformBuffer;
 		case BindingKind::Count: EXIT("invalid native descriptor binding kind");
 	}
 	EXIT("invalid native descriptor binding kind");
@@ -181,11 +182,32 @@ static bool WriteRangeImageStatsEnabled() {
 	return enabled;
 }
 
+// KYTY_STORAGE_RANGE_CAP (default auto: on for NVIDIA, 1 = always, 0 = never) limits a storage
+// buffer descriptor's range to just under 2 GiB. NVIDIA reports maxStorageBufferRange 4 GiB - 1,
+// but OpArrayLength of a binding with a larger range returns 0 there (seen with a 3 GiB range), so
+// every bounds-checked load reads 0. Ratchet & Clank binds its whole vertex pool with one 3 GiB V#:
+// all world vertices collapsed to one point and the G-buffer stayed empty. Data past the cap reads
+// 0 under the cap, as all of it did before.
+static uint64_t StorageRangeCap(const GraphicContext& graphics) {
+	static std::atomic<int64_t> mode_once {Common::OnceUnset};
+	const auto                  mode         = static_cast<int>(Common::Once(mode_once, [] {
+		const auto* value = std::getenv("KYTY_STORAGE_RANGE_CAP");
+		if (value == nullptr || *value == '\0' || std::strcmp(value, "auto") == 0) {
+			return int64_t {2};
+		}
+		return int64_t {std::strcmp(value, "0") != 0 ? 1 : 0};
+	}));
+	constexpr uint64_t          NvidiaVendor = 0x10de;
+	const bool                  on =
+	    mode == 1 || (mode == 2 && graphics.GetPhysicalDeviceProperties().vendorID == NvidiaVendor);
+	return on ? uint64_t {0x7ffffffc} : std::numeric_limits<uint64_t>::max();
+}
+
 static vk::DescriptorBufferInfo
 NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource& source,
                     const ShaderRecompiler::IR::BufferResource& resource, ShaderType stage,
                     uint32_t slot, uint32_t& buffer_offset,
-                    const std::vector<GuestRange>* written_ranges) {
+                    const std::vector<GuestRange>* written_ranges, bool uniform_view) {
 	buffer_offset = 0;
 
 	const auto& [address, size, id] = source;
@@ -194,8 +216,15 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 		BufferLookupStats::AddBinding(LookupOutcome::Null, 0);
 		return {context.GetBufferCache().GetBuffer(NULL_BUFFER_ID).Handle(), 0, 16};
 	}
-	const auto& graphics  = context.GetGraphics();
-	const auto  alignment = graphics.StorageMinAlignment();
+	const auto& graphics = context.GetGraphics();
+	// A buffer bound as a uniform buffer (KYTY_UNIFORM_BUFFERS) meets both offset alignments, so
+	// the one base adjustment in shader data serves either view.
+	const auto alignment =
+	    uniform_view
+	        ? std::max<vk::DeviceSize>(
+	              graphics.StorageMinAlignment(),
+	              graphics.GetPhysicalDeviceProperties().limits.minUniformBufferOffsetAlignment)
+	        : graphics.StorageMinAlignment();
 	if (size > graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange) {
 		EXIT("storage buffer range is unsupported\n");
 	}
@@ -238,8 +267,10 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	// may leave plain dword loads to robustBufferAccess2 (HostBufferRobustness). NVIDIA then
 	// returns data for a dword that is only partly inside the range, so bind whole dwords: a
 	// no-op for every shader-side check, and it makes the device check match them.
-	const auto range = size + adjustment >= 4u ? Common::AlignDown(size + adjustment, uint64_t {4})
-	                                           : size + adjustment;
+	const auto range =
+	    std::min(size + adjustment >= 4u ? Common::AlignDown(size + adjustment, uint64_t {4})
+	                                     : size + adjustment,
+	             StorageRangeCap(graphics));
 	const vk::DescriptorBufferInfo result {buffer->Handle(), aligned_offset, range};
 	descriptor_scope.Stop();
 	const auto invalidate_start = gpu_written ? BufferLookupStats::Now() : 0;
@@ -267,7 +298,8 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	return result;
 }
 
-bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
+// Reserved and unsupported T# fields must be zero; perf_mod only scales sampler state.
+static bool IsCanonicalTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
 	constexpr uint32_t field1_reserved_mask = 0x200fff00u;
 	constexpr uint32_t field2_reserved_mask = 0xf0003000u;
 	const uint32_t     field3_expected = descriptor.DstSelXYZW() |
@@ -278,16 +310,26 @@ bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bo
 	const uint32_t     field4_expected = descriptor.Depth() | (descriptor.BaseArray5() << 16u);
 	const uint32_t     field5_expected = (static_cast<uint32_t>(descriptor.PerfMod5()) << 20u) |
 	                                     (static_cast<uint32_t>(descriptor.MaxMip()) << 4u);
-	const bool         common          = (descriptor.fields[1] & field1_reserved_mask) == 0 &&
-	                                     (descriptor.fields[2] & field2_reserved_mask) == 0 &&
-	                                     descriptor.fields[3] == field3_expected;
+	if ((descriptor.fields[1] & field1_reserved_mask) != 0 ||
+	    (descriptor.fields[2] & field2_reserved_mask) != 0 ||
+	    descriptor.fields[3] != field3_expected) {
+		return false;
+	}
 	if (r128) {
-		return common && descriptor.fields[4] == 0 && descriptor.fields[5] == 0 &&
+		return descriptor.fields[4] == 0 && descriptor.fields[5] == 0 &&
 		       descriptor.fields[6] == 0 && descriptor.fields[7] == 0;
 	}
-	const bool full = common && descriptor.fields[4] == field4_expected &&
-	                  descriptor.fields[5] == field5_expected;
-	if (!full || (descriptor.MsaaDepth() && !IsMultisampledTexture(descriptor.Type()))) {
+	return descriptor.fields[4] == field4_expected && descriptor.fields[5] == field5_expected;
+}
+
+bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
+	if (!IsCanonicalTextureEncoding(descriptor, r128)) {
+		return false;
+	}
+	if (r128) {
+		return true;
+	}
+	if (descriptor.MsaaDepth() && !IsMultisampledTexture(descriptor.Type())) {
 		return false;
 	}
 	const auto metadata_control = descriptor.fields[6] & 0x00ffffffu;
@@ -447,36 +489,12 @@ static bool IsSupportedStorageTextureDescriptor(const ShaderRecompiler::IR::Imag
 	       supported_swizzle && descriptor.BCSwizzle() == 0 && !descriptor.MsaaDepth();
 }
 
-static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageResource& resource,
-                                              const ShaderTextureResource& descriptor) {
-	constexpr uint32_t field1_reserved_mask = 0x200fff00u;
-	constexpr uint32_t field2_reserved_mask = 0xf0003000u;
-	constexpr uint32_t field5_expected      = 0x00700000u;
-	constexpr uint32_t field5_max_mip_mask  = 0x000000f0u;
-	const uint32_t     expected_field3 = descriptor.DstSelXYZW() |
-	                                     (static_cast<uint32_t>(descriptor.BaseLevel()) << 12u) |
-	                                     (static_cast<uint32_t>(descriptor.LastLevel()) << 16u) |
-	                                     (static_cast<uint32_t>(descriptor.TileMode()) << 20u) |
-	                                     (static_cast<uint32_t>(descriptor.Type()) << 28u);
-	const uint32_t     expected_field4 =
-	    descriptor.Depth() | (static_cast<uint32_t>(descriptor.BaseArray5()) << 16u);
-	const bool common = (descriptor.fields[1] & field1_reserved_mask) == 0 &&
-	                    (descriptor.fields[2] & field2_reserved_mask) == 0 &&
-	                    descriptor.fields[3] == expected_field3;
-	if (resource.r128) {
-		return common && descriptor.fields[4] == 0 && descriptor.fields[5] == 0 &&
-		       descriptor.fields[6] == 0 && descriptor.fields[7] == 0;
-	}
-	return common && descriptor.fields[4] == expected_field4 &&
-	       (descriptor.fields[5] & ~field5_max_mip_mask) == field5_expected;
-}
-
 bool ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size, bool fatal) {
 	const auto format           = descriptor.Format();
 	const bool resource_ok      = IsSupportedStorageImageResource(resource);
 	const bool descriptor_ok    = IsSupportedStorageTextureDescriptor(resource, descriptor);
-	const bool encoding_ok      = IsSupportedStorageTextureEncoding(resource, descriptor);
+	const bool encoding_ok      = IsCanonicalTextureEncoding(descriptor, resource.r128);
 	const bool uint_resource    = resource.numeric_class == Prospero::TextureNumericClass::Uint;
 	const bool raw_sint_storage = format == Prospero::BufferFormat::k32SInt && uint_resource &&
 	                              resource.written && !resource.read && !resource.atomic;
@@ -651,7 +669,7 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 	}
 	view.usage = storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlagBits::eSampled;
 	view.mapping =
-	    storage || surface_format.conversion_format != Prospero::BufferFormat::kInvalid
+	    storage || resource.conversion_format != Prospero::BufferFormat::kInvalid
 	        ? vk::ComponentMapping {}
 	        : TextureGetComponentMapping(descriptor.DstSelXYZW(), surface_format.host_to_storage);
 	switch (resource.dimension) {
@@ -2087,6 +2105,8 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	}
 	prefetch_scope.Stop();
 	CommitStats::StepMark(CommitStats::Step::RbHead);
+	const auto* uniform_binding = ShaderRecompiler::IR::FindBinding(
+	    program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::UniformBuffers);
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		uint32_t    buffer_offset = 0;
 		const auto  ranges_start  = program.info.buffers[i].written ? BufferLookupStats::Now() : 0;
@@ -2096,9 +2116,11 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			BufferLookupStats::AddPart(BufferLookupStats::Part::WriteRanges,
 			                           BufferLookupStats::Now() - ranges_start);
 		}
+		const bool uniform_view =
+		    uniform_binding != nullptr && std::ranges::binary_search(uniform_binding->resources, i);
 		prepared.buffers.push_back(NativeStorageBuffer(m_context, prepared.buffer_sources[i],
 		                                               program.info.buffers[i], program.stage, i,
-		                                               buffer_offset, written));
+		                                               buffer_offset, written, uniform_view));
 		pack_memory_offset(i, buffer_offset);
 	}
 	CommitStats::StepMark(CommitStats::Step::RbBindings);
@@ -2308,6 +2330,26 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	check_claimed_views();
 }
 
+// KYTY_REBIND_AFTER_JOIN=1 (default off; chenxiao07/KytyPS5 ed6f063e1): a draw or dispatch whose
+// resolved buffers lost one to a join (BufferCache::UnregisterEpoch moved) resolves them again
+// before it is recorded. The first 16 occurrences are logged.
+bool RebindAfterJoinEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_REBIND_AFTER_JOIN");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
+void NoteRebindAfterJoin(const char* kind, const char* name) {
+	static std::atomic<uint32_t> count {0};
+	const auto                   n = count.fetch_add(1, std::memory_order_relaxed);
+	if (n < 16 || (n & (n - 1)) == 0) {
+		std::printf("Kyty rebind after join: a %s's buffers resolved again (%s; %u so far)\n", kind,
+		            name != nullptr ? name : "-", n + 1);
+	}
+}
+
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo> colors, bool keep_images) {
 	bool uses_dma = false;
@@ -2363,6 +2405,8 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	// The uploads of every stage share one barrier pair (KYTY_UPLOAD_BATCH).
 	{
 		const BufferCache::UploadBatch upload_batch(m_context.GetBufferCache());
+		// KYTY_REBIND_AFTER_JOIN: the count the draw checks after its per-draw ranges.
+		m_rebind_epoch = m_context.GetBufferCache().UnregisterEpoch();
 		for (auto* stage: stages) {
 			RebindBuffers(*stage);
 		}
@@ -2758,6 +2802,22 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 							m_descriptor_buffers.push_back(view);
 						}
 						break;
+					case BindingKind::UniformBuffers: {
+						// KYTY_UNIFORM_BUFFERS: the storage view, its range cut to the uniform
+						// array the shader declares (constant reads stay inside it).
+						const auto max_range =
+						    std::min<vk::DeviceSize>(ShaderRecompiler::IR::UniformBufferBytes,
+						                             m_context.GetGraphics()
+						                                 .GetPhysicalDeviceProperties()
+						                                 .limits.maxUniformBufferRange);
+						for (const auto resource: binding.resources) {
+							auto view = descriptors.buffers.at(resource);
+							EXIT_IF(view.buffer == nullptr);
+							view.range = std::min(view.range, max_range);
+							m_descriptor_buffers.push_back(view);
+						}
+						break;
+					}
 					case BindingKind::BdaPagetable:
 					case BindingKind::FaultBuffer: {
 						auto&       cache      = m_context.GetBufferCache();

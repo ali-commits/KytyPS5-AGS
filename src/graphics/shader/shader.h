@@ -137,6 +137,8 @@ struct ShaderTessellationInputInfo {
 	uint32_t output_control_points = 0;
 	uint32_t ls_stride             = 0;
 	uint32_t hs_stride             = 0;
+	uint32_t patch_base            = 0;
+	uint32_t patch_size            = 0;
 	uint32_t domain                = 0;
 	uint32_t partitioning          = 0;
 	uint32_t output_topology       = 0;
@@ -145,18 +147,22 @@ struct ShaderTessellationInputInfo {
 struct ShaderVertexInputInfo {
 	static constexpr int RES_MAX = 32;
 
-	ShaderBufferResource        resources[RES_MAX];
-	ShaderVertexDestination     resources_dst[RES_MAX];
-	ShaderVertexInputBuffer     buffers[RES_MAX];
-	ShaderStageRuntime          stage;
-	ShaderType                  logical_stage       = ShaderType::Vertex;
-	int                         resources_num       = 0;
-	int                         fetch_attrib_reg    = 0;
-	int                         fetch_buffer_reg    = 0;
-	int                         buffers_num         = 0;
-	uint32_t                    wave_size           = 64;
-	uint32_t                    scratch_size_dwords = 0;
-	uint32_t                    pa_cl_vs_out_cntl   = 0;
+	ShaderBufferResource    resources[RES_MAX];
+	ShaderVertexDestination resources_dst[RES_MAX];
+	ShaderVertexInputBuffer buffers[RES_MAX];
+	ShaderStageRuntime      stage;
+	ShaderType              logical_stage       = ShaderType::Vertex;
+	int                     resources_num       = 0;
+	int                     fetch_attrib_reg    = 0;
+	int                     fetch_buffer_reg    = 0;
+	int                     buffers_num         = 0;
+	uint32_t                wave_size           = 64;
+	uint32_t                scratch_size_dwords = 0;
+	// LDS_SIZE of the GS stage a non-NGG vertex shader runs on; usually zero.
+	uint32_t lds_size_dwords   = 0;
+	uint32_t pa_cl_vs_out_cntl = 0;
+	// PA_CL_CLIP_CNTL.UCP_ENA; set only on the last pre-rasterization stage.
+	uint32_t                    user_clip_planes = 0;
 	ShaderClipSpaceTransform    clip_space;
 	ShaderMeshInputInfo         mesh;
 	ShaderTessellationInputInfo tess;
@@ -215,21 +221,23 @@ struct ShaderPixelInputInfo {
 	uint8_t  target_output_mode[8]      = {};
 	// CB_SHADER_MASK with KYTY_CB_SHADER_MASK_EXPORTS=1 (MRT export i goes to the i-th target
 	// with a non-zero nibble); UINT32_MAX otherwise (export i goes to target i).
-	uint32_t                                       target_shader_mask           = UINT32_MAX;
-	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
-	uint32_t                                       scratch_size_dwords          = 0;
-	bool                                           ps_pos_x                     = false;
-	bool                                           ps_pos_y                     = false;
-	bool                                           ps_pos_z                     = false;
-	bool                                           ps_pos_w                     = false;
-	bool                                           ps_front_face                = false;
-	bool                                           ps_ancillary                 = false;
-	bool                                           ps_no_perspective            = false;
-	bool                                           ps_pixel_kill_enable         = false;
-	bool                                           ps_depth_export_enable       = false;
-	bool                                           ps_sample_mask_export_enable = false;
-	bool                                           ps_sample_shading            = false;
-	bool                                           dual_source_blending         = false;
+	uint32_t                                       target_shader_mask    = UINT32_MAX;
+	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping = {};
+	uint32_t                                       scratch_size_dwords   = 0;
+	// EXTRA_LDS_SIZE: LDS reserved beyond the interpolants (VGPR spills to LDS).
+	uint32_t lds_size_dwords              = 0;
+	bool     ps_pos_x                     = false;
+	bool     ps_pos_y                     = false;
+	bool     ps_pos_z                     = false;
+	bool     ps_pos_w                     = false;
+	bool     ps_front_face                = false;
+	bool     ps_ancillary                 = false;
+	bool     ps_no_perspective            = false;
+	bool     ps_pixel_kill_enable         = false;
+	bool     ps_depth_export_enable       = false;
+	bool     ps_sample_mask_export_enable = false;
+	bool     ps_sample_shading            = false;
+	bool     dual_source_blending         = false;
 	// Export logical alpha or per-channel source factors through MRT1 after channel swizzling.
 	ShaderAlphaBlendSource alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                   ps_early_z         = false;

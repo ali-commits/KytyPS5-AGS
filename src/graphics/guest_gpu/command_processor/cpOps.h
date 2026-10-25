@@ -76,6 +76,8 @@ enum class OpKind : uint16_t {
 	DrawAuto,
 	DrawIndirect,
 	DrawIndirectMulti,
+	// Draw-index writes persist into later snapshots: return the executed count in lockstep.
+	DrawIndirectMultiIndex,
 	DispatchDirect,
 	DispatchIndirect,
 	EndOfPipe,
@@ -121,6 +123,7 @@ enum class OpKind : uint16_t {
 		case OpKind::Predication:
 		case OpKind::CondExec:
 		case OpKind::Branch:
+		case OpKind::DrawIndirectMultiIndex:
 		case OpKind::LockstepRead: return true;
 		default: return false;
 	}
@@ -152,14 +155,14 @@ inline constexpr uint16_t FlagAdvanceEpoch = 1u << 1u; // thread mode: a sync-ep
 // recorder packet": the op ring reuses the CP recorder's ring and its Wrap records).
 struct OpHeader {
 	CommandStream::Header ring;
-	OpKind                kind  = OpKind::Count;
-	uint16_t              flags = 0;
+	OpKind                kind      = OpKind::Count;
+	uint16_t              flags     = 0;
 	uint32_t              data_size = 0; // inline data bytes after the payload
 	uint64_t              sequence  = 0; // op number in its stream (the ordering token)
 	uint64_t              packet    = 0; // packets the front completed in this PM4 stream before
 	                                     // the emitting packet
-	uint64_t              packets_hash = 0; // verify: running hash of those packets' dwords
-	uint64_t              verify_hash  = 0; // verify: payload and inline data at encode
+	uint64_t packets_hash = 0;           // verify: running hash of those packets' dwords
+	uint64_t verify_hash  = 0;           // verify: payload and inline data at encode
 };
 static_assert(sizeof(OpHeader) == 48);
 
@@ -167,7 +170,7 @@ static_assert(sizeof(OpHeader) == 48);
 
 // DrawIndexOp / DrawAutoOp flags.
 inline constexpr uint32_t DrawFlagInheritInstances = 1u << 0u; // instance count from the resolver's
-                                                             // instance state (NumInstances)
+                                                               // instance state (NumInstances)
 // Thread mode: the draw was published to the draw-prep window at position `window`, or carries
 // the register snapshot `snapshot` (cpSequencer.h). Transport fields: the verifier ignores them.
 inline constexpr uint32_t DrawFlagPublished = 1u << 1u;
@@ -206,10 +209,10 @@ struct DrawAutoOp {
 inline constexpr uint32_t IndirectFlagIndexed      = 1u << 0u;
 inline constexpr uint32_t IndirectFlagSetInstances = 1u << 1u; // apply num_instances first (the
                                                                // front's SET_NUM_INSTANCES value)
-inline constexpr uint32_t IndirectFlagSnapshot     = 1u << 2u; // thread mode: `snapshot` is bound
+inline constexpr uint32_t IndirectFlagSnapshot = 1u << 2u;     // thread mode: `snapshot` is bound
 // KYTY_DRAW_PREP_INDIRECT, thread mode: the draw's programs were prepared in draw-prep window slot
 // `window` (DrawPrep::Engine::ExecuteIndirect).
-inline constexpr uint32_t IndirectFlagPrepared     = 1u << 3u;
+inline constexpr uint32_t IndirectFlagPrepared = 1u << 3u;
 
 // DRAW_INDIRECT / DRAW_INDEX_INDIRECT (multi: DRAW_INDIRECT_MULTI / DRAW_INDEX_INDIRECT_MULTI).
 // The front's draw state at the packet travels with the op: the resolver reads the arguments.
@@ -226,8 +229,8 @@ struct DrawIndirectOp {
 	uint32_t flags               = 0;
 	uint32_t num_instances       = 0; // IndirectFlagSetInstances
 	uint32_t snapshot            = 0; // IndirectFlagSnapshot
-	uint32_t reserved            = 0;
-	uint64_t window              = 0; // IndirectFlagPrepared
+	uint32_t draw_index_sgpr = 0; // multi: 1 + the user SGPR given each record's index (0: none)
+	uint64_t window          = 0; // IndirectFlagPrepared
 };
 
 // Dispatch op flags.
@@ -421,27 +424,27 @@ struct SkipSlotsOp {
 };
 
 template <typename T>
-inline constexpr bool IsPayload = std::is_trivially_copyable_v<T> && alignof(T) <= 8 &&
-                                  (sizeof(T) % 8) == 0 &&
-                                  std::has_unique_object_representations_v<T>;
+inline constexpr bool IsPayload =
+    std::is_trivially_copyable_v<T> && alignof(T) <= 8 && (sizeof(T) % 8) == 0 &&
+    std::has_unique_object_representations_v<T>;
 
 static_assert(IsPayload<DrawIndexOp> && IsPayload<DrawAutoOp> && IsPayload<DrawIndirectOp> &&
               IsPayload<DispatchDirectOp> && IsPayload<DispatchIndirectOp> &&
               IsPayload<EndOfPipeOp> && IsPayload<ReleaseMemOp> && IsPayload<EventWriteOp> &&
               IsPayload<WriteDataOp> && IsPayload<ReferenceClockOp> && IsPayload<DmaDataOp> &&
               IsPayload<LodStatsOp> && IsPayload<FlipOp> && IsPayload<WaitRegMemOp> &&
-              IsPayload<WaitFlipDoneOp> && IsPayload<DumpConstRamOp> &&
-              IsPayload<PredicationOp> && IsPayload<CondExecOp> && IsPayload<BranchOp> &&
-              IsPayload<ReadCheckOp> && IsPayload<StreamBeginOp> && IsPayload<StreamEndOp> &&
-              IsPayload<HandoffOp> && IsPayload<LockstepReadOp> && IsPayload<SkipSlotsOp>);
+              IsPayload<WaitFlipDoneOp> && IsPayload<DumpConstRamOp> && IsPayload<PredicationOp> &&
+              IsPayload<CondExecOp> && IsPayload<BranchOp> && IsPayload<ReadCheckOp> &&
+              IsPayload<StreamBeginOp> && IsPayload<StreamEndOp> && IsPayload<HandoffOp> &&
+              IsPayload<LockstepReadOp> && IsPayload<SkipSlotsOp>);
 
 // The kind of each payload type (compile-time dispatch for Emit/Submit).
 template <typename T>
 struct KindOf;
 #define KYTY_CPSEQ_PAYLOAD(kind_name, type)                                                        \
-	template <>                                                                                  \
-	struct KindOf<type> {                                                                        \
-		static constexpr OpKind Kind = OpKind::kind_name;                                        \
+	template <>                                                                                    \
+	struct KindOf<type> {                                                                          \
+		static constexpr OpKind Kind = OpKind::kind_name;                                          \
 	};
 KYTY_CPSEQ_PAYLOAD(DrawIndex, DrawIndexOp)
 KYTY_CPSEQ_PAYLOAD(DrawAuto, DrawAutoOp)
@@ -468,7 +471,7 @@ KYTY_CPSEQ_PAYLOAD(Handoff, HandoffOp)
 KYTY_CPSEQ_PAYLOAD(LockstepRead, LockstepReadOp)
 KYTY_CPSEQ_PAYLOAD(SkipSlots, SkipSlotsOp)
 #undef KYTY_CPSEQ_PAYLOAD
-// DrawIndirectOp serves two kinds (DrawIndirect, DrawIndirectMulti): no KindOf.
+// DrawIndirectOp serves direct, multi, and lockstep draw-index variants: no KindOf.
 
 [[nodiscard]] uint32_t PayloadSize(OpKind kind) noexcept;
 

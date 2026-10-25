@@ -235,7 +235,7 @@ Decoder::Operand MemorySourceAt(const Decoder::Instruction& decoded, uint32_t in
 	if (decoded.family == Decoder::Family::MUBUF || decoded.family == Decoder::Family::MTBUF) {
 		const bool store_or_atomic =
 		    (decoded.opcode >= Decoder::Opcode::BUFFER_STORE_FORMAT_X &&
-		     decoded.opcode <= Decoder::Opcode::BUFFER_STORE_FORMAT_D16_X) ||
+		     decoded.opcode <= Decoder::Opcode::BUFFER_STORE_FORMAT_D16_XYZW) ||
 		    (decoded.opcode >= Decoder::Opcode::BUFFER_STORE_BYTE &&
 		     decoded.opcode <= Decoder::Opcode::BUFFER_STORE_DWORDX4) ||
 		    (decoded.opcode >= Decoder::Opcode::TBUFFER_STORE_FORMAT_X &&
@@ -500,12 +500,18 @@ void Translator::BUFFER_LOAD(const Decoder::Instruction& inst) {
 	            AddMemoryInfo(memory, inst.pc));
 	if (bits != 32u) {
 		WriteOperand(inst.dst, WidenSubdword(loaded, bits, sign));
-	} else if (memory.data_dwords == 1u) {
-		WriteOperand(inst.dst, loaded);
-	} else {
-		for (uint32_t component = 0; component < memory.data_dwords; component++) {
-			WriteOperand(OffsetOperand(inst.dst, component),
-			             ir.CompositeExtract(loaded, component));
+		WriteFetchStatus(inst, memory);
+		return;
+	}
+	for (uint32_t component = 0; component < memory.data_dwords; component++) {
+		const auto dst = OffsetOperand(inst.dst, component);
+		const auto value =
+		    memory.data_dwords == 1u ? IR::U32(loaded) : ir.CompositeExtract(loaded, component);
+		// D16 formats with an odd component count keep the high half of their final VGPR.
+		if (memory.data_bits == 16u && component * 2u + 1u == memory.component_count) {
+			Write16Bits(dst, value);
+		} else {
+			WriteOperand(dst, value);
 		}
 	}
 	WriteFetchStatus(inst, memory);
@@ -1068,6 +1074,9 @@ void Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::BUFFER_LOAD_FORMAT_XYZ:
 		case Decoder::Opcode::BUFFER_LOAD_FORMAT_XYZW:
 		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_X:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XY:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XYZ:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XYZW:
 		case Decoder::Opcode::TBUFFER_LOAD_FORMAT_X:
 		case Decoder::Opcode::TBUFFER_LOAD_FORMAT_XY:
 		case Decoder::Opcode::TBUFFER_LOAD_FORMAT_XYZ:
@@ -1084,6 +1093,9 @@ void Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::BUFFER_STORE_FORMAT_XYZ:
 		case Decoder::Opcode::BUFFER_STORE_FORMAT_XYZW:
 		case Decoder::Opcode::BUFFER_STORE_FORMAT_D16_X:
+		case Decoder::Opcode::BUFFER_STORE_FORMAT_D16_XY:
+		case Decoder::Opcode::BUFFER_STORE_FORMAT_D16_XYZ:
+		case Decoder::Opcode::BUFFER_STORE_FORMAT_D16_XYZW:
 		case Decoder::Opcode::TBUFFER_STORE_FORMAT_X:
 		case Decoder::Opcode::TBUFFER_STORE_FORMAT_XY:
 		case Decoder::Opcode::TBUFFER_STORE_FORMAT_XYZ:

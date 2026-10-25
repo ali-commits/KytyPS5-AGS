@@ -8,6 +8,7 @@
 #include "common/hangWatchdog.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
+#include "common/paceLog.h"
 #include "common/prepPhases.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -22,6 +23,7 @@
 #include "graphics/host_gpu/coherenceLog.h"
 #include "graphics/host_gpu/gpuTouchedPages.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
 #include "graphics/host_gpu/renderer/drawPrep/commitStats.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
@@ -115,6 +117,21 @@ static_assert(offsetof(DrawIndexedIndirectArgs, instance_count) == IndirectInsta
 static bool NativeIndirectEnabled() {
 	static const bool enabled = [] {
 		const auto* value = std::getenv("KYTY_NATIVE_INDIRECT");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+// KYTY_INDIRECT_DRAW_INDEX (default on; =0 off): DRAW_(INDEX_)INDIRECT_MULTI with DRAW_INDEX_ENABLE
+// has the CP write each record's index into the user SGPR at DRAW_INDEX_LOC before that record
+// draws. Kyty ignored it, so every record saw the SGPR's previous value: Wolverine's title mesh
+// draws (one record per object, the shader indexes a per-draw table with that SGPR) all drew the
+// first table entry with the other records' meshlet counts, i.e. garbage triangles in front of
+// the camera. The host indirect path has no per-record SGPR, so such multi-draws of more than one
+// record take the CPU path (which reads the records).
+static bool IndirectDrawIndexEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_INDIRECT_DRAW_INDEX");
 		return value == nullptr || std::strcmp(value, "0") != 0;
 	}();
 	return enabled;
@@ -316,10 +333,50 @@ void GuestGpu::ProcessCommands() {
 	}
 }
 
+// KYTY_SYNC_COMMAND_SPIN_US (default 0: sleep at once, as before; live): GuestGpu::SendCommandSync.
+static Live::Switch
+    g_sync_command_spin_us("KYTY_SYNC_COMMAND_SPIN_US", [](const char* value) -> int64_t {
+	    const auto parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 0ul;
+	    return static_cast<int64_t>(std::min(parsed, 10000ul));
+    });
+
 void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!command);
 	if (IsGpuThread()) {
 		command();
+		return;
+	}
+	const auto spin_us = static_cast<uint64_t>(g_sync_command_spin_us.Get());
+	if (spin_us != 0) {
+		// KYTY_SYNC_COMMAND_SPIN_US: the caller spins that long (about what such a command waits
+		// for its packet boundary and runs) before it sleeps, and the GPU thread wakes it only when
+		// it sleeps: a guest readback's begin was a sleep, then a wake-up system call on the GPU
+		// thread (chenxiao07/KytyPS5 59aa6dc79). States: 0 running, 1 done, 2 the caller sleeps.
+		// The caller may observe completion before the callback finishes notifying.
+		// Keep the atomic alive through both sides, including that final notify.
+		auto state = std::make_shared<std::atomic<uint32_t>>(0);
+		SendCommand([operation = std::move(command), state]() mutable {
+			operation();
+			if (state->exchange(1, std::memory_order_acq_rel) == 2) {
+				state->notify_one();
+			}
+		});
+		HangWatchdog::Scope wait("cp-service-command", reinterpret_cast<uint64_t>(this),
+		                         reinterpret_cast<uint64_t>(state.get()));
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
+		uint32_t   spins    = 0;
+		while (state->load(std::memory_order_acquire) != 1) {
+			if ((++spins & 63u) == 0 && std::chrono::steady_clock::now() >= deadline) {
+				uint32_t expected = 0;
+				if (state->compare_exchange_strong(expected, 2, std::memory_order_acq_rel)) {
+					while (state->load(std::memory_order_acquire) == 2) {
+						state->wait(2, std::memory_order_acquire);
+					}
+				}
+				break;
+			}
+			_mm_pause();
+		}
 		return;
 	}
 	std::binary_semaphore done {0};
@@ -486,6 +543,20 @@ void GuestGpu::DropCpVisibleLabels(uint64_t address, uint64_t size) {
 	}
 }
 
+bool GuestGpu::CpVisibleLabelOverlaps(uint64_t address, uint64_t size) {
+	if (!m_cp_visible_labels.load(std::memory_order_relaxed) || !HasDeferredLabels()) {
+		return false;
+	}
+	Common::LockGuard lock(m_queue_mutex);
+	for (const auto& label: m_deferred_labels) {
+		if (label.cp_visible && label.address < address + size &&
+		    address < label.address + label.size) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void GuestGpu::NoteCpVisibleLabelsWaited(uint64_t address, uint64_t size) {
 	Common::LockGuard lock(m_queue_mutex);
 	for (auto& label: m_deferred_labels) {
@@ -611,6 +682,7 @@ void GuestGpu::Done() {
 	}
 	HangWatchdog::Scope blocked("agc-done-prefix", reinterpret_cast<uint64_t>(this), target);
 	const auto          wait_start = HangTrace::Enabled() ? HangTrace::NowNs() : 0;
+	const auto          pace_start = PaceLog::Enabled() ? PaceLog::NowNs() : 0;
 	{
 		Profiler::ScopedFrameWait frame_wait(Profiler::FrameWait::AgcDoneWait);
 		Common::LockGuard         lock(m_queue_mutex);
@@ -629,6 +701,9 @@ void GuestGpu::Done() {
 	}
 	if (HangTrace::Enabled()) {
 		HangTrace::RecordDoneWait(HangTrace::NowNs() - wait_start);
+	}
+	if (pace_start != 0) {
+		PaceLog::NoteDone(pace_start, PaceLog::NowNs() - pace_start);
 	}
 }
 
@@ -986,6 +1061,7 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 }
 
 void CommandProcessor::ExecDumpConstRam(const CpSeq::DumpConstRamOp& op, const uint32_t* src) {
+	StreamCopyDefer::NoteGpuOnlyWrite(op.dst, uint64_t {op.dw_num} * 4u);
 	memcpy(reinterpret_cast<uint32_t*>(op.dst), src, static_cast<size_t>(op.dw_num) * 4);
 	NoteCpWrite(op.dst, uint64_t {op.dw_num} * 4u);
 }
@@ -1145,6 +1221,50 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	(void)Submit(op, src, dw_num * static_cast<uint32_t>(sizeof(uint32_t)));
 }
 
+static bool LabelSplitMode();
+static bool LabelCompletionMode();
+
+// Diagnostic (Bug C): KYTY_CP_AHEAD_LOG=1 counts command-processor writes the guest CPU can see at
+// once (CPU writes at record time) made while deferred labels are pending, i.e. while the CP may be
+// ahead of the GPU in split mode; prints the first 32 addresses per kind and totals every 1000.
+enum class CpAheadKind : uint32_t {
+	WriteData,
+	WriteDataDeferred,
+	FlipLabel,
+	FlipLabelDeferred,
+	Count
+};
+static void NoteCpAhead(CpAheadKind kind, uint64_t address, uint64_t value) {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_CP_AHEAD_LOG");
+		return v != nullptr && std::strcmp(v, "1") == 0;
+	}();
+	if (!enabled) {
+		return;
+	}
+	static const char*           names[] = {"write-data", "write-data-deferred", "flip-label",
+	                                        "flip-label-deferred"};
+	static std::atomic<uint64_t> counts[static_cast<uint32_t>(CpAheadKind::Count)] {};
+	const auto                   k = static_cast<uint32_t>(kind);
+	const auto                   n = counts[k].fetch_add(1, std::memory_order_relaxed) + 1;
+	if (n <= 32 || (n % 1000) == 0) {
+		std::printf("Kyty cp-ahead %s #%" PRIu64 " 0x%" PRIx64 " value 0x%" PRIx64 "\n", names[k],
+		            n, address, value);
+	}
+}
+
+// KYTY_LABEL_MODE=split: a CPU write-data to a label that is still pending (its guest write waits
+// for completion) is deferred behind it, so the guest sees the label, then this write, in
+// hardware order and not before the GPU got there. KYTY_LABEL_SPLIT_WRITE_DATA=0: written at once
+// (the pending label's write is then skipped if a CP wait passed on it).
+static bool SplitWriteDataDeferred() {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_LABEL_SPLIT_WRITE_DATA");
+		return LabelSplitMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+	}();
+	return enabled;
+}
+
 void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_t* src) {
 	auto*          dst           = reinterpret_cast<uint32_t*>(op.dst);
 	const uint32_t dw_num        = op.dw_num;
@@ -1194,13 +1314,35 @@ void CommandProcessor::ExecWriteData(const CpSeq::WriteDataOp& op, const uint32_
 			return;
 		}
 	}
+	const uint64_t cpu_bytes = write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u;
+	if (g_gpu_state != nullptr && g_gpu_state->HasDeferredLabels()) {
+		if (cpu_bytes <= sizeof(uint64_t) && SplitWriteDataDeferred() &&
+		    g_gpu_state->CpVisibleLabelOverlaps(op.dst, cpu_bytes)) {
+			uint64_t value = 0;
+			std::memcpy(&value, write_one_address ? src + (dw_num - 1u) : src, cpu_bytes);
+			NoteCpAhead(CpAheadKind::WriteDataDeferred, op.dst, value);
+			const bool proxy   = m_defer_next_label;
+			m_defer_next_label = false;
+			const bool deferred =
+			    TryDeferLabel(dst, value, static_cast<uint32_t>(cpu_bytes), false, 0);
+			m_defer_next_label = proxy;
+			if (deferred) {
+				Profiler::CountFrameEvent(Profiler::FrameEvent::WriteDataCpu);
+				TraceCpLabel("wd-deferred", dst, value, cpu_bytes);
+				return;
+			}
+		}
+		NoteCpAhead(CpAheadKind::WriteData, op.dst, src[write_one_address ? dw_num - 1u : 0u]);
+	}
 	Profiler::CountFrameEvent(Profiler::FrameEvent::WriteDataCpu);
 	TraceCpLabel("wd-cpu", dst, src[write_one_address ? dw_num - 1u : 0u], uint64_t {dw_num} * 4u);
 	LogCpAddress(
 	    "write-data", op.dst, src[write_one_address ? dw_num - 1u : 0u], uint64_t {dw_num} * 4u,
 	    m_interrupt_event_id == 0 ? 0u : static_cast<uint32_t>(m_interrupt_event_id - 0x20 + 1));
 
-	// Completion labels may be reused immediately; publish each DWORD exactly once.
+	StreamCopyDefer::NoteGuestWrite(op.dst,
+	                                write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * 4u);
+	// Completion labels can be reused immediately; memcpy may write a destination twice.
 	auto* output = static_cast<volatile uint32_t*>(dst);
 	for (uint32_t i = 0; i < dw_num; i++) {
 		*output = src[i];
@@ -1225,6 +1367,7 @@ void CommandProcessor::ExecReferenceClock(const CpSeq::ReferenceClockOp& op) {
 		     num_bytes);
 	}
 	const auto value = Sync::ReadReferenceClock();
+	StreamCopyDefer::NoteGpuOnlyWrite(dst_address, num_bytes);
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	NoteCpWrite(dst_address, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
@@ -1342,6 +1485,9 @@ void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
 	if (HangTrace::Enabled()) {
 		submission.enqueue_ns = HangTrace::NowNs();
+	}
+	if (PaceLog::Enabled()) {
+		submission.pace_enqueue_ns = PaceLog::NowNs();
 	}
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
@@ -1649,6 +1795,9 @@ bool GuestGpu::Process(Submission& submission) {
 
 	if (first_slice) {
 		submission.started = true;
+		if (submission.type == SubmissionType::Graphics) {
+			PaceLog::NoteCpSubmission(submission.pace_enqueue_ns, submission.reset_processor);
+		}
 		cp.SetSubmitId(++m_submit_id);
 		cp.ResetDeCe();
 		cp.SetFlip({});
@@ -1752,6 +1901,7 @@ bool GuestGpu::ProcessSequenced(Submission& submission) {
 	if (first_slice) {
 		SyncEpoch::AdvanceSubmission();
 		submission.started = true;
+		PaceLog::NoteCpSubmission(submission.pace_enqueue_ns, submission.reset_processor);
 		cp.SetSubmitId(++m_submit_id);
 		// The frame fence's ordering point: the sequencer reads a fenced submission's command
 		// bytes only from here on.
@@ -2713,19 +2863,50 @@ void CommandProcessor::ExecDrawIndirect(const CpSeq::DrawIndirectOp& op) {
 	                                   args.start_instance_location, op.index_type_and_size));
 }
 
+static void WriteDrawIndexSgpr(HW::Shader* shaders, uint32_t encoded_sgpr, uint32_t index);
+
 void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_count_or_count,
                                          const volatile uint32_t*               count_addr,
                                          uint32_t                               stride_in_bytes,
                                          [[maybe_unused]] IndirectDrawRegisters registers,
-                                         uint32_t draw_initiator, bool indexed) {
+                                         uint32_t draw_initiator, bool indexed,
+                                         int32_t draw_index_sgpr) {
 	auto op               = IndirectDrawOp(data_offset, draw_initiator, indexed);
 	op.count_addr         = reinterpret_cast<uint64_t>(count_addr);
 	op.max_count_or_count = max_count_or_count;
 	op.stride             = stride_in_bytes;
-	(void)Submit(CpSeq::OpKind::DrawIndirectMulti, &op, sizeof(op));
+	if (draw_index_sgpr >= 0 && IndirectDrawIndexEnabled()) {
+		op.draw_index_sgpr = static_cast<uint32_t>(draw_index_sgpr) + 1u;
+	}
+	const auto kind   = op.draw_index_sgpr != 0 ? CpSeq::OpKind::DrawIndirectMultiIndex
+	                                            : CpSeq::OpKind::DrawIndirectMulti;
+	const auto result = Submit(kind, &op, sizeof(op));
+	if (result.suspended) {
+		SuspendPm4();
+		return;
+	}
+	// The resolver writes its disposable snapshot. Publish the last executed index back to
+	// the front before it can snapshot any following draw (also the verifier's reference front).
+	if (op.draw_index_sgpr != 0 && result.value != 0 && m_front_mode != FrontMode::Direct) {
+		WriteDrawIndexSgpr(&m_sh_ctx, op.draw_index_sgpr, static_cast<uint32_t>(result.value - 1u));
+	}
 }
 
-void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
+// The CP's DRAW_INDEX_LOC write: `index` into the bound first stage's user SGPR (1 + GS user SGPR,
+// or 1 + 32 + HS user SGPR). The register keeps the value, as on the GPU.
+static void WriteDrawIndexSgpr(HW::Shader* shaders, uint32_t encoded_sgpr, uint32_t index) {
+	if (shaders == nullptr || encoded_sgpr == 0) {
+		return;
+	}
+	const auto sgpr = encoded_sgpr - 1u;
+	if (sgpr < 32u) {
+		shaders->SetGsUserSgpr(sgpr, index, shaders->GetVs().gs_user_sgpr.type[sgpr]);
+	} else if (sgpr - 32u < 32u) {
+		shaders->SetHsUserSgpr(sgpr - 32u, index, shaders->GetVs().hs_user_sgpr.type[sgpr - 32u]);
+	}
+}
+
+uint32_t CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 	if ((op.flags & CpSeq::IndirectFlagSetInstances) != 0) {
 		m_num_instances = op.num_instances;
 		m_pending_num_instances.clear();
@@ -2737,12 +2918,26 @@ void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 
 	// Zero records draw nothing and leave the instance count unchanged on either path.
 	if (max_count_or_count == 0) {
-		return;
+		return 0;
+	}
+
+	// DRAW_INDEX_ENABLE requires an ordered CPU count read, including for a single record:
+	// a zero GPU-written count must leave the persistent user SGPR untouched.
+	HW::Shader* const draw_index_shaders =
+	    op.draw_index_sgpr != 0 ? GetScheduler().BoundShaders() : nullptr;
+	if (draw_index_shaders != nullptr) {
+		static std::atomic<bool> reported {false};
+		if (!reported.exchange(true, std::memory_order_relaxed)) {
+			LOGF("Kyty: indirect multi-draw writes the draw index to user SGPR %u "
+			     "(KYTY_INDIRECT_DRAW_INDEX=0 turns it off)\n",
+			     op.draw_index_sgpr - 1u);
+		}
 	}
 
 	// The renderer rejects strides shorter than a record; the CPU path below reports them.
 	const auto args_base = op.args_base + op.data_offset;
-	if (TryDrawIndirectNative({.args_addr           = args_base,
+	if (draw_index_shaders == nullptr &&
+	    TryDrawIndirectNative({.args_addr           = args_base,
 	                           .stride              = stride_in_bytes,
 	                           .max_count           = max_count_or_count,
 	                           .count_addr          = count_addr,
@@ -2750,7 +2945,7 @@ void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 	                           .index_base_addr     = op.index_base_addr,
 	                           .index_buffer_size   = op.index_buffer_size,
 	                           .index_type_and_size = op.index_type_and_size})) {
-		return;
+		return 0;
 	}
 
 	uint32_t draw_count = max_count_or_count;
@@ -2762,7 +2957,7 @@ void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 	}
 
 	if (draw_count == 0) {
-		return;
+		return 0;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
@@ -2774,6 +2969,7 @@ void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = args_base + static_cast<uint64_t>(i) * stride_in_bytes;
+		WriteDrawIndexSgpr(draw_index_shaders, op.draw_index_sgpr, i);
 
 		if (!indexed) {
 			const auto args = ReadGuestForCp<DrawIndirectArgs>(args_addr);
@@ -2807,6 +3003,7 @@ void CommandProcessor::ExecDrawIndirectMulti(const CpSeq::DrawIndirectOp& op) {
 		                                   static_cast<int32_t>(args.base_vertex_location),
 		                                   args.start_instance_location, op.index_type_and_size));
 	}
+	return draw_index_shaders != nullptr ? draw_count : 0;
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
@@ -3228,10 +3425,13 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    // on it at record time) stays; hardware would have written the label first.
 				    const auto superseded = gpu.DeferredLabelSupersededBytes(address, tick);
 				    if (superseded == 0) {
+					    StreamCopyDefer::NoteGpuOnlyWrite(address,
+					                                      size); // after its tick completed
 					    std::memcpy(reinterpret_cast<void*>(address), &written, size);
 				    } else {
 					    for (uint32_t byte = 0; byte < size; ++byte) {
 						    if ((superseded & (1u << byte)) == 0) {
+							    StreamCopyDefer::NoteGpuOnlyWrite(address + byte, 1);
 							    reinterpret_cast<uint8_t*>(address)[byte] =
 							        reinterpret_cast<const uint8_t*>(&written)[byte];
 						    }
@@ -3298,6 +3498,7 @@ bool CommandProcessor::WriteDroppedLabel(void* dst, uint64_t value, uint32_t siz
 		return interrupt;
 	}
 	KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel");
+	StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), size);
 	std::memcpy(dst, &value, size);
 	NoteCpWrite(reinterpret_cast<uint64_t>(dst), size);
 	QueueEopTimestamp(timestamp_slot, dst, value);
@@ -3418,6 +3619,8 @@ bool CommandProcessor::TryDeferGdsRead(uint32_t* dst, uint32_t dw_offset, uint32
 		    auto write = [renderer, &gpu, bytes = std::move(bytes), address, tick, interrupt,
 		                  event_id, interrupt_context_id](bool on_gpu_thread) {
 			    if (on_gpu_thread) {
+				    StreamCopyDefer::NoteGpuOnlyWrite(address,
+				                                      bytes.size()); // after its tick completed
 				    std::memcpy(reinterpret_cast<void*>(address), bytes.data(), bytes.size());
 			    } else {
 				    (void)LibKernel::Memory::TryWriteBacking(address, bytes.data(), bytes.size());
@@ -3503,6 +3706,30 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				                      label_clock)) {
 					return; // the deferred label raises the interrupt after its write
 				}
+				// KYTY_LABEL_MODE=completion/split: deferred label writes run on the GPU thread, so
+				// an interrupt-only end-of-pipe event goes there too, after the labels before it
+				// (it could wake the guest before they were visible).
+				// KYTY_LABEL_ORDERED_INTERRUPTS=0.
+				static const bool ordered_interrupts = [] {
+					const auto* v = std::getenv("KYTY_LABEL_ORDERED_INTERRUPTS");
+					return LabelCompletionMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+				}();
+				if (ordered_interrupts) {
+					auto*      renderer = &m_renderer;
+					auto&      gpu      = m_renderer.GetGpu();
+					const int  event_id = m_interrupt_event_id;
+					const auto ctx      = interrupt_context_id;
+					GetScheduler().DeferPriorityOperation(
+					    [renderer, &gpu, event_id, ctx] {
+						    if (!gpu.TrySendCommand([renderer, event_id, ctx] {
+							        renderer->TriggerInterrupt(event_id, ctx);
+						        })) {
+							    renderer->TriggerInterrupt(event_id, ctx);
+						    }
+					    },
+					    CommandScheduler::PriorityOperationKind::EopInterrupt);
+					return;
+				}
 				Sync::TriggerEopEventAtEndOfPipe(command, m_interrupt_event_id,
 				                                 interrupt_context_id);
 				return;
@@ -3529,6 +3756,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			// Guest label pages can be protected by resource tracking. Attribute any
 			// resulting fault separately from the end-of-pipe submission/interrupt work.
 			KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel32");
+			StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst), sizeof(data));
 			std::memcpy(dst, &data, sizeof(data));
 		}
 		NoteCpWrite(reinterpret_cast<uint64_t>(dst), sizeof(data));
@@ -3563,6 +3791,8 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 					Profiler::ScopedGpuWaitReason wait_reason(Profiler::FrameWait::GpuWaitGds);
 					SynchronizeGpu();
+					StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst),
+					                                uint64_t {value >> 16u} * 4u);
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
 					NoteCpWrite(reinterpret_cast<uint64_t>(dst), uint64_t {value >> 16u} * 4u);
@@ -3612,6 +3842,8 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 					{
 						KYTY_PROFILER_DETAIL_BLOCK("EndOfPipe::WriteLabel64");
+						StreamCopyDefer::NoteGuestWrite(reinterpret_cast<uint64_t>(dst),
+						                                sizeof(value));
 						std::memcpy(dst, &value, sizeof(value));
 					}
 					NoteCpWrite(reinterpret_cast<uint64_t>(dst), sizeof(value));
@@ -3919,10 +4151,14 @@ void CommandProcessor::ExecEventWrite(const CpSeq::EventWriteOp& op) {
 			constexpr uint64_t counter_mask = ready_bit - 1u;
 			auto*              results      = reinterpret_cast<volatile uint64_t*>(event_address);
 			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
+			StreamCopyDefer::NoteGpuOnlyWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}
-			NoteCpWrite(event_address, 16u * 2u * sizeof(uint64_t));
+			// The bytes written: 16 slots 16 bytes apart. Not 256: an end dump sits 8 bytes into
+			// its pair block, and 256 bytes from it covers the label the game keeps right after the
+			// block, which split label mode then took for overwritten and skipped its write.
+			NoteCpWrite(event_address, (16u * 2u - 1u) * sizeof(uint64_t));
 			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 			break;
 		}
@@ -4051,6 +4287,29 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	                         eop_event_type, cache_action));
 }
 
+// KYTY_LABEL_MODE=completion/split: a flip's end-of-pipe label is written at completion like any
+// other label (it was written at record time). KYTY_LABEL_SPLIT_FLIPS=0 restores that.
+bool CommandProcessor::DeferFlipLabel(void* dst, uint32_t value, bool interrupt) {
+	static const bool enabled = [] {
+		const auto* v = std::getenv("KYTY_LABEL_SPLIT_FLIPS");
+		return LabelCompletionMode() && (v == nullptr || std::strcmp(v, "0") != 0);
+	}();
+	if (!enabled || dst == nullptr) {
+		return false;
+	}
+	static std::once_flag once;
+	std::call_once(once, [interrupt] {
+		std::printf("Kyty end-of-pipe labels: flip labels written at completion (%s)\n",
+		            interrupt ? "with interrupt" : "plain");
+	});
+	NoteCpAhead(CpAheadKind::FlipLabelDeferred, reinterpret_cast<uint64_t>(dst), value);
+	const bool proxy    = m_defer_next_label;
+	m_defer_next_label  = false;
+	const bool deferred = TryDeferLabel(dst, value, sizeof(value), interrupt, 0);
+	m_defer_next_label  = proxy;
+	return deferred;
+}
+
 void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 	const FlipInfo flip {
 	    .handle = op.handle, .index = op.index, .flip_mode = op.flip_mode, .flip_arg = op.flip_arg};
@@ -4087,8 +4346,11 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 				     reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 			}
 
-			std::memcpy(dst_gpu_addr, &value, sizeof(value));
-			NoteCpWrite(op.dst, sizeof(value));
+			if (!DeferFlipLabel(dst_gpu_addr, value, false)) {
+				StreamCopyDefer::NoteGuestWrite(op.dst, sizeof(value));
+				std::memcpy(dst_gpu_addr, &value, sizeof(value));
+				NoteCpWrite(op.dst, sizeof(value));
+			}
 			auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,
 			                                         flip.flip_mode, flip.flip_arg);
 			Sync::WriteAtEndOfPipeWithFlip32(
@@ -4118,6 +4380,19 @@ void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 			if (eop_event_type != 0x00000004 || cache_action != 0x00000038) {
 				EXIT("unknown event type\n");
 			}
+			if (DeferFlipLabel(dst_gpu_addr, value, true)) {
+				// The deferred label raises the flip's interrupt after its write.
+				auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,
+				                                         flip.flip_mode, flip.flip_arg);
+				Sync::WriteAtEndOfPipeWithFlip32(
+				    m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr), value, flip.handle,
+				    flip.index, flip.flip_mode, flip.flip_arg, request);
+				GetScheduler().Flush();
+				Live::OnCpFlip();
+				Libs::Graphics::PageManager::NoteCpFlip();
+				return;
+			}
+			StreamCopyDefer::NoteGuestWrite(op.dst, sizeof(value));
 			std::memcpy(dst_gpu_addr, &value, sizeof(value));
 			NoteCpWrite(op.dst, sizeof(value));
 			auto request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index,
@@ -4319,7 +4594,8 @@ static CpGaps::Cat OpGapCat(CpSeq::OpKind kind) {
 		case OpKind::DrawIndex:
 		case OpKind::DrawAuto:
 		case OpKind::DrawIndirect:
-		case OpKind::DrawIndirectMulti: return CpGaps::Cat::DrawOp;
+		case OpKind::DrawIndirectMulti:
+		case OpKind::DrawIndirectMultiIndex: return CpGaps::Cat::DrawOp;
 		case OpKind::DispatchDirect:
 		case OpKind::DispatchIndirect: return CpGaps::Cat::DispatchOp;
 		case OpKind::EndOfPipe:
@@ -4383,8 +4659,9 @@ CpSeq::Result CommandProcessor::ExecuteOp(CpSeq::OpKind kind, const void* payloa
 			ExecDrawIndirect(*static_cast<const CpSeq::DrawIndirectOp*>(payload));
 			break;
 		case OpKind::DrawIndirectMulti:
-			ExecDrawIndirectMulti(*static_cast<const CpSeq::DrawIndirectOp*>(payload));
-			break;
+		case OpKind::DrawIndirectMultiIndex:
+			return {false,
+			        ExecDrawIndirectMulti(*static_cast<const CpSeq::DrawIndirectOp*>(payload))};
 		case OpKind::DispatchDirect:
 			ExecDispatchDirect(*static_cast<const CpSeq::DispatchDirectOp*>(payload));
 			break;
@@ -4954,7 +5231,8 @@ CpSeq::RegisterState* CommandProcessor::OpSnapshot(CpSeq::OpKind kind, const voi
 			break;
 		}
 		case OpKind::DrawIndirect:
-		case OpKind::DrawIndirectMulti: {
+		case OpKind::DrawIndirectMulti:
+		case OpKind::DrawIndirectMultiIndex: {
 			const auto& op = *static_cast<const CpSeq::DrawIndirectOp*>(payload);
 			index = (op.flags & CpSeq::IndirectFlagSnapshot) != 0 ? op.snapshot : UINT32_MAX;
 			break;

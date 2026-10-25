@@ -4,6 +4,11 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
 uint32_t PixelParameterLocation(const EmitterState& state, uint32_t attr) {
@@ -136,11 +141,14 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 		EXIT("invalid image resource class");
 	}
 	const auto& info = ImageDimensionInfoFor(image.dimension);
-	const auto  scalar_type =
+	if (sampled == 2 && info.multisampled != 0u) {
+		state.builder.RequireCapability(spv::CapabilityStorageImageMultisample);
+	}
+	const auto scalar_type =
 	    image.atomic64 ? TypeU64(state) : ImageScalarType(state, image.numeric_class);
-	return state.builder.Type(spv::OpTypeImage, scalar_type,
-	                          info.spirv_dimension, image.depth_compare ? 1u : 0u, info.arrayed,
-	                          info.multisampled, sampled, format);
+	return state.builder.Type(spv::OpTypeImage, scalar_type, info.spirv_dimension,
+	                          image.depth_compare ? 1u : 0u, info.arrayed, info.multisampled,
+	                          sampled, format);
 }
 
 uint32_t ImageViewSizeType(EmitterState& state, ImageDimension dimension) {
@@ -155,7 +163,7 @@ uint32_t ImageViewSizeType(EmitterState& state, ImageDimension dimension) {
 uint32_t LoadImageDescriptor(EmitterState& state, uint32_t resource, uint32_t mip,
                              uint32_t array_index) {
 	const auto pointer = ImageDescriptorPointer(state, resource, mip, array_index);
-	const auto image = state.builder.AllocateId();
+	const auto image   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, ImageType(state, state.program.info.images.at(resource)),
 	                          image, pointer);
 	return image;
@@ -179,9 +187,9 @@ uint32_t MakeSampledImage(EmitterState& state, uint32_t resource, uint32_t sampl
                           uint32_t array_index) {
 	const auto& image_resource = state.program.info.images.at(resource);
 	EXIT_IF(image_resource.resource_class != IR::ImageResourceClass::Sampled);
-	const auto  image          = LoadImageDescriptor(state, resource, mip, array_index);
-	const auto  sampled_image = state.builder.AllocateId();
-	const auto  sampled_type =
+	const auto image         = LoadImageDescriptor(state, resource, mip, array_index);
+	const auto sampled_image = state.builder.AllocateId();
+	const auto sampled_type =
 	    state.builder.Type(spv::OpTypeSampledImage, ImageType(state, image_resource));
 	state.builder.AddFunction(spv::OpSampledImage, sampled_type, sampled_image, image, sampler_id);
 	if (array_index != 0u) {
@@ -237,6 +245,170 @@ spv::ExecutionModel ExecutionModelForStage(ShaderType stage) {
 		case ShaderType::Pixel: return spv::ExecutionModelFragment;
 		default: return spv::ExecutionModelGLCompute;
 	}
+}
+
+namespace {
+
+// The immediate post-dominator of each block, with blocks.size() standing for the exit, or an
+// empty result when some block never reaches the exit (from EmK530/KytyPS5 420fc4ead).
+std::vector<size_t>
+SplitWavePostDominators(const IR::BlockList&                                blocks,
+                        const std::unordered_map<const IR::Block*, size_t>& index) {
+	const auto     count      = blocks.size();
+	const auto     exit       = count;
+	constexpr auto none       = SIZE_MAX;
+	const auto     successors = [&](size_t block) {
+		std::vector<size_t> result;
+		if (block == exit) {
+			return result;
+		}
+		for (const auto* successor: blocks[block]->ImmSuccessors()) {
+			result.push_back(index.at(successor));
+		}
+		if (result.empty()) {
+			result.push_back(exit);
+		}
+		return result;
+	};
+	std::vector<std::vector<size_t>> reverse(count + 1);
+	for (size_t block = 0; block < count; block++) {
+		for (const auto successor: successors(block)) {
+			reverse[successor].push_back(block);
+		}
+	}
+	std::vector<size_t>                    order(count + 1, none);
+	std::vector<size_t>                    postorder;
+	std::vector<std::pair<size_t, size_t>> stack {{exit, 0}};
+	order[exit] = 0;
+	while (!stack.empty()) {
+		auto& [node, next] = stack.back();
+		if (next < reverse[node].size()) {
+			const auto child = reverse[node][next++];
+			if (order[child] == none) {
+				order[child] = 0;
+				stack.emplace_back(child, 0);
+			}
+			continue;
+		}
+		order[node] = postorder.size();
+		postorder.push_back(node);
+		stack.pop_back();
+	}
+	if (postorder.size() != count + 1) {
+		return {};
+	}
+	std::vector<size_t> idom(count + 1, none);
+	idom[exit]           = exit;
+	const auto intersect = [&](size_t lhs, size_t rhs) {
+		while (lhs != rhs) {
+			while (order[lhs] < order[rhs])
+				lhs = idom[lhs];
+			while (order[rhs] < order[lhs])
+				rhs = idom[rhs];
+		}
+		return lhs;
+	};
+	for (bool changed = true; changed;) {
+		changed = false;
+		for (auto node = postorder.rbegin() + 1; node != postorder.rend(); ++node) {
+			auto dominator = none;
+			for (const auto successor: successors(*node)) {
+				if (idom[successor] != none) {
+					dominator = dominator == none ? successor : intersect(successor, dominator);
+				}
+			}
+			if (idom[*node] != dominator) {
+				idom[*node] = dominator;
+				changed     = true;
+			}
+		}
+	}
+	return idom;
+}
+
+bool IsWaveBranch(const CFG::Terminator& terminator) {
+	if (terminator.kind != CFG::TerminatorKind::ConditionalBranch) {
+		return false;
+	}
+	switch (terminator.condition) {
+		case CFG::BranchCondition::SccZero:
+		case CFG::BranchCondition::SccNonZero:
+		case CFG::BranchCondition::VccZero:
+		case CFG::BranchCondition::VccNonZero:
+		case CFG::BranchCondition::ExecZero:
+		case CFG::BranchCondition::ExecNonZero: return true;
+		default: return false;
+	}
+}
+
+} // namespace
+
+std::unordered_set<const IR::Block*>
+SplitWaveLocalBranches(const IR::Program&                          program,
+                       const std::unordered_set<const IR::Block*>& sync_blocks) {
+	// Each half of a split wave may branch on its own lanes where the guest branched on all of
+	// them: a half whose lanes are all inactive then skips code the guest ran with them masked.
+	// The halves must still meet at every barrier together, so a branch stays whole-wave when a
+	// block that depends on it (transitively, through the branches controlling it) synchronizes
+	// the halves or ends the program.
+	std::unordered_set<const IR::Block*> result;
+	const auto&                          blocks = program.blocks;
+	const auto                           count  = blocks.size();
+	if (count == 0 || program.block_info.size() != count || program.dispatcher_fallback) {
+		return result;
+	}
+	std::unordered_map<const IR::Block*, size_t> index;
+	for (size_t block = 0; block < count; block++) {
+		index.emplace(blocks[block], block);
+	}
+	const auto idom = SplitWavePostDominators(blocks, index);
+	if (idom.empty()) {
+		return result;
+	}
+	// A block depends on a branch when one of the branch's successors leads to it but the
+	// branch's block does not always reach it.
+	std::vector<std::vector<size_t>> controllers(count);
+	for (size_t block = 0; block < count; block++) {
+		const auto successors = blocks[block]->ImmSuccessors();
+		if (successors.size() < 2) {
+			continue;
+		}
+		for (const auto* successor: successors) {
+			for (auto runner = index.at(successor); runner != idom[block] && runner != count;
+			     runner      = idom[runner]) {
+				if (std::ranges::find(controllers[runner], block) == controllers[runner].end()) {
+					controllers[runner].push_back(block);
+				}
+			}
+		}
+	}
+	// Every branch a synchronizing block depends on, transitively, stays whole-wave.
+	std::vector<bool>   whole(count, false);
+	std::vector<size_t> work;
+	for (size_t block = 0; block < count; block++) {
+		if (sync_blocks.contains(blocks[block]) || blocks[block]->ImmSuccessors().empty()) {
+			work.push_back(block);
+		}
+	}
+	std::vector<bool> visited(count, false);
+	while (!work.empty()) {
+		const auto block = work.back();
+		work.pop_back();
+		if (visited[block]) {
+			continue;
+		}
+		visited[block] = true;
+		for (const auto controller: controllers[block]) {
+			whole[controller] = true;
+			work.push_back(controller);
+		}
+	}
+	for (size_t block = 0; block < count; block++) {
+		if (!whole[block] && IsWaveBranch(program.block_info[block].terminator)) {
+			result.insert(blocks[block]);
+		}
+	}
+	return result;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter

@@ -15,6 +15,7 @@
 namespace {
 
 using namespace Libs::Graphics::ShaderRecompiler::IR;
+using Libs::Graphics::ShaderComputeInputInfo;
 using Libs::Graphics::ShaderType;
 
 void Check(bool condition, const char *message) {
@@ -38,6 +39,7 @@ void CheckFatal(F &&function, std::string_view expected, const char *message) {
 
 struct Fixture {
   Program program;
+  ShaderComputeInputInfo compute{};
 
   explicit Fixture(uint32_t block_count = 1) {
     program.stage = ShaderType::Compute;
@@ -231,12 +233,9 @@ void TestShaderBaseAndUserData() {
 
 void TestCarryAndBitFields() {
   Fixture fixture;
-  const auto carry =
-      fixture.Emit(ValueOpcode::IAddCarry32, {Value(0xffffffffu), Value(2u)});
-  const auto low =
-      fixture.Emit(ValueOpcode::CompositeExtractU32x2, {carry, Value(0u)});
-  const auto high =
-      fixture.Emit(ValueOpcode::CompositeExtractU32x2, {carry, Value(1u)});
+  const auto low = fixture.Emit(ValueOpcode::IAdd32, {Value(0xffffffffu), Value(2u)});
+  const auto carry = fixture.Emit(ValueOpcode::ULessThan32, {low, Value(0xffffffffu)});
+  const auto high = fixture.Emit(ValueOpcode::SelectU32, {carry, Value(1u), Value(0u)});
   const auto inserted =
       fixture.Emit(ValueOpcode::BitFieldInsert,
                    {Value(0u), Value(0x89abcdefu), Value(0u), Value(32u)});

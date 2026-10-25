@@ -78,10 +78,10 @@ static bool RegisteredShaderCodeEnabled() {
 	return enabled;
 }
 
-struct ShaderMapEntry : ShaderMappedData {
-	uint64_t code_hash = 0;
-	uint64_t registered_hash = 0;
-	bool has_declared_hash = false;
+struct ShaderMapEntry: ShaderMappedData {
+	uint64_t code_hash         = 0;
+	uint64_t registered_hash   = 0;
+	bool     has_declared_hash = false;
 };
 
 static uint64_t GetDeclaredShaderHash(uint64_t shader_addr);
@@ -96,7 +96,7 @@ static uint64_t RegisteredOrDeclaredShaderHash(uint64_t addr, const ShaderMapEnt
 }
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMapEntry>> g_shader_map;
-static std::mutex                                                      g_shader_map_mutex;
+static std::mutex                                                    g_shader_map_mutex;
 // Bumped under g_shader_map_mutex after every map update. Starts at 1 so that zero-initialized
 // memo entries never match.
 static std::atomic<uint64_t> g_shader_map_generation {1};
@@ -113,14 +113,16 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	ShaderMapEntry entry;
 	static_cast<ShaderMappedData&>(entry) = data;
 	if (RegisteredShaderCodeEnabled()) {
-		if (addr == 0 || data.code_size_bytes == 0 || data.code_size_bytes % sizeof(uint32_t) != 0) {
-			EXIT("ShaderMapUserData: invalid code address/size 0x%016" PRIx64 " / %u\n", addr, data.code_size_bytes);
+		if (addr == 0 || data.code_size_bytes == 0 ||
+		    data.code_size_bytes % sizeof(uint32_t) != 0) {
+			EXIT("ShaderMapUserData: invalid code address/size 0x%016" PRIx64 " / %u\n", addr,
+			     data.code_size_bytes);
 		}
 		// Hash before taking the map lock: a guest read can fault and ask the GPU to publish bytes.
 		entry.code_hash = XXH3_64bits(reinterpret_cast<const void*>(addr), data.code_size_bytes);
 		const auto declared = GetDeclaredShaderHash(addr);
 		// Keep declared IDs used by our title-specific codegen options; headerless code uses XXH3.
-		entry.registered_hash = declared != 0 ? declared : entry.code_hash;
+		entry.registered_hash   = declared != 0 ? declared : entry.code_hash;
 		entry.has_declared_hash = declared != 0;
 	}
 	std::scoped_lock lock(g_shader_map_mutex);
@@ -132,7 +134,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 void ShaderUnmapCode(uint64_t addr, uint64_t size) {
 	if (!RegisteredShaderCodeEnabled() || size == 0 || g_shader_map == nullptr) return;
 	std::scoped_lock lock(g_shader_map_mutex);
-	const auto removed = std::erase_if(*g_shader_map, [=](const auto& pair) {
+	const auto       removed = std::erase_if(*g_shader_map, [=](const auto& pair) {
 		const auto start = pair.first;
 		const auto bytes = pair.second.code_size_bytes;
 		return start >= addr ? start - addr < size : addr - start < bytes;
@@ -153,7 +155,7 @@ static bool ShaderMapMemoEnabled() {
 }
 
 static ShaderMapEntry ShaderGetMappedDataLocked(uint64_t addr, const char* label,
-                                                  bool* found = nullptr) {
+                                                bool* found = nullptr) {
 	std::scoped_lock lock(g_shader_map_mutex);
 
 	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
@@ -182,12 +184,12 @@ static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	// loaded before the locked lookup: an update racing that lookup leaves the entry stale, and
 	// any later update changes the generation, so a hit always returns the current mapping.
 	struct Entry {
-		uint64_t         addr       = 0;
-		uint64_t         generation = 0;
+		uint64_t       addr       = 0;
+		uint64_t       generation = 0;
 		ShaderMapEntry data;
 	};
 	static thread_local std::array<Entry, 16> memo {};
-	auto&      entry      = memo[(addr >> 8u) % memo.size()];
+	auto&                                     entry = memo[(addr >> 8u) % memo.size()];
 	const auto generation = g_shader_map_generation.load(std::memory_order_acquire);
 	if (entry.generation == generation && entry.addr == addr) {
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderMapMemoHits);
@@ -231,9 +233,9 @@ static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
 struct PreparationMetadata {
 	static constexpr uint32_t MaxEntries = 64;
 
-	ShaderUserData                           header {};
-	std::array<uint16_t, MaxEntries>        direct_offsets {};
-	std::array<ShaderSemantic, MaxEntries>  semantics {};
+	ShaderUserData                         header {};
+	std::array<uint16_t, MaxEntries>       direct_offsets {};
+	std::array<ShaderSemantic, MaxEntries> semantics {};
 };
 
 // Outside a preparation returns `data` unchanged. Inside one, returns a view whose pointers refer
@@ -245,9 +247,8 @@ static bool CopyMetadataForPreparation(const ShaderMappedData& data, Preparation
 		return true;
 	}
 	const auto read = [](const void* address, void* destination, uint64_t size) {
-		return size == 0 ||
-		       LibKernel::Memory::TryReadGpuCleanBacking(reinterpret_cast<uint64_t>(address),
-		                                                destination, size);
+		return size == 0 || LibKernel::Memory::TryReadGpuCleanBacking(
+		                        reinterpret_cast<uint64_t>(address), destination, size);
 	};
 	if (data.user_data != nullptr) {
 		if (!read(data.user_data, &copy.header, sizeof(copy.header))) {
@@ -297,11 +298,11 @@ static uint64_t GetDeclaredShaderHash(uint64_t shader_addr) {
 		// A shader header may share a protected page with unrelated GPU-owned bytes.
 		// No values persist across calls; failed proofs retain the fault/readback path.
 		const auto read_word = [speculative](const uint32_t* address) {
-			uint32_t value = 0;
+			uint32_t   value = 0;
 			const bool clean = LibKernel::Memory::TryReadGpuCleanBacking(
 			    reinterpret_cast<uint64_t>(address), &value, sizeof(value));
 			Profiler::CountFrameEvent(clean ? Profiler::FrameEvent::ShaderHeaderProbeHits
-			                               : Profiler::FrameEvent::ShaderHeaderProbeMisses);
+			                                : Profiler::FrameEvent::ShaderHeaderProbeMisses);
 			return clean || speculative ? value : *address;
 		};
 		const auto* code = reinterpret_cast<const uint32_t*>(shader_addr);
@@ -320,14 +321,15 @@ static uint64_t GetDeclaredShaderHash(uint64_t shader_addr) {
 			if (read_word(code) != 0xBEEB03FF) return 0;
 			offset = read_word(code + 1);
 		}
-		const auto* header = reinterpret_cast<const ShaderBinaryInfo*>(
-		    code + static_cast<size_t>(offset + 1u) * 2);
+		const auto* header =
+		    reinterpret_cast<const ShaderBinaryInfo*>(code + static_cast<size_t>(offset + 1u) * 2);
 		std::array<uint32_t, 2> hashes {};
-		static_assert(offsetof(ShaderBinaryInfo, hash1) == offsetof(ShaderBinaryInfo, hash0) + sizeof(uint32_t));
+		static_assert(offsetof(ShaderBinaryInfo, hash1) ==
+		              offsetof(ShaderBinaryInfo, hash0) + sizeof(uint32_t));
 		const bool clean = LibKernel::Memory::TryReadGpuCleanBacking(
 		    reinterpret_cast<uint64_t>(&header->hash0), hashes.data(), sizeof(hashes));
 		Profiler::CountFrameEvent(clean ? Profiler::FrameEvent::ShaderHeaderProbeHits
-		                               : Profiler::FrameEvent::ShaderHeaderProbeMisses);
+		                                : Profiler::FrameEvent::ShaderHeaderProbeMisses);
 		if (!clean && speculative) {
 			return 0; // the failed probe already failed the preparation
 		}
@@ -415,7 +417,7 @@ static uint64_t HashShaderCodeCertified(std::span<const uint32_t> code) {
 	if (DrawPrepCodeDigestEnabled()) {
 		uint64_t digest = 0;
 		if (!LibKernel::Memory::TryReadGpuCleanBackingDigest(address, scratch.data(),
-		                                                    code.size_bytes(), digest)) {
+		                                                     code.size_bytes(), digest)) {
 			return 0; // the recorder has failed the preparation
 		}
 		Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderCodeHashCertified);
@@ -436,9 +438,9 @@ static uint64_t HashShaderCode(std::span<const uint32_t> code) {
 	}
 	if (ShaderHashBackingEnabled()) {
 		if (LibKernel::Memory::BackingInPlaceEnabled()) {
-			bool       ok = false;
-			const auto digest =
-			    HashCleanBackingInPlace(reinterpret_cast<uint64_t>(code.data()), code.size_bytes(), ok);
+			bool       ok     = false;
+			const auto digest = HashCleanBackingInPlace(reinterpret_cast<uint64_t>(code.data()),
+			                                            code.size_bytes(), ok);
 			if (ok) {
 				Profiler::CountFrameEvent(Profiler::FrameEvent::ShaderCodeHashBacking);
 				return digest;
@@ -458,8 +460,8 @@ static uint64_t HashShaderCode(std::span<const uint32_t> code) {
 }
 
 static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uint64_t declared_hash,
-	                                std::span<const uint32_t> user_data,
-	                                const ShaderMapEntry& data, uint32_t user_data_base = 0) {
+                                    std::span<const uint32_t> user_data, const ShaderMapEntry& data,
+                                    uint32_t user_data_base = 0) {
 	if (DrawPrep::SpeculativeFailed()) {
 		return {};
 	}
@@ -469,8 +471,8 @@ static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uin
 		     label, declared_hash, shader_addr, data.code_size_bytes);
 	}
 	const auto code_words = data.code_size_bytes / sizeof(uint32_t);
-	const auto code = std::span {reinterpret_cast<const uint32_t*>(shader_addr), code_words};
-	uint64_t effective_hash = declared_hash;
+	const auto code       = std::span {reinterpret_cast<const uint32_t*>(shader_addr), code_words};
+	uint64_t   effective_hash = declared_hash;
 	if (RegisteredShaderCodeEnabled() && DrawPrep::Speculative()) {
 		// Keep the worker's exact code certificate, including failed-read fallback at commit.
 		const auto certified_hash = HashShaderCodeCertified(code);
@@ -767,13 +769,14 @@ static void DumpVertexFailure(uint64_t shader_addr, const ShaderMappedData& data
 	static const char* prefix = std::getenv("KYTY_VERTEX_FAILURE_DUMP");
 	if (prefix == nullptr || *prefix == '\0') return;
 	static std::atomic<uint32_t> count {0};
-	const auto index = count.fetch_add(1, std::memory_order_relaxed);
+	const auto                   index = count.fetch_add(1, std::memory_order_relaxed);
 	if (index >= 8) return;
 	const auto path = std::string(prefix) + "-" + std::to_string(index) + ".txt";
-	auto* file = std::fopen(path.c_str(), "w");
+	auto*      file = std::fopen(path.c_str(), "w");
 	if (file == nullptr) return;
-	std::fprintf(file, "shader=%016" PRIx64 " code_bytes=%u speculative=%u "
-	                  "sgpr_count=%u attrib_reg=%d buffer_reg=%d semantics=%u\n",
+	std::fprintf(file,
+	             "shader=%016" PRIx64 " code_bytes=%u speculative=%u "
+	             "sgpr_count=%u attrib_reg=%d buffer_reg=%d semantics=%u\n",
 	             shader_addr, data.code_size_bytes, static_cast<unsigned>(speculative),
 	             user_sgpr_num, metadata.vertex_attrib_reg, metadata.vertex_buffer_reg,
 	             metadata.input_semantics_count);
@@ -787,14 +790,15 @@ static void DumpVertexFailure(uint64_t shader_addr, const ShaderMappedData& data
 		std::fprintf(file, "semantic[%u]=%08x\n", i, word);
 	}
 	const auto dump_words = [file](const char* label, uint64_t address) {
-		std::fprintf(file, "%s=%016" PRIx64 " (128 bytes before, 512 bytes from pointer)\n",
-		             label, address);
+		std::fprintf(file, "%s=%016" PRIx64 " (128 bytes before, 512 bytes from pointer)\n", label,
+		             address);
 		if (address < 128 || address > UINT64_MAX - 512) return;
 		for (int offset = -128; offset < 512; offset += 16) {
 			std::array<uint32_t, 4> words {};
-			const auto current = offset < 0 ? address - static_cast<uint64_t>(-offset)
-			                                : address + static_cast<uint64_t>(offset);
-			const bool read = LibKernel::Memory::TryReadBacking(current, words.data(), sizeof(words));
+			const auto              current = offset < 0 ? address - static_cast<uint64_t>(-offset)
+			                                             : address + static_cast<uint64_t>(offset);
+			const bool              read =
+			    LibKernel::Memory::TryReadBacking(current, words.data(), sizeof(words));
 			std::fprintf(file, "%016" PRIx64 " read=%u %08x %08x %08x %08x\n", current,
 			             static_cast<unsigned>(read), words[0], words[1], words[2], words[3]);
 		}
@@ -802,7 +806,7 @@ static void DumpVertexFailure(uint64_t shader_addr, const ShaderMappedData& data
 	dump_words("attribute_table", attrib);
 	dump_words("buffer_table", buffer);
 	std::fclose(file);
-	const auto code_size = std::min<uint32_t>(data.code_size_bytes, 64u * 1024u);
+	const auto           code_size = std::min<uint32_t>(data.code_size_bytes, 64u * 1024u);
 	std::vector<uint8_t> code(code_size);
 	if (code_size != 0 && LibKernel::Memory::TryReadBacking(shader_addr, code.data(), code_size)) {
 		const auto code_path = path + ".shader.bin";
@@ -826,7 +830,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 	EXIT_IF(attrib == nullptr || buffer == nullptr);
 
-	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
+	const bool        debug_dump            = Config::GraphicsDebugDumpEnabled();
 	static const bool use_clean_backing_env = [] {
 		const auto* value = std::getenv("KYTY_SHADER_METADATA_BACKING");
 		return value != nullptr && std::strcmp(value, "1") == 0;
@@ -844,10 +848,10 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 	// successful probe proves every word of the span clean, so each word equals what its own
 	// probe returns; a failed probe falls back to exactly the per-word reads.
 	const bool batch = use_clean_backing && ShaderMetadataBatchEnabled() && num_input_semantics > 1;
-	constexpr uint32_t          MaxBatchWords = 64;
+	constexpr uint32_t                  MaxBatchWords = 64;
 	std::array<uint32_t, MaxBatchWords> attribute_words {};
-	uint32_t                    attribute_first   = 0;
-	bool                        attributes_batched = false;
+	uint32_t                            attribute_first    = 0;
+	bool                                attributes_batched = false;
 	if (batch) {
 		uint32_t first = UINT32_MAX;
 		uint32_t last  = 0;
@@ -860,8 +864,9 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 			attributes_batched = LibKernel::Memory::TryReadGpuCleanBacking(
 			    reinterpret_cast<uint64_t>(attrib + first), attribute_words.data(),
 			    (last - first + 1u) * sizeof(uint32_t));
-			Profiler::CountFrameEvent(attributes_batched ? Profiler::FrameEvent::VertexTableBatchHits
-			                                             : Profiler::FrameEvent::VertexTableBatchMisses);
+			Profiler::CountFrameEvent(attributes_batched
+			                              ? Profiler::FrameEvent::VertexTableBatchHits
+			                              : Profiler::FrameEvent::VertexTableBatchMisses);
 		}
 	}
 
@@ -880,9 +885,10 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		if (attributes_batched) {
 			attribute = attribute_words[in.semantic - attribute_first];
 		} else {
-			const bool attribute_clean = use_clean_backing &&
-			    LibKernel::Memory::TryReadGpuCleanBacking(
-			        reinterpret_cast<uint64_t>(attrib + in.semantic), &attribute, sizeof(attribute));
+			const bool attribute_clean =
+			    use_clean_backing && LibKernel::Memory::TryReadGpuCleanBacking(
+			                             reinterpret_cast<uint64_t>(attrib + in.semantic),
+			                             &attribute, sizeof(attribute));
 			if (use_clean_backing) {
 				Profiler::CountFrameEvent(attribute_clean
 				                              ? Profiler::FrameEvent::VertexMetadataProbeHits
@@ -905,7 +911,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 	// The vertex-buffer descriptors those attributes select, again as one span when possible.
 	read_purpose.Set("vertex-buffers");
 	std::array<uint32_t, MaxBatchWords * 2> sharp_words {};
-	uint32_t                                sharp_first  = 0;
+	uint32_t                                sharp_first    = 0;
 	bool                                    sharps_batched = false;
 	if (batch) {
 		uint32_t first = UINT32_MAX;
@@ -922,22 +928,22 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 			sharps_batched = LibKernel::Memory::TryReadGpuCleanBacking(
 			    reinterpret_cast<uint64_t>(buffer + static_cast<size_t>(first) * 4u),
 			    sharp_words.data(), (last - first + 1u) * 4u * sizeof(uint32_t));
-			Profiler::CountFrameEvent(sharps_batched ? Profiler::FrameEvent::VertexTableBatchHits
-			                                         : Profiler::FrameEvent::VertexTableBatchMisses);
+			Profiler::CountFrameEvent(sharps_batched
+			                              ? Profiler::FrameEvent::VertexTableBatchHits
+			                              : Profiler::FrameEvent::VertexTableBatchMisses);
 		}
 	}
 
 	for (uint32_t i = 0; i < num_input_semantics; i++) {
 		const auto& in = input_semantics[i];
 
-		uint32_t reg  = in.hardware_mapping;
-		uint32_t size = in.size_in_elements;
+		uint32_t       reg       = in.hardware_mapping;
+		uint32_t       size      = in.size_in_elements;
 		const uint32_t attribute = attributes[i];
 
-		size_t index = attribute & 0x1fu;
-		auto   format =
-		    static_cast<Prospero::VertexAttribFormat>((attribute >> 5u) & 0x1ffu);
-		uint32_t offset      = (attribute >> 14u) & 0xfffu;
+		size_t   index  = attribute & 0x1fu;
+		auto     format = static_cast<Prospero::VertexAttribFormat>((attribute >> 5u) & 0x1ffu);
+		uint32_t offset = (attribute >> 14u) & 0xfffu;
 		uint32_t fetch_index = (attribute >> 26u) & 0x1u;
 
 		if (speculative && index >= ShaderVertexInputInfo::RES_MAX) {
@@ -951,20 +957,20 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 		EXIT_NOT_IMPLEMENTED(info.resources_num >= ShaderVertexInputInfo::RES_MAX);
 
-		auto& r           = info.resources[info.resources_num];
-		auto& rd          = info.resources_dst[info.resources_num];
-		rd.register_start = static_cast<int>(reg);
-		rd.registers_num  = static_cast<int>(size);
-		rd.attr_id        = static_cast<int>(in.semantic);
-		rd.fetch_index    = fetch_index;
+		auto& r               = info.resources[info.resources_num];
+		auto& rd              = info.resources_dst[info.resources_num];
+		rd.register_start     = static_cast<int>(reg);
+		rd.registers_num      = static_cast<int>(size);
+		rd.attr_id            = static_cast<int>(in.semantic);
+		rd.fetch_index        = fetch_index;
 		bool descriptor_clean = false;
 		if (sharps_batched) {
 			std::copy_n(sharp_words.data() + (index - sharp_first) * 4u, 4, r.fields);
 			descriptor_clean = true;
 		} else {
-			descriptor_clean = use_clean_backing &&
-			    LibKernel::Memory::TryReadGpuCleanBacking(reinterpret_cast<uint64_t>(sharp),
-			                                             r.fields, 4 * sizeof(uint32_t));
+			descriptor_clean = use_clean_backing && LibKernel::Memory::TryReadGpuCleanBacking(
+			                                            reinterpret_cast<uint64_t>(sharp), r.fields,
+			                                            4 * sizeof(uint32_t));
 			if (use_clean_backing) {
 				Profiler::CountFrameEvent(descriptor_clean
 				                              ? Profiler::FrameEvent::VertexMetadataProbeHits
@@ -981,13 +987,12 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		EXIT_NOT_IMPLEMENTED(r.AddTid());
 		EXIT_NOT_IMPLEMENTED(r.SwizzleEnabled());
 		if (format != Prospero::VertexAttribFormat::kInvalid) {
-			const auto                   format_raw    = static_cast<uint32_t>(format);
-			const auto                   buffer_format = format_raw >> 2u;
-			const auto                   channels      = (format_raw & 3u) + 1u;
+			const auto format_raw    = static_cast<uint32_t>(format);
+			const auto buffer_format = format_raw >> 2u;
+			const auto channels      = (format_raw & 3u) + 1u;
 			// AGC vertex formats encode the buffer format above the two channel-count bits.
 			// The fetch prolog selects X001, XY01, XYZ1, or XYZW from that count.
-			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
-			              (buffer_format << 12u) |
+			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) | (buffer_format << 12u) |
 			              DstSel(4, channels > 1u ? 5u : 0u, channels > 2u ? 6u : 0u,
 			                     channels > 3u ? 7u : 1u);
 		}
@@ -995,12 +1000,13 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		// Such a descriptor must fall back to ordered preparation, not reach pipeline creation.
 		// Use the same component rules as TranslateEmbeddedFetch: constants need no
 		// memory format, and selectors beyond this semantic's width are not consumed.
-		const auto format_info = ShaderRecompiler::Format::GetFormatInfo(r.Format());
-		bool invalid_descriptor = size > 4;
+		const auto format_info        = ShaderRecompiler::Format::GetFormatInfo(r.Format());
+		bool       invalid_descriptor = size > 4;
 		for (uint32_t component = 0; component < std::min(size, 4u); component++) {
-			invalid_descriptor |= ShaderRecompiler::Format::ResolveFormattedSource(
-			    format_info, GetDstSel(r.DstSelXYZW(), component)).kind ==
-			    ShaderRecompiler::Format::FormattedSourceKind::Invalid;
+			invalid_descriptor |=
+			    ShaderRecompiler::Format::ResolveFormattedSource(
+			        format_info, GetDstSel(r.DstSelXYZW(), component))
+			        .kind == ShaderRecompiler::Format::FormattedSourceKind::Invalid;
 		}
 		if (invalid_descriptor) {
 			DumpVertexFailure(shader_addr, data, user_sgpr, user_sgpr_num, metadata,
@@ -1008,30 +1014,33 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 			                  reinterpret_cast<uint64_t>(buffer), speculative);
 			static std::atomic<uint32_t> invalid_logs {0};
 			if (invalid_logs.fetch_add(1, std::memory_order_relaxed) < 32) {
-				std::fprintf(stderr, "VertexDescriptorInvalid: speculative=%u clean=%u batched=%u "
-				     "attrib_table=0x%016" PRIx64 " buffer_table=0x%016" PRIx64
-				     " semantic=%u attribute=0x%08x descriptor_index=%zu "
-				     "descriptor=%08x,%08x,%08x,%08x format=%u selectors=%u,%u,%u,%u\n",
-				     static_cast<unsigned>(speculative), static_cast<unsigned>(descriptor_clean),
-				     static_cast<unsigned>(sharps_batched), reinterpret_cast<uint64_t>(attrib),
-				     reinterpret_cast<uint64_t>(buffer), static_cast<unsigned>(in.semantic),
-				     attribute, index, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
-				     static_cast<unsigned>(r.RawFormat()), static_cast<unsigned>(r.DstSelX()),
-				     static_cast<unsigned>(r.DstSelY()), static_cast<unsigned>(r.DstSelZ()),
-				     static_cast<unsigned>(r.DstSelW()));
-				uint32_t live_attribute = 0;
+				std::fprintf(
+				    stderr,
+				    "VertexDescriptorInvalid: speculative=%u clean=%u batched=%u "
+				    "attrib_table=0x%016" PRIx64 " buffer_table=0x%016" PRIx64
+				    " semantic=%u attribute=0x%08x descriptor_index=%zu "
+				    "descriptor=%08x,%08x,%08x,%08x format=%u selectors=%u,%u,%u,%u\n",
+				    static_cast<unsigned>(speculative), static_cast<unsigned>(descriptor_clean),
+				    static_cast<unsigned>(sharps_batched), reinterpret_cast<uint64_t>(attrib),
+				    reinterpret_cast<uint64_t>(buffer), static_cast<unsigned>(in.semantic),
+				    attribute, index, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+				    static_cast<unsigned>(r.RawFormat()), static_cast<unsigned>(r.DstSelX()),
+				    static_cast<unsigned>(r.DstSelY()), static_cast<unsigned>(r.DstSelZ()),
+				    static_cast<unsigned>(r.DstSelW()));
+				uint32_t                live_attribute = 0;
 				std::array<uint32_t, 4> live_descriptor {};
-				const bool live_attribute_read = LibKernel::Memory::TryReadBacking(
+				const bool              live_attribute_read = LibKernel::Memory::TryReadBacking(
 				    reinterpret_cast<uint64_t>(attrib + in.semantic), &live_attribute,
 				    sizeof(live_attribute));
 				const bool live_descriptor_read = LibKernel::Memory::TryReadBacking(
 				    reinterpret_cast<uint64_t>(sharp), live_descriptor.data(),
 				    sizeof(live_descriptor));
-				std::fprintf(stderr, "VertexDescriptorBacking: attribute_read=%u attribute=%08x "
-				    "descriptor_read=%u descriptor=%08x,%08x,%08x,%08x\n",
-				    static_cast<unsigned>(live_attribute_read), live_attribute,
-				    static_cast<unsigned>(live_descriptor_read), live_descriptor[0],
-				    live_descriptor[1], live_descriptor[2], live_descriptor[3]);
+				std::fprintf(stderr,
+				             "VertexDescriptorBacking: attribute_read=%u attribute=%08x "
+				             "descriptor_read=%u descriptor=%08x,%08x,%08x,%08x\n",
+				             static_cast<unsigned>(live_attribute_read), live_attribute,
+				             static_cast<unsigned>(live_descriptor_read), live_descriptor[0],
+				             live_descriptor[1], live_descriptor[2], live_descriptor[3]);
 				std::fflush(stderr);
 			}
 			if (speculative) {
@@ -1159,14 +1168,15 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 static void ShaderGetStaticInputInfoPS(
     const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
-	const ShaderMappedData& data, ShaderPixelInputInfo& ps_info) {
+    const ShaderMappedData& data, ShaderPixelInputInfo& ps_info) {
 	KYTY_PROFILER_FUNCTION();
 
-	ps_info = {};
+	ps_info                     = {};
 	ps_info.scratch_size_dwords = data.scratch_size_dwords;
+	ps_info.lds_size_dwords     = static_cast<uint32_t>(regs.ps_regs.rsrc2.extra_lds_size) * 128u;
 
 	// SPI_PS_IN_CONTROL: NUM_INTERP occupies bits 5:0 and PS_W32_EN is bit 15.
-	ps_info.input_num            = sh.ps_in_control & 0x3fu;
+	ps_info.input_num = sh.ps_in_control & 0x3fu;
 	if ((sh.ps_in_control & 0x8000u) != 0) {
 		ps_info.wave_size = 32;
 	}
@@ -1184,8 +1194,8 @@ static void ShaderGetStaticInputInfoPS(
 	if ((active_inputs & 0x00000001u) != 0) {
 		ps_info.ps_perspective_sample_vgpr = 0u;
 	}
-	const uint32_t linear_base = 2u * std::popcount(active_inputs & 0x7u) +
-	                             ((active_inputs & 0x00000008u) != 0 ? 3u : 0u);
+	const uint32_t linear_base =
+	    2u * std::popcount(active_inputs & 0x7u) + ((active_inputs & 0x00000008u) != 0 ? 3u : 0u);
 	if ((active_inputs & 0x00000010u) != 0) {
 		ps_info.ps_linear_sample_vgpr = linear_base;
 	}
@@ -1212,10 +1222,11 @@ static void ShaderGetStaticInputInfoPS(
 	ps_info.ps_pixel_kill_enable         = sh.db_shader_control.shader_kill_enable;
 	ps_info.ps_depth_export_enable       = sh.db_shader_control.shader_z_export_enable;
 	ps_info.ps_sample_mask_export_enable = sh.db_shader_control.shader_mask_export_enable;
+	// Alpha-to-mask coverage must gate depth writes, so it rules out early fragment tests.
 	ps_info.ps_early_z =
 	    (sh.db_shader_control.shader_z_behavior == 1 && !sh.db_shader_control.shader_kill_enable &&
 	     !sh.db_shader_control.shader_z_export_enable &&
-	     !sh.db_shader_control.shader_mask_export_enable);
+	     !sh.db_shader_control.shader_mask_export_enable && !sh.AlphaToMask());
 	ps_info.ps_execute_on_noop = sh.db_shader_control.shader_execute_on_noop;
 
 	for (uint32_t i = 0; i < ps_info.input_num; i++) {
@@ -1244,16 +1255,16 @@ static void ShaderGetStaticInputInfoCS(const HW::ComputeShaderInfo& regs,
 	info.dispatch_thread_dimensions       = dispatch_thread_dimensions;
 	info.host_subgroup_size               = host_subgroup_size;
 	std::ranges::copy(workgroup_counts, info.workgroup_counts);
-	info.threads_num[0]                   = regs.cs_regs.num_thread_x;
-	info.threads_num[1]                   = regs.cs_regs.num_thread_y;
-	info.threads_num[2]                   = regs.cs_regs.num_thread_z;
-	info.lds_size_dwords                  = static_cast<uint32_t>(regs.cs_regs.lds_size) * 128u;
-	info.scratch_size_dwords              = data.scratch_size_dwords;
-	info.float_mode                       = regs.cs_regs.float_mode;
-	info.group_id[0]                      = regs.cs_regs.tgid_x_en != 0;
-	info.group_id[1]                      = regs.cs_regs.tgid_y_en != 0;
-	info.group_id[2]                      = regs.cs_regs.tgid_z_en != 0;
-	info.wave_size                        = regs.cs_regs.wave_size;
+	info.threads_num[0]      = regs.cs_regs.num_thread_x;
+	info.threads_num[1]      = regs.cs_regs.num_thread_y;
+	info.threads_num[2]      = regs.cs_regs.num_thread_z;
+	info.lds_size_dwords     = static_cast<uint32_t>(regs.cs_regs.lds_size) * 128u;
+	info.scratch_size_dwords = data.scratch_size_dwords;
+	info.float_mode          = regs.cs_regs.float_mode;
+	info.group_id[0]         = regs.cs_regs.tgid_x_en != 0;
+	info.group_id[1]         = regs.cs_regs.tgid_y_en != 0;
+	info.group_id[2]         = regs.cs_regs.tgid_z_en != 0;
+	info.wave_size           = regs.cs_regs.wave_size;
 	info.thread_ids_num      = regs.cs_regs.tidig_comp_cnt + 1;
 	info.tg_size_en          = regs.cs_regs.tg_size_en != 0;
 
@@ -1263,12 +1274,12 @@ static void ShaderGetStaticInputInfoCS(const HW::ComputeShaderInfo& regs,
 ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context& context,
                             const HW::UserConfig& user_config, ShaderVertexInputInfo& info) {
 	const auto& sh     = context.GetShaderRegisters();
-	const auto data = ShaderGetMappedData(regs.es_regs.data_addr, "ShaderGetInputInfoVS():");
-	const bool merged = (context.GetShaderStages() & 0x20u) != 0;
+	const auto  data   = ShaderGetMappedData(regs.es_regs.data_addr, "ShaderGetInputInfoVS():");
+	const bool  merged = (context.GetShaderStages() & 0x20u) != 0;
 	// GS_EN controls amplification, not whether an NGG shader uses a workgroup.
-	const bool native_ngg = !merged && data.type == Prospero::ShaderBinaryType::kGs &&
-	                        regs.gs_regs.rsrc2.lds_size != 0;
-	auto        params = GetShaderParams(
+	const bool native_ngg =
+	    !merged && data.type == Prospero::ShaderBinaryType::kGs && regs.gs_regs.rsrc2.lds_size != 0;
+	auto params = GetShaderParams(
 	    regs.es_regs.data_addr, "ShaderRecompiler VS",
 	    RegisteredOrDeclaredShaderHash(regs.es_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr), data,
@@ -1277,7 +1288,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		return params; // discarded; the serial path decides at commit
 	}
 	// The GS user SGPRs start at s8: one the shader receives may hold the draw's start instance.
-	const auto start_instance = regs.start_instance_user_sgpr;
+	const auto    start_instance = regs.start_instance_user_sgpr;
 	const int32_t start_instance_sgpr =
 	    start_instance >= 0 && static_cast<uint32_t>(start_instance) < regs.gs_regs.rsrc2.user_sgpr
 	        ? 8 + start_instance
@@ -1307,6 +1318,8 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		}
 		info.wave_size           = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
 		info.start_instance_sgpr = start_instance_sgpr;
+		// Upstream fa8216c4d: per-invocation LDS emulation is sized by the GS stage's LDS_SIZE.
+		info.lds_size_dwords = static_cast<uint32_t>(regs.gs_regs.rsrc2.lds_size) * 128u;
 		return params;
 	}
 	// NGG user SGPRs start at s8; a separately compiled GS back half also receives
@@ -1331,11 +1344,11 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		if (DrawPrep::SpeculativeFailed()) {
 			return params;
 		}
-		params.back_code = back_params.code;
-		params.user_data[0] = static_cast<uint32_t>(regs.gs_regs.user_data_addr);
-		params.user_data[1] = static_cast<uint32_t>(regs.gs_regs.user_data_addr >> 32u);
-		const uint64_t hashes[] = {params.hash, back_params.hash};
-		params.hash = XXH3_64bits(hashes, sizeof(hashes));
+		params.back_code         = back_params.code;
+		params.user_data[0]      = static_cast<uint32_t>(regs.gs_regs.user_data_addr);
+		params.user_data[1]      = static_cast<uint32_t>(regs.gs_regs.user_data_addr >> 32u);
+		const uint64_t hashes[]  = {params.hash, back_params.hash};
+		params.hash              = XXH3_64bits(hashes, sizeof(hashes));
 		mesh.scratch_size_dwords = std::max(mesh.scratch_size_dwords, back.scratch_size_dwords);
 	}
 	if (merged) {
@@ -1349,21 +1362,31 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	     user_config.GetPrimType() != Prospero::PrimitiveType::kTriStrip &&
 	     user_config.GetPrimType() != Prospero::PrimitiveType::kTriList) ||
 	    sh.m_vgtGsOutPrimType != 2u || (!native_ngg && sh.m_vgtGsMaxVertOut < 3u) ||
-	    group.vertex_group_size < mesh.InputPrimitiveSize() ||
-	    mesh.max_vertices == 0u) {
+	    group.vertex_group_size < mesh.InputPrimitiveSize() || mesh.max_vertices == 0u) {
 		EXIT("unsupported GS assembly: input=%u output=%u vertices=%u GE=%u/%u max_output=%u\n",
 		     mesh.input_primitive, sh.m_vgtGsOutPrimType, sh.m_vgtGsMaxVertOut,
 		     group.primitive_group_size, group.vertex_group_size, mesh.max_vertices);
 	}
-	mesh.max_primitives       = native_ngg ? mesh.InputPrimitiveCount(mesh.max_vertices)
-	                                       : group.primitive_group_size * (sh.m_vgtGsMaxVertOut - 2u);
+	mesh.max_primitives = native_ngg ? mesh.InputPrimitiveCount(mesh.max_vertices)
+	                                 : group.primitive_group_size * (sh.m_vgtGsMaxVertOut - 2u);
 	mesh.primitives_per_group = std::min({static_cast<uint32_t>(group.primitive_group_size),
 	                                      mesh.InputPrimitiveCount(group.vertex_group_size),
-	                                      native_ngg ? mesh.max_primitives :
-	                                          mesh.max_vertices / sh.m_vgtGsMaxVertOut});
+	                                      native_ngg ? mesh.InputPrimitiveCount(mesh.max_vertices)
+	                                                 : mesh.max_vertices / sh.m_vgtGsMaxVertOut});
 	EXIT_IF(mesh.primitives_per_group == 0u);
 	mesh.vertices_per_group = mesh.InputVertexCount(mesh.primitives_per_group);
-	const auto threads  = native_ngg ? mesh.vertices_per_group : mesh.max_vertices;
+	auto threads            = native_ngg ? mesh.vertices_per_group : mesh.max_vertices;
+	// KYTY_NGG_PRIM_AMP=1 (default off; upstream ae2555832): the primitive outputs are sized from
+	// GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR (primitives per input primitive), and the workgroup is
+	// large enough to export each of them.
+	static const bool prim_amp = [] {
+		const char* value = std::getenv("KYTY_NGG_PRIM_AMP");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (prim_amp && (sh.m_geNggSubgrpCntl & 0x1ffu) != 0u) {
+		mesh.max_primitives = mesh.primitives_per_group * (sh.m_geNggSubgrpCntl & 0x1ffu);
+		threads             = std::max(threads, mesh.max_primitives);
+	}
 	mesh.threads_num[0] = ((threads + mesh.wave_size - 1u) / mesh.wave_size) * mesh.wave_size;
 	mesh.threads_num[1] = mesh.threads_num[2] = 1u;
 	return params;
@@ -1387,12 +1410,14 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	const auto evaluation_users = std::span(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr);
 	std::array<ShaderParams, 3> params {
 	    GetShaderParams(regs.ls_regs.data_addr, "ShaderRecompiler LS",
-	                    RegisteredOrDeclaredShaderHash(regs.ls_regs.data_addr, local), local_users, local),
+	                    RegisteredOrDeclaredShaderHash(regs.ls_regs.data_addr, local), local_users,
+	                    local),
 	    GetShaderParams(regs.hs_regs.data_addr, "ShaderRecompiler HS",
-	                    RegisteredOrDeclaredShaderHash(regs.hs_regs.data_addr, control), local_users, control, 8u),
+	                    RegisteredOrDeclaredShaderHash(regs.hs_regs.data_addr, control),
+	                    local_users, control, 8u),
 	    GetShaderParams(regs.es_regs.data_addr, "ShaderRecompiler TES",
-	                    RegisteredOrDeclaredShaderHash(regs.es_regs.data_addr, evaluation), evaluation_users,
-	                    evaluation),
+	                    RegisteredOrDeclaredShaderHash(regs.es_regs.data_addr, evaluation),
+	                    evaluation_users, evaluation),
 	};
 	// The fused HS back half receives its separate user-data address in s0:s1.
 	// RDNA2 reserves s0:s7 before the native HS user SGPRs.
@@ -1420,17 +1445,36 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	};
 	EXIT_IF(tess.input_control_points == 0 || tess.input_control_points > 32 ||
 	        tess.output_control_points == 0 || tess.output_control_points > 32);
-	ShaderRecompiler::AnalyzeTessellationPrograms(params[0].code, params[1].code, tess);
+	// Upstream c71589124: reflection decodes both programs, so it runs once per LS/HS pair and VGT
+	// configuration (the key also covers the VGT fields cached in tess).
+	// Declared IDs can be absent or remain stable across code writes. Hash the exact current
+	// LS/HS bytes, matching the programs whose instructions reflection reads.
+	const uint64_t layout_key[] = {XXH3_64bits(params[0].code.data(), params[0].code.size_bytes()),
+	                               XXH3_64bits(params[1].code.data(), params[1].code.size_bytes()),
+	                               uint64_t {sh.m_vgtLsHsConfig & 0xfff00u} << 32u |
+	                                   sh.m_vgtTfParam};
+	{
+		static std::unordered_map<uint64_t, ShaderTessellationInputInfo> layouts;
+		static std::mutex                                                layouts_mutex;
+		std::scoped_lock                                                 lock(layouts_mutex);
+		auto [entry, inserted] =
+		    layouts.try_emplace(XXH3_64bits(layout_key, sizeof(layout_key)), tess);
+		if (inserted) {
+			ShaderRecompiler::AnalyzeTessellationPrograms(params[0].code, params[1].code,
+			                                              entry->second);
+		}
+		tess = entry->second;
+	}
 	for (auto& stage: input_info) {
 		stage.tess = tess;
 	}
 	return params;
 }
 
-ShaderParams PrepareProgram(
-    const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
-    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
-    ShaderPixelInputInfo&                               ps_info) {
+ShaderParams
+PrepareProgram(const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
+               std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+               ShaderPixelInputInfo&                               ps_info) {
 	const auto data = ShaderGetMappedData(regs.ps_regs.data_addr, "ShaderGetInputInfoPS():");
 	if (DrawPrep::Speculative()) {
 		PreparationMetadata metadata_copy;
@@ -1444,7 +1488,8 @@ ShaderParams PrepareProgram(
 		ShaderGetStaticInputInfoPS(regs, sh, target_export_mapping, data, ps_info);
 	}
 	return GetShaderParams(
-	    regs.ps_regs.data_addr, "ShaderRecompiler PS", RegisteredOrDeclaredShaderHash(regs.ps_regs.data_addr, data),
+	    regs.ps_regs.data_addr, "ShaderRecompiler PS",
+	    RegisteredOrDeclaredShaderHash(regs.ps_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.ps_user_sgpr.value, regs.ps_regs.rsrc2.user_sgpr), data);
 }
 
@@ -1453,7 +1498,8 @@ ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderR
 	const auto data = ShaderGetMappedData(regs.cs_regs.data_addr, "ShaderGetInputInfoCS():");
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
 	return GetShaderParams(
-	    regs.cs_regs.data_addr, "ShaderRecompiler CS", RegisteredOrDeclaredShaderHash(regs.cs_regs.data_addr, data),
+	    regs.cs_regs.data_addr, "ShaderRecompiler CS",
+	    RegisteredOrDeclaredShaderHash(regs.cs_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data);
 }
 
@@ -1534,17 +1580,17 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info) {
 	     "\t ps_no_perspective    = %s\n"
 	     "\t ps_pixel_kill_enable = %s\n"
 	     "\t ps_early_z           = %s\n"
-	     "\t ps_execute_on_noop   = %s\n",
+	     "\t ps_execute_on_noop   = %s\n"
+	     "\t lds_size_dwords      = %u\n",
 	     info.input_num, info.ps_system_input_base, info.custom_interpolation_mask,
 	     info.ps_perspective_center_vgpr, info.ps_perspective_sample_vgpr,
-	     info.ps_perspective_centroid_vgpr,
-	     info.ps_pos_x ? "true" : "false",
+	     info.ps_perspective_centroid_vgpr, info.ps_pos_x ? "true" : "false",
 	     info.ps_pos_y ? "true" : "false", info.ps_pos_z ? "true" : "false",
 	     info.ps_pos_w ? "true" : "false", info.ps_front_face ? "true" : "false",
-	     info.ps_ancillary ? "true" : "false",
-	     info.ps_sample_shading ? "true" : "false", info.ps_no_perspective ? "true" : "false",
-	     info.ps_pixel_kill_enable ? "true" : "false", info.ps_early_z ? "true" : "false",
-	     info.ps_execute_on_noop ? "true" : "false");
+	     info.ps_ancillary ? "true" : "false", info.ps_sample_shading ? "true" : "false",
+	     info.ps_no_perspective ? "true" : "false", info.ps_pixel_kill_enable ? "true" : "false",
+	     info.ps_early_z ? "true" : "false", info.ps_execute_on_noop ? "true" : "false",
+	     info.lds_size_dwords);
 
 	for (uint32_t i = 0; i < info.input_num; i++) {
 		LOGF("\t interpolator_settings[%u] = %u\n", i, info.interpolator_settings[i]);

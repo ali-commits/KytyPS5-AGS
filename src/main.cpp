@@ -181,6 +181,8 @@ static void PrintUsage() {
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
+	::printf("  --readback-tiled-images <true|false>  Read back small writable tiled images on "
+	         "submit.\n");
 	::printf("  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. "
 	         "Default: false.\n");
 	::printf("  --support-zmask <true|false>         Fill HTILE buffers with uncompressed ZMask. "
@@ -493,6 +495,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid controller vibration intensity: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--keyboard-player") {
+			if (!ParseUint32(value, options.config.keyboard_player) ||
+			    options.config.keyboard_player > static_cast<uint32_t>(Config::MAX_PLAYERS)) {
+				::printf("invalid keyboard player: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--audio-master-volume" || arg == "--audio-main-volume" ||
 		           arg == "--audio-music-volume" || arg == "--audio-pad-speaker-volume" ||
 		           arg == "--audio-objects-volume") {
@@ -512,12 +520,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
-		} else if (arg == "--keyboard-player") {
-			if (!ParseUint32(value, options.config.keyboard_player) ||
-			    options.config.keyboard_player > static_cast<uint32_t>(Config::MAX_PLAYERS)) {
-				::printf("invalid keyboard player: %s\n", value.c_str());
-				return false;
-			}
+
 		} else if (arg == "--present-mode") {
 			if (!ParseEnum(value, options.config.present_mode)) {
 				::printf("invalid present mode: %s\n", value.c_str());
@@ -613,6 +616,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--readback-linear-images") {
 			if (!ParseBool(value, options.config.readback_linear_images)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--readback-tiled-images") {
+			if (!ParseBool(value, options.config.readback_tiled_images)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

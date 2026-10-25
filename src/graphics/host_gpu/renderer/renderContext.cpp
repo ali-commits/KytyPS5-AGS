@@ -195,11 +195,12 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	}
 	const MemoryStats::ScopedTimer fault_timer(MemoryStats::Counter::FaultNs);
 	const CpGaps::Scope            fault_gap(CpGaps::Cat::Fault);
-	// Live cost numbers (faultCost.h); the slow-PC simulation's wait comes first, outside every lock.
+	// Live cost numbers (faultCost.h); the slow-PC simulation's wait comes first, outside every
+	// lock.
 	const auto start = FaultCost::NowNs();
 	FaultCost::SimulateFault();
-	const bool               map = FaultCost::MapEnabled();
-	FaultCost::FaultRecord   record;
+	const bool             map = FaultCost::MapEnabled();
+	FaultCost::FaultRecord record;
 	MemoryStats::Count(access == PageFaultAccess::Write ? MemoryStats::Counter::WriteFaults
 	                                                    : MemoryStats::Counter::ReadFaults);
 	if (access == PageFaultAccess::Write) {
@@ -209,8 +210,8 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		if (map) {
 			FaultCost::MapInFault(true);
 		}
-		uint64_t mark = map ? FaultCost::NowNs() : 0;
-		const auto lap = [&](FaultCost::Part part) {
+		uint64_t   mark = map ? FaultCost::NowNs() : 0;
+		const auto lap  = [&](FaultCost::Part part) {
 			if (map) {
 				const auto now = FaultCost::NowNs();
 				record.part_ns[static_cast<int>(part)] += now - mark;
@@ -240,8 +241,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
-	const auto handler_ns  = FaultCost::NowNs() - start;
-	const bool found_dirty = access == PageFaultAccess::Write && MemoryTracker::TakeFaultFoundDirty();
+	const auto handler_ns = FaultCost::NowNs() - start;
+	const bool found_dirty =
+	    access == PageFaultAccess::Write && MemoryTracker::TakeFaultFoundDirty();
 	FaultCost::NoteFault(handler_ns);
 	if (map) {
 		record.address     = fault_vaddr;
@@ -262,6 +264,17 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	m_buffer_cache.InvalidateMemory(vaddr, size);
 	m_texture_cache.InvalidateMemory(vaddr, size);
 	return true;
+}
+
+bool RenderContext::PrepareHostOverwrite(uint64_t vaddr, uint64_t size) {
+	if (!IsMapped(vaddr, size)) {
+		return false;
+	}
+	const auto watched = m_page_manager.CountWatchedPages(vaddr, size);
+	if (watched.write == 0 && watched.access == 0) {
+		return false;
+	}
+	return InvalidateMemory(vaddr, size);
 }
 
 bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
@@ -369,7 +382,8 @@ void RenderContext::NoteHostBackingWrite(uint64_t vaddr, uint64_t size,
 	if (states.gpu_dirty == 0 && states.clean == 0) {
 		return;
 	}
-	Profiler::CountFrameEvent(Profiler::FrameEvent::HostBackingWriteGpuDirtyPages, states.gpu_dirty);
+	Profiler::CountFrameEvent(Profiler::FrameEvent::HostBackingWriteGpuDirtyPages,
+	                          states.gpu_dirty);
 	Profiler::CountFrameEvent(Profiler::FrameEvent::HostBackingWriteCleanPages, states.clean);
 	static std::atomic<uint32_t> logged {0};
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
@@ -433,8 +447,8 @@ void RenderContext::NoteGuestProtection(uint64_t vaddr, uint64_t size, bool allo
 	const auto watched = m_page_manager.CountWatchedPages(vaddr, size);
 	// Pages whose tracking protection the new guest mode replaces: a write-watched page that
 	// becomes writable, an access-watched page that becomes readable or writable.
-	const auto overridden = (allows_write ? watched.write : 0u) +
-	                        (allows_read || allows_write ? watched.access : 0u);
+	const auto overridden =
+	    (allows_write ? watched.write : 0u) + (allows_read || allows_write ? watched.access : 0u);
 	const bool restricts = !allows_read || !allows_write;
 	Profiler::CountFrameEvent(Profiler::FrameEvent::GuestProtectWatchedPages,
 	                          watched.write + watched.access);
@@ -473,7 +487,7 @@ void RenderContext::RunGarbageCollector() {
 
 void RenderContext::ReportVram() {
 	using VramStats::ToMiB;
-	const auto now   = std::time(nullptr);
+	const auto now = std::time(nullptr);
 	std::tm    local {};
 #if defined(_WIN32)
 	localtime_s(&local, &now);
@@ -486,16 +500,17 @@ void RenderContext::ReportVram() {
 	m_graphics.ReportVramStats();
 	{
 		std::shared_lock lock(m_mapped_ranges_mutex);
-		uint64_t         mapped = 0;
-		uint64_t         lowest = UINT64_MAX;
+		uint64_t         mapped  = 0;
+		uint64_t         lowest  = UINT64_MAX;
 		uint64_t         highest = 0;
 		m_mapped_ranges.ForEach([&](uint64_t begin, uint64_t end) {
 			mapped += end - begin;
 			lowest  = std::min(lowest, begin);
 			highest = std::max(highest, end);
 		});
-		VramStats::Line("guest GPU mappings: %.1f MiB in %zu ranges, 0x%" PRIx64 "..0x%" PRIx64, ToMiB(mapped),
-		                m_mapped_ranges.Size(), lowest == UINT64_MAX ? 0 : lowest, highest);
+		VramStats::Line("guest GPU mappings: %.1f MiB in %zu ranges, 0x%" PRIx64 "..0x%" PRIx64,
+		                ToMiB(mapped), m_mapped_ranges.Size(), lowest == UINT64_MAX ? 0 : lowest,
+		                highest);
 	}
 	m_texture_cache.ReportVram();
 	m_buffer_cache.ReportVram();

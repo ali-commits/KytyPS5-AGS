@@ -360,33 +360,32 @@ static KYTY_SYSV_ABI void RunEntry(uint64_t addr, EntryParams* params, atexit_fu
 		register entry_func_t func_reg asm("rbx")     = func;
 		register uintptr_t    guest_rsp_reg asm("r8") = guest_rsp;
 		register uintptr_t    guest_rbp_reg asm("r9") = guest_rbp;
-		asm volatile("pushq %%r12\n\t"
-		             "pushq %%r13\n\t"
-		             "pushq %%r14\n\t"
-		             "pushq %%r15\n\t"
-		             "movq %%gs:0x08, %%r14\n\t"
-		             "movq %%gs:0x10, %%r15\n\t"
-		             "xorq %%rcx, %%rcx\n\t"
-		             "movq %%rcx, %%gs:0x08\n\t"
-		             "movq %%rcx, %%gs:0x10\n\t"
-		             "movq %%rsp, %%r12\n\t"
-		             "movq %%rbp, %%r13\n\t"
-		             "movq %[guest_rsp], %%rsp\n\t"
-		             "movq %[guest_rbp], %%rbp\n\t"
-		             "callq *%[func]\n\t"
-		             "movq %%r13, %%rbp\n\t"
-		             "movq %%r12, %%rsp\n\t"
-		             "movq %%r14, %%gs:0x08\n\t"
-		             "movq %%r15, %%gs:0x10\n\t"
-		             "popq %%r15\n\t"
-		             "popq %%r14\n\t"
-		             "popq %%r13\n\t"
-		             "popq %%r12\n\t"
-		             : [guest_rsp] "+r"(guest_rsp_reg), [guest_rbp] "+r"(guest_rbp_reg)
-		             : [func] "r"(func_reg), "D"(params), "S"(atexit_func)
-		             : "cc", "memory", "rax", "rcx", "rdx", "r10", "r11", "xmm0", "xmm1", "xmm2",
-		               "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
-		               "xmm12", "xmm13", "xmm14", "xmm15");
+		asm volatile(
+		    "pushq %%r12\n\t"
+		    "pushq %%r13\n\t"
+		    "pushq %%r14\n\t"
+		    "pushq %%r15\n\t"
+		    "movq %%gs:0x08, %%r14\n\t"
+		    "movq %%gs:0x10, %%r15\n\t" KYTY_GUEST_TEB_STACK_RANGE_ASM(
+		        "%[teb_range]") "movq %%rsp, %%r12\n\t"
+		                        "movq %%rbp, %%r13\n\t"
+		                        "movq %[guest_rsp], %%rsp\n\t"
+		                        "movq %[guest_rbp], %%rbp\n\t"
+		                        "callq *%[func]\n\t"
+		                        "movq %%r13, %%rbp\n\t"
+		                        "movq %%r12, %%rsp\n\t"
+		                        "movq %%r14, %%gs:0x08\n\t"
+		                        "movq %%r15, %%gs:0x10\n\t"
+		                        "popq %%r15\n\t"
+		                        "popq %%r14\n\t"
+		                        "popq %%r13\n\t"
+		                        "popq %%r12\n\t"
+		    : [guest_rsp] "+r"(guest_rsp_reg), [guest_rbp] "+r"(guest_rbp_reg)
+		    : [func] "r"(func_reg), "D"(params),
+		      "S"(atexit_func), [teb_range] "m"(Common::HostException::g_guest_teb_stack_range)
+		    : "cc", "memory", "rax", "rcx", "rdx", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3",
+		      "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13",
+		      "xmm14", "xmm15");
 #else
 		// Clobbers prevent inputs from being allocated to r12/r13.
 		asm volatile("movq %%rsp, %%r12\n\t"
@@ -518,9 +517,17 @@ bool TestMainEntryUsesGuestStack() {
 	             : "=r"(restored_teb_stack_base), "=r"(restored_teb_stack_limit)
 	             :
 	             : "memory");
-	const bool teb_ok = state.teb_stack_base == 0 && state.teb_stack_limit == 0 &&
-	                    restored_teb_stack_base == original_teb_stack_base &&
-	                    restored_teb_stack_limit == original_teb_stack_limit;
+	// Zeros, or with KYTY_GUEST_TEB_STACK_RANGE=1 and the host stack above the guest stacks'
+	// region, that region (hostException.h).
+	uintptr_t deallocation_stack = 0;
+	asm volatile("movq %%gs:0x1478, %0" : "=r"(deallocation_stack) : : "memory");
+	const bool teb_range = Common::HostException::g_guest_teb_stack_range != 0 &&
+	                       deallocation_stack >= Common::HostException::GuestStacksHigh;
+	const bool teb_ok =
+	    state.teb_stack_base == (teb_range ? Common::HostException::GuestStacksHigh : 0) &&
+	    state.teb_stack_limit == (teb_range ? Common::HostException::GuestStacksLow : 0) &&
+	    restored_teb_stack_base == original_teb_stack_base &&
+	    restored_teb_stack_limit == original_teb_stack_limit;
 #else
 	constexpr bool teb_ok = true;
 #endif
@@ -1521,6 +1528,9 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 		}
 	}
 	if (!m_programs.empty()) {
+		GamePatch::ApplyBuiltin(m_programs.front());
+	}
+	if (!m_programs.empty() && !m_programs.front()->elf->IsShared()) {
 		Common::GuestProbe::Arm(m_programs.front()->base_vaddr, m_programs.front()->base_size);
 	}
 	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {

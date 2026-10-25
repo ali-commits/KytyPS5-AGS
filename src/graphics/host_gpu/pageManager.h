@@ -73,18 +73,21 @@ public:
 	void ResyncHostProtection(uint64_t vaddr, uint64_t size);
 
 	// Deferred write protections (KYTY_DEFER_PROTECTS, default off; the idea of peepostarexx's
-	// DEFER_PROTECTS, re-implemented on the watcher counts). While a DeferProtectsScope is active on
-	// a thread, a new write watcher that makes pages read-only only updates the counts, under the
-	// region's count lock; the pages are marked pending and their spans join the thread's pending
-	// list instead of calling the host. Whoever takes the list (TakePendingProtects) must apply it
-	// (ApplyProtects, any thread) before it reads the bytes of those pages for the copy the
-	// protection guards: a guest write landing before the protection is then in the copy, and every
-	// later write faults. Applying is ApplySpan: it sets the host protection from the counts as they
-	// are then, under the region's host lock, so it needs no ordering with other changes of the
-	// same pages (each change sets what the counts ask for the pages it changes; a pending page only
-	// stays looser until it is applied). BufferCache: read uploads whose guest bytes the upload DMA
-	// worker copies hand the list to the worker with the copy; every other path applies it on the
-	// calling thread before its own copy.
+	// DEFER_PROTECTS, re-implemented on the watcher counts). While a DeferProtectsScope is active
+	// on a thread, a new write watcher that makes pages read-only only updates the counts, under
+	// the region's count lock; the pages are marked pending and their spans join the thread's
+	// pending list instead of calling the host. Whoever takes the list (TakePendingProtects) must
+	// apply it (ApplyProtects, any thread) before it reads the bytes of those pages for the copy
+	// the protection guards: a guest write landing before the protection is then in the copy, and
+	// every later write faults. Applying is ApplySpan: it sets the host protection from the counts
+	// as they are then, under the region's host lock, so it needs no ordering with other changes of
+	// the same pages (each change sets what the counts ask for the pages it changes; a pending page
+	// only stays looser until it is applied). BufferCache: read uploads whose guest bytes the
+	// upload DMA worker copies hand the list to the worker with the copy; every other path applies
+	// it on the calling thread before its own copy. A synchronous write watch (outside a scope: the
+	// texture cache) of a pending page applies that page's protection itself before it returns
+	// (KYTY_DEFER_PROTECTS_COWATCH, default on), since its caller copies the bytes next and relies
+	// on the following guest write faulting.
 	struct PendingProtect {
 		PageManager* manager = nullptr;
 		void*        region  = nullptr; // Impl::Region
@@ -120,22 +123,33 @@ public:
 	// leftovers. Live switch. Bits: 1 on, 2 all, 4 verify.
 	[[nodiscard]] static int DeferProtectsMode() noexcept;
 	struct DeferProtectsStats {
-		uint64_t spans          = 0; // spans put on pending lists
-		uint64_t pages          = 0; // pages whose protection was deferred
-		uint64_t worker_spans   = 0; // spans applied off the deferring thread
-		uint64_t worker_calls   = 0; // host calls those made
-		uint64_t worker_ns      = 0;
-		uint64_t local_spans    = 0; // spans applied on the deferring thread (no worker copy)
-		uint64_t local_calls    = 0;
-		uint64_t leftover_spans = 0; // applied at the scope end
-		uint64_t pending_pages  = 0; // pages pending now
-		uint64_t verify_checks  = 0;
+		uint64_t spans             = 0; // spans put on pending lists
+		uint64_t pages             = 0; // pages whose protection was deferred
+		uint64_t worker_spans      = 0; // spans applied off the deferring thread
+		uint64_t worker_calls      = 0; // host calls those made
+		uint64_t worker_ns         = 0;
+		uint64_t local_spans       = 0; // spans applied on the deferring thread (no worker copy)
+		uint64_t local_calls       = 0;
+		uint64_t leftover_spans    = 0; // applied at the scope end
+		uint64_t pending_pages     = 0; // pages pending now
+		uint64_t verify_checks     = 0;
 		uint64_t verify_mismatches = 0;
 		// Pages a deferred tighten made while another thread's host update of the region was in
 		// flight (pending whatever `applied` said), and pages an update recorded looser than their
 		// counts without being pending (0 unless KYTY_DEFER_PROTECTS_RACE=old).
 		uint64_t race_pages = 0;
 		uint64_t lost_pages = 0;
+		// Synchronous write watches (an image) that found pages still pending, and the pages they
+		// protected at once (KYTY_DEFER_PROTECTS_COWATCH, default on).
+		uint64_t cowatch_pages   = 0;
+		uint64_t cowatch_applied = 0;
+		// KYTY_DEFER_PROTECTS_WINDOW_AUDIT=1: pages hashed when they became pending; of those,
+		// pages whose bytes changed before their protection (unfaulted guest writes the buffer copy
+		// still sees); pages that changed after a co-watch and before their protection (writes the
+		// co-watcher never sees).
+		uint64_t window_pages   = 0;
+		uint64_t window_writes  = 0;
+		uint64_t cowatch_writes = 0;
 	};
 	[[nodiscard]] static DeferProtectsStats GetDeferProtectsStats() noexcept;
 	// Host protection calls made by the calling thread (cumulative): count, pages, ns.

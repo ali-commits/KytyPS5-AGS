@@ -10051,7 +10051,8 @@ void TestNewShaderRecompilerBufferLoadsGuardedByExec() {
         "buffer load SPIR-V lacks storage buffer bounds branch");
   Check(element_access != std::string::npos,
         "buffer load SPIR-V lacks storage element access");
-  Check(exec_branch < array_length,
+  // A provably full EXEC emits no guard (upstream 0f7d11254): the first branch is the bounds one.
+  Check(exec_branch < array_length || exec_branch == bounds_branch,
         "buffer load bounds check was emitted outside EXEC guard");
   Check(bounds_branch < element_access,
         "buffer load storage element pointer was formed before bounds guard");
@@ -14596,6 +14597,114 @@ void TestNewShaderRecompilerPixelPipelineEntry() {
   CompilePixelRuntime(vcc_params, vcc_input);
 }
 
+void TestF16OnlyPixelInterpolation() {
+  using namespace ShaderRecompiler;
+  // The I/J source is unused by P2 lowering and disappears during DCE. F16 input
+  // collection must still request the barycentrics used to blend the raw vertices.
+  const uint32_t shader[] = {
+      EncodeVop3Word0(0x35a, 4), EncodeVop3Word1(0, 256, 0),
+      EncodeExp0(0x00, 0x1), EncodeExp1(4, 0, 0, 0), EncodeSopp(0x01),
+  };
+  for (const bool linear : {false, true}) {
+    ShaderPixelInputInfo pixel{};
+    pixel.input_num = 1;
+    pixel.target_output_mode[0] = 4;
+    pixel.ps_no_perspective = linear;
+    SetIdentityInterpolatorSettings(&pixel);
+    auto options = MakeCompileOptions(ShaderType::Pixel);
+    options.input_info.pixel = &pixel;
+    const auto result = RecompileForTest(shader, options);
+    Check(ProgramHasInput(result.program, linear ? IR::StageInputKind::BaryCoordNoPerspective
+                                                : IR::StageInputKind::BaryCoordSmooth),
+          "F16-only smooth pixel input lost its barycentric interface after DCE");
+    Check(SpirvHasDecorationValueWithDecoration(result.spirv, 30u, 0u, 5285u),
+          "F16-only smooth input must read packed values per vertex");
+    CheckSpirvBinaryValidates(result.spirv);
+  }
+}
+
+void TestHeaderlessTessellationLayoutIdentity() {
+  // The registrations have no declared binary hash. Every pair uses identical
+  // VGT state, so only the current LS/HS code distinguishes its reflected layout.
+  auto local_a = std::array{
+      EncodeVop3Word0(0x169, 4), EncodeVop3Word1(259, 144, 0), // v4 = v3 * 16
+      EncodeDs0(0x0d), EncodeDs1(0, 0, 4), EncodeSop1(0x20, 0, 6),
+  };
+  auto local_b = local_a;
+  local_b[1] = EncodeVop3Word1(259, 160, 0); // stride 32
+  auto control_a = std::array{
+      EncodeVop3Word0(0x148, 4), EncodeVop3Word1(257, 136, 133), // packed v1[12:8]
+      EncodeVop3Word0(0x169, 4), EncodeVop3Word1(260, 160, 0), // stride 32
+      EncodeMubuf0(0x1c, 0, false) | (1u << 12u), EncodeMubuf1(0, 0, 4, 2),
+      EncodeSopp(0x01),
+  };
+  auto control_b = control_a;
+  control_b[3] = EncodeVop3Word1(260, 192, 0); // stride 64
+  const uint32_t evaluation[] = {EncodeSopp(0x01)};
+  ShaderUserData user_data{};
+  const auto map = [&](std::span<const uint32_t> code, Prospero::ShaderBinaryType type) {
+    ShaderMappedData mapped{};
+    mapped.type = type;
+    mapped.user_data = &user_data;
+    mapped.code_size_bytes = static_cast<uint32_t>(code.size_bytes());
+    ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()), mapped);
+  };
+  map(local_a, Prospero::ShaderBinaryType::kHsFront);
+  map(local_b, Prospero::ShaderBinaryType::kHsFront);
+  map(control_a, Prospero::ShaderBinaryType::kHsBack);
+  map(control_b, Prospero::ShaderBinaryType::kHsBack);
+  map(evaluation, Prospero::ShaderBinaryType::kGs);
+  HW::Context context;
+  context.SetShaderStages(0x4u);
+  context.SetLsHsConfig((3u << 8u) | (3u << 14u));
+  context.SetTfParam(1u | (2u << 2u) | (2u << 5u));
+  const auto check = [&](std::span<const uint32_t> local, std::span<const uint32_t> control,
+                         uint32_t ls_stride, uint32_t hs_stride) {
+    HW::VertexShaderInfo regs{};
+    regs.ls_regs.data_addr = reinterpret_cast<uint64_t>(local.data());
+    regs.hs_regs.data_addr = reinterpret_cast<uint64_t>(control.data());
+    regs.es_regs.data_addr = reinterpret_cast<uint64_t>(evaluation);
+    regs.hs_regs.user_data_addr = reinterpret_cast<uint64_t>(&user_data);
+    std::array<ShaderVertexInputInfo, 3> inputs{};
+    const auto params = PrepareTessellationPrograms(regs, context, inputs);
+    Check(params[0].code.data() == local.data() && params[1].code.data() == control.data(),
+          "tessellation fixture did not retain its registered headerless code");
+    for (const auto& input : inputs) {
+      Check(input.tess.ls_stride == ls_stride && input.tess.hs_stride == hs_stride,
+            "tessellation memo reused another headerless program's layout");
+    }
+  };
+  check(local_a, control_a, 16u, 32u);
+  check(local_b, control_a, 32u, 32u);
+  check(local_b, control_b, 32u, 64u);
+  local_b[1] = EncodeVop3Word1(259, 176, 0); // Guest code changes without re-registration.
+  check(local_b, control_b, 48u, 64u);
+  control_b[3] = EncodeVop3Word1(260, 144, 0);
+  check(local_b, control_b, 48u, 16u);
+}
+
+void TestTessellationPatchStaticKeyAndAliasPosition() {
+  ShaderVertexInputInfo input{};
+  input.tess.input_control_points = input.tess.output_control_points = 3;
+  input.tess.ls_stride = input.tess.hs_stride = 16;
+  input.tess.patch_base = 48;
+  input.tess.patch_size = 16;
+  const auto original = MakeStageStaticKey(input);
+  input.tess.patch_base += 16;
+  Check(original != MakeStageStaticKey(input), "patch base is missing from the shader key");
+  input.tess.patch_base -= 16;
+  input.tess.patch_size += 16;
+  Check(original != MakeStageStaticKey(input), "patch size is missing from the shader key");
+  input.param_alias_mask = 1u << 2u;
+  input.param_alias_source[2] = 1u;
+  input.lds_size_dwords = 128;
+  input.user_clip_planes = 1;
+  const auto aliases = MakeStageStaticKey(input);
+  Check(aliases.size() > 10 && aliases[8] == 0x7A11A5u && aliases[9] == (1u << 2u) &&
+            aliases[10] == 1u,
+        "new LDS/clip key fields displaced the stored vertex-alias prefix");
+}
+
 void TestRegisteredShaderCodeIdentity() {
   uint32_t shader[] = {EncodeSopp(0x00), EncodeSopp(0x01)};
   HW::ComputeShaderInfo regs{};
@@ -15697,6 +15806,13 @@ int main(int argc, char **argv) {
     TestDeferredSpirvPhiPatching();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--int21-review-only") == 0) {
+    TestF16OnlyPixelInterpolation();
+    TestHeaderlessTessellationLayoutIdentity();
+    TestTessellationPatchStaticKeyAndAliasPosition();
+    std::puts("shader_cfg --int21-review-only: ok");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--registered-shader-code-only") == 0) {
     TestRegisteredShaderCodeIdentity();
     return 0;
@@ -15929,6 +16045,9 @@ int main(int argc, char **argv) {
   TestPerspectiveSampleInputs();
   TestGraphicsCreateInterpolantMapping();
   TestNewShaderRecompilerPixelPipelineEntry();
+  TestF16OnlyPixelInterpolation();
+  TestHeaderlessTessellationLayoutIdentity();
+  TestTessellationPatchStaticKeyAndAliasPosition();
   TestComputeLdsAllocationIdentity();
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();

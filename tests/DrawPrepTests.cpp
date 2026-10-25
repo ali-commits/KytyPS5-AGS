@@ -93,6 +93,41 @@ void TestLogIntersection() {
 	      "an empty read set never conflicts");
 }
 
+// KYTY_CLEAN_UNTOUCHED: the hull pre-test of Check gives the same outcome as the plain search.
+void TestLogHullMatchesSearch() {
+	auto     log    = std::make_unique<Coherence::Log>();
+	uint64_t state  = 0x9e3779b97f4a7c15ull;
+	auto     random = [&] {
+		state ^= state << 13u;
+		state ^= state >> 7u;
+		state ^= state << 17u;
+		return state;
+	};
+	for (int round = 0; round < 2000; round++) {
+		const auto g0      = log->Generation();
+		const int  entries = static_cast<int>(random() % 6u);
+		for (int i = 0; i < entries; i++) {
+			const auto begin = (random() % 64u) * 0x100u;
+			const auto size  = random() % 4u == 0 ? 0u : (random() % 8u) * 0x80u;
+			log->Append(Coherence::MakeRange(begin, size), random() % 3u == 0
+			                                                   ? Coherence::Source::ImageGpuModified
+			                                                   : Coherence::Source::BufferDirtyAdd);
+		}
+		std::vector<Coherence::Range> ranges;
+		uint64_t                      cursor = (random() % 32u) * 0x100u;
+		const int                     count  = static_cast<int>(random() % 4u);
+		for (int i = 0; i < count; i++) {
+			const auto size = 0x40u + (random() % 4u) * 0x40u;
+			ranges.push_back({cursor, cursor + size});
+			cursor += size + 0x40u + (random() % 8u) * 0x100u;
+		}
+		const auto plain = log->Check(g0, log->Generation(), ranges);
+		const auto hull  = log->Check(g0, log->Generation(), ranges, true);
+		Check(plain.result == hull.result && plain.conflict_source == hull.conflict_source,
+		      "the hull pre-test gives the plain search's outcome");
+	}
+}
+
 void TestLogBumpWithoutReaders() {
 	// A log nobody reads only counts generations (Bump); its entries are never readable, and a
 	// Check over such an interval is conservative (Unknown), never Clean.
@@ -1948,6 +1983,7 @@ int main(int argc, char** argv) {
 	TestLogIntersection();
 	TestLogEmptyRangeNeverIntersects();
 	TestLogBumpWithoutReaders();
+	TestLogHullMatchesSearch();
 	TestGlobalLogAlwaysRecords();
 	TestLogOverflow();
 	TestLogConcurrentAppends();

@@ -5,6 +5,8 @@
 #include "common/common.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 
+#include <array>
+
 namespace Libs::Graphics::HW {
 
 struct ColorBase {
@@ -457,8 +459,8 @@ struct PsShaderResource2 {
 };
 
 struct PsStageRegisters {
-	uint64_t          data_addr = 0;
-	uint64_t          user_data_addr = 0;
+	uint64_t data_addr      = 0;
+	uint64_t user_data_addr = 0;
 	// Hades II uses PS offsets 4:5 for a byte-addressed descriptor table.
 	uint64_t          auxiliary_table_addr = 0;
 	PsShaderResource1 rsrc1;
@@ -572,6 +574,12 @@ struct ShaderRegisters {
 	uint32_t m_paScShaderControl = 0;
 
 	DepthShaderControl db_shader_control;
+	bool               alpha_to_mask_enable = false;
+
+	// DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE overrides DB_ALPHA_TO_MASK per shader.
+	[[nodiscard]] bool AlphaToMask() const {
+		return alpha_to_mask_enable && !db_shader_control.alpha_to_mask_disable;
+	}
 
 	[[nodiscard]] uint32_t GetExportCount() const {
 		return 1u + ((m_spiVsOutConfig >> 1u) & 0x1Fu);
@@ -637,9 +645,9 @@ public:
 
 	KYTY_CLASS_DEFAULT_COPY(Context);
 
-	void Reset() { *this = Context(); }
+	void                   Reset() { *this = Context(); }
 	[[nodiscard]] uint32_t GetDepthCountControl() const { return m_depth_count_control; }
-	void SetDepthCountControl(uint32_t value) { m_depth_count_control = value; }
+	void                   SetDepthCountControl(uint32_t value) { m_depth_count_control = value; }
 
 	void SetColorBase(uint32_t slot, const ColorBase& base) { m_render_targets[slot].base = base; }
 	void SetColorView(uint32_t slot, const ColorView& view) { m_render_targets[slot].view = view; }
@@ -823,6 +831,11 @@ public:
 	void SetBlendColor(const BlendColor& color) { m_blend_color = color; }
 	[[nodiscard]] const ClipControl& GetClipControl() const { return m_clip_control; }
 	void SetClipControl(const ClipControl& control) { m_clip_control = control; }
+	// PA_CL_UCP_0_X..PA_CL_UCP_5_W as raw float bits, four per plane.
+	[[nodiscard]] const std::array<uint32_t, 24>& GetUserClipPlanes() const {
+		return m_user_clip_planes;
+	}
+	void SetUserClipPlane(uint32_t index, uint32_t value) { m_user_clip_planes[index] = value; }
 	[[nodiscard]] const RenderControl& GetRenderControl() const { return m_render_control; }
 	void SetRenderControl(const RenderControl& control) { m_render_control = control; }
 	[[nodiscard]] const DepthRenderOverride& GetDepthRenderOverride() const {
@@ -905,6 +918,7 @@ public:
 	void SetDepthShaderControl(const DepthShaderControl& value) {
 		m_sh_regs.db_shader_control = value;
 	}
+	void SetAlphaToMaskEnable(bool value) { m_sh_regs.alpha_to_mask_enable = value; }
 
 	void SetScShaderControl(uint32_t value) { m_sh_regs.m_paScShaderControl = value; }
 
@@ -921,6 +935,8 @@ private:
 	ColorControl    m_color_control;
 	ScanModeControl m_scan_mode_control;
 
+	std::array<uint32_t, 24> m_user_clip_planes {};
+
 	AaSampleControl m_aa_sample_control;
 	AaConfig        m_aa_config;
 
@@ -929,7 +945,7 @@ private:
 	DepthRenderTarget   m_depth_render_target;
 	RenderControl       m_render_control;
 	DepthRenderOverride m_depth_render_override;
-	uint32_t m_depth_count_control = 0;
+	uint32_t            m_depth_count_control = 0;
 	DepthControl        m_depth_control;
 	StencilControl      m_stencil_control;
 	StencilMask         m_stencil_mask;
@@ -990,7 +1006,7 @@ public:
 	[[nodiscard]] const FsrView& GetFsrView() const { return m_fsr_view; }
 
 private:
-	FsrView m_fsr_view;
+	FsrView                 m_fsr_view;
 	Prospero::PrimitiveType m_prim_type               = Prospero::PrimitiveType::kNone;
 	uint32_t                m_index_offset            = 0;
 	uint32_t                m_object_id               = 0;
@@ -1072,8 +1088,8 @@ public:
 private:
 	static void SetUserDataAddressWord(uint64_t& address, uint32_t word, uint32_t value) {
 		const auto shift = word * 32u;
-		address = (address & ~(uint64_t {0xffffffffu} << shift)) |
-		          (static_cast<uint64_t>(value) << shift);
+		address          = (address & ~(uint64_t {0xffffffffu} << shift)) |
+		                   (static_cast<uint64_t>(value) << shift);
 	}
 
 	VertexShaderInfo  m_vs;

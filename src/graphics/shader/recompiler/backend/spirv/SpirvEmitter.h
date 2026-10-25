@@ -27,6 +27,11 @@ HostFloatControls GetHostFloatControls();
 // shader's own "dword index < OpArrayLength" check. The device layer sets this once.
 struct HostBufferRobustness {
 	bool storage_dword_loads_return_zero = false;
+	// robustBufferAccess2 with robustUniformBufferAccessSizeAlignment <= 16 and
+	// uniformBufferStandardLayout: a dword uniform load past the range rounded up to that alignment
+	// returns 0,
+	// so constant-only buffers can bind as uniform buffers (KYTY_UNIFORM_BUFFERS).
+	bool uniform_dword_loads_return_zero = false;
 };
 
 void                 SetHostBufferRobustness(const HostBufferRobustness& robustness);
@@ -68,7 +73,8 @@ HostShaderClock GetHostShaderClock();
 // KYTY_MESH_OUTPUT_GUARD, auto/on/off, set once by the device layer; auto is on for NVIDIA Turing
 // only). A guest export runs under EXEC, so a vertex whose lane skips its position export leaves
 // gl_Position (and the zero-position clip guard plane) undefined, and an NGG mesh lane that skips
-// its exports leaves its vertex and primitive undefined. Where the hardware happens to read such values as 0 nothing changes:
+// its exports leaves its vertex and primitive undefined. Where the hardware happens to read such
+// values as 0 nothing changes:
 //   vertex_outputs: vertex/evaluation shaders store position (0,0,0,0) and a clip-guard distance
 //     of -1 before the guest code, so an unexported vertex culls its primitives.
 //   mesh_outputs: mesh shaders start each lane's position at (0,0,0,0) and primitive as culled,
@@ -83,9 +89,9 @@ void              SetHostGeometryGuard(const HostGeometryGuard& guard);
 HostGeometryGuard GetHostGeometryGuard();
 
 // Graphics stages whose host subgroups can be wider than a wave32 program's wave (set once by the
-// device layer). The AMD proprietary driver runs vertex, mesh and pixel shaders on 64-wide subgroups
-// and lets only compute pipelines require 32 (requiredSubgroupSizeStages = COMPUTE), so one host
-// subgroup holds two guest waves; the emitter then keeps each wave to its own 32 lanes
+// device layer). The AMD proprietary driver runs vertex, mesh and pixel shaders on 64-wide
+// subgroups and lets only compute pipelines require 32 (requiredSubgroupSizeStages = COMPUTE), so
+// one host subgroup holds two guest waves; the emitter then keeps each wave to its own 32 lanes
 // (KYTY_WAVE32_CLUSTERS, CodegenOptions).
 struct HostWaveClusters {
 	bool vertex = false; // VS, LS and DS programs (never given a required subgroup size)
@@ -107,8 +113,8 @@ HostWaveClusters GetHostWaveClusters();
 // mip_stats_records=false emits the plain variant of a GET_LOD_STATS-instrumented pixel shader:
 // the same bindings and code, without the per-sample feedback (and so without its storage-buffer
 // atomics, which force depth/stencil tests after the shader for a shader that can discard).
-std::vector<uint32_t> EmitProgram(const IR::Program& program,
-                                  ShaderStageInputInfo input_info, bool mip_stats_records = true);
+std::vector<uint32_t> EmitProgram(const IR::Program& program, ShaderStageInputInfo input_info,
+                                  bool mip_stats_records = true);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

@@ -85,6 +85,7 @@ enum class Op : uint16_t {
 	DrawIndexedIndirectCount,
 	Dispatch,
 	DispatchIndirect,
+	DispatchBase,
 	ResetQueryPool,
 	BeginQuery,
 	EndQuery,
@@ -95,6 +96,9 @@ enum class Op : uint16_t {
 	UpdateDescriptorSets,
 	// vkCmdWriteBufferMarkerAMD (KYTY_GPU_BREADCRUMBS, gpuBreadcrumbs.h).
 	WriteBufferMarker,
+	// A host memcpy of guest bytes into mapped memory (KYTY_STREAM_COPY_DEFER, BufferCache): not a
+	// command; replayed in stream order, so before the Submit of the commands that read it.
+	HostCopy,
 	Count,
 };
 
@@ -311,6 +315,14 @@ struct Groups3Packet {
 	uint32_t y = 0;
 	uint32_t z = 0;
 };
+struct DispatchBasePacket {
+	uint32_t base_x = 0;
+	uint32_t base_y = 0;
+	uint32_t base_z = 0;
+	uint32_t x      = 0;
+	uint32_t y      = 0;
+	uint32_t z      = 0;
+};
 struct IndirectPacket {
 	vk::Buffer buffer     = nullptr;
 	uint64_t   offset     = 0;
@@ -352,6 +364,11 @@ struct WriteTimestampPacket {
 	vk::QueryPool pool  = nullptr;
 	uint64_t      stage = 0; // VkPipelineStageFlags2
 	uint32_t      query = 0;
+};
+struct HostCopyPacket {
+	uint64_t destination = 0; // host pointer (mapped stream ring)
+	uint64_t source      = 0; // guest virtual address
+	uint64_t size        = 0;
 };
 struct WriteBufferMarkerPacket {
 	vk::Buffer buffer = nullptr;
@@ -607,7 +624,8 @@ public:
 			case Op::DrawIndirectCount:
 			case Op::DrawIndexedIndirectCount:
 			case Op::Dispatch:
-			case Op::DispatchIndirect: return true;
+			case Op::DispatchIndirect:
+			case Op::DispatchBase: return true;
 			default: return false;
 		}
 	}
@@ -704,6 +722,8 @@ public:
 	                              vk::DeviceSize count_offset, uint32_t max_count, uint32_t stride);
 	void dispatch(uint32_t x, uint32_t y, uint32_t z);
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset);
+	void dispatchBase(uint32_t base_x, uint32_t base_y, uint32_t base_z, uint32_t x, uint32_t y,
+	                  uint32_t z);
 	void resetQueryPool(vk::QueryPool pool, uint32_t first, uint32_t count);
 	void beginQuery(vk::QueryPool pool, uint32_t query, vk::QueryControlFlags flags);
 	void endQuery(vk::QueryPool pool, uint32_t query);
@@ -711,8 +731,9 @@ public:
 	                          vk::Buffer destination, vk::DeviceSize offset, vk::DeviceSize stride,
 	                          vk::QueryResultFlags flags);
 	void writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool, uint32_t query);
-	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
-	                          uint32_t marker);
+	void hostCopy(void* destination, uint64_t source, uint64_t size);
+	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
+	                          vk::DeviceSize offset, uint32_t marker);
 
 private:
 	class Writer;

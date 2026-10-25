@@ -69,7 +69,7 @@ int PrefetchMode() {
 
 uint32_t PrefetchDraws() {
 	static const uint32_t draws = [] {
-		const auto* value = EnvValue("KYTY_CP_SEQ_PREFETCH_DRAWS");
+		const auto* value  = EnvValue("KYTY_CP_SEQ_PREFETCH_DRAWS");
 		const auto  parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 16ul;
 		return static_cast<uint32_t>(parsed < 1ul ? 1ul : (parsed > 1024ul ? 1024ul : parsed));
 	}();
@@ -87,6 +87,7 @@ const char* OpKindName(OpKind kind) noexcept {
 		case OpKind::DrawAuto: return "DrawAuto";
 		case OpKind::DrawIndirect: return "DrawIndirect";
 		case OpKind::DrawIndirectMulti: return "DrawIndirectMulti";
+		case OpKind::DrawIndirectMultiIndex: return "DrawIndirectMultiIndex";
 		case OpKind::DispatchDirect: return "DispatchDirect";
 		case OpKind::DispatchIndirect: return "DispatchIndirect";
 		case OpKind::EndOfPipe: return "EndOfPipe";
@@ -119,7 +120,8 @@ uint32_t PayloadSize(OpKind kind) noexcept {
 		case OpKind::DrawIndex: return sizeof(DrawIndexOp);
 		case OpKind::DrawAuto: return sizeof(DrawAutoOp);
 		case OpKind::DrawIndirect:
-		case OpKind::DrawIndirectMulti: return sizeof(DrawIndirectOp);
+		case OpKind::DrawIndirectMulti:
+		case OpKind::DrawIndirectMultiIndex: return sizeof(DrawIndirectOp);
 		case OpKind::DispatchDirect: return sizeof(DispatchDirectOp);
 		case OpKind::DispatchIndirect: return sizeof(DispatchIndirectOp);
 		case OpKind::EndOfPipe: return sizeof(EndOfPipeOp);
@@ -164,7 +166,8 @@ void NormalizeForCompare(OpKind kind, void* payload) noexcept {
 			break;
 		}
 		case OpKind::DrawIndirect:
-		case OpKind::DrawIndirectMulti: {
+		case OpKind::DrawIndirectMulti:
+		case OpKind::DrawIndirectMultiIndex: {
 			auto* op = static_cast<DrawIndirectOp*>(payload);
 			op->flags &= ~(IndirectFlagSnapshot | IndirectFlagPrepared);
 			op->snapshot = 0;
@@ -192,8 +195,7 @@ void NormalizeForCompare(OpKind kind, void* payload) noexcept {
 uint64_t HashOp(OpKind kind, const void* payload, uint32_t payload_size, const void* data,
                 uint32_t data_size) noexcept {
 	// Chained one-shot hashes (the streaming state is opaque in this build of xxHash).
-	const auto hash =
-	    XXH3_64bits_withSeed(payload, payload_size, static_cast<uint64_t>(kind) + 1u);
+	const auto hash = XXH3_64bits_withSeed(payload, payload_size, static_cast<uint64_t>(kind) + 1u);
 	return data_size != 0 ? XXH3_64bits_withSeed(data, data_size, hash) : hash;
 }
 

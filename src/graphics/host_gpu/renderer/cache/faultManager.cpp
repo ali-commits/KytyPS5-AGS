@@ -2,13 +2,13 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
-#include "gpu_tiler_shaders/fault_buffer_process_spv.h"
 #include "gpu_tiler_shaders/bda_write_pages_process_spv.h"
+#include "gpu_tiler_shaders/fault_buffer_process_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
-#include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 
 #include <bit>
@@ -20,7 +20,7 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr size_t MaxPageFaults    = 1024;
+constexpr size_t MaxPageFaults     = 1024;
 constexpr size_t PageFaultAreaSize = MaxPageFaults * sizeof(uint64_t);
 // KYTY_BDA_WRITES: bda_write_pages_process.comp's MAX_PAGE_FAULTS (1 GiB of 16 KiB pages). The list
 // is the shader's: a u32 count in the first entry, page addresses from the second; the copy of the
@@ -55,20 +55,18 @@ FaultManager::FaultManager(GraphicContext& graphics, CommandScheduler& scheduler
 	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
 	layout_info.bindingCount = std::size(bindings);
 	layout_info.pBindings    = bindings;
-	RequireVulkanSuccess(
-	    m_graphics.device.createDescriptorSetLayout(&layout_info, nullptr,
-	                                                &m_fault_process_desc_layout),
-	    "create fault-buffer descriptor layout");
+	RequireVulkanSuccess(m_graphics.device.createDescriptorSetLayout(&layout_info, nullptr,
+	                                                                 &m_fault_process_desc_layout),
+	                     "create fault-buffer descriptor layout");
 
 	const auto module = CompileSPV(FAULT_BUFFER_PROCESS_SPV, m_graphics.device);
 
 	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.setLayoutCount = 1;
 	pipeline_layout_info.pSetLayouts    = &m_fault_process_desc_layout;
-	RequireVulkanSuccess(
-	    m_graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
-	                                           &m_fault_process_pipeline_layout),
-	    "create fault-buffer pipeline layout");
+	RequireVulkanSuccess(m_graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+	                                                            &m_fault_process_pipeline_layout),
+	                     "create fault-buffer pipeline layout");
 
 	vk::PipelineShaderStageCreateInfo stage {};
 	stage.stage  = vk::ShaderStageFlagBits::eCompute;
@@ -77,7 +75,7 @@ FaultManager::FaultManager(GraphicContext& graphics, CommandScheduler& scheduler
 	vk::ComputePipelineCreateInfo pipeline_info {};
 	pipeline_info.stage  = stage;
 	pipeline_info.layout = m_fault_process_pipeline_layout;
-	const auto result = m_graphics.device.createComputePipelines(
+	const auto result    = m_graphics.device.createComputePipelines(
 	    nullptr, 1, &pipeline_info, nullptr, &m_fault_process_pipeline);
 	m_graphics.device.destroyShaderModule(module, nullptr);
 	RequireVulkanSuccess(result, "create fault-buffer pipeline");
@@ -106,14 +104,14 @@ void FaultManager::ProcessFaultBuffer() {
 	m_download_buffer.Flush(offset, PageFaultAreaSize);
 
 	vk::BufferMemoryBarrier2 pre_barrier {};
-	pre_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
-	pre_barrier.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
-	pre_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
-	pre_barrier.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
-	pre_barrier.buffer        = m_fault_buffer.Handle();
-	pre_barrier.offset        = 0;
+	pre_barrier.srcStageMask   = vk::PipelineStageFlagBits2::eAllCommands;
+	pre_barrier.srcAccessMask  = vk::AccessFlagBits2::eShaderWrite;
+	pre_barrier.dstStageMask   = vk::PipelineStageFlagBits2::eComputeShader;
+	pre_barrier.dstAccessMask  = vk::AccessFlagBits2::eShaderRead;
+	pre_barrier.buffer         = m_fault_buffer.Handle();
+	pre_barrier.offset         = 0;
 	pre_barrier.size           = m_fault_buffer.Size();
-	auto post_barrier         = pre_barrier;
+	auto post_barrier          = pre_barrier;
 	post_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
 	post_barrier.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
 	post_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -132,7 +130,7 @@ void FaultManager::ProcessFaultBuffer() {
 	}
 
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	auto               command = m_scheduler.Current().Handle();
 	vk::DependencyInfo dependency {};
 	dependency.dependencyFlags          = vk::DependencyFlagBits::eByRegion;
 	dependency.bufferMemoryBarrierCount = 1;
@@ -140,8 +138,8 @@ void FaultManager::ProcessFaultBuffer() {
 	command.pipelineBarrier2(dependency);
 	m_scheduler.Current().BindPipeline(vk::PipelineBindPoint::eCompute, m_fault_process_pipeline);
 	m_scheduler.Current().PushDescriptors(vk::PipelineBindPoint::eCompute,
-	                             m_fault_process_pipeline_layout, 0,
-	                             static_cast<uint32_t>(writes.size()), writes.data());
+	                                      m_fault_process_pipeline_layout, 0,
+	                                      static_cast<uint32_t>(writes.size()), writes.data());
 	const auto num_threads    = BufferCache::CACHING_NUMPAGES / 32;
 	const auto num_workgroups = (num_threads + 63) / 64;
 	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
@@ -153,7 +151,12 @@ void FaultManager::ProcessFaultBuffer() {
 		m_download_buffer.Invalidate(offset, PageFaultAreaSize);
 		RangeSet    fault_ranges;
 		const auto* faults = std::bit_cast<const uint64_t*>(mapped);
-		const auto  count  = static_cast<uint32_t>(faults[0]);
+		// The parser counts every faulting page but stores at most MaxPageFaults - 1 records
+		// (entries 1..MaxPageFaults - 1): a larger count would read past this area into another
+		// batch's records or past the download buffer (chenxiao07/KytyPS5 d645c916b). Pages left
+		// out fault again at their next read.
+		const auto count = static_cast<uint32_t>(
+		    std::min<uint64_t>(static_cast<uint32_t>(faults[0]), MaxPageFaults - 1));
 		for (uint32_t index = 1; index <= count; ++index) {
 			fault_ranges.Add(faults[index], BufferCache::CACHING_PAGESIZE);
 			LOGF("Accessed non-GPU cached memory at 0x%016" PRIx64 "\n", faults[index]);
@@ -193,7 +196,7 @@ FaultManager::BdaWrites FaultManager::CollectBdaWrites() {
 		pipeline_info.stage  = stage;
 		pipeline_info.layout = m_fault_process_pipeline_layout;
 		const auto result    = m_graphics.device.createComputePipelines(
-            nullptr, 1, &pipeline_info, nullptr, &m_bda_pages_pipeline);
+		    nullptr, 1, &pipeline_info, nullptr, &m_bda_pages_pipeline);
 		m_graphics.device.destroyShaderModule(module, nullptr);
 		RequireVulkanSuccess(result, "create BDA written-page pipeline");
 		SetVulkanObjectNameF(m_graphics.device, m_bda_pages_pipeline, "BDA Written Page Parser");
@@ -220,9 +223,9 @@ FaultManager::BdaWrites FaultManager::CollectBdaWrites() {
 	    vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer;
 	before.dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
 	                       vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;
-	before.buffer = m_fault_buffer.Handle();
-	before.offset = bitmap_offset;
-	before.size   = BufferCache::BDA_WRITES_FAULT_BUFFER_SIZE - bitmap_offset;
+	before.buffer        = m_fault_buffer.Handle();
+	before.offset        = bitmap_offset;
+	before.size          = BufferCache::BDA_WRITES_FAULT_BUFFER_SIZE - bitmap_offset;
 	vk::DependencyInfo dependency {};
 	dependency.bufferMemoryBarrierCount = 1;
 	dependency.pBufferMemoryBarriers    = &before;
@@ -254,7 +257,7 @@ FaultManager::BdaWrites FaultManager::CollectBdaWrites() {
 		command.copyBuffer(m_fault_buffer.Handle(), m_bda_download->Handle(), 1, &log_copy);
 	}
 	// The counter and the store log's count (the words between them are unused) are cleared.
-	constexpr auto counters_size = log_offset + sizeof(uint32_t) - dropped_offset;
+	constexpr auto           counters_size = log_offset + sizeof(uint32_t) - dropped_offset;
 	vk::BufferMemoryBarrier2 cleared {};
 	cleared.srcStageMask             = vk::PipelineStageFlagBits2::eTransfer;
 	cleared.srcAccessMask            = vk::AccessFlagBits2::eTransferRead;
@@ -309,7 +312,7 @@ FaultManager::BdaWrites FaultManager::CollectBdaWrites() {
 		m_bda_download->Invalidate(BdaStoreLogOffset, sizeof(uint32_t));
 		uint32_t logged = 0;
 		std::memcpy(&logged, mapped + BdaStoreLogOffset, sizeof(logged));
-		const auto entries = std::min<size_t>(logged, BufferCache::BDA_STORE_LOG_ENTRIES);
+		const auto entries  = std::min<size_t>(logged, BufferCache::BDA_STORE_LOG_ENTRIES);
 		result.log_overflow = logged - static_cast<uint32_t>(entries);
 		if (entries != 0) {
 			constexpr size_t first = BdaStoreLogOffset + 4 * sizeof(uint32_t);

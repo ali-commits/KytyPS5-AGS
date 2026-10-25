@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 
@@ -124,8 +125,8 @@ static void GetInputFormat(const ShaderBufferResource& res, vk::Format& format, 
 	format = VulkanFormat(fmt);
 	size   = ShaderRecompiler::Format::GetFormatInfo(fmt).component_count;
 	if (format == vk::Format::eUndefined || size == 0) {
-		EXIT("unknown vertex format: fmt = %u descriptor=%08x,%08x,%08x,%08x\n",
-		     raw_format, res.fields[0], res.fields[1], res.fields[2], res.fields[3]);
+		EXIT("unknown vertex format: fmt = %u descriptor=%08x,%08x,%08x,%08x\n", raw_format,
+		     res.fields[0], res.fields[1], res.fields[2], res.fields[3]);
 	}
 
 	if (NarrowInputFormat(format, size, used_components)) {
@@ -179,9 +180,9 @@ static vk::BlendOp GetBlendOp(uint32_t op) {
 	return vk::BlendOp::eAdd;
 }
 
-static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descriptor_bindings,
+static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>&    descriptor_bindings,
                               const ShaderRecompiler::IR::CompiledShaderInfo& program,
-                              vk::ShaderStageFlagBits              stage) {
+                              vk::ShaderStageFlagBits                         stage) {
 	for (const auto& binding: program.bindings.descriptors) {
 		descriptor_bindings.push_back(
 		    {ShaderRecompiler::IR::NativeBinding(program.stage, binding.kind),
@@ -204,20 +205,17 @@ static void AssignPipelineLayout(GraphicContext& graphics, PipelineCache::Pipeli
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-                            const PipelineRenderingState&          rendering,
-                            const PipelineVertexInputState&        vertex_input,
-                            std::span<const ShaderVertexInputInfo> vertex_info,
-                            const ShaderPixelInputInfo*            ps_input_info,
-                            const PipelineCache::GraphicsPrograms& programs,
-                            const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache,
-                            const GraphicsPipelineCreateHook*      create_hook) {
+void CreatePipelineInternal(
+    GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
+    const PipelineRenderingState& rendering, const PipelineVertexInputState& vertex_input,
+    std::span<const ShaderVertexInputInfo> vertex_info, const ShaderPixelInputInfo* ps_input_info,
+    const PipelineCache::GraphicsPrograms& programs, const PipelineStaticParameters& static_params,
+    vk::PipelineCache driver_cache, const GraphicsPipelineCreateHook* create_hook) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
 	const bool  tessellation   = vertex_info.size() == 3;
-	const bool ps_active = ps_input_info != nullptr;
+	const bool  ps_active      = ps_input_info != nullptr;
 	EXIT_IF(!vertex_program || (ps_active && !pixel_program));
 	const bool with_depth = rendering.depth_format != vk::Format::eUndefined ||
 	                        rendering.stencil_format != vk::Format::eUndefined;
@@ -281,12 +279,13 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	for (uint32_t index = 0; index < shader_stage_count; index++) {
 		auto&      stage   = shader_stages[index];
 		const bool is_mesh = stage.stage == vk::ShaderStageFlagBits::eMeshEXT;
-		if (!is_mesh && (stage.stage != vk::ShaderStageFlagBits::eFragment || !ps_input_info->stage)) {
+		if (!is_mesh &&
+		    (stage.stage != vk::ShaderStageFlagBits::eFragment || !ps_input_info->stage)) {
 			continue;
 		}
-		const auto wave_size = is_mesh ? vs_input_info.mesh.wave_size
-		                               : ps_input_info->stage.program->wave_size;
-		const auto required  = graphics.GraphicsSubgroupSize(stage.stage, wave_size);
+		const auto wave_size =
+		    is_mesh ? vs_input_info.mesh.wave_size : ps_input_info->stage.program->wave_size;
+		const auto required = graphics.GraphicsSubgroupSize(stage.stage, wave_size);
 		if (required != 0) {
 			stage_subgroup_sizes[index].requiredSubgroupSize = required;
 			stage.pNext                                      = &stage_subgroup_sizes[index];
@@ -323,7 +322,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		if (vs_input_info.fetch_embedded && compiled_components == 0) {
 			continue;
 		}
-		auto& native_attribute     = input_attr[input_attribute_count++];
+		auto& native_attribute    = input_attr[input_attribute_count++];
 		native_attribute.binding  = vertex_input.attributes[index].binding;
 		native_attribute.location = index;
 		native_attribute.offset   = vertex_input.attributes[index].offset;
@@ -413,19 +412,22 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	                     !graphics.provoking_vertex_last_enabled);
 	if (graphics.provoking_vertex_last_enabled) {
 		provoking_vertex.provokingVertexMode = static_params.provoking_vtx_last
-		    ? vk::ProvokingVertexModeEXT::eLastVertex : vk::ProvokingVertexModeEXT::eFirstVertex;
-		provoking_vertex.pNext = rasterizer.pNext;
-		rasterizer.pNext = &provoking_vertex;
+		                                           ? vk::ProvokingVertexModeEXT::eLastVertex
+		                                           : vk::ProvokingVertexModeEXT::eFirstVertex;
+		provoking_vertex.pNext               = rasterizer.pNext;
+		rasterizer.pNext                     = &provoking_vertex;
 	}
-	rasterizer.cullMode  = cull_mode;
-	rasterizer.frontFace = front_face;
+	rasterizer.cullMode    = cull_mode;
+	rasterizer.frontFace   = front_face;
 	rasterizer.polygonMode = static_params.polygon_mode;
-	rasterizer.lineWidth = 1.0f;
+	rasterizer.lineWidth   = 1.0f;
 
 	vk::PipelineMultisampleStateCreateInfo multisampling {};
 	multisampling.sampleShadingEnable  = static_params.sample_shading_enable ? VK_TRUE : VK_FALSE;
 	multisampling.rasterizationSamples = vulkan_sample_count(static_params.samples);
 	multisampling.minSampleShading     = 1.0f;
+	multisampling.alphaToCoverageEnable =
+	    static_params.alpha_to_coverage_enable ? VK_TRUE : VK_FALSE;
 
 	vk::PipelineColorBlendAttachmentState color_blend_attachment[RENDER_COLOR_ATTACHMENTS_MAX] = {};
 	for (uint32_t i = 0; i < rendering.color_count; i++) {
@@ -439,9 +441,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		    GetBlendFactor(static_params.color_destblend[i]);
 		color_blend_attachment[i].colorBlendOp = GetBlendOp(static_params.color_comb_fcn[i]);
 		color_blend_attachment[i].srcAlphaBlendFactor =
-		    (static_params.separate_alpha_blend[i]
-		         ? GetBlendFactor(static_params.alpha_srcblend[i])
-		         : color_blend_attachment[i].srcColorBlendFactor);
+		    (static_params.separate_alpha_blend[i] ? GetBlendFactor(static_params.alpha_srcblend[i])
+		                                           : color_blend_attachment[i].srcColorBlendFactor);
 		color_blend_attachment[i].dstAlphaBlendFactor =
 		    (static_params.separate_alpha_blend[i]
 		         ? GetBlendFactor(static_params.alpha_destblend[i])
@@ -497,24 +498,17 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 #else
 	    (static_params.depth_bounds_test_enable ? VK_TRUE : VK_FALSE);
 #endif
-	depth_stencil_info.minDepthBounds    = static_params.depth_min_bounds;
-	depth_stencil_info.maxDepthBounds    = static_params.depth_max_bounds;
+	depth_stencil_info.minDepthBounds = static_params.depth_min_bounds;
+	depth_stencil_info.maxDepthBounds = static_params.depth_max_bounds;
 
 	std::vector<vk::DynamicState> dynamic_states {
-	    vk::DynamicState::eViewportWithCount,
-	    vk::DynamicState::eScissorWithCount,
-	    vk::DynamicState::eLineWidth,
-	    vk::DynamicState::eDepthTestEnable,
-	    vk::DynamicState::eDepthWriteEnable,
-	    vk::DynamicState::eDepthCompareOp,
-	    vk::DynamicState::eDepthBiasEnable,
-	    vk::DynamicState::eDepthBias,
-	    vk::DynamicState::eStencilTestEnable,
-	    vk::DynamicState::eStencilOp,
-	    vk::DynamicState::eStencilCompareMask,
-	    vk::DynamicState::eStencilReference,
-	    vk::DynamicState::eStencilWriteMask,
-	    vk::DynamicState::eBlendConstants,
+	    vk::DynamicState::eViewportWithCount,  vk::DynamicState::eScissorWithCount,
+	    vk::DynamicState::eLineWidth,          vk::DynamicState::eDepthTestEnable,
+	    vk::DynamicState::eDepthWriteEnable,   vk::DynamicState::eDepthCompareOp,
+	    vk::DynamicState::eDepthBiasEnable,    vk::DynamicState::eDepthBias,
+	    vk::DynamicState::eStencilTestEnable,  vk::DynamicState::eStencilOp,
+	    vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilReference,
+	    vk::DynamicState::eStencilWriteMask,   vk::DynamicState::eBlendConstants,
 	};
 	if (graphics.color_write_enable_enabled && rendering.color_count != 0) {
 		dynamic_states.push_back(vk::DynamicState::eColorWriteEnableEXT);
@@ -551,15 +545,15 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	vk::PipelineTessellationStateCreateInfo tessellation_state {};
 	tessellation_state.patchControlPoints =
 	    tessellation ? vs_input_info.tess.input_control_points : 3u;
-	pipeline_info.pTessellationState = (rect_list || tessellation) ? &tessellation_state : nullptr;
-	pipeline_info.pViewportState          = &viewport_state;
-	pipeline_info.pRasterizationState     = &rasterizer;
-	pipeline_info.pMultisampleState       = &multisampling;
-	pipeline_info.pDepthStencilState      = (with_depth ? &depth_stencil_info : nullptr);
-	pipeline_info.pColorBlendState        = &color_blending;
-	pipeline_info.pDynamicState           = &dynamic_state;
-	pipeline_info.layout                  = pipeline.pipeline_layout;
-	pipeline_info.basePipelineIndex       = -1;
+	pipeline_info.pTessellationState  = (rect_list || tessellation) ? &tessellation_state : nullptr;
+	pipeline_info.pViewportState      = &viewport_state;
+	pipeline_info.pRasterizationState = &rasterizer;
+	pipeline_info.pMultisampleState   = &multisampling;
+	pipeline_info.pDepthStencilState  = (with_depth ? &depth_stencil_info : nullptr);
+	pipeline_info.pColorBlendState    = &color_blending;
+	pipeline_info.pDynamicState       = &dynamic_state;
+	pipeline_info.layout              = pipeline.pipeline_layout;
+	pipeline_info.basePipelineIndex   = -1;
 
 	EXIT_IF(pipeline.pipeline != nullptr);
 
@@ -610,10 +604,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 		                                                 &pipeline.pipeline);
 	}
-	Profiler::AddFrameWait(Profiler::FrameWait::GraphicsPipelineDriver, 1,
-	                       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                                                 std::chrono::steady_clock::now() - driver_begin)
-	                                                 .count()));
+	Profiler::AddFrameWait(
+	    Profiler::FrameWait::GraphicsPipelineDriver, 1,
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                              std::chrono::steady_clock::now() - driver_begin)
+	                              .count()));
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
@@ -634,8 +629,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
                             vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
-                            const ComputePipelineCreateHook* create_hook,
-                            vk::Result* result_out) {
+                            const ComputePipelineCreateHook* create_hook, vk::Result* result_out) {
 	EXIT_IF(compute_module == nullptr);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
@@ -670,6 +664,13 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	vk::Result result = vk::Result::eSuccess;
 
 	vk::ComputePipelineCreateInfo info {};
+	// KYTY_ORDERED_APPEND: GDS programs may run per workgroup through vkCmdDispatchBase.
+	if (OrderedAppendSplitEnabled() && input_info.stage.program != nullptr &&
+	    (ShaderRecompiler::IR::FindBinding(input_info.stage.program->bindings,
+	                                       ShaderRecompiler::IR::DescriptorBindingKind::Gds) !=
+	     nullptr)) {
+		info.flags = vk::PipelineCreateFlagBits::eDispatchBase;
+	}
 	info.stage             = comp_shader_stage_info;
 	info.layout            = pipeline.pipeline_layout;
 	info.basePipelineIndex = -1;
@@ -698,7 +699,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 				graphics.device.destroyPipeline(pipeline.pipeline, nullptr);
 				pipeline.pipeline = nullptr;
 			}
-			ReleasePipelineLayout(graphics, pipeline.pipeline_layout, pipeline.descriptor_set_layout);
+			ReleasePipelineLayout(graphics, pipeline.pipeline_layout,
+			                      pipeline.descriptor_set_layout);
 			pipeline.pipeline_layout       = nullptr;
 			pipeline.descriptor_set_layout = nullptr;
 		}

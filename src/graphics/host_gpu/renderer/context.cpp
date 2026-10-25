@@ -5,10 +5,10 @@
 #include "common/profiler.h"
 #include "common/rendererBatch.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/memoryStats.h"
-#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -45,17 +45,44 @@ static bool EnvSwitch(const char* name, bool default_value) {
 	         std::strcmp(value, "off") == 0);
 }
 
+// KYTY_DEPTH_RO_STORE_NONE=1 (default off; chenxiao07/KytyPS5 ef46df82f): a depth or stencil
+// aspect the rendering's attachment layout makes read-only is stored with STORE_OP_NONE. The draws
+// of such a pass cannot write it, and STORE_OP_STORE is a write for synchronization (a pass that
+// tests against the depth buffer it also samples, then the next transition of it: a
+// write-after-write the barrier made for the shader reads did not cover) and a write-back for the
+// driver.
+static vk::AttachmentStoreOp DepthStoreOp(vk::ImageLayout layout, bool stencil) {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_DEPTH_RO_STORE_NONE");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (enabled) {
+		switch (layout) {
+			case vk::ImageLayout::eDepthStencilReadOnlyOptimal: return vk::AttachmentStoreOp::eNone;
+			case vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal:
+			case vk::ImageLayout::eDepthReadOnlyOptimal:
+				if (!stencil) return vk::AttachmentStoreOp::eNone;
+				break;
+			case vk::ImageLayout::eDepthAttachmentStencilReadOnlyOptimal:
+			case vk::ImageLayout::eStencilReadOnlyOptimal:
+				if (stencil) return vk::AttachmentStoreOp::eNone;
+				break;
+			default: break;
+		}
+	}
+	return vk::AttachmentStoreOp::eStore;
+}
+
 bool BarrierBatchEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
-		return EnvSwitch("KYTY_BARRIER_BATCH", true);
-	}));
+	const auto                  enabled = static_cast<bool>(
+	    Common::Once(enabled_once, [&] { return EnvSwitch("KYTY_BARRIER_BATCH", true); }));
 	return enabled;
 }
 
 bool BarrierSinkEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+	const auto                  enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return BarrierBatchEnabled() && EnvSwitch("KYTY_BARRIER_SINK", true);
 	}));
 	return enabled;
@@ -68,7 +95,7 @@ bool UploadBatchEnabled() {
 
 bool DrawWriteSinkEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+	const auto                  enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return BarrierBatchEnabled() && EnvSwitch("KYTY_DRAW_WRITE_SINK", true);
 	}));
 	return enabled;
@@ -76,7 +103,7 @@ bool DrawWriteSinkEnabled() {
 
 bool DepthFeedbackKeepEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+	const auto                  enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return BarrierBatchEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_KEEP", true);
 	}));
 	return enabled;
@@ -84,7 +111,7 @@ bool DepthFeedbackKeepEnabled() {
 
 bool DepthFeedbackLazyEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
+	const auto                  enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return DepthFeedbackKeepEnabled() && EnvSwitch("KYTY_DEPTH_FEEDBACK_LAZY", true);
 	}));
 	return enabled;
@@ -97,9 +124,8 @@ bool DepthLayoutStableEnabled() {
 
 bool PushConstantShadowEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
-	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
-		return EnvSwitch("KYTY_PUSH_CONSTANT_SHADOW", true);
-	}));
+	const auto                  enabled = static_cast<bool>(
+	    Common::Once(enabled_once, [&] { return EnvSwitch("KYTY_PUSH_CONSTANT_SHADOW", true); }));
 	return enabled;
 }
 
@@ -123,13 +149,11 @@ using Access2 = vk::AccessFlagBits2;
 constexpr vk::AccessFlags2 KnownDeviceReads =
     Access2::eIndirectCommandRead | Access2::eIndexRead | Access2::eVertexAttributeRead |
     Access2::eUniformRead | Access2::eInputAttachmentRead | Access2::eShaderRead |
-    Access2::eColorAttachmentRead | Access2::eDepthStencilAttachmentRead |
-    Access2::eTransferRead | Access2::eMemoryRead | Access2::eShaderSampledRead |
-    Access2::eShaderStorageRead;
+    Access2::eColorAttachmentRead | Access2::eDepthStencilAttachmentRead | Access2::eTransferRead |
+    Access2::eMemoryRead | Access2::eShaderSampledRead | Access2::eShaderStorageRead;
 constexpr vk::AccessFlags2 KnownDeviceWrites =
-    Access2::eShaderWrite | Access2::eColorAttachmentWrite |
-    Access2::eDepthStencilAttachmentWrite | Access2::eTransferWrite | Access2::eMemoryWrite |
-    Access2::eShaderStorageWrite;
+    Access2::eShaderWrite | Access2::eColorAttachmentWrite | Access2::eDepthStencilAttachmentWrite |
+    Access2::eTransferWrite | Access2::eMemoryWrite | Access2::eShaderStorageWrite;
 
 // True when a dependency on `have` stages includes every stage in `want`. ALL_COMMANDS covers
 // every queue stage; HOST is not a queue stage and must be present literally.
@@ -431,15 +455,13 @@ void CommandBuffer::RequestUploadCopy(vk::Buffer source, vk::Buffer destination,
 	m_pending.uploads.push_back({source, destination,
 	                             static_cast<uint32_t>(m_pending.upload_regions.size()),
 	                             static_cast<uint32_t>(regions.size())});
-	m_pending.upload_regions.insert(m_pending.upload_regions.end(), regions.begin(),
-	                                regions.end());
+	m_pending.upload_regions.insert(m_pending.upload_regions.end(), regions.begin(), regions.end());
 	m_pending.origins |= OriginBit(BarrierOrigin::Upload);
 	CountOriginRequest(BarrierOrigin::Upload);
 }
 
 void CommandBuffer::RecordPendingUploads() const {
-	const GpuOpProfiler::ScopedSite site(
-	    g_batch_sites[static_cast<size_t>(BarrierOrigin::Upload)]);
+	const GpuOpProfiler::ScopedSite site(g_batch_sites[static_cast<size_t>(BarrierOrigin::Upload)]);
 	std::vector<vk::BufferMemoryBarrier2> destinations;
 	for (const auto& upload: m_pending.uploads) {
 		if (std::ranges::any_of(destinations, [&upload](const auto& barrier) {
@@ -450,11 +472,10 @@ void CommandBuffer::RecordPendingUploads() const {
 		vk::BufferMemoryBarrier2 barrier {};
 		// Every earlier access of the destination (including an earlier upload copy) before
 		// the copies' writes, as SynchronizeBuffer's own pre-copy barrier.
-		barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
-		barrier.srcAccessMask       = vk::AccessFlagBits2::eMemoryRead |
-		                        vk::AccessFlagBits2::eMemoryWrite |
-		                        vk::AccessFlagBits2::eTransferRead |
-		                        vk::AccessFlagBits2::eTransferWrite;
+		barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+		barrier.srcAccessMask =
+		    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
+		    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;
 		barrier.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
 		barrier.dstAccessMask       = vk::AccessFlagBits2::eTransferWrite;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -659,11 +680,13 @@ void CommandBuffer::End() const {
 	FlushBarriers();
 	auto buffer = StateHandle();
 	if (GpuBreadcrumbs::Active()) {
-		// The command buffer's last breadcrumb: at the bottom of the pipe, everything in it completed.
+		// The command buffer's last breadcrumb: at the bottom of the pipe, everything in it
+		// completed.
 		const auto tick = m_context.GetCommandScheduler().CurrentTick();
-		GpuBreadcrumbs::Write(buffer, GpuBreadcrumbs::Queue::Graphics,
-		                      GpuBreadcrumbs::Note(GpuBreadcrumbs::Queue::Graphics,
-		                                           {.op = GpuBreadcrumbs::OpCommandBufferEnd, .tick = tick}));
+		GpuBreadcrumbs::Write(
+		    buffer, GpuBreadcrumbs::Queue::Graphics,
+		    GpuBreadcrumbs::Note(GpuBreadcrumbs::Queue::Graphics,
+		                         {.op = GpuBreadcrumbs::OpCommandBufferEnd, .tick = tick}));
 	}
 
 	auto result = buffer.end();
@@ -750,19 +773,19 @@ int32_t CommandBuffer::PushDescriptors(vk::PipelineBindPoint point, vk::Pipeline
 		state.bound_set = nullptr;
 		return PushMissFresh;
 	}
-	bool supported = Common::RendererBatchEnabled() && set == 0;
+	bool   supported    = Common::RendererBatchEnabled() && set == 0;
 	size_t buffer_count = 0, image_count = 0;
 	for (uint32_t i = 0; supported && i < count; ++i) {
-		const auto& write = writes[i];
-		const bool buffer_type = write.descriptorType == vk::DescriptorType::eStorageBuffer ||
-		                         write.descriptorType == vk::DescriptorType::eUniformBuffer;
-		const bool image_type = write.descriptorType == vk::DescriptorType::eSampler ||
-		                        write.descriptorType == vk::DescriptorType::eSampledImage ||
-		                        write.descriptorType == vk::DescriptorType::eStorageImage ||
-		                        write.descriptorType == vk::DescriptorType::eCombinedImageSampler;
-		supported = write.pNext == nullptr && write.pTexelBufferView == nullptr &&
-		            ((buffer_type && write.pBufferInfo != nullptr) ||
-		             (image_type && write.pImageInfo != nullptr));
+		const auto& write       = writes[i];
+		const bool  buffer_type = write.descriptorType == vk::DescriptorType::eStorageBuffer ||
+		                          write.descriptorType == vk::DescriptorType::eUniformBuffer;
+		const bool  image_type  = write.descriptorType == vk::DescriptorType::eSampler ||
+		                          write.descriptorType == vk::DescriptorType::eSampledImage ||
+		                          write.descriptorType == vk::DescriptorType::eStorageImage ||
+		                          write.descriptorType == vk::DescriptorType::eCombinedImageSampler;
+		supported               = write.pNext == nullptr && write.pTexelBufferView == nullptr &&
+		                          ((buffer_type && write.pBufferInfo != nullptr) ||
+		                           (image_type && write.pImageInfo != nullptr));
 		buffer_count += buffer_type ? write.descriptorCount : 0u;
 		image_count += image_type ? write.descriptorCount : 0u;
 	}
@@ -776,7 +799,8 @@ int32_t CommandBuffer::PushDescriptors(vk::PipelineBindPoint point, vk::Pipeline
 		for (uint32_t i = 0; result == PushAvoided && i < count; ++i) {
 			const auto& write = writes[i];
 			const auto& old   = state.writes[i];
-			if (write.dstBinding != old.dstBinding || write.dstArrayElement != old.dstArrayElement ||
+			if (write.dstBinding != old.dstBinding ||
+			    write.dstArrayElement != old.dstArrayElement ||
 			    write.descriptorCount != old.descriptorCount ||
 			    write.descriptorType != old.descriptorType) {
 				result = PushMissShape;
@@ -785,8 +809,9 @@ int32_t CommandBuffer::PushDescriptors(vk::PipelineBindPoint point, vk::Pipeline
 			const bool buffer_type = write.descriptorType == vk::DescriptorType::eStorageBuffer ||
 			                         write.descriptorType == vk::DescriptorType::eUniformBuffer;
 			for (uint32_t j = 0; j < write.descriptorCount; ++j) {
-				const bool equal = buffer_type ? write.pBufferInfo[j] == state.buffers[buffer_index++]
-				                               : write.pImageInfo[j] == state.images[image_index++];
+				const bool equal = buffer_type
+				                       ? write.pBufferInfo[j] == state.buffers[buffer_index++]
+				                       : write.pImageInfo[j] == state.images[image_index++];
 				if (!equal) {
 					result = static_cast<int32_t>(i);
 					break;
@@ -812,12 +837,14 @@ int32_t CommandBuffer::PushDescriptors(vk::PipelineBindPoint point, vk::Pipeline
 	for (auto& write: state.writes) {
 		const bool buffer_type = write.descriptorType == vk::DescriptorType::eStorageBuffer ||
 		                         write.descriptorType == vk::DescriptorType::eUniformBuffer;
-		if (buffer_type) state.buffers.insert(state.buffers.end(), write.pBufferInfo,
-		                                     write.pBufferInfo + write.descriptorCount);
-		else state.images.insert(state.images.end(), write.pImageInfo,
-		                         write.pImageInfo + write.descriptorCount);
+		if (buffer_type)
+			state.buffers.insert(state.buffers.end(), write.pBufferInfo,
+			                     write.pBufferInfo + write.descriptorCount);
+		else
+			state.images.insert(state.images.end(), write.pImageInfo,
+			                    write.pImageInfo + write.descriptorCount);
 		write.pBufferInfo = nullptr;
-		write.pImageInfo = nullptr;
+		write.pImageInfo  = nullptr;
 	}
 	state.layout = layout;
 	return result;
@@ -825,13 +852,13 @@ int32_t CommandBuffer::PushDescriptors(vk::PipelineBindPoint point, vk::Pipeline
 
 void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
                                  uint32_t arg2, uint32_t arg3, uint64_t arg4) {
-	m_debug_op        = op;
-	m_debug_submit_id = submit_id;
-	m_debug_arg0      = arg0;
-	m_debug_arg1      = arg1;
-	m_debug_arg2      = arg2;
-	m_debug_arg3      = arg3;
-	m_debug_arg4      = arg4;
+	m_debug_op             = op;
+	m_debug_submit_id      = submit_id;
+	m_debug_arg0           = arg0;
+	m_debug_arg1           = arg1;
+	m_debug_arg2           = arg2;
+	m_debug_arg3           = arg3;
+	m_debug_arg4           = arg4;
 	const bool breadcrumbs = GpuBreadcrumbs::Active();
 	if ((m_graphics.diagnostic_checkpoints_enabled || breadcrumbs) && m_buffer) {
 		const DiagnosticCheckpoint checkpoint {
@@ -853,16 +880,36 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 			}
 		}
 		if (breadcrumbs) {
-			// KYTY_GPU_BREADCRUMBS: a state-like command (it orders nothing the batcher tracks), so it
-			// neither flushes pending barriers nor ends the rendering instance.
+			// KYTY_GPU_BREADCRUMBS: a state-like command (it orders nothing the batcher tracks), so
+			// it neither flushes pending barriers nor ends the rendering instance.
 			const auto marker = GpuBreadcrumbs::Note(GpuBreadcrumbs::Queue::Graphics, checkpoint);
 			const auto sink   = StateSink();
-			sink.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eTopOfPipe, GpuBreadcrumbs::Buffer(),
-			                          GpuBreadcrumbs::TopOffset(GpuBreadcrumbs::Queue::Graphics), marker);
-			sink.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe, GpuBreadcrumbs::Buffer(),
-			                          GpuBreadcrumbs::BottomOffset(GpuBreadcrumbs::Queue::Graphics), marker);
+			sink.writeBufferMarkerAMD(
+			    vk::PipelineStageFlagBits::eTopOfPipe, GpuBreadcrumbs::Buffer(),
+			    GpuBreadcrumbs::TopOffset(GpuBreadcrumbs::Queue::Graphics), marker);
+			sink.writeBufferMarkerAMD(
+			    vk::PipelineStageFlagBits::eBottomOfPipe, GpuBreadcrumbs::Buffer(),
+			    GpuBreadcrumbs::BottomOffset(GpuBreadcrumbs::Queue::Graphics), marker);
 		}
 	}
+}
+
+// The same rendering: the size, the layers, the depth/stencil attachment and the color attachments
+// up to the count (those past it are no part of a rendering; the defaulted comparison read all
+// eight at every draw; chenxiao07/KytyPS5 7bce89917).
+static bool SameRendering(const RenderState& a, const RenderState& b) {
+	if (a.num_color_attachments != b.num_color_attachments || a.width != b.width ||
+	    a.height != b.height || a.num_layers != b.num_layers ||
+	    !(a.depth_stencil_attachment == b.depth_stencil_attachment)) {
+		return false;
+	}
+	const auto count = std::min<uint32_t>(a.num_color_attachments, RENDER_COLOR_ATTACHMENTS_MAX);
+	for (uint32_t i = 0; i < count; i++) {
+		if (!(a.color_attachments[i] == b.color_attachments[i])) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {
@@ -870,10 +917,10 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	auto&      occlusion     = m_context.GetOcclusionCounter();
 	// A DB_COUNT_CONTROL change matters only when this instance or the next one is counted
 	// (KYTY_OCCLUSION_GATE, occlusion.h): with neither counted, no sample can reach a guest value.
-	const bool same_control =
-	    m_occlusion_control == count_control ||
-	    (OcclusionCounter::GateEnabled() && !occlusion.Active() && !occlusion.WouldCount(count_control));
-	const bool same_instance = m_rendering && m_render_state == state && same_control;
+	const bool same_control  = m_occlusion_control == count_control ||
+	                           (OcclusionCounter::GateEnabled() && !occlusion.Active() &&
+	                            !occlusion.WouldCount(count_control));
+	const bool same_instance = m_rendering && SameRendering(m_render_state, state) && same_control;
 	if (same_instance) {
 		m_occlusion_control = count_control;
 	}
@@ -913,7 +960,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 		if (barrier_split) {
 			KYTY_GPU_OP_SITE("render.barrier_split");
 			EndRendering();
-		} else if (m_render_state == state) {
+		} else if (SameRendering(m_render_state, state)) {
 			KYTY_GPU_OP_SITE("render.occlusion_control");
 			EndRendering();
 		} else {
@@ -953,7 +1000,8 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	depth.imageLayout = depth_stencil.image_layout;
 	depth.loadOp =
 	    depth_stencil.depth_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-	depth.storeOp                       = vk::AttachmentStoreOp::eStore;
+	depth.storeOp = depth_stencil.depth_clear ? vk::AttachmentStoreOp::eStore
+	                                          : DepthStoreOp(depth_stencil.image_layout, false);
 	depth.clearValue.depthStencil.depth = std::bit_cast<float>(depth_stencil.clear_value[0]);
 
 	vk::RenderingAttachmentInfo stencil {};
@@ -961,7 +1009,8 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	stencil.imageLayout = depth_stencil.image_layout;
 	stencil.loadOp =
 	    depth_stencil.stencil_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-	stencil.storeOp                         = vk::AttachmentStoreOp::eStore;
+	stencil.storeOp = depth_stencil.stencil_clear ? vk::AttachmentStoreOp::eStore
+	                                              : DepthStoreOp(depth_stencil.image_layout, true);
 	stencil.clearValue.depthStencil.stencil = depth_stencil.clear_value[1];
 
 	vk::RenderingInfo rendering {};
@@ -988,8 +1037,14 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 			                    static_cast<uint32_t>(db.z_info.format));
 		}
 	}
+	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state = state;
-	m_rendering    = true;
+	for (auto& color: m_render_state.color_attachments) {
+		color.is_clear = false;
+	}
+	m_render_state.depth_stencil_attachment.depth_clear   = false;
+	m_render_state.depth_stencil_attachment.stencil_clear = false;
+	m_rendering                                           = true;
 	++m_rendering_serial;
 	m_occlusion_control = count_control;
 	if (BarrierBatchEnabled()) {

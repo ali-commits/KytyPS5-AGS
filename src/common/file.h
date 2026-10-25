@@ -46,6 +46,8 @@ public:
 	virtual ~File();
 
 	bool Create(const std::filesystem::path& name);
+	// Atomically create a new host file; never replace an existing entry (including symlinks).
+	bool CreateExclusive(const std::filesystem::path& name);
 	bool Open(const std::filesystem::path& name, Mode mode);
 	bool OpenInMem(void* buf, uint32_t buf_size);
 	bool CreateInMem();
@@ -76,7 +78,7 @@ public:
 
 	std::vector<std::byte> ReadWholeBuffer();
 
-	static uint64_t Size(const std::filesystem::path& name);
+	static uint64_t            Size(const std::filesystem::path& name);
 	static std::optional<Info> GetInfo(const std::filesystem::path& name);
 
 	static bool IsDirectoryExisting(const std::filesystem::path& path);

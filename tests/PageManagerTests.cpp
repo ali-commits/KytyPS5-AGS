@@ -1022,6 +1022,58 @@ void TestDeferredProtectRacingRelease() {
   Live::OnCpFlip();
 }
 
+// A synchronous write watch (the texture cache watching an image) of a page whose deferred write
+// protection is still on another thread's pending list (the upload DMA worker's job). The image
+// copies its bytes next and relies on the following guest write faulting, so the watch must
+// return with the page protected (KYTY_DEFER_PROTECTS_COWATCH, default on); =0 is the old
+// behaviour, where only the counts were raised and the page stayed writable until the worker ran.
+void TestDeferredProtectCoWatch(bool fix) {
+  SetDeferMode(DeferMode::On);
+  Live::Testing::StageText(std::string("KYTY_DEFER_PROTECTS=all\nKYTY_DEFER_PROTECTS_COWATCH=") +
+                           (fix ? "1" : "0") + "\n");
+  Live::OnCpFlip();
+  PageManager manager;
+  const auto page_size = manager.GetPageSize();
+  auto *memory = Allocate(page_size * 2);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto before = PageManager::GetDeferProtectsStats();
+
+  PageManager::PendingProtects list;
+  {
+    const PageManager::DeferProtectsScope scope(true);
+    manager.UpdatePageWatchers<true>(address, page_size * 2);
+    list = PageManager::TakePendingProtects();
+    PageManager::DeferProtectsScope::Stop();
+  }
+  Check(!list.empty() && IsWritable(memory), "the buffer watch was not deferred");
+  // The image watches the first page only.
+  manager.UpdatePageWatchers<true>(address, page_size);
+  if (fix) {
+    Check(Protection(memory) == PAGE_READONLY,
+          "a synchronous watch of a pending page returned with the page writable");
+  } else {
+    Check(IsWritable(memory), "COWATCH=0 changed the old behaviour");
+  }
+  Check(IsWritable(memory + page_size), "the co-watch protected a page it does not watch");
+  std::thread([&] { PageManager::ApplyProtects(list, true); }).join();
+  Check(Protection(memory) == PAGE_READONLY && Protection(memory + page_size) == PAGE_READONLY,
+        "applying the pending span set the wrong protections");
+  const auto after = PageManager::GetDeferProtectsStats();
+  Check(after.cowatch_pages - before.cowatch_pages == 1, "the co-watch was not counted");
+  Check(after.cowatch_applied - before.cowatch_applied == (fix ? 1u : 0u),
+        "the co-watch apply count is wrong");
+  Check(after.pending_pages == 0, "pages stayed pending");
+  Check(after.lost_pages == before.lost_pages, "a page was left looser than its counts");
+
+  manager.UpdatePageWatchers<false>(address, page_size);
+  Check(Protection(memory) == PAGE_READONLY, "the image's unwatch dropped the buffer's watch");
+  manager.UpdatePageWatchers<false>(address, page_size * 2);
+  Check(IsWritable(memory) && IsWritable(memory + page_size), "unwatch did not restore access");
+  Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
+  Live::Testing::StageText("KYTY_DEFER_PROTECTS=\nKYTY_DEFER_PROTECTS_COWATCH=\n");
+  Live::OnCpFlip();
+}
+
 } // namespace
 
 namespace Libs::LibKernel::Memory {
@@ -1075,6 +1127,8 @@ int main(int argc, char **argv) {
   TestDeferredProtects("1");
   TestDeferredProtects("verify");
   TestDeferredProtectRacingRelease();
+  TestDeferredProtectCoWatch(false);
+  TestDeferredProtectCoWatch(true);
   Check(PageManager::GetDeferProtectsStats().verify_checks != 0,
         "deferred protection verify checked nothing");
   TestParkingLock();

@@ -30,3 +30,4 @@ _Textures/
 *.nsys-rep
 *.ngfx-gputrace
 .kiro
+CMakeUserPresets.json

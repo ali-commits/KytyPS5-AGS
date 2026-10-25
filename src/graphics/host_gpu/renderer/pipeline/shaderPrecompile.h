@@ -41,12 +41,12 @@ public:
 	struct Settings {
 		std::filesystem::path path;
 		// Header identity: the file is used only when byte-equal (device, input layouts).
-		std::vector<uint8_t>  identity;
+		std::vector<uint8_t> identity;
 		// New records stop being added beyond this file size.
-		uint64_t              max_file_bytes = 256ull * 1024 * 1024;
+		uint64_t max_file_bytes = 256ull * 1024 * 1024;
 		// Background writes (false: only Flush writes; tests).
-		bool                  background_writer = true;
-		uint64_t              flush_interval_ns = 2'000'000'000ull;
+		bool     background_writer = true;
+		uint64_t flush_interval_ns = 2'000'000'000ull;
 		// Messages (null: none).
 		std::function<void(const std::string&)> log;
 	};
@@ -66,28 +66,28 @@ public:
 		std::vector<uint32_t> static_state;
 		std::vector<uint32_t> code;
 		// The stage input info struct, bytes as in memory, with its runtime pointers cleared.
-		std::vector<uint8_t>  input_info;
+		std::vector<uint8_t> input_info;
 		// A merged stage's second half (the NGG GS back half of a mesh program; empty otherwise):
 		// `hash` is then the XXH3-64 of the two halves' code hashes.
 		std::vector<uint32_t> back_code;
 	};
 	struct Entry {
-		uint32_t             source = 0; // index into Sources()
+		uint32_t             source           = 0; // index into Sources()
 		uint32_t             push_data_cursor = 0;
 		std::vector<uint8_t> specialization;
 	};
 
 	struct Stats {
-		bool     file_found      = false;
-		bool     header_rejected = false;
-		uint64_t file_bytes      = 0;
-		uint64_t load_ns         = 0;
-		uint64_t damaged_bytes   = 0; // ignored tail
+		bool     file_found       = false;
+		bool     header_rejected  = false;
+		uint64_t file_bytes       = 0;
+		uint64_t load_ns          = 0;
+		uint64_t damaged_bytes    = 0; // ignored tail
 		uint64_t recorded_sources = 0;
 		uint64_t recorded_entries = 0;
-		uint64_t written_bytes   = 0;
-		uint64_t write_failures  = 0;
-		bool     over_capacity   = false;
+		uint64_t written_bytes    = 0;
+		uint64_t write_failures   = 0;
+		bool     over_capacity    = false;
 	};
 
 	static constexpr char     FileMagic[8]  = {'K', 'Y', 'S', 'H', 'J', 'R', 'N', '1'};
@@ -120,9 +120,14 @@ public:
 	};
 	Appended AppendReplayOnly(std::vector<Source> sources, const std::vector<Entry>& entries);
 
+	// Excludes loaded replay entries by sorted index, without changing the append-only journal or
+	// its recording/dedup indices. Only before replay starts (migration recovery).
+	void ExcludeReplayEntries(std::span<const uint32_t> indices);
+
 	// The identity in a journal file's header (tools: kyty_pipeline_list reads journals of any
 	// device). False when the file is not a shader journal.
-	[[nodiscard]] static bool ReadIdentity(const std::filesystem::path& path, std::vector<uint8_t>& identity);
+	[[nodiscard]] static bool ReadIdentity(const std::filesystem::path& path,
+	                                       std::vector<uint8_t>&        identity);
 
 	// Whether a source with this identity is journaled already (loaded or recorded this run); the
 	// caller then needs not fill code and input_info.
@@ -134,7 +139,7 @@ public:
 	// Writes the pending records now. False when a write failed.
 	bool Flush();
 
-	[[nodiscard]] Stats GetStats();
+	[[nodiscard]] Stats                        GetStats();
 	[[nodiscard]] const std::filesystem::path& Path() const { return m_settings.path; }
 
 private:
@@ -145,7 +150,7 @@ private:
 	void            RunWriter();
 	void            Log(const std::string& message) const;
 
-	Settings m_settings;
+	Settings            m_settings;
 	std::vector<Source> m_sources;
 	std::vector<Entry>  m_entries;
 
@@ -154,13 +159,14 @@ private:
 	std::unordered_multimap<uint64_t, uint32_t> m_by_digest;
 	// Identity of every known source (code and input_info omitted for recorded ones).
 	std::vector<Source> m_known;
-	std::unordered_set<uint64_t> m_known_entries; // digest of (source index, cursor, specialization)
-	std::vector<std::vector<uint8_t>> m_pending;  // encoded records, in order
-	uint64_t m_pending_bytes = 0;
-	uint32_t m_next_source   = 0;
+	std::unordered_set<uint64_t>
+	    m_known_entries;                         // digest of (source index, cursor, specialization)
+	std::vector<std::vector<uint8_t>> m_pending; // encoded records, in order
+	uint64_t                          m_pending_bytes = 0;
+	uint32_t                          m_next_source   = 0;
 	uint64_t m_file_valid_bytes = 0; // length of the intact prefix (0: the file is to be recreated)
-	uint64_t m_file_bytes    = 0;    // length after the pending records
-	bool     m_file_ready    = false; // the header is in the file
+	uint64_t m_file_bytes       = 0; // length after the pending records
+	bool     m_file_ready       = false; // the header is in the file
 	Stats    m_stats;
 
 	std::mutex              m_write_mutex; // one write at a time
@@ -187,7 +193,7 @@ public:
 		bool                  background_writer = true;
 		uint64_t              flush_interval_ns = 2'000'000'000ull;
 		// Flush writes only the records recorded before the last Seal().
-		bool                  sealed_writes     = false;
+		bool                                    sealed_writes = false;
 		std::function<void(const std::string&)> log;
 	};
 	struct Record {
@@ -219,7 +225,7 @@ public:
 
 	// What the file held, in file order (immutable until ReleaseLoaded).
 	[[nodiscard]] const std::vector<Record>& Loaded() const { return m_loaded; }
-	void ReleaseLoaded();
+	void                                     ReleaseLoaded();
 
 	// Whether the key was loaded or recorded (and not dropped by Reset).
 	[[nodiscard]] bool Contains(uint64_t key) const;
@@ -233,10 +239,11 @@ public:
 	// Writes the pending (sealed) records now. False when a write failed.
 	bool Flush();
 
-	[[nodiscard]] Stats GetStats() const;
+	[[nodiscard]] Stats  GetStats() const;
 	[[nodiscard]] size_t KnownCount() const;
 	// The identity in a pipeline journal file's header (tools). False when it is not one.
-	[[nodiscard]] static bool ReadIdentity(const std::filesystem::path& path, std::vector<uint8_t>& identity);
+	[[nodiscard]] static bool                  ReadIdentity(const std::filesystem::path& path,
+	                                                        std::vector<uint8_t>&        identity);
 	[[nodiscard]] const std::filesystem::path& Path() const { return m_settings.path; }
 
 private:
@@ -250,7 +257,7 @@ private:
 
 	mutable std::mutex                m_mutex;
 	std::unordered_set<uint64_t>      m_known;
-	std::vector<std::vector<uint8_t>> m_pending; // encoded records, in order
+	std::vector<std::vector<uint8_t>> m_pending;           // encoded records, in order
 	size_t                            m_sealed        = 0; // m_pending[0, m_sealed) may be written
 	uint64_t                          m_pending_bytes = 0;
 	uint64_t                          m_file_valid_bytes = 0;
@@ -277,21 +284,22 @@ public:
 		Skipped,  // not replayable (stale input, skip-dispatch program, declined)
 		Failed,
 	};
-	using CompileFn = std::function<Outcome(const ShaderJournal::Source&, const ShaderJournal::Entry&)>;
+	using CompileFn =
+	    std::function<Outcome(const ShaderJournal::Source&, const ShaderJournal::Entry&)>;
 
 	struct Settings {
-		uint32_t threads     = 2;
+		uint32_t threads = 2;
 		// Replays at most this many entries (0: all).
 		uint64_t max_entries = 0;
 		// Workers run below normal priority (the game's threads come first).
-		bool     low_priority = true;
+		bool low_priority = true;
 		// Entries of the sources this accepts are replayed first, in file order, then the rest in
 		// file order (also under max_entries: the cap drops the last of the rest). Called once per
 		// source, from the constructor. The software ray-tracing kernels use it: their pipelines
 		// take seconds to build and the game needs them at its first lighting pass.
 		std::function<bool(const ShaderJournal::Source&)> priority_source;
 		// Called on each worker thread when it starts (name, priority).
-		std::function<void(uint32_t worker)> thread_init;
+		std::function<void(uint32_t worker)>    thread_init;
 		std::function<void(const std::string&)> log;
 		// Called once on the last worker after the final line (nothing reads the journal's loaded
 		// content any more).
@@ -320,7 +328,7 @@ public:
 	// Entries not started yet are dropped; entries in progress finish.
 	void Stop();
 	// Returns once every entry was replayed (or Stop took effect).
-	void Wait();
+	void                   Wait();
 	[[nodiscard]] Progress GetProgress() const;
 
 private:
@@ -330,7 +338,7 @@ private:
 	const ShaderJournal& m_journal;
 	Settings             m_settings;
 	CompileFn            m_compile;
-	uint64_t             m_total = 0;
+	uint64_t             m_total    = 0;
 	uint64_t             m_begin_ns = 0;
 
 	// Replay order (indices into the journal's entries) when priority_source reordered them.
@@ -340,11 +348,11 @@ private:
 	std::atomic<uint64_t> m_done {0}, m_compiled {0}, m_present {0}, m_skipped {0}, m_failed {0};
 	std::atomic<uint32_t> m_workers_running {0};
 
-	mutable std::mutex      m_mutex; // progress reporting
-	std::condition_variable m_finished_cv;
-	uint64_t                m_reported_done = 0;
-	uint64_t                m_reported_ns   = 0;
-	bool                    m_finished      = false;
+	mutable std::mutex       m_mutex; // progress reporting
+	std::condition_variable  m_finished_cv;
+	uint64_t                 m_reported_done = 0;
+	uint64_t                 m_reported_ns   = 0;
+	bool                     m_finished      = false;
 	std::vector<std::thread> m_threads;
 };
 

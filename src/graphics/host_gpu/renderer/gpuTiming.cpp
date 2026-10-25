@@ -2,6 +2,8 @@
 
 #include "common/assert.h"
 #include "common/hangTrace.h"
+#include "common/liveSwitch.h"
+#include "common/paceLog.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/eopTimestamps.h"
@@ -56,9 +58,9 @@ struct DeviceInfo {
 const char* g_calibration_extension = nullptr;
 
 // Guards g_device and g_pending. Producers hold it only to append one collected batch.
-std::mutex          g_mutex;
-DeviceInfo          g_device;
-std::vector<Sample> g_pending;
+std::mutex            g_mutex;
+DeviceInfo            g_device;
+std::vector<Sample>   g_pending;
 std::atomic<uint64_t> g_dropped {0};
 std::atomic<uint64_t> g_unavailable {0};
 
@@ -157,8 +159,8 @@ const char* SelectCalibrationExtension(const std::vector<vk::ExtensionProperties
 	if (!Enabled() && !EopTimestamps::GpuEnabled()) {
 		return nullptr;
 	}
-	for (const char* name:
-	     {VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME}) {
+	for (const char* name: {VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
+	                        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME}) {
 		const bool found = std::any_of(available.begin(), available.end(), [name](const auto& ext) {
 			return std::strcmp(ext.extensionName, name) == 0;
 		});
@@ -182,7 +184,7 @@ void OnGuestFlip() {
 		return;
 	}
 	std::lock_guard flip_lock(g_flip_mutex);
-	DeviceInfo info;
+	DeviceInfo      info;
 	{
 		std::lock_guard lock(g_mutex);
 		info = g_device;
@@ -224,13 +226,13 @@ void OnGuestFlip() {
 	// Union of [start, end] spans. The cursor starts at the previous flip's union end, so an
 	// overlap with already-counted work is not counted twice and the gap from the previous
 	// flip's last completed span is attributed to this flip.
-	bool     have_cursor = g_have_previous_end;
-	int64_t  cursor      = 0;
-	int64_t  busy        = 0;
-	int64_t  idle        = 0;
-	int64_t  max_gap     = 0;
-	uint64_t gaps        = 0;
-	double   starved_ns  = 0.0;
+	bool     have_cursor       = g_have_previous_end;
+	int64_t  cursor            = 0;
+	int64_t  busy              = 0;
+	int64_t  idle              = 0;
+	int64_t  max_gap           = 0;
+	uint64_t gaps              = 0;
+	double   starved_ns        = 0.0;
 	double   record_latency_ns = 0.0, dispatch_latency_ns = 0.0, observe_lag_ns = 0.0;
 	uint64_t latency_samples = 0;
 	for (const auto& span: spans) {
@@ -262,7 +264,8 @@ void OnGuestFlip() {
 		}
 		if (calibration.valid && span.sample->dispatch_ns != 0) {
 			const auto start_steady = to_steady(span.start);
-			record_latency_ns += std::max(0.0, start_steady - static_cast<double>(span.sample->record_ns));
+			record_latency_ns +=
+			    std::max(0.0, start_steady - static_cast<double>(span.sample->record_ns));
 			dispatch_latency_ns +=
 			    std::max(0.0, start_steady - static_cast<double>(span.sample->dispatch_ns));
 			observe_lag_ns +=
@@ -276,16 +279,18 @@ void OnGuestFlip() {
 	}
 
 	HangTrace::GpuFrame frame;
-	frame.busy_ns              = ToUnsignedNs(static_cast<double>(busy) * info.period_ns);
-	frame.idle_ns              = ToUnsignedNs(static_cast<double>(idle) * info.period_ns);
-	frame.max_gap_ns           = ToUnsignedNs(static_cast<double>(max_gap) * info.period_ns);
-	frame.starved_ns           = ToUnsignedNs(starved_ns);
-	frame.command_buffers      = spans.size();
-	frame.latency_samples      = latency_samples;
-	frame.record_latency_ns    = ToUnsignedNs(record_latency_ns);
-	frame.dispatch_latency_ns  = ToUnsignedNs(dispatch_latency_ns);
-	frame.dropped              = dropped + unavailable + rejected;
+	frame.busy_ns             = ToUnsignedNs(static_cast<double>(busy) * info.period_ns);
+	frame.idle_ns             = ToUnsignedNs(static_cast<double>(idle) * info.period_ns);
+	frame.max_gap_ns          = ToUnsignedNs(static_cast<double>(max_gap) * info.period_ns);
+	frame.starved_ns          = ToUnsignedNs(starved_ns);
+	frame.command_buffers     = spans.size();
+	frame.latency_samples     = latency_samples;
+	frame.record_latency_ns   = ToUnsignedNs(record_latency_ns);
+	frame.dispatch_latency_ns = ToUnsignedNs(dispatch_latency_ns);
+	frame.dropped             = dropped + unavailable + rejected;
 	HangTrace::RecordGpuFrame(frame);
+	PaceLog::NoteGpuFrame(frame.busy_ns, frame.idle_ns, frame.starved_ns, frame.command_buffers,
+	                      calibration.valid && have_cursor ? ToUnsignedNs(to_steady(cursor)) : 0);
 
 	Profiler::AddFrameWait(Profiler::FrameWait::GpuBusy, frame.command_buffers, frame.busy_ns);
 	Profiler::AddFrameWait(Profiler::FrameWait::GpuIdle, gaps, frame.idle_ns);
@@ -318,8 +323,9 @@ GpuTimestampRing::GpuTimestampRing(GraphicContext& graphics, uint32_t pair_capac
 	info.period_ns  = graphics.physical_device_properties.limits.timestampPeriod;
 	if (info.valid_bits == 0 || info.valid_bits > 64 || !std::isfinite(info.period_ns) ||
 	    info.period_ns <= 0.0) {
-		std::printf("Kyty GPU timing disabled: queue family %u has %u timestamp bits, period %g ns\n",
-		            graphics.queue_family, info.valid_bits, info.period_ns);
+		std::printf(
+		    "Kyty GPU timing disabled: queue family %u has %u timestamp bits, period %g ns\n",
+		    graphics.queue_family, info.valid_bits, info.period_ns);
 		std::fflush(stdout);
 		return;
 	}
@@ -339,9 +345,8 @@ GpuTimestampRing::GpuTimestampRing(GraphicContext& graphics, uint32_t pair_capac
 		if (graphics.physical_device.getCalibrateableTimeDomainsKHR(&domain_count, nullptr) ==
 		    vk::Result::eSuccess) {
 			std::vector<vk::TimeDomainKHR> domains(domain_count);
-			if (graphics.physical_device.getCalibrateableTimeDomainsKHR(&domain_count,
-			                                                            domains.data()) ==
-			    vk::Result::eSuccess) {
+			if (graphics.physical_device.getCalibrateableTimeDomainsKHR(
+			        &domain_count, domains.data()) == vk::Result::eSuccess) {
 				domains.resize(domain_count);
 				const auto has = [&domains](vk::TimeDomainKHR domain) {
 					return std::find(domains.begin(), domains.end(), domain) != domains.end();
@@ -463,7 +468,7 @@ void GpuTimestampRing::Collect(uint64_t known_gpu_tick, bool force) {
 	if (ready == 0) {
 		return;
 	}
-	const auto observed = GpuTiming::NowNs();
+	const auto observed  = GpuTiming::NowNs();
 	const auto first_run = std::min(ready, capacity - m_head);
 	CollectRun(m_head, first_run, observed);
 	if (ready > first_run) {
@@ -484,14 +489,14 @@ void GpuTimestampRing::CollectRun(uint32_t first, uint32_t count, uint64_t obser
 		    m_pool, first * 2u, chunk * 2u, sizeof(uint64_t) * 4u * chunk, results.data(),
 		    sizeof(uint64_t) * 2u,
 		    vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
-		const bool read = result == vk::Result::eSuccess || result == vk::Result::eNotReady;
+		const bool read  = result == vk::Result::eSuccess || result == vk::Result::eNotReady;
 		uint32_t   valid = 0;
 		for (uint32_t i = 0; i < chunk; ++i) {
 			auto& slot = m_slots[first + i];
 			EXIT_IF(slot.state != SlotState::Submitted);
 			if (read && results[i * 4 + 1] != 0 && results[i * 4 + 3] != 0) {
 				samples[valid++] = {results[i * 4], results[i * 4 + 2], slot.record_ns,
-				                    slot.submit_ns, slot.dispatch_ns, observed_ns};
+				                    slot.submit_ns, slot.dispatch_ns,   observed_ns};
 			}
 			slot.state = SlotState::Free;
 		}
@@ -500,8 +505,8 @@ void GpuTimestampRing::CollectRun(uint32_t first, uint32_t count, uint64_t obser
 		}
 		if (valid != 0) {
 			std::lock_guard lock(g_mutex);
-			const auto room = kMaxPending - std::min(kMaxPending, g_pending.size());
-			const auto kept = std::min<size_t>(room, valid);
+			const auto      room = kMaxPending - std::min(kMaxPending, g_pending.size());
+			const auto      kept = std::min<size_t>(room, valid);
 			g_pending.insert(g_pending.end(), samples.begin(), samples.begin() + kept);
 			if (kept != valid) {
 				g_dropped.fetch_add(valid - kept, std::memory_order_relaxed);

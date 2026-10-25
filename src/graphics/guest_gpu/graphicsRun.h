@@ -79,6 +79,8 @@ public:
 	void DropCpVisibleLabels(uint64_t address, uint64_t size);
 	// Bit mask of bytes replaced by later CP writes (DropCpVisibleLabels).
 	[[nodiscard]] uint8_t DeferredLabelSupersededBytes(uint64_t address, uint64_t tick);
+	// A pending CP-visible label overlaps [address, address + size) (KYTY_LABEL_MODE=split).
+	[[nodiscard]] bool CpVisibleLabelOverlaps(uint64_t address, uint64_t size);
 
 private:
 	struct DeferredLabel {
@@ -113,6 +115,7 @@ private:
 		bool                      slice_progress    = false; // the last slice advanced
 		uint64_t                  flip_request_id   = 0;
 		uint64_t                  enqueue_ns        = 0;
+		uint64_t                  pace_enqueue_ns   = 0; // KYTY_PACE_LOG (steady clock)
 		uint64_t                  sequence          = 0; // admission order (m_queue_mutex)
 		// Last sequence admitted before the latest Done at admission (KYTY_FRAME_FENCE): the
 		// submission starts only after all of those have completed. 0 = no fence.

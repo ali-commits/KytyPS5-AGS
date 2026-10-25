@@ -398,6 +398,10 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	r.stencil_clear_enable =
 	    has_stencil && rc.stencil_clear_enable && !z.depth_view.stencil_write_disable;
 	r.stencil_clear_value = hw.GetStencilClearValue();
+	// Explicit clears until AcquireRenderTargets adds a pending HTile clear (upstream 57791645e).
+	r.load_clear_aspects = {};
+	if (r.depth_clear_enable) r.load_clear_aspects |= vk::ImageAspectFlagBits::eDepth;
+	if (r.stencil_clear_enable) r.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
 	r.stencil_test_enable = has_stencil && dc.stencil_enable;
 	if (r.stencil_test_enable) {
 		const bool stencil_ops_disabled =

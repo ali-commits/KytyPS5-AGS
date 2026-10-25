@@ -1,6 +1,8 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_COHERENCELOG_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_COHERENCELOG_H_
 
+#include "graphics/host_gpu/gpuTouchedPages.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -9,8 +11,6 @@
 #include <cstring>
 #include <span>
 #include <thread>
-
-#include "graphics/host_gpu/gpuTouchedPages.h"
 
 // Draw-prep S4: the coherence generation and its range log.
 //
@@ -105,11 +105,10 @@ public:
 	uint64_t Append(Range range, Source source) noexcept {
 		// KYTY_CP_SEQ=1: the sticky GPU-touched pages (gpuTouchedPages.h), set before the
 		// transition becomes observable, for the transitions that can make a range unclean.
-		GpuTouched::NoteTransition(range.begin, range.end,
-		                           source == Source::BufferDirtyAdd ||
-		                               source == Source::TrackerGpuMark ||
-		                               source == Source::ImageGpuModified ||
-		                               source == Source::PublicationBegin);
+		GpuTouched::NoteTransition(
+		    range.begin, range.end,
+		    source == Source::BufferDirtyAdd || source == Source::TrackerGpuMark ||
+		        source == Source::ImageGpuModified || source == Source::PublicationBegin);
 		const auto generation = m_generation.fetch_add(1, std::memory_order_seq_cst) + 1u;
 		auto&      entry      = m_entries[generation & (Capacity - 1u)];
 		// Slots are written in turn: the writer of this lap waits until the previous lap's writer
@@ -157,9 +156,11 @@ public:
 	}
 
 	// Whether any entry with a generation in (from, to] intersects one of `ranges`, which must be
-	// sorted by begin and non-overlapping. An unfinished entry is waited for briefly.
-	[[nodiscard]] CheckOutcome Check(uint64_t from, uint64_t to,
-	                                 std::span<const Range> ranges) const noexcept {
+	// sorted by begin and non-overlapping. An unfinished entry is waited for briefly. `hull`: test
+	// each entry against [first begin, last end) before searching the ranges (same answer; the
+	// search touches the range list only for entries inside the hull).
+	[[nodiscard]] CheckOutcome Check(uint64_t from, uint64_t to, std::span<const Range> ranges,
+	                                 bool hull = false) const noexcept {
 		CheckOutcome outcome;
 		if (to <= from) {
 			return outcome;
@@ -183,6 +184,10 @@ public:
 				outcome.result = CheckResult::Unknown;
 				return outcome;
 			}
+			if (hull && (ranges.empty() || range.end <= ranges.front().begin ||
+			             range.begin >= ranges.back().end)) {
+				continue;
+			}
 			if (IntersectsAny(range, ranges)) {
 				outcome.result          = CheckResult::Conflict;
 				outcome.conflict_source = source;
@@ -198,8 +203,9 @@ public:
 			return false;
 		}
 		// First range whose end is past range.begin.
-		const auto it = std::lower_bound(ranges.begin(), ranges.end(), range.begin,
-		                                 [](const Range& r, uint64_t value) { return r.end <= value; });
+		const auto it =
+		    std::lower_bound(ranges.begin(), ranges.end(), range.begin,
+		                     [](const Range& r, uint64_t value) { return r.end <= value; });
 		return it != ranges.end() && it->begin < range.end;
 	}
 

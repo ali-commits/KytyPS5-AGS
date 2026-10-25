@@ -56,6 +56,7 @@ QStringList BuildEmulatorArgs(const Configuration& info) {
 		args << "--hide-cursor";
 	}
 	args << "--readback-linear-images" << BoolArg(info.readback_linear_images);
+	args << "--readback-tiled-images" << BoolArg(info.readback_tiled_images);
 	args << "--sync-raw-image-buffers" << BoolArg(info.sync_raw_image_buffers);
 	args << "--support-zmask" << BoolArg(info.support_zmask);
 	args << "--perf-overlay" << BoolArg(info.perf_overlay_enabled);

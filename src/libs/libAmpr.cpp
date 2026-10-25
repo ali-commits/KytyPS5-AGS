@@ -19,15 +19,19 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #ifdef min
@@ -316,6 +320,10 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 				log_missing = true;
 			}
+		}
+		if (!log_missing && info.result == OK && path.starts_with("/addcont")) {
+			LOGF("\tAPR resolve: %s -> %s (%" PRIu64 " bytes)\n", guest_path,
+			     Common::PathToString(info.host_path).c_str(), info.file_size);
 		}
 		if (log_missing) {
 			LOGF("\tAPR resolve missing path: %s -> %s\n", guest_path, info.host_path.c_str());
@@ -1709,7 +1717,7 @@ static bool AppendAmmMapRecord(uint64_t                                 command_
 	return CommitCommandBufferRecord(command_buffer, &state, record_size);
 }
 
-static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offset,
+static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t file_offset,
                                uint64_t destination, uint64_t size, uint64_t* bytes_read);
 
 static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_result,
@@ -2016,7 +2024,60 @@ static bool AdvanceCommandBuffer(uint64_t command_buffer, uint64_t record_size) 
 	return CommitCommandBufferRecord(command_buffer, &state, record_size);
 }
 
-static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offset,
+// KYTY_APR_KEEP_FILES=1 (default off; chenxiao07/KytyPS5 2f9a63da7 and 0fbe46bdf): APR reads go
+// through game files kept open for the process (a handle per host path, its size read once), into
+// a staging buffer the reading thread keeps, instead of an open, a size query, a read and a close
+// per read with a new zero-filled buffer each time. Streams read in small pieces then get the
+// file cache's read-ahead, and a first open no longer happens at every piece. The open itself is
+// made outside the table's lock, so reads of files open already never wait behind it.
+// KYTY_APR_PREPARE_WRITE=1 (default off; chenxiao07/KytyPS5 23011e4c5 and d635d6d70): before the
+// bytes are copied in, a destination resource tracking watches is invalidated once (as the
+// kernel's file reads do) instead of taking a write fault per 4 KiB page.
+static bool AprEnvOn(const char* name) {
+	const auto* value = std::getenv(name);
+	return value != nullptr && std::strcmp(value, "1") == 0;
+}
+static bool AprKeepFilesEnabled() {
+	static const bool enabled = AprEnvOn("KYTY_APR_KEEP_FILES");
+	return enabled;
+}
+static bool AprPrepareWriteEnabled() {
+	static const bool enabled = AprEnvOn("KYTY_APR_PREPARE_WRITE");
+	return enabled;
+}
+
+struct KeptAprFile {
+	std::mutex   mutex; // one positioned read at a time on the shared handle
+	Common::File file;
+	uint64_t     size = 0;
+};
+
+static std::shared_ptr<KeptAprFile> OpenKeptAprFile(const std::filesystem::path& host_path) {
+	static std::mutex                                                    table_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<KeptAprFile>> table;
+	constexpr size_t                                                     MaxKeptFiles = 16384;
+	auto key = Common::PathToString(host_path);
+	{
+		std::lock_guard lock(table_mutex);
+		if (auto it = table.find(key); it != table.end()) {
+			return it->second;
+		}
+	}
+	auto kept = std::make_shared<KeptAprFile>();
+	if (!kept->file.Open(host_path, Common::File::Mode::Read)) {
+		return nullptr;
+	}
+	kept->size = kept->file.Size();
+	std::lock_guard lock(table_mutex);
+	if (table.size() >= MaxKeptFiles) {
+		// Readers holding an entry keep it alive; the others close with the table's references.
+		table.clear();
+	}
+	// Another thread may have opened it meanwhile: keep one handle.
+	return table.emplace(std::move(key), std::move(kept)).first->second;
+}
+
+static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t file_offset,
                                uint64_t destination, uint64_t size, uint64_t* bytes_read) {
 	Profiler::ScopedLoadingOperation loading(Profiler::LoadingOperation::AprRead);
 	Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprRequestedBytes, size);
@@ -2032,39 +2093,70 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 
-	Common::File file;
-	if (!file.Open(host_path, Common::File::Mode::Read)) {
-		LOGF("\tAPR read missing host file: %s\n", host_path.c_str());
-		return LibKernel::KERNEL_ERROR_ENOENT;
+	const bool                   keep = AprKeepFilesEnabled();
+	std::shared_ptr<KeptAprFile> kept;
+	std::unique_lock<std::mutex> kept_lock;
+	Common::File                 own_file;
+	Common::File*                file      = &own_file;
+	uint64_t                     file_size = 0;
+	if (keep) {
+		kept = OpenKeptAprFile(host_path);
+		if (kept == nullptr) {
+			LOGF("\tAPR read missing host file: %s\n", Common::PathToString(host_path).c_str());
+			return LibKernel::KERNEL_ERROR_ENOENT;
+		}
+		kept_lock = std::unique_lock(kept->mutex);
+		file      = &kept->file;
+		file_size = kept->size;
+	} else {
+		if (!own_file.Open(host_path, Common::File::Mode::Read)) {
+			LOGF("\tAPR read missing host file: %s\n", Common::PathToString(host_path).c_str());
+			return LibKernel::KERNEL_ERROR_ENOENT;
+		}
+		file_size = own_file.Size();
 	}
-	const auto file_size = file.Size();
+	const auto close = [&] {
+		if (!keep) {
+			own_file.Close();
+		}
+	};
 	if (file_offset >= file_size) {
 		Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprShortReads);
-		file.Close();
+		close();
 		return OK;
 	}
-	if (!file.Seek(file_offset)) {
-		file.Close();
+	if (!file->Seek(file_offset)) {
+		close();
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const auto readable = std::min<uint64_t>(size, file_size - file_offset);
 	if (readable == 0) {
-		file.Close();
+		close();
 		return OK;
 	}
 
-	std::vector<uint8_t> buffer(
-	    static_cast<size_t>(std::min<uint64_t>(APR_HOST_READ_CHUNK_SIZE, readable)));
+	if (AprPrepareWriteEnabled()) {
+		(void)LibKernel::Memory::PrepareHostOverwrite(destination, readable);
+	}
+
+	const auto buffer_size =
+	    static_cast<size_t>(std::min<uint64_t>(APR_HOST_READ_CHUNK_SIZE, readable));
+	std::vector<uint8_t>              own_buffer;
+	thread_local std::vector<uint8_t> kept_buffer;
+	auto&                             buffer = keep ? kept_buffer : own_buffer;
+	if (buffer.size() < buffer_size) {
+		buffer.resize(buffer_size);
+	}
 	while (*bytes_read < readable) {
 		const auto request =
-		    static_cast<uint32_t>(std::min<uint64_t>(buffer.size(), readable - *bytes_read));
+		    static_cast<uint32_t>(std::min<uint64_t>(buffer_size, readable - *bytes_read));
 		uint32_t read = 0;
 		{
 			Profiler::ScopedLoadingOperation host_read(Profiler::LoadingOperation::AprHostRead);
 			HangWatchdog::Scope wait("ampr-host-read", destination + *bytes_read, request,
 			                         *bytes_read, file_offset + *bytes_read);
-			file.Read(buffer.data(), request, &read);
+			file->Read(buffer.data(), request, &read);
 		}
 		Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprHostReadBytes, read);
 		if (read == 0) {
@@ -2079,7 +2171,7 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 		*bytes_read += read;
 	}
 
-	file.Close();
+	close();
 	if (*bytes_read < size) {
 		Profiler::CountLoadingEvent(Profiler::LoadingEvent::AprShortReads);
 	}

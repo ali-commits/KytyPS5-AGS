@@ -99,6 +99,16 @@ void ValidateValueReferences(const Program& program, ShaderStageInputInfo input_
 					}
 					break;
 				}
+				case ValueOpcode::GetAttributeF16: {
+					if (program.stage != ShaderType::Pixel || !inst.Arg(0).IsImmediate() ||
+					    inst.Arg(0).GetType() != Type::U32 || !inst.Arg(1).IsImmediate() ||
+					    inst.Arg(1).GetType() != Type::U32 || !inst.Arg(2).IsImmediate() ||
+					    inst.Arg(1).U32() >= 4u ||
+					    inst.Arg(0).U32() >= input_info.pixel->input_num) {
+						return Fail("f16 attribute reference is invalid");
+					}
+					break;
+				}
 				case ValueOpcode::GetInterpolationParameter: {
 					if (program.stage != ShaderType::Pixel || !inst.Arg(0).IsImmediate() ||
 					    inst.Arg(0).GetType() != Type::U32 || !inst.Arg(1).IsImmediate() ||
@@ -223,13 +233,21 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			if (inst.GetOpcode() == ValueOpcode::GetAttribute) {
-				used[inst.Arg(0).U32()] = true;
+				used[inst.Arg(0).U32()]         = true;
 				interpolated[inst.Arg(0).U32()] = true;
+			} else if (inst.GetOpcode() == ValueOpcode::GetAttributeF16) {
+				// Packed halves cannot be interpolated by the host: smooth inputs read raw
+				// vertices.
+				const auto input    = inst.Arg(0).U32();
+				used[input]         = true;
+				interpolated[input] = true;
+				per_vertex[input] = per_vertex[input] || !ShaderPixelParameterIsFlat(*pixel, input);
 			} else if (inst.GetOpcode() == ValueOpcode::GetInterpolationParameter) {
 				const auto input = inst.Arg(0).U32();
 				const auto mode  = inst.Arg(2).U32();
-				used[input] = true;
-				// KYTY_PS_PER_VERTEX=0: no raw-vertex inputs (the reads take the interpolated value).
+				used[input]      = true;
+				// KYTY_PS_PER_VERTEX=0: no raw-vertex inputs (the reads take the interpolated
+				// value).
 				per_vertex[input] =
 				    GetCodegenOptions().ps_per_vertex &&
 				    (per_vertex[input] || mode < 2u || !ShaderPixelParameterIsFlat(*pixel, input));
@@ -390,7 +408,8 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 						const auto output = DecodePositionExportComponent(
 						    input_info.vertex->pa_cl_vs_out_cntl, export_info.index, component);
 						if (output.viewport) {
-							AddOutput(info, StageOutputKind::ViewportIndex, 0, 0, "gl_ViewportIndex");
+							AddOutput(info, StageOutputKind::ViewportIndex, 0, 0,
+							          "gl_ViewportIndex");
 						}
 						if (output.point_size) {
 							AddOutput(info, StageOutputKind::PointSize, 0, 0, "gl_PointSize");
@@ -416,9 +435,11 @@ void CollectOutputs(const Program& program, ShaderStageInputInfo input_info, Sha
 					if (alpha_remap && export_info.index != 0) {
 						break;
 					}
-					const auto slot = input_info.pixel->dual_source_blending
-					                      ? 0u : ShaderPixelExportTarget(input_info.pixel->target_shader_mask,
-					                                                    export_info.index);
+					const auto slot =
+					    input_info.pixel->dual_source_blending
+					        ? 0u
+					        : ShaderPixelExportTarget(input_info.pixel->target_shader_mask,
+					                                  export_info.index);
 					if (slot >= 8) {
 						break;
 					}

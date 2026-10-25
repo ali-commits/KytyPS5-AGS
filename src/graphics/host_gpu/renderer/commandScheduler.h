@@ -40,12 +40,12 @@ public:
 	~CommandScheduler();
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
-	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
-	void           BeginRendering(const RenderState& state);
-	void           EndRendering();
-	void           Flush();
-	void           Flush(SubmitInfo& submit);
-	void           FlushAndWait();
+	void Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
+	void BeginRendering(const RenderState& state);
+	void EndRendering();
+	void Flush();
+	void Flush(SubmitInfo& submit);
+	void FlushAndWait();
 	// Submits the current recording with an observable completion (as Wait does for the current
 	// tick, without the wait) and begins the next one; returns the submitted tick.
 	uint64_t       FlushObservable();
@@ -54,25 +54,24 @@ public:
 	uint64_t       Submit(SubmitInfo submit = {}, bool force_completion = false);
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
-	void                      Shutdown();
-	void                      Wait(uint64_t tick);
+	void Shutdown();
+	void Wait(uint64_t tick);
 	// Runs every normal operation whose tick has completed, in order. Before each one it waits for
 	// the priority operations of that tick and earlier: a normal operation may free what they
 	// still use.
-	void                      PopPendingOperations();
+	void PopPendingOperations();
 	// The same, for the draw and dispatch paths' opportunistic housekeeping. With
 	// KYTY_PENDING_OPS_NOWAIT (default on) it never waits for the priority runner. At the first
 	// completed operation whose tick still has priority operations pending, it stops and leaves
 	// that operation and those after it queued, in order, for a later pop. Every blocking caller
 	// (Finish, the fault manager, explicit waits) still uses PopPendingOperations.
-	void                      PopReadyOperations();
-	void                      DrainPriorityOperations();
+	void PopReadyOperations();
+	void DrainPriorityOperations();
 	// KYTY_PRIORITY_WAIT_SPIN_US (default 0): first spin that long for the priority runner.
-	void                      WaitPriorityOperations(uint64_t tick);
-	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
-	void                      DeferPriorityOperation(
-	    Common::UniqueFunction<void>&& operation,
-	    PriorityOperationKind kind = PriorityOperationKind::Generic);
+	void WaitPriorityOperations(uint64_t tick);
+	void DeferOperation(Common::UniqueFunction<void>&& operation);
+	void DeferPriorityOperation(Common::UniqueFunction<void>&& operation,
+	                            PriorityOperationKind kind = PriorityOperationKind::Generic);
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 	// Called on the completion runner after every priority operation (e.g. to wake queues
 	// suspended on what it published). Clear it, then DrainPriorityOperations, before the
@@ -113,13 +112,18 @@ public:
 		m_command.m_user_config = binding.user_config;
 		m_command.m_shaders     = binding.shaders;
 	}
+	// The bound shader registers, writable: the command processor's own SH register writes during
+	// an op (an indirect multi-draw's per-record draw index).
+	[[nodiscard]] HW::Shader* BoundShaders() const noexcept { return m_command.m_shaders; }
 
-	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
-	void                           CheckActive() const;
-	CommandBuffer&                 Current();
-	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
+	[[nodiscard]] bool     Active() const noexcept { return m_command.m_registers != nullptr; }
+	void                   CheckActive() const;
+	CommandBuffer&         Current();
+	[[nodiscard]] uint64_t CurrentTick() const noexcept { return m_master.CurrentTick(); }
 	// KYTY_EOP_TIMESTAMPS=gpu: the guest timestamp query ring; null in record mode.
-	[[nodiscard]] EopTimestampRing* GuestTimestamps() const noexcept { return m_eop_timestamps.get(); }
+	[[nodiscard]] EopTimestampRing* GuestTimestamps() const noexcept {
+		return m_eop_timestamps.get();
+	}
 	[[nodiscard]] bool             IsFree(uint64_t tick);
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
 	[[nodiscard]] RenderContext&   Context() const noexcept { return m_context; }
@@ -159,7 +163,7 @@ private:
 		GraphicContext&                m_graphics;
 		MasterSemaphore&               m_master;
 		CommandRecorder*               m_recorder = nullptr;
-		vk::CommandPool                m_pool = nullptr;
+		vk::CommandPool                m_pool     = nullptr;
 		std::vector<vk::CommandBuffer> m_buffers;
 		std::vector<uint64_t>          m_ticks;
 		size_t                         m_hint = 0;
@@ -190,26 +194,26 @@ private:
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;
 	// The completion runner sleeps on its own condition, so a push can wake exactly it.
-	std::condition_variable      m_priority_available;
-	bool                         m_priority_active      = false;
-	uint64_t                     m_priority_active_tick = 0;
+	std::condition_variable m_priority_available;
+	bool                    m_priority_active      = false;
+	uint64_t                m_priority_active_tick = 0;
 	// Threads in WaitPriorityOperations/DrainPriorityOperations (m_operation_mutex).
-	uint32_t                     m_priority_waiters     = 0;
+	uint32_t m_priority_waiters = 0;
 	// Bumped by the priority runner after each operation; WaitPriorityOperations' spin polls it
 	// instead of taking m_operation_mutex.
-	std::atomic<uint64_t>        m_priority_progress {0};
-	ProgressHook                 m_progress_hook         = nullptr;
-	void*                        m_progress_hook_context = nullptr;
-	PreSubmitHook                m_pre_submit_hook         = nullptr;
-	void*                        m_pre_submit_hook_context = nullptr;
-	bool                         m_in_pre_submit           = false;
-	OperationState               m_operation_state      = OperationState::Open;
+	std::atomic<uint64_t> m_priority_progress {0};
+	ProgressHook          m_progress_hook           = nullptr;
+	void*                 m_progress_hook_context   = nullptr;
+	PreSubmitHook         m_pre_submit_hook         = nullptr;
+	void*                 m_pre_submit_hook_context = nullptr;
+	bool                  m_in_pre_submit           = false;
+	OperationState        m_operation_state         = OperationState::Open;
 	// Guarded by m_operation_mutex, alongside callback registration and the
 	// queued-submit tick transition. Captured into each owned submission record.
-	bool                         m_preserve_current_completion = false;
+	bool m_preserve_current_completion = false;
 	// Aggregate tracing reasons, guarded by m_operation_mutex. They never affect submission.
-	bool                         m_diagnostic_eop_completion     = false;
-	bool                         m_diagnostic_generic_completion = false;
+	bool m_diagnostic_eop_completion     = false;
+	bool m_diagnostic_generic_completion = false;
 	// KYTY_GPU_TIMING ring; null when disabled. Owned by the recording producer, like m_command.
 	std::unique_ptr<GpuTimestampRing> m_gpu_timing;
 	// KYTY_EOP_TIMESTAMPS=gpu query ring (guest scheduler only); null otherwise. Recording
@@ -220,7 +224,7 @@ private:
 	bool m_gpu_ops = false;
 	// KYTY_PENDING_REFRESH_US: when the draw-entry pop last queried the GPU's progress (steady
 	// clock nanoseconds; the recording producer only).
-	uint64_t m_last_pending_refresh_ns = 0;
+	uint64_t                                             m_last_pending_refresh_ns = 0;
 	std::array<SubmitDependency*, SubmitDependencySlots> m_submit_dependencies {};
 	// KYTY_CP_RECORDER: the recorder thread of the guest scheduler (after m_gpu_timing, whose
 	// ring it drives; destroyed before it).

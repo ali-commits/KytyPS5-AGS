@@ -78,14 +78,14 @@ struct CodegenOptions {
 	// KYTY_MOVREL_RANGE=0: keep V_MOVRELS/V_MOVRELD select chains over every VGPR above the base
 	// instead of folding the compares that the M0 value set proves false.
 	bool movrel_range = true;
-	// KYTY_MOVREL_KNOWN_ZEROS=1 (default off): with movrel_range, a V_MOVRELS/V_MOVRELD compare of M0
-	// against a register offset that sets a bit M0 never has also folds when M0's value set is
+	// KYTY_MOVREL_KNOWN_ZEROS=1 (default off): with movrel_range, a V_MOVRELS/V_MOVRELD compare of
+	// M0 against a register offset that sets a bit M0 never has also folds when M0's value set is
 	// unknown. Known zero bits pass through shifts by constants, masks, sums, products, bit-field
 	// extracts, selects, phis and lane reads: M0 = loop counter << 2 (Astro Bot's foliage vertex
 	// shaders) leaves every fourth register of each chain. Exact.
 	bool movrel_known_zeros = false;
-	// KYTY_MOVREL_SWITCH=1 (default off): a V_MOVRELS select chain of 16 or more links is emitted as
-	// an OpSwitch on M0 / 16 whose cases hold the select chains of their 16 index values. M0 is
+	// KYTY_MOVREL_SWITCH=1 (default off): a V_MOVRELS select chain of 16 or more links is emitted
+	// as an OpSwitch on M0 / 16 whose cases hold the select chains of their 16 index values. M0 is
 	// uniform, so the host runs one short chain instead of a select per register. Exact.
 	bool movrel_switch = false;
 	// KYTY_UNIFORM_LANE_READS=1 (default off): the shuffle result of V_READFIRSTLANE/V_READLANE
@@ -101,11 +101,30 @@ struct CodegenOptions {
 	// KYTY_FAST_FMINMAX=0: emulate f32 min/max/min3/max3/med3 with two bit classifications per
 	// min/max instead of one compare-and-select plus a single two-zeros test.
 	bool fast_float_min_max = true;
+	// KYTY_NATIVE_FMINMAX=1 (EmK530/KytyPS5 d6825f587): with KYTY_FAST_FMINMAX, f32 min/max become
+	// GLSL NMin/NMax. They return the other operand for one NaN like the guest, but leave which
+	// zero min/max(-0, +0) returns unspecified and may treat denormals differently from the
+	// guest's compare (see EmitFastMinMaxF32), so this stays opt-in.
+	bool native_float_min_max = false;
+	// KYTY_READFIRSTLANE_EXEC0=1 (default off; upstream 919fac13d): V_READFIRSTLANE with EXEC
+	// zero reads lane 0 (FindILsb + select) instead of BallotFindLSB's undefined lane.
+	bool readfirstlane_exec_zero = false;
+	// KYTY_UNIFORM_BUFFERS=1 (EmK530/KytyPS5 407de5105): bind constant-only buffers as uniform
+	// buffers instead of storage buffers (IR::UniformBufferResources). Off by default: neutral in
+	// Miles Morales on an RTX 3090 (GPU busy within noise), and on NVIDIA's 16-byte uniform
+	// robustness granularity a read just past a V#'s end may return data instead of 0.
+	bool uniform_buffers = false;
+	// KYTY_WAVE64_WARPS=1 (EmK530/KytyPS5 420fc4ead): a wave64 compute program whose workgroup is
+	// the one wave runs on a 32-wide host as two host subgroups, one guest lane per invocation,
+	// instead of two lanes per invocation (Spirv::SplitWaveEligible). Cross-lane operations
+	// exchange the halves through workgroup memory; a branch whose region holds no exchange or
+	// barrier is decided by each half on its own lanes.
+	bool wave64_warps = false;
 	// KYTY_FAST_PKRTZ=0: convert V_CVT_PKRTZ_F16_F32 halves with the original select chain instead
 	// of the shorter integer formulation.
 	bool fast_pkrtz = true;
-	// KYTY_SINGLE_F2I_SATURATION=0: repeat the float-to-int NaN/range saturation in the emitter even
-	// though the translator's saturated conversion already guarantees an in-range operand.
+	// KYTY_SINGLE_F2I_SATURATION=0: repeat the float-to-int NaN/range saturation in the emitter
+	// even though the translator's saturated conversion already guarantees an in-range operand.
 	bool single_f2i_saturation = true;
 	// KYTY_LOD_STATS_GATE=0: record GET_LOD_STATS feedback for every sample, including images whose
 	// T# has no mip-statistics counter, and issue the finest-level AtomicUMin unconditionally.
@@ -160,17 +179,25 @@ struct CodegenOptions {
 	// nodes in its GI ray-bundle linked lists).
 	PsLiveExec ps_live_exec = PsLiveExec::AppendConsume;
 	// KYTY_PS_HELPER_ATOMICS_SKIP=0: a pixel shader's helper invocations run the compare-exchange
-	// loops of emulated read-modify-writes (sub-dword stores, float min/max, INC/DEC; AtomicUpdate in
-	// spirvEmitterInternal.h) like the other lanes. By default they skip them: Vulkan does not perform
-	// a helper invocation's atomics and leaves their results undefined, so the loop's exit test need
-	// never hold in a helper lane and the wave can spin until a device reset (AMD keeps helper lanes
-	// in the wave). Skipping changes nothing observable: a helper's atomic has no effect and no
-	// defined result.
+	// loops of emulated read-modify-writes (sub-dword stores, float min/max, INC/DEC; AtomicUpdate
+	// in spirvEmitterInternal.h) like the other lanes. By default they skip them: Vulkan does not
+	// perform a helper invocation's atomics and leaves their results undefined, so the loop's exit
+	// test need never hold in a helper lane and the wave can spin until a device reset (AMD keeps
+	// helper lanes in the wave). Skipping changes nothing observable: a helper's atomic has no
+	// effect and no defined result.
 	bool ps_helper_atomics_skip = true;
-	// KYTY_VOLATILE_LOADS=1 (diagnostic, default 0): every buffer, scalar-buffer and BDA (FLAT/GLOBAL,
-	// indirect V#) access is Volatile, not only MUBUF accesses with GLC/DLC. A guest loop that polls
-	// memory written by another workgroup or queue then rereads it instead of a cached or hoisted value.
+	// KYTY_VOLATILE_LOADS=1 (diagnostic, default 0): every buffer, scalar-buffer and BDA
+	// (FLAT/GLOBAL, indirect V#) access is Volatile, not only MUBUF accesses with GLC/DLC. A guest
+	// loop that polls memory written by another workgroup or queue then rereads it instead of a
+	// cached or hoisted value.
 	bool volatile_loads = false;
+	// KYTY_CFG_CLONE_EXITS=1 (default 0): before a CFG falls back to the dispatcher loop, a small
+	// terminal block (no successors, at most 8 instructions) entered from several blocks gets one
+	// copy per entering block, and structurization is retried. Pixel shaders branch to a shared
+	// "every lane discarded: null export, s_endpgm" tail from inside nested selections, which made
+	// the region of the outer selection externally entered (Wolverine's 0x09161b28ae4039bb). The
+	// copies run the same instructions; nothing after them can tell them apart.
+	bool cfg_clone_exits = false;
 	// KYTY_LOOP_GUARD=<n> with KYTY_LOOP_GUARD_SHADERS=<hash>[,<hash>...] (hexadecimal guest shader
 	// hashes): a diagnostic for a GPU hang suspected in a shader loop. Every structured loop of a
 	// listed shader counts iterations against one per-invocation budget; an invocation that has
@@ -187,8 +214,8 @@ struct CodegenOptions {
 	// valid runtime value: e.g. a BVH traversal's loop-carried instance pointer, or data the GPU
 	// produces) is planned as a runtime read instead of a flat SRT slot. A flat slot is evaluated
 	// once before the dispatch, so such a slot always fails to evaluate and the whole dispatch is
-	// dropped. An S_BUFFER_LOAD through a V# read that way then reads through BDA, and a program with
-	// another such descriptor (no BDA path) is dropped, as before. Reads whose address can be
+	// dropped. An S_BUFFER_LOAD through a V# read that way then reads through BDA, and a program
+	// with another such descriptor (no BDA path) is dropped, as before. Reads whose address can be
 	// evaluated before the dispatch keep their flat slots.
 	// Default on since int18 (before, only u59-preset.json set it): without it Astro Bot's tiled
 	// deferred-lighting and GI kernels are dropped, and with the game's lighting patches off lit
@@ -200,26 +227,29 @@ struct CodegenOptions {
 	// renderer/meshIndirect.h). Unset, 0 or "empty": the dwords are only ever pushed.
 	bool mesh_indirect_params = false;
 	// KYTY_REALTIME_CLOCK=0: S_MEMREALTIME returns the placeholder UINT64_MAX (the behaviour before
-	// the real clock) instead of the host GPU clock. With the placeholder a guest spin-wait timed by
-	// S_MEMREALTIME never times out, and only a GPU reset ends it. The emitter reads the clock the
-	// device layer enabled (Spirv::HostShaderClock); a device without one keeps the placeholder.
+	// the real clock) instead of the host GPU clock. With the placeholder a guest spin-wait timed
+	// by S_MEMREALTIME never times out, and only a GPU reset ends it. The emitter reads the clock
+	// the device layer enabled (Spirv::HostShaderClock); a device without one keeps the
+	// placeholder.
 	bool realtime_clock = true;
 	// KYTY_DPP_SKIP_INACTIVE=0: a DPP source lane that EXEC disables reads zero (the behaviour
 	// before), so the receiving lane gets op(0, x). On the guest such a source is invalid like a
-	// vacated one, and without bound_ctrl the receiving lane keeps its value (PS5 ISA, DPP options);
-	// so does a lane the host subgroup lacks. A work-list loop whose DPP row scan then yields a
-	// wrong minimum never ends (a GPU hang). Not for DPP8 or fetch-inactive. Exact.
+	// vacated one, and without bound_ctrl the receiving lane keeps its value (PS5 ISA, DPP
+	// options); so does a lane the host subgroup lacks. A work-list loop whose DPP row scan then
+	// yields a wrong minimum never ends (a GPU hang). Not for DPP8 or fetch-inactive. Exact.
 	bool dpp_skip_inactive = true;
-	// KYTY_LANE_REDUCTIONS=0: a V_READLANE of the last lane of a DPP row scan with every lane enabled
-	// (IR::MatchLaneReduction) stays an emulated scan instead of a native subgroup reduction over the
-	// row or row pair. A partly filled host subgroup lacks lanes the scan would read; the reduction
-	// counts them as the operation's identity, as the guest shader's own masking makes them.
+	// KYTY_LANE_REDUCTIONS=0: a V_READLANE of the last lane of a DPP row scan with every lane
+	// enabled (IR::MatchLaneReduction) stays an emulated scan instead of a native subgroup
+	// reduction over the row or row pair. A partly filled host subgroup lacks lanes the scan would
+	// read; the reduction counts them as the operation's identity, as the guest shader's own
+	// masking makes them.
 	bool lane_reductions = true;
-	// KYTY_DISPATCHER_CAP=<n> (default 4096; 0: no cap): a program whose CFG cannot be structured runs
-	// as a dispatcher loop over its blocks (IR::Program::dispatcher_fallback), and an invocation
-	// leaves that loop after n block transitions. A guest loop that never ends (for example a trip
-	// count read from memory an unemulated pass left unwritten) then gives that invocation wrong
-	// results instead of hanging the GPU until a device reset. Structured programs are unaffected.
+	// KYTY_DISPATCHER_CAP=<n> (default 4096; 0: no cap): a program whose CFG cannot be structured
+	// runs as a dispatcher loop over its blocks (IR::Program::dispatcher_fallback), and an
+	// invocation leaves that loop after n block transitions. A guest loop that never ends (for
+	// example a trip count read from memory an unemulated pass left unwritten) then gives that
+	// invocation wrong results instead of hanging the GPU until a device reset. Structured programs
+	// are unaffected.
 	uint32_t dispatcher_cap = 4096;
 	// KYTY_IR_LINEAR_USES=1 (default off; Senaxx 5145dc1f9): IR use-list bookkeeping without the
 	// quadratic searches (Inst::ReplaceUsesWith takes a use list over at once, AddUse searches for
@@ -242,12 +272,12 @@ struct CodegenOptions {
 	// cleared hit_status in triangle return mode 0). Diagnostic only: it never reports a hit.
 	bool rt_stub = false;
 	// KYTY_RT_SOFTWARE (default 1): translate the BVH instructions exactly in software (IR
-	// BvhIntersectRay, lowered in the SPIR-V backend; spec: RT-SOFTWARE-DESIGN.md). Takes precedence
-	// over KYTY_RT_STUB. Astro Bot's own tiled deferred lighting and its GI probe tracing contain
-	// these instructions; without a BVH mode their whole dispatches are skipped, which leaves the
-	// scene unlit (black robots on the title screen). KYTY_RT_SOFTWARE=0 with KYTY_RT_STUB=1 keeps
-	// the passes but lets every ray miss (no ray-traced shadows); KYTY_RT_SOFTWARE=0 alone restores
-	// the old skip.
+	// BvhIntersectRay, lowered in the SPIR-V backend; spec: RT-SOFTWARE-DESIGN.md). Takes
+	// precedence over KYTY_RT_STUB. Astro Bot's own tiled deferred lighting and its GI probe
+	// tracing contain these instructions; without a BVH mode their whole dispatches are skipped,
+	// which leaves the scene unlit (black robots on the title screen). KYTY_RT_SOFTWARE=0 with
+	// KYTY_RT_STUB=1 keeps the passes but lets every ray miss (no ray-traced shadows);
+	// KYTY_RT_SOFTWARE=0 alone restores the old skip.
 	bool rt_software = true;
 	// KYTY_RT_SOFTWARE=auto (the default; also what an unset or empty variable means): software RT
 	// on, whatever the GPU. "1" forces it on, "0" turns it off. The switch for users whose GPU or
@@ -256,27 +286,27 @@ struct CodegenOptions {
 	// the driver fails to build for such a kernel turns software RT off for the session on its own
 	// (rtSession.h). rt_software_auto only records which spelling selected the mode.
 	bool rt_software_auto = true;
-	// KYTY_RT_FUNCTION=0|1|2 (with KYTY_RT_SOFTWARE; default 1): how a BVH instruction lowers. 1: the
-	// node test (box and triangle tests, traversal helpers, ~100k SPIR-V words) is ONE function per
-	// module that every BVH instruction calls (OpFunctionCall); a kernel with three instructions
-	// was 322k words with the test inlined at each. 2: the same with the DontInline function
-	// control, so the driver does not inline it again. 0: inline at every site (the pre-int16
-	// code, for comparisons).
+	// KYTY_RT_FUNCTION=0|1|2 (with KYTY_RT_SOFTWARE; default 1): how a BVH instruction lowers. 1:
+	// the node test (box and triangle tests, traversal helpers, ~100k SPIR-V words) is ONE function
+	// per module that every BVH instruction calls (OpFunctionCall); a kernel with three
+	// instructions was 322k words with the test inlined at each. 2: the same with the DontInline
+	// function control, so the driver does not inline it again. 0: inline at every site (the
+	// pre-int16 code, for comparisons).
 	uint32_t rt_function = 1;
 	// KYTY_RT_TYPE6=0 (with KYTY_RT_SOFTWARE): node type 6 misses (four invalid children) like
 	// RDNA2's user node, instead of being decoded as the PS5 shared-exponent box.
 	bool rt_type6 = true;
 	// KYTY_BDA_WRITES=1 (or =verify): raw stores and atomics through a V# the shader computes
 	// (Psr's BVH builders) write guest memory through BDA instead of failing resource tracking. The
-	// renderer settles each such dispatch synchronously: it waits for it and marks the pages it wrote
-	// GPU-owned before the CP continues (BDA-WRITES-DESIGN.md). Default 1: Astro Bot's BVH builders
-	// need it once its game patches are off; KYTY_BDA_WRITES=0 restores the old refusal.
+	// renderer settles each such dispatch synchronously: it waits for it and marks the pages it
+	// wrote GPU-owned before the CP continues (BDA-WRITES-DESIGN.md). Default 1: Astro Bot's BVH
+	// builders need it once its game patches are off; KYTY_BDA_WRITES=0 restores the old refusal.
 	bool bda_writes = true;
 	// KYTY_BDA_STORE_LOG (default 1, with bda_writes): a raw store through such a V# to a page
 	// without a cache buffer, which BDA cannot reach, is appended to the fault buffer's store log
 	// (BufferCache::BDA_STORE_LOG_WORD) instead of being dropped; the synchronous settle writes the
-	// logged dwords into guest memory, where those bytes live (BufferCache::SettleBdaWrites). Such a
-	// page gets a cache buffer only after its fault is processed, so before this every dispatch
+	// logged dwords into guest memory, where those bytes live (BufferCache::SettleBdaWrites). Such
+	// a page gets a cache buffer only after its fault is processed, so before this every dispatch
 	// until then lost its stores there (a counted consumer whose output V# takes NUM_RECORDS from a
 	// GPU-written count wrote nothing). Atomics there still drop (no value to return).
 	// KYTY_BDA_STORE_LOG=0 restores the drop.
@@ -284,8 +314,8 @@ struct CodegenOptions {
 	// KYTY_RT_NODE_BUDGET=<n> (with KYTY_RT_SOFTWARE; 0 = no limit): the most BVH node tests one
 	// guest lane runs. A garbage or cyclic BVH can keep the guest's traversal looping forever and
 	// lose the device. Past the budget every node test misses without reading memory, the
-	// invocation takes each loop's exit edge (as KYTY_LOOP_GUARD does), and at return it adds one to
-	// GDS dword end - RtNodeBudgetGdsFromEnd, which the command processor reports at flips ("RT
+	// invocation takes each loop's exit edge (as KYTY_LOOP_GUARD does), and at return it adds one
+	// to GDS dword end - RtNodeBudgetGdsFromEnd, which the command processor reports at flips ("RT
 	// node budget"). Every invocation of a wave executes the instruction for each node the wave's
 	// packet traversal visits, so the count is the wave's traversal length. The default is a safety
 	// net far above expected traversals (KYTY_RT_NODE_STATS measures them).
@@ -295,15 +325,16 @@ struct CodegenOptions {
 	// [2^k, 2^(k+1)), at end - RtNodeStatsGdsFromEnd - k), reported at flips. A diagnostic for the
 	// budget.
 	bool rt_node_stats = false;
-	// KYTY_WAVE32_CLUSTERS=0|auto|force (default auto), see Wave32Clusters. A wave32 vertex, mesh or
-	// pixel program on a host subgroup wider than its wave (AMD: 64 in those stages, which cannot
-	// require 32) shares the subgroup with another guest wave. Without clusters its EXEC, VCC and
-	// ballot words read the first 32 lanes of the subgroup, its lane reads and V_READFIRSTLANE take
-	// lanes of the other wave, and V_MBCNT counts them: a waterfall or work-list loop of the second
-	// wave never removes its own lanes and spins until a device reset, and DS_APPEND hands its lanes
-	// duplicate indices. With clusters each guest wave uses host lanes 32k..32k+31 only: lane ids
-	// are the low 5 bits, ballots take the wave's own word, shuffles stay in the wave, lane reads
-	// are not broadcast across the subgroup, and lane reductions use the emulated scan.
+	// KYTY_WAVE32_CLUSTERS=0|auto|force (default auto), see Wave32Clusters. A wave32 vertex, mesh
+	// or pixel program on a host subgroup wider than its wave (AMD: 64 in those stages, which
+	// cannot require 32) shares the subgroup with another guest wave. Without clusters its EXEC,
+	// VCC and ballot words read the first 32 lanes of the subgroup, its lane reads and
+	// V_READFIRSTLANE take lanes of the other wave, and V_MBCNT counts them: a waterfall or
+	// work-list loop of the second wave never removes its own lanes and spins until a device reset,
+	// and DS_APPEND hands its lanes duplicate indices. With clusters each guest wave uses host
+	// lanes 32k..32k+31 only: lane ids are the low 5 bits, ballots take the wave's own word,
+	// shuffles stay in the wave, lane reads are not broadcast across the subgroup, and lane
+	// reductions use the emulated scan.
 	Wave32Clusters wave32_clusters = Wave32Clusters::Auto;
 	// KYTY_LDS_WAITCNT_BARRIER=subgroup|workgroup|0 (default subgroup), see LdsWaitcntBarrier. An
 	// S_WAITCNT lgkmcnt(0) with an LDS write pending since the last barrier, in compute and mesh
@@ -357,6 +388,11 @@ inline constexpr uint32_t LoopGuardHashGdsFromEnd = RtNodeStatsGdsFromEnd + RtNo
 [[nodiscard]] bool LoopGuardApplies(uint64_t shader_hash);
 
 [[nodiscard]] const CodegenOptions& GetCodegenOptions();
+// KYTY_UNIFORM_BUFFERS needs a device that reads 0 for a uniform dword past the bound range
+// (Spirv::HostBufferRobustness::uniform_dword_loads_return_zero, mirrored here by
+// Spirv::SetHostBufferRobustness for IR::UniformBufferResources).
+void               SetHostUniformBufferRobust(bool robust);
+[[nodiscard]] bool GetHostUniformBufferRobust();
 // Test hook: replaces the options for subsequent compilations. Not thread-safe; call it only
 // while no shader is being compiled.
 void SetCodegenOptions(const CodegenOptions& options);

@@ -47,7 +47,7 @@ struct ImageUsage {
 // subresource states, content serial, CPU dirtiness, buffer modification and tracking range.
 // Changes made on other threads (CPU dirtiness) advance it after the change.
 inline std::atomic<uint64_t> g_image_state_epoch {1};
-inline void NoteImageStateChange() noexcept {
+inline void                  NoteImageStateChange() noexcept {
 	g_image_state_epoch.fetch_add(1, std::memory_order_release);
 }
 [[nodiscard]] inline uint64_t ImageStateEpoch() noexcept {
@@ -66,9 +66,10 @@ struct ImageBinding {
 
 class Image final {
 public:
-	// sparse_first_level > 0 (KYTY_TEXTURE_SPARSE_RESIDENCY, TextureCache::InsertImage): try a sparse
-	// residency image with memory behind levels >= it only (GraphicContext::CreateSparseImage);
-	// a format or usage that cannot be sparse gets an ordinary image.
+	// sparse_first_level > 0 (KYTY_TEXTURE_SPARSE_RESIDENCY, TextureCache::InsertImage): try a
+	// sparse residency image with memory behind levels >= it only
+	// (GraphicContext::CreateSparseImage); a format or usage that cannot be sparse gets an ordinary
+	// image.
 	Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& info,
 	      uint32_t sparse_first_level = 0);
 	~Image();
@@ -107,9 +108,9 @@ public:
 	// per-subresource states), `range` covers every level and layer (a volume's range counts as
 	// one layer, as in GetBarriers), and that state already has the layout and the access, which
 	// includes no write (a repeated write needs a barrier). GetBarriers' early return.
-	[[nodiscard]] bool TransitIsNoOp(vk::ImageLayout                             destination_layout,
-	                                 vk::AccessFlags2                            destination_access,
-	                                 const std::optional<ImageSubresourceRange>& range) const noexcept;
+	[[nodiscard]] bool
+	     TransitIsNoOp(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	                   const std::optional<ImageSubresourceRange>& range) const noexcept;
 	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
 	            uint64_t size);
 	void Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -133,7 +134,7 @@ public:
 	[[nodiscard]] uint64_t DefiniteWrites() const noexcept { return m_definite_writes; }
 	void                   NoteContentWrite() noexcept;
 	void                   NotePossibleWrite() noexcept;
-	void AdoptContentSerial(uint64_t serial) noexcept {
+	void                   AdoptContentSerial(uint64_t serial) noexcept {
 		m_content_serial = serial;
 		NoteImageStateChange();
 	}
@@ -176,10 +177,11 @@ public:
 	}
 
 	// KYTY_IMAGE_GPU_KEEP (TextureCache::KeepGpuBytes): a CPU write or a partial unmap replaced the
-	// guest bytes of [begin, end) of this GPU-written image; its other bytes stay the GPU's. The image
-	// is CPU-dirty in kept_dirty only: the next refresh uploads the subresources over those ranges
-	// (TextureCache::UploadKeptRanges). Any whole-image invalidation clears kept_dirty again.
-	// Refused (false) while the whole image is CPU-dirty: that refresh uploads everything anyway.
+	// guest bytes of [begin, end) of this GPU-written image; its other bytes stay the GPU's. The
+	// image is CPU-dirty in kept_dirty only: the next refresh uploads the subresources over those
+	// ranges (TextureCache::UploadKeptRanges). Any whole-image invalidation clears kept_dirty
+	// again. Refused (false) while the whole image is CPU-dirty: that refresh uploads everything
+	// anyway.
 	bool NoteKeptCpuWrite(uint64_t begin, uint64_t end) {
 		if (m_maybe_cpu_dirty || (m_cpu_dirty && kept_dirty.empty())) {
 			return false;
@@ -201,15 +203,15 @@ public:
 	// chunk is untracked only by a CPU write, which also marks it dirty. Dirty chunks are the
 	// guest bytes that may differ from the native contents; they are cleared by a refresh.
 	struct ChunkState {
-		uint64_t              base        = 0; // AlignDown(data.address, chunk size)
-		uint32_t              count       = 0; // 0: whole-image tracking
-		uint32_t              shift       = 0;
-		uint32_t              dirty_count = 0;
-		uint32_t              untracked_count = 0;
+		uint64_t base            = 0; // AlignDown(data.address, chunk size)
+		uint32_t count           = 0; // 0: whole-image tracking
+		uint32_t shift           = 0;
+		uint32_t dirty_count     = 0;
+		uint32_t untracked_count = 0;
 		// Consecutive refreshes that found (nearly) every chunk dirty. Such an image is
 		// rewritten whole by the CPU: its next write releases every chunk at once, so it takes
 		// one fault per refresh instead of one per chunk.
-		uint32_t              full_streak = 0;
+		uint32_t full_streak = 0;
 		// Refresh cycles since the last chunk-by-chunk cycle; every 8th cycle probes again.
 		uint32_t              whole_cycles   = 0;
 		bool                  whole_released = false;
@@ -220,8 +222,8 @@ public:
 	};
 	[[nodiscard]] bool ChunkTracked() const noexcept { return chunks.count != 0; }
 	void               EnableChunkTracking(uint32_t shift) {
-		chunks.shift = shift;
-		chunks.base  = live.address & ~((uint64_t {1} << shift) - 1);
+		chunks.shift     = shift;
+		chunks.base      = live.address & ~((uint64_t {1} << shift) - 1);
 		const auto end   = live.End();
 		const auto count = ((end - chunks.base) + (uint64_t {1} << shift) - 1) >> shift;
 		chunks.count     = static_cast<uint32_t>(count);
@@ -310,9 +312,9 @@ public:
 	[[nodiscard]] uint64_t DirtySpanBegin() const noexcept { return m_dirty_begin; }
 	void                   ClearDirtySpan() noexcept { m_dirty_begin = m_dirty_end = 0; }
 	// False until the first refresh (upload, or overwrite of the initial guest contents).
-	[[nodiscard]] bool     WasEverUploaded() const noexcept { return m_uploads != 0 || m_refreshed; }
-	void                   NoteUpload() noexcept { m_uploads++; }
-	[[nodiscard]] bool     DirtyFromEdgeHash() const noexcept { return m_dirty_from_hash; }
+	[[nodiscard]] bool WasEverUploaded() const noexcept { return m_uploads != 0 || m_refreshed; }
+	void               NoteUpload() noexcept { m_uploads++; }
+	[[nodiscard]] bool DirtyFromEdgeHash() const noexcept { return m_dirty_from_hash; }
 
 	[[nodiscard]] bool IsCpuDirty() const { return m_cpu_dirty || m_maybe_cpu_dirty; }
 	[[nodiscard]] bool IsDefinitelyCpuDirty() const { return m_cpu_dirty; }
@@ -391,8 +393,8 @@ public:
 		return m_gpu_modified ? m_owned.get() : nullptr;
 	}
 	[[nodiscard]] bool OwnsBytesIn(uint64_t address, uint64_t size) const noexcept {
-		if (!m_gpu_modified || size == 0 || !ImageRangeOverlaps(info.data.address, info.data.size,
-		                                                        address, size)) {
+		if (!m_gpu_modified || size == 0 ||
+		    !ImageRangeOverlaps(info.data.address, info.data.size, address, size)) {
 			return false;
 		}
 		return !m_owned || m_owned->Intersects(address, size);
@@ -493,44 +495,48 @@ public:
 	}
 	[[nodiscard]] uint64_t HashGuestEdges() const;
 
-	ImageInfo        info;
+	ImageInfo info;
 	// The guest bytes of the resident levels: info.data, or its prefix when resident_first > 0.
 	// Changed only while the image is unregistered.
-	GuestRange       live;
-	uint32_t         resident_first = 0;
+	GuestRange live;
+	uint32_t   resident_first = 0;
 	// KYTY_TEXTURE_RESIDENT_MIPS=poison: non-resident levels were filled with a marker.
-	bool             residency_poisoned = false;
+	bool residency_poisoned = false;
 	// The next refresh uploads levels made resident by a residency change (attribution only).
-	bool             residency_refresh = false;
-	VulkanImage      backing;
+	bool                         residency_refresh = false;
+	VulkanImage                  backing;
 	std::vector<CachedImageView> views;
-	ImageUsage       usage;
-	ImageBinding     binding;
-	bool             registered     = false;
-	mutable uint32_t query_epoch    = 0;
-	uint64_t         track_addr     = 0;
-	uint64_t         track_addr_end = 0;
-	ImageId          depth_id {};
+	ImageUsage                   usage;
+	ImageBinding                 binding;
+	bool                         registered     = false;
+	mutable uint32_t             query_epoch    = 0;
+	uint64_t                     track_addr     = 0;
+	uint64_t                     track_addr_end = 0;
+	ImageId                      depth_id {};
 	// The current stencil plane's mapping into the depth image, also retained by its association.
 	ImageSubresourceRange stencil_subresources;
-	uint64_t         tick_accessed_last  = 0;
-	uint64_t         frame_accessed_last = 0; // presented guest frames, see TextureCache::AdvanceFrame
-	size_t           lru_id              = 0;
+	uint64_t              tick_accessed_last = 0;
+	uint64_t frame_accessed_last = 0; // presented guest frames, see TextureCache::AdvanceFrame
+	// KYTY_PIPELINE_SKIP: the last presented frame (+1) this image was a draw's render target, and
+	// in how many distinct frames it was one (saturating), see DrawOnlyChangesPicture.
+	uint64_t skip_target_frame  = 0;
+	uint32_t skip_target_frames = 0;
+	size_t   lru_id             = 0;
 	// While registered: the tick of TextureCache's LRU item lru_id (KYTY_IMAGE_LRU_SKIP). Set from
 	// the item after every Insert (RegisterImage) and Touch (TouchImage), its only writers.
-	uint64_t         lru_tick            = 0;
+	uint64_t lru_tick = 0;
 	// Last GPU writer among overlapping aliases; cleared when another alias takes the bytes.
-	bool             alias_owner         = false;
+	bool alias_owner = false;
 	// KYTY_IMAGE_EXACT_RANGE_INVALIDATE (TextureCache::InvalidateMemoryFromGPU): a GPU buffer write
 	// over exactly another image's range partly overlapped this image and left it unrebuilt (in
 	// count mode: would have). Cleared by the image's next GPU write, and (on) by a refresh upload.
-	bool             exact_range_stale   = false;
+	bool exact_range_stale = false;
 	// KYTY_ALIAS_BYTES: a level-0 texel rectangle whose 64 KiB blocks this image owns (bounded
 	// render-target claims skip the claim when a draw's scissor lies inside it). Dropped whenever
 	// the image loses owned bytes.
-	vk::Rect2D       claimed_rect {};
-	bool             claimed_rect_valid  = false;
-	ChunkState       chunks;
+	vk::Rect2D claimed_rect {};
+	bool       claimed_rect_valid = false;
+	ChunkState chunks;
 	// KYTY_IMAGE_GPU_KEEP: see NoteKeptCpuWrite. kept_holes are the page-aligned ranges inside
 	// [track_addr, track_addr_end) whose watch a kept CPU write released (the faulting pages); the
 	// next TrackImage watches them again, UntrackImage leaves them out.
@@ -546,13 +552,13 @@ public:
 		uint64_t       size     = 0;
 		bool           valid    = false;
 	};
-	TexelSyncMark    texel_sync;
+	TexelSyncMark texel_sync;
 	// Depth attachments (KYTY_DEPTH_FEEDBACK_KEEP, RenderExecutor::NoteDepthFeedback): the
 	// rendering instance this image is attached to with no attachment write since it began, the
 	// content serial at that point (0: none), and the last instance it was attached to at all.
-	uint64_t         feedback_instance = 0;
-	uint64_t         feedback_serial   = 0;
-	uint64_t         feedback_attached = 0;
+	uint64_t feedback_instance = 0;
+	uint64_t feedback_serial   = 0;
+	uint64_t feedback_attached = 0;
 	// Replaces the tracked state without recording a barrier. Only for callers that proved no
 	// access pair of the old and new scopes can conflict (see KYTY_DEPTH_FEEDBACK_KEEP).
 	void AdoptState(vk::PipelineStageFlags2 stage, vk::AccessFlags2 access,
@@ -584,11 +590,11 @@ private:
 	bool              m_partial_valid    = false;
 	// See OwnedSet(): the owned bytes of a GPU-modified image, nullptr for all of them.
 	std::unique_ptr<RangeSet> m_owned;
-	uint64_t          m_content_serial   = 0;
-	uint64_t          m_definite_writes  = 0;
-	uint64_t          m_dirty_begin      = 0;
-	uint64_t          m_dirty_end        = 0;
-	uint32_t          m_uploads          = 0;
+	uint64_t                  m_content_serial  = 0;
+	uint64_t                  m_definite_writes = 0;
+	uint64_t                  m_dirty_begin     = 0;
+	uint64_t                  m_dirty_end       = 0;
+	uint32_t                  m_uploads         = 0;
 	// What the device refused for this image and the image was created without
 	// (DeviceCompat::OptionalImageCreateFallbacks): FindView stops at a view that needs it.
 	vk::ImageUsageFlags  m_dropped_usage {};

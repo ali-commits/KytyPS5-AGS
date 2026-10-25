@@ -93,6 +93,14 @@ void Delay(Uint32) {}
 #undef SDL_CloseGamepad
 #undef SDL_Delay
 
+namespace Libs::Controller {
+// No virtual headset in these tests (padVr.cpp is not linked here).
+int PadVrPortHand(int) { return -1; }
+int PadVrPort(int, int, int, bool) { return PAD_ERROR_INVALID_ARG; }
+int PadVrCheckHandle(int) { return PAD_ERROR_INVALID_HANDLE; }
+int PadVrClose(int) { return PAD_ERROR_INVALID_HANDLE; }
+} // namespace Libs::Controller
+
 namespace Libs::Controller::DualSenseHaptics {
 bool SetVibration(int, uint8_t large_motor, uint8_t small_motor, uint32_t duration_ms) {
 	haptics.push_back({large_motor, small_motor, duration_ms});
@@ -490,7 +498,57 @@ void TestIndependentOutputsAndPadSwitch() {
 	}
 }
 
-// scePadGetTriggerEffectState: the state of each trigger's effect at the trigger's travel.
+void TestPadPortOwnership() {
+	Initialize();
+	const int user = Config::GetUserId();
+	constexpr auto not_initialized = static_cast<int32_t>(0x80920005u);
+	constexpr auto already_opened = static_cast<int32_t>(0x80920004u);
+	constexpr auto invalid_handle = static_cast<int32_t>(0x80920003u);
+	constexpr auto no_handle = static_cast<int32_t>(0x80920008u);
+	PadData data {};
+	Check(PadOpen(user, 0, 0, nullptr) == not_initialized &&
+	          PadGetHandle(user, 0, 0) == not_initialized &&
+	          PadReadState(1, &data) == not_initialized,
+	      "an uninitialized library exposed a controller port");
+	Check(PadInit() == 0 && PadGetHandle(user, 0, 0) == no_handle,
+	      "initializing the library opened a controller port");
+	const int handle = PadOpen(user, 0, 0, nullptr);
+	Check(handle == 1 && PadInit() == 0 && PadGetHandle(user, 0, 0) == handle,
+	      "reinitializing the library lost the open port");
+	for (int duplicate = 0; duplicate < 4; duplicate++) {
+		const int rejected = PadOpen(user, 0, 0, nullptr);
+		Check(rejected == already_opened,
+		      "opening one pad five times exposed duplicate connected controllers");
+		Check(PadClose(rejected) == invalid_handle && PadGetHandle(user, 0, 0) == handle,
+		      "closing a rejected duplicate released the original owner");
+	}
+	Check(PadGetHandle(user + 1, 0, 0) == no_handle &&
+	          PadGetHandle(user, 99, 0) == no_handle && PadGetHandle(user, 0, 1) == no_handle,
+	      "a different port tuple aliased the open standard pad");
+	Check(PadGetHandle(user, 2, 0) == handle && PadGetHandle(0xff, 16, 0) == handle,
+	      "the fork's supported device aliases lost the standard pad owner");
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, true);
+	Check(PadReadState(handle, &data) == 0 && data.connected &&
+	          data.buttons == PAD_BUTTON_CROSS,
+	      "keyboard Cross did not reach the owned port");
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, false);
+	Connect(1);
+	SetButton(1, PAD_BUTTON_CROSS, true);
+	Check(PadReadState(handle, &data) == 0 && data.buttons == PAD_BUTTON_CROSS,
+	      "the physical controller did not share the owned port");
+	Disconnect(1);
+	Check(PadGetHandle(user, 0, 0) == handle && PadOpen(user, 0, 0, nullptr) == already_opened,
+	      "host disconnection released guest port ownership");
+	Check(PadClose(handle) == 0 && PadGetHandle(user, 0, 0) == no_handle &&
+	          PadReadState(handle, &data) == invalid_handle &&
+	          PadRead(handle, &data, 1) == invalid_handle && PadClose(handle) == invalid_handle,
+	      "a closed port retained a usable handle");
+	Check(PadOpen(user, 0, 0, nullptr) == handle && PadReadState(handle, &data) == 0,
+	      "a closed port could not reopen");
+	Shutdown();
+}
+
+
 void TestPlayerUserIds() {
 	Check(Config::IsConfiguredUserIdValid(Config::MAX_USER_ID) &&
 	          !Config::IsConfiguredUserIdValid(Config::MAX_USER_ID + 1) &&
@@ -611,6 +669,26 @@ void TestDedicatedKeyboardOutputs() {
 	Config::Load(Config::ConfigOptions {});
 }
 
+// scePadGetTriggerEffectState: the state of each trigger's effect at the trigger's travel.
+void TestCoalescedButtonEdges() {
+	if (!PadStateCoalescing()) return;
+	Controller controller;
+	PadData states[64] {};
+	(void)PadRead(1, states, 64);
+	SetButton(1, PAD_BUTTON_CROSS, true);
+	for (int i = 0; i < 200; ++i) SetAxis(1, Axis::LeftX, i % 256);
+	SetButton(1, PAD_BUTTON_CROSS, false);
+	for (int i = 0; i < 200; ++i) SetAxis(1, Axis::LeftX, (i + 17) % 256);
+	const int count = PadRead(1, states, 64);
+	bool pressed = false, released_after = false;
+	for (int i = 0; i < count; ++i) {
+		if ((states[i].buttons & PAD_BUTTON_CROSS) != 0) pressed = true;
+		else if (pressed) released_after = true;
+	}
+	Check(count >= 2 && pressed && released_after && states[count - 1].left_stick_x == 216,
+	      "axis traffic during a hitch lost a button edge or the newest stick position");
+}
+
 void TestTriggerEffectState() {
 	Controller controller;
 	int32_t    state[2] = {-1, -1};
@@ -705,11 +783,13 @@ int main() {
 	    TestSettingCycles();
         TestGlobalControllerLevels();
 	TestPlayerUserIds();
+	TestPadPortOwnership();
 	// Each following test initializes another controller and requires strong defaults.
 	TestVibrationLifetime();
 	TestMaskedTriggersAndValidation();
 	TestIndependentOutputsAndPadSwitch();
 	TestTriggerEffectState();
+	TestCoalescedButtonEdges();
 	TestMultiplayerRouting();
 	TestDedicatedKeyboardOutputs();
 	Config::Shutdown();

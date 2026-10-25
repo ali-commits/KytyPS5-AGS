@@ -236,6 +236,10 @@ bool GraphicContext::CreateAllocator() {
 	VmaVulkanFunctions functions {};
 	functions.vkGetInstanceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr;
 	functions.vkGetDeviceProcAddr   = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+	// Through the dispatcher, so the KYTY_CMD_GUARD hooks (installed before the allocator) see
+	// the destruction of buffers and images; without the guard these are the driver's entries.
+	functions.vkDestroyBuffer = VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyBuffer;
+	functions.vkDestroyImage  = VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImage;
 
 	VmaAllocatorCreateInfo info {};
 	info.instance         = instance;

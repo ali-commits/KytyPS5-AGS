@@ -1,3 +1,4 @@
+#define SPV_ENABLE_UTILITY_CODE
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -112,6 +113,7 @@
 #include <functional>
 #include <initializer_list>
 #include <limits>
+#include <ranges>
 #include <map>
 #include <unordered_map>
 #include <memory>
@@ -598,6 +600,10 @@ struct TextureCacheTestAccess {
                                GuestRange stencil) {
     std::lock_guard lock(cache.m_lock);
     (void)cache.AssociateStencil(depth, stencil);
+  }
+
+  static void SetTiledReadback(TextureCache &cache, bool enabled) {
+    cache.m_readback_tiled_images = enabled;
   }
 
   static void SetLinearReadback(TextureCache &cache, bool enabled) {
@@ -2132,8 +2138,28 @@ void CheckRectListShaders() {
   ValidateSpirv(name, position_only.evaluation);
 }
 
-void CheckSpirvText(const TestCase &test, const std::vector<u32> &spirv) {
-  if (test.required_spirv.empty() && test.forbidden_spirv.empty()) {
+void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
+  std::vector<u32> result_types(spirv[3]);
+  for (size_t offset = 5; offset < spirv.size();) {
+    const auto words = std::span<const u32>(spirv).subspan(offset, spirv[offset] >> 16u);
+    const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
+    bool has_result = false, has_type = false;
+    spv::HasResultAndType(opcode, &has_result, &has_type);
+    if (has_result && has_type) result_types[words[2]] = words[1];
+    if (opcode == spv::OpBitcast) {
+      Require(test.name, "bitcast changes representation",
+              words[1] != result_types[words[3]],
+              "emitted a redundant bitcast between identical SPIR-V types");
+    }
+    offset += words.size();
+  }
+  // KYTY_TEST_SKIP_SPIRV_TEXT=1: run the cases under codegen switches whose SPIR-V the text
+  // expectations do not describe (e.g. KYTY_WAVE64_WARPS=1), keeping only the result checks.
+  static const bool skip_text = [] {
+    const char *value = std::getenv("KYTY_TEST_SKIP_SPIRV_TEXT");
+    return value != nullptr && value[0] == '1';
+  }();
+  if (skip_text || (test.required_spirv.empty() && test.forbidden_spirv.empty())) {
     return;
   }
 
@@ -2416,9 +2442,9 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
     std::erase_if(storage.required_spirv, [](const std::string &text) {
       return text.find("Workgroup") != std::string::npos;
     });
-    CheckSpirvText(storage, result.spirv);
+    CheckSpirvEmission(storage, result.spirv);
   } else {
-    CheckSpirvText(test, result.spirv);
+    CheckSpirvEmission(test, result.spirv);
   }
   const auto *buffer_binding = ShaderRecompiler::IR::FindBinding(
       result.program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::Buffers);
@@ -18413,8 +18439,10 @@ public:
   // while the first draw keeps its own snapshot. Additive blending shows which pixel shader each
   // draw ran. The shaders are headerless, so a commit also depends on the certified code hash.
   // KYTY_DRAW_PREP=off checks the pixels only.
-  void CheckDrawPrepEngineDraw(bool journal_alias_fixture = false) {
-    constexpr const char *name = "DrawPrepEngineDraw";
+  void CheckDrawPrepEngineDraw(bool journal_alias_fixture = false, uint32_t review_fixture = 0) {
+    const char *name = review_fixture == 1 ? "IndirectDrawIndexPersistence"
+                       : review_fixture == 2 ? "TiledReadbackPipelineSkip"
+                                             : "DrawPrepEngineDraw";
     constexpr uintptr_t base = 0x0000000206200000ull;
     constexpr uint64_t allocation_size = 0x80000;
     constexpr uint64_t allocation_alignment = 0x10000;
@@ -18453,6 +18481,16 @@ public:
       vertex_code.push_back(EncodeExp0(0x20 + parameter, 0xf));
       vertex_code.push_back(EncodeExp1(0, 0, 0, 0));
     }
+    if (review_fixture == 1) {
+      // GS user register 0 arrives at shader s8 in the vertex ABI. Export its value
+      // without changing the fullscreen triangle's position.
+      vertex_code.insert(vertex_code.begin(), EncodeVop1(0x06, 7, 8));
+      for (size_t i = 1; i + 1 < vertex_code.size(); ++i) {
+        if (vertex_code[i] == EncodeExp0(0x20, 0xf)) {
+          vertex_code[i + 1] = EncodeExp1(7, 7, 7, 7);
+        }
+      }
+    }
     AppendEnd(&vertex_code);
     std::array<std::vector<u32>, 2> pixel_codes;
     for (size_t i = 0; i < pixel_codes.size(); i++) {
@@ -18472,6 +18510,10 @@ public:
       }
       pixel_codes[i].push_back(EncodeExp0(0x00, 0xf));
       pixel_codes[i].push_back(EncodeExp1(0, 1, 2, 3));
+      if (review_fixture == 1) {
+        pixel_codes[i] = {EncodeVintrp(2, 0, 0, 0, 2), EncodeExp0(0x00, 0xf),
+                          EncodeExp1(0, 0, 0, 0)};
+      }
       AppendEnd(&pixel_codes[i]);
     }
 
@@ -18601,6 +18643,177 @@ public:
                     (pixels.empty() ? std::string("missing") : Hex(pixels[bad])) +
                     ", expected " + Hex(expected[bad % 4]));
       };
+
+      if (review_fixture == 1) {
+        shaders.SetGsShaderResource2({.user_sgpr = 1});
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+        registers.SetPsInControl(0x8001);
+        registers.SetPsInputEna(2);
+        registers.SetPsInputAddr(2);
+        registers.SetPsInputSettings(0, 0x400);
+        constexpr uint64_t args_address = base + 0x8000;
+        constexpr uint64_t count_address = base + 0x9000;
+        constexpr uint64_t index_address = base + 0xa000;
+        // Empty primitives isolate the persistent register's effect in the following direct draw.
+        const std::array<u32, 10> arguments{0, 1, 0, 0, 0, 0, 1, 0, 0, 0};
+        std::memcpy(memory + 0x8000, arguments.data(), sizeof(arguments));
+        processor.SetDrawIndirectArgsBaseAddress(args_address);
+        processor.SetIndexBaseAddress(index_address);
+        processor.SetIndexType(0);
+        const auto run = [&](std::span<const u32> commands) {
+          if (CpSeq::ConfiguredMode() != CpSeq::Mode::Thread) {
+            Pm4Execution execution;
+            Require(name, "direct/inline stream", processor.Process(execution, commands) ==
+                        Pm4ProcessResult::Complete, "indirect stream did not complete");
+            return;
+          }
+          CpSeq::Sequencer sequencer(processor);
+          processor.AttachSequencer(&sequencer);
+          sequencer.Start();
+          processor.BufferInit();
+          CpSeq::Intake intake;
+          intake.sequence = 1;
+          intake.commands = commands;
+          sequencer.Admit(intake);
+          Pm4Execution execution;
+          bool handoff = false;
+          bool complete = false;
+          for (uint32_t slice = 0; slice < 100000 && !complete && !handoff; ++slice) {
+            complete = processor.ResolveSubmission(execution, 1, commands, handoff) ==
+                       Pm4ProcessResult::Complete;
+          }
+          Require(name, "threaded stream", complete && !handoff,
+                  "indirect stream did not complete in the sequencer");
+          sequencer.Stop();
+          processor.DetachSequencer();
+          processor.BufferInit();
+        };
+        for (const bool indexed : {false, true}) {
+          // Includes max=1/count=0, formerly the native path's premature zero SGPR write.
+          for (const auto [maximum, count, expected_index] :
+               {std::array<u32, 3>{0, 2, 7}, {1, 0, 7}, {2, 2, 1}, {2, 1, 0}}) {
+            clear();
+            shaders.SetGsUserSgpr(0, 7, HW::UserSgprType::Unknown);
+            auto &buffers = context.GetBufferCache();
+            (void)buffers.ObtainBuffer(count_address, sizeof(count), true, false);
+            Require(name, "GPU count write",
+                    buffers.TryWriteDataGpu(count_address, &count, sizeof(count)),
+                    "the count must be read from current GPU-owned data");
+            std::vector<u32> commands{
+                indexed ? 0xc0083800u : 0xc0082c00u, 0, Pm4::SH_NOP, Pm4::SH_NOP,
+                0xc0000000u | Pm4::SPI_SHADER_USER_DATA_GS_0, maximum,
+                static_cast<u32>(count_address), static_cast<u32>(count_address >> 32u),
+                20, indexed ? 0u : 2u};
+            commands.insert(commands.end(), draw.begin(), draw.end());
+            run(commands);
+            Require(name, "persistent user SGPR", shaders.GetVs().gs_user_sgpr.value[0] == expected_index,
+                    "zero records changed s0, or a later snapshot lost the last draw index");
+            const auto pixels = read();
+            const auto expected_word = std::bit_cast<u32>(static_cast<float>(expected_index));
+            Require(name, "following draw consumes persistent index",
+                    pixels.size() == size_t{extent} * extent * 4u &&
+                        std::ranges::all_of(pixels, [&](u32 word) { return word == expected_word; }),
+                    "indexed=" + std::to_string(indexed) + " max=" + std::to_string(maximum) +
+                        " count=" + std::to_string(count) + " s0=" +
+                        std::to_string(shaders.GetVs().gs_user_sgpr.value[0]) +
+                        " expected=" + Hex(expected_word) + " first pixel=" +
+                        (pixels.empty() ? std::string("missing") : Hex(pixels[0])));
+          }
+        }
+        RenderExecutorTestAccess::ResetBindings(executor);
+        context.UnmapMemory(base, allocation_size);
+        scheduler.Finish();
+        return;
+      }
+
+      if (review_fixture == 2) {
+        Require(name, "pipeline skip enabled", context.GetPipelineCache().PipelineSkipEnabled(),
+                "run this regression with KYTY_PIPELINE_SKIP=1");
+        TextureCacheTestAccess::SetTiledReadback(texture_cache, true);
+        // Use a separate tiled allocation from the initial linear image.
+        registers.SetColorBase(0, {.addr = base + depth_offset});
+        registers.SetColorAttrib3(0, {.tile_mode = Prospero::TileMode::kRenderTarget, .dimension = 1});
+        RenderExecutorTestAccess::ResolveRenderColorTarget(executor, scheduler.Current(), color, 0);
+        auto &target = texture_cache.GetImage(color.image_id);
+        target.skip_target_frames = 3;
+        target.skip_target_frame = texture_cache.Frame() + 1;
+        Require(name, "small tiled CPU target", target.info.IsTiled() &&
+                    texture_cache.NeedsCpuReadback(target.info), "target must enroll for readback");
+        clear();
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+        const auto before = context.GetPipelineCache().GetSkipTotals();
+        RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+                                           {.vertex_count = 3, .instance_count = 1});
+        Require(name, "color draw retained", context.GetPipelineCache().GetSkipTotals().requested ==
+                    before.requested && TextureCacheTestAccess::PendingDownload(texture_cache, color.image_id),
+                "a CPU-visible recurrent target queued a skippable cold pipeline or lost readback");
+        const auto pixels = read();
+        Require(name, "color pixels", pixels.size() == size_t{extent} * extent * 4u &&
+                    std::ranges::equal(pixels, std::views::iota(size_t{0}, pixels.size()) |
+                        std::views::transform([&](size_t i) { return colors[0][i % 4]; })),
+                "the first cold draw into the small tiled target was lost");
+        Require(name, "color CPU download", TextureCacheTestAccess::TryDownload(texture_cache, color.image_id),
+                "small tiled color target was not downloaded");
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+        Require(name, "color CPU result",
+                std::memcmp(memory + depth_offset, colors[0].data(), sizeof(colors[0])) == 0,
+                "CPU backing did not receive the draw's first tiled texel");
+
+        // Large tiled color plus small tiled depth isolates the depth eligibility guard.
+        registers.SetColorBase(0, {.addr = base + target_offset});
+        registers.SetColorAttrib2(0, {.height = 63, .width = 127});
+        RenderExecutorTestAccess::ResolveRenderColorTarget(executor, scheduler.Current(), color, 0);
+        auto &large = texture_cache.GetImage(color.image_id);
+        large.skip_target_frames = 3;
+        large.skip_target_frame = texture_cache.Frame() + 1;
+        Require(name, "large tiled picture target", !texture_cache.NeedsCpuReadback(large.info),
+                "the depth regression must not be protected by the color guard");
+        HW::DepthRenderTarget depth_target{};
+        depth_target.z_info.format = Prospero::DepthFormat::kZ32F;
+        depth_target.z_read_base_addr = base + htile_offset;
+        depth_target.z_write_base_addr = base + htile_offset;
+        depth_target.size = {extent - 1, extent - 1, true};
+        registers.SetDepthRenderTarget(depth_target);
+        HW::DepthControl control{};
+        control.z_enable = control.z_write_enable = true;
+        control.zfunc = static_cast<uint8_t>(vk::CompareOp::eAlways);
+        registers.SetDepthControl(control);
+        RenderDepthInfo depth{};
+        RenderExecutorTestAccess::ResolveRenderDepthTarget(executor, scheduler.Current(), depth);
+        auto &small_depth = texture_cache.GetImage(depth.image_id);
+        small_depth.skip_target_frames = 3;
+        small_depth.skip_target_frame = texture_cache.Frame() + 1;
+        Require(name, "small tiled CPU depth", texture_cache.NeedsCpuReadback(small_depth.info) &&
+                    small_depth.info.IsTiled() && !depth.depth_clear_enable && !depth.load_clear_aspects,
+                "the depth guard must be exercised without a metadata clear");
+        vk::ClearValue depth_clear{};
+        depth_clear.depthStencil = {1.0f, 0};
+        TextureCacheTestAccess::ClearImage(texture_cache, scheduler.Current(), depth.image_id,
+                                           {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1}, depth_clear);
+        const auto depth_before = context.GetPipelineCache().GetSkipTotals();
+        RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+                                           {.vertex_count = 3, .instance_count = 1});
+        // Depth acquisition does not auto-enroll downloads (unlike color/storage). Its
+        // CPU-visible result must still survive pipeline skipping and an explicit download.
+        Require(name, "depth draw retained", context.GetPipelineCache().GetSkipTotals().requested ==
+                    depth_before.requested,
+                "a CPU-visible depth target queued a skippable cold pipeline");
+        const auto depth_pixels = ReadCachedTexel(name, context, depth.image_id, {}, {extent, extent, 1});
+        Require(name, "depth pixels", depth_pixels.size() == size_t{extent} * extent &&
+                    std::ranges::all_of(depth_pixels, [](u32 word) { return word == 0; }),
+                "the first cold depth draw was lost");
+        Require(name, "depth CPU download", TextureCacheTestAccess::TryDownload(texture_cache, depth.image_id),
+                "small tiled depth target was not downloaded");
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+        Require(name, "depth CPU result", *reinterpret_cast<const u32 *>(memory + htile_offset) == 0,
+                "CPU backing did not receive the depth draw");
+        RenderExecutorTestAccess::ResetBindings(executor);
+        context.UnmapMemory(base, allocation_size);
+        scheduler.Finish();
+        return;
+      }
 
       // Serial reference: no look-ahead request precedes these cold draws.
       const auto serial_prefetch_before =
@@ -24586,6 +24799,39 @@ public:
               "bytes");
       // Return the range to the CPU before the unmap below.
       cache.ReadMemory(base, upload_size, false);
+
+      // KYTY_UPLOAD_DMA_WRITE_DRAIN: a command-processor write that follows an upload in the
+      // command stream waits until the worker has copied the bytes it overwrites, so the upload
+      // keeps the bytes from before the write.
+      Live::Testing::StageText("KYTY_UPLOAD_DMA_WRITE_DRAIN=1\n");
+      Live::OnCpFlip();
+      Require(name, "write drain on", UploadDmaWriteDrainEnabled(),
+              "KYTY_UPLOAD_DMA_WRITE_DRAIN did not switch on");
+      std::vector<uint32_t> before_write(upload_size / sizeof(uint32_t));
+      for (uint64_t i = 0; i < before_write.size(); i++) {
+        before_write[i] = static_cast<uint32_t>(i * 0x85ebca6bu + 0x77u);
+      }
+      Require(name, "guest write 2", context.InvalidateMemory(base, upload_size),
+              "the re-dirtied range is not mapped");
+      Libs::LibKernel::Memory::WriteBacking(base, before_write.data(), upload_size);
+      dma->HoldWorkerForTest(true);
+      const auto [third, third_offset] = cache.ObtainBuffer(base, upload_size, false, false);
+      std::thread release([dma] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        dma->HoldWorkerForTest(false);
+      });
+      const bool waited = dma->DrainHostCopies(base + 64, sizeof(uint32_t));
+      const bool copied = dma->HostCopyBytesDone() == dma->HostCopyBytesQueued();
+      const uint32_t later = 0xdeadbeefu;
+      Libs::LibKernel::Memory::WriteBacking(base + 64, &later, sizeof(later));
+      release.join();
+      const bool unrelated = !dma->DrainHostCopies(base + upload_size + 64, sizeof(uint32_t));
+      const auto third_words = read_back(third->Handle(), third_offset, upload_size);
+      Require(name, "write drain",
+              waited && copied && unrelated && third_words[16] == before_write[16],
+              "a CP write after a queued upload did not wait for its host copy, or leaked into it");
+      Live::Testing::StageText("KYTY_UPLOAD_DMA_WRITE_DRAIN=\n");
+      Live::OnCpFlip();
     }
 
     // A private ring of 1 MiB. The cache's dependency slot is borrowed and restored.
@@ -44766,6 +45012,79 @@ TestCase BufferStoreFormatXSnorm16ClampsRoundsAndPreservesHalfwords() {
   return test;
 }
 
+std::vector<TestCase> PackedD16MultiComponentCases() {
+  using F = Prospero::BufferFormat;
+  using O = ShaderOpcode;
+  const std::array<F, 3> uint_formats{F::k32_32UInt, F::k32_32_32UInt, F::k32_32_32_32UInt};
+  const std::array<F, 3> float_formats{F::k32_32Float, F::k32_32_32Float, F::k32_32_32_32Float};
+  const std::array<O, 3> loads{O::BUFFER_LOAD_FORMAT_D16_XY, O::BUFFER_LOAD_FORMAT_D16_XYZ,
+                             O::BUFFER_LOAD_FORMAT_D16_XYZW};
+  const std::array<O, 3> stores{O::BUFFER_STORE_FORMAT_D16_XY, O::BUFFER_STORE_FORMAT_D16_XYZ,
+                              O::BUFFER_STORE_FORMAT_D16_XYZW};
+  std::vector<TestCase> cases;
+  for (bool fp : {false, true}) {
+    for (u32 components = 2; components <= 4; ++components) {
+      TestCase test;
+      static constexpr const char *names[2][3] = {
+          {"PackedD16Uint2", "PackedD16Uint3", "PackedD16Uint4"},
+          {"PackedD16Float2", "PackedD16Float3", "PackedD16Float4"}};
+      test.name = names[fp][components - 2];
+      test.initial.assign(16, 0xcafef00du);
+      const std::array<u32, 4> values = fp
+          ? std::array<u32, 4>{0x3f800000u, 0x3f000000u, 0xbf800000u, 0x40000000u}
+          : std::array<u32, 4>{0x1234u, 0xabcdu, 0x2468u, 0x1357u};
+      const std::array<u32, 4> halves = fp
+          ? std::array<u32, 4>{0x3c00u, 0x3800u, 0xbc00u, 0x4000u} : values;
+      std::copy(values.begin(), values.end(), test.initial.begin());
+      test.expected = test.initial;
+      std::copy_n(values.begin(), components, test.expected.begin() + 4);
+      test.expected[8] = halves[0] | (halves[1] << 16u);
+      test.expected[9] = components == 2 ? 0xa5a5a5a5u
+          : halves[2] | (components == 3 ? 0xa5a50000u : halves[3] << 16u);
+      AppendVMovLiteral(&test.code, 0, 0xdeadbeefu);
+      AppendVMovLiteral(&test.code, 1, 0xa5a5a5a5u);
+      AppendVMovU32(&test.code, 2, 0);
+      test.code.push_back(EncodeMubuf0(0x80u + components - 1u, 0, true, false));
+      test.code.push_back(EncodeMubuf1(0, 0, 2));
+      AppendStoreVgpr(&test.code, 0, 8);
+      AppendStoreVgpr(&test.code, 1, 9);
+      AppendVMovU32(&test.code, 2, 1);
+      test.code.push_back(EncodeMubuf0(0x84u + components - 1u, 0, true, false));
+      test.code.push_back(EncodeMubuf1(0, 0, 2));
+      AppendEnd(&test.code);
+      test.user_data = MakeStructuredStorageBufferData(16, 4, false,
+          BufferFormat((fp ? float_formats : uint_formats)[components - 2]));
+      test.has_user_data = true;
+      test.opcodes = {O::V_MOV_B32, loads[components - 2], stores[components - 2],
+                      O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+      cases.push_back(std::move(test));
+    }
+  }
+  return cases;
+}
+
+TestCase SplitWaveStraightLineReadFirst() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "SplitWaveStraightLineReadFirst";
+  test.code.push_back(EncodeVop1(0x02, 20, Vgpr(0)));
+  test.code.push_back(EncodeVopc(0xc2, 20, 0));
+  AppendStoreSgprAtLaneDwordOffset(&test.code, 20, 0, 0);
+  AppendStoreSgprAtLaneDwordOffset(&test.code, 106, 0, 64);
+  AppendStoreSgprAtLaneDwordOffset(&test.code, 107, 0, 128);
+  AppendEnd(&test.code);
+  test.expected.insert(test.expected.end(), 64, 0);
+  test.expected.insert(test.expected.end(), 64, 1);
+  test.expected.insert(test.expected.end(), 64, 0);
+  test.initial.resize(192);
+  test.opcodes = {O::V_READFIRSTLANE_B32, O::V_CMP_EQ_U32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.wave_size = 64;
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 std::vector<TestCase> BufferLoadFormatD16XCases() {
   using F = Prospero::BufferFormat;
   using O = ShaderOpcode;
@@ -55463,7 +55782,8 @@ void CheckDepthAttachmentWrites() {
           "masked front write or KEEP-only back face claimed stencil");
 
   target.stencil_test_enable = false;
-  target.load_clear_aspects = vk::ImageAspectFlagBits::eStencil;
+  target.stencil_clear_enable = true;
+  target.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
   Require("DepthAttachmentWrites", "stencil clear",
           target.AttachmentWriteAspects() == vk::ImageAspectFlagBits::eStencil,
           "stencil attachment clear did not claim stencil");
@@ -55542,7 +55862,8 @@ void CheckDepthFeedbackAspects() {
           feedback(sampled) == vk::ImageAspectFlagBits::eDepth,
           "a sampled depth attachment clear missed feedback");
   target.load_clear_aspects = {};
-  target.load_clear_aspects = vk::ImageAspectFlagBits::eStencil;
+  target.stencil_clear_enable = true;
+  target.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
   sampled.aspect = vk::ImageAspectFlagBits::eStencil;
   Require("DepthFeedbackAspects", "stencil clear only",
           feedback(sampled) == vk::ImageAspectFlagBits::eStencil,
@@ -55609,7 +55930,8 @@ void CheckDynamicRenderingState() {
           "depth-only writes did not retain read-only stencil");
   attachment.load_clear_aspects = {};
   attachment.depth_write_enable = false;
-  attachment.load_clear_aspects = vk::ImageAspectFlagBits::eStencil;
+  attachment.stencil_clear_enable = true;
+  attachment.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
   Require("DynamicRenderingState", "depth-read stencil-write layout",
           depth_attachment_layout(attachment) ==
               vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal,
@@ -57857,6 +58179,12 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, Vop3pInt16Ops());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--int21-gpu-only") == 0) {
+    VulkanHarness vulkan;
+    for (const auto &test : PackedD16MultiComponentCases()) RunCase(&vulkan, test);
+    RunCase(&vulkan, SplitWaveStraightLineReadFirst());
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-snorm-store-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, BufferStoreFormatXyzwSnorm16CapturedSkinningVectors());
@@ -58839,6 +59167,16 @@ int main(int argc, char **argv) {
     Loader::SystemContentLoadParamSfo(argv[2]);
     vulkan.CheckDrawPrepEngineDraw(true);
     vulkan.CheckDrawPrepEngineTextures();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--draw-index-review-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDrawPrepEngineDraw(false, 1);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--tiled-readback-review-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDrawPrepEngineDraw(false, 2);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-prep-engine-only") == 0) {

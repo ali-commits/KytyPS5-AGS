@@ -102,15 +102,18 @@ constexpr size_t   PTHREAD_STACK_INITIAL   = 0x200000;
 constexpr size_t   PTHREAD_STACK_EXTRA     = 0x100000;
 constexpr uint64_t PTHREAD_STACK_TOP       = 0x7efff8000ull;
 constexpr uint64_t PTHREAD_STACK_BOTTOM    = 0x0000040000ull;
-constexpr uint32_t SIGNAL_APC_POLL_MICROS  = 10000;
+// (The TEB's stack range on guest stacks, KYTY_GUEST_TEB_STACK_RANGE_ASM, spells the numbers out.)
+static_assert(PTHREAD_STACK_TOP == Common::HostException::GuestStacksHigh &&
+              PTHREAD_STACK_BOTTOM == Common::HostException::GuestStacksLow);
+constexpr uint32_t SIGNAL_APC_POLL_MICROS = 10000;
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 
 // The guest's priority classes are mapped onto host priorities. On the console the graphics command
 // processor is hardware and competes with nothing; here it is a thread, and a game may keep a dozen
-// job workers spinning on a lock-free job table, so the whole guest band sits at or below the host's
-// normal priority and the emulator's own threads stay above the game's workers. Only the values the
-// operating system accepts outside the realtime class may be used here.
+// job workers spinning on a lock-free job table, so the whole guest band sits at or below the
+// host's normal priority and the emulator's own threads stay above the game's workers. Only the
+// values the operating system accepts outside the realtime class may be used here.
 constexpr int GUEST_HOST_PRIORITY_HIGH   = 0;
 constexpr int GUEST_HOST_PRIORITY_NORMAL = -1;
 constexpr int GUEST_HOST_PRIORITY_LOW    = -2;
@@ -129,10 +132,11 @@ static int GuestPriorityToHost(int guest_priority) {
 
 /// Tells whether a guest thread with this affinity runs one host priority step below its band.
 ///
-/// A guest thread pinned to a single core owns that core on the console. A game that starts one such
-/// spinning job worker per core shares all of them with the threads that produce their work, on fewer
-/// host cores and in the same priority band, and the spinners starve those threads. Decided once when
-/// the thread starts: a main thread may pin itself to one core for a while and must not drop with it.
+/// A guest thread pinned to a single core owns that core on the console. A game that starts one
+/// such spinning job worker per core shares all of them with the threads that produce their work,
+/// on fewer host cores and in the same priority band, and the spinners starve those threads.
+/// Decided once when the thread starts: a main thread may pin itself to one core for a while and
+/// must not drop with it.
 static bool LowerCoreBoundThread(KernelCpumask affinity) {
 	return std::has_single_bit(affinity);
 }
@@ -414,6 +418,9 @@ struct PthreadMutexPrivate {
 	uint32_t                count     = 0;
 	int                     type      = 1;
 	int                     pprotocol = PTHREAD_PRIO_NONE;
+	// Waiters that have waited longer than the hand-off limit, oldest first. While it is not
+	// empty only its front thread may take the mutex (see NativeMutexLock).
+	std::vector<Pthread> starving;
 };
 
 struct PthreadMutexattrPrivate {
@@ -448,26 +455,26 @@ struct PthreadGuestData {
 static_assert(sizeof(PthreadGuestData) == 4096);
 
 struct PthreadPrivate {
-	PthreadGuestData      guest;
-	std::string           name;
-	pthread_t             p;
-	PthreadAttr           attr;
-	pthread_entry_func_t  entry;
-	void*                 arg;
-	int                   unique_id;
-	std::atomic_bool      detached;
-	std::atomic_bool      almost_done;
-	std::atomic_bool      free;
-	uint64_t              host_thread_id;
+	PthreadGuestData     guest;
+	std::string          name;
+	pthread_t            p;
+	PthreadAttr          attr;
+	pthread_entry_func_t entry;
+	void*                arg;
+	int                  unique_id;
+	std::atomic_bool     detached;
+	std::atomic_bool     almost_done;
+	std::atomic_bool     free;
+	uint64_t             host_thread_id;
 	// Pinned to one core when it started; such a thread runs one host priority step lower. Written
 	// by the thread itself, read by whoever changes its priority.
-	std::atomic_bool      core_bound = false;
-	uintptr_t             guest_host_rbx;
-	uintptr_t             guest_host_rsp;
-	uintptr_t             guest_host_rbp;
-	uint64_t              cond_sequence = 0;
+	std::atomic_bool        core_bound = false;
+	uintptr_t               guest_host_rbx;
+	uintptr_t               guest_host_rsp;
+	uintptr_t               guest_host_rbp;
+	uint64_t                cond_sequence = 0;
 	std::condition_variable cond_cv;
-	std::atomic<uint64_t> pending_signal_mask {0};
+	std::atomic<uint64_t>   pending_signal_mask {0};
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	uintptr_t guest_host_gs8;
 	uintptr_t guest_host_gs10;
@@ -518,11 +525,11 @@ struct PthreadCondattrPrivate {
 };
 
 struct PthreadCondPrivate {
-	uint8_t                 reserved[256];
-	std::string             name;
-	std::mutex              m;
-	KernelClockid           clock_id = KERNEL_CLOCK_REALTIME;
-	std::vector<Pthread>    waiters;
+	uint8_t              reserved[256];
+	std::string          name;
+	std::mutex           m;
+	KernelClockid        clock_id = KERNEL_CLOCK_REALTIME;
+	std::vector<Pthread> waiters;
 };
 
 static void CondAddWaiter(PthreadCondPrivate* cond, Pthread thread) {
@@ -1022,33 +1029,32 @@ static KYTY_SYSV_ABI void* RunOnGuestStack(void* arg, pthread_entry_func_t func,
 	             "pushq %%r15\n\t"
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	             "movq %%gs:0x08, %%r14\n\t"
-	             "movq %%gs:0x10, %%r15\n\t"
-	             "xorq %%rcx, %%rcx\n\t"
-	             "movq %%rcx, %%gs:0x08\n\t"
-	             "movq %%rcx, %%gs:0x10\n\t"
+	             "movq %%gs:0x10, %%r15\n\t" KYTY_GUEST_TEB_STACK_RANGE_ASM("%[teb_range]")
 #endif
-	             "movq %%rsp, %%r12\n\t"
-	             "movq %%rbp, %%r13\n\t"
-	             "movq %[guest_rsp], %%rsp\n\t"
-	             "movq %[guest_rsp], %%rbp\n\t"
-	             "callq *%%rsi\n\t"
-	             "movq %%r13, %%rbp\n\t"
-	             "movq %%r12, %%rsp\n\t"
+	                 "movq %%rsp, %%r12\n\t"
+	                 "movq %%rbp, %%r13\n\t"
+	                 "movq %[guest_rsp], %%rsp\n\t"
+	                 "movq %[guest_rsp], %%rbp\n\t"
+	                 "callq *%%rsi\n\t"
+	                 "movq %%r13, %%rbp\n\t"
+	                 "movq %%r12, %%rsp\n\t"
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	             "movq %%r14, %%gs:0x08\n\t"
-	             "movq %%r15, %%gs:0x10\n\t"
+	                 "movq %%r14, %%gs:0x08\n\t"
+	                 "movq %%r15, %%gs:0x10\n\t"
 #endif
-	             "popq %%r15\n\t"
-	             "popq %%r14\n\t"
-	             "popq %%r13\n\t"
-	             "popq %%r12\n\t"
+	                 "popq %%r15\n\t"
+	                 "popq %%r14\n\t"
+	                 "popq %%r13\n\t"
+	                 "popq %%r12\n\t"
 	             : "=a"(ret), "+D"(arg), "+S"(func)
-	             : [guest_rsp] "0"(guest_rsp)
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	             : [guest_rsp] "0"(guest_rsp), [teb_range] "m"(
+	                                               Common::HostException::g_guest_teb_stack_range)
 	             : "cc", "memory", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1",
 	               "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
 	               "xmm12", "xmm13", "xmm14", "xmm15");
 #else
+	             : [guest_rsp] "0"(guest_rsp)
 	             : "cc", "memory", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11", "r12", "r13",
 	               "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
 	               "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
@@ -1180,8 +1186,8 @@ void PthreadInitSelfForMainThread() {
 	g_pthread_self = new PthreadPrivate {};
 	PthreadAttrInit(&g_pthread_self->attr);
 	UpdateCurrentThreadStackAttr(&g_pthread_self->attr);
-	g_pthread_self->p               = pthread_self();
-	g_pthread_self->name            = "MainThread";
+	g_pthread_self->p    = pthread_self();
+	g_pthread_self->name = "MainThread";
 	HangWatchdog::SetGuestThread(reinterpret_cast<uint64_t>(g_pthread_self), "MainThread");
 	g_pthread_self->guest.thread_id = ++g_pthread_thread_id;
 	g_pthread_self->unique_id       = Common::Thread::GetThreadIdUnique();
@@ -1417,6 +1423,66 @@ static int PthreadRwlockInitNamed(PthreadRwlock* rwlock, const PthreadRwlockattr
                                   const char* name);
 static int PthreadCondInitNamed(PthreadCond* cond, const PthreadCondattr* attr, const char* name);
 
+// Guest mutex starvation guard. The mutex below is not fair: unlock wakes a waiter, but the
+// unlocking thread can take the mutex again before the woken host thread runs. A guest thread
+// that unlocks and re-locks in a loop (Wwise's audio thread does this with its global lock
+// when audio runs behind) then keeps the mutex for seconds and every other locker starves:
+// Ratchet & Clank froze with its main thread stuck in PthreadMutexLock. A waiter that has
+// waited longer than KYTY_MUTEX_HANDOFF_US (default 2000 us, 0 = off) joins the starving
+// queue; while that queue is not empty the mutex goes to its front thread only (direct
+// hand-off, like Go's sync.Mutex starvation mode). Short waits behave as before.
+static int64_t MutexHandoffMicros() {
+	static const int64_t value = [] {
+		const auto* env = std::getenv("KYTY_MUTEX_HANDOFF_US");
+		if (env == nullptr || env[0] == '\0') {
+			return static_cast<int64_t>(2000);
+		}
+		return std::max<int64_t>(0, std::strtoll(env, nullptr, 10));
+	}();
+	return value;
+}
+
+static bool MutexMayTake(const PthreadMutexPrivate* mutex, Pthread self) {
+	return mutex->owner == nullptr && (mutex->starving.empty() || mutex->starving.front() == self);
+}
+
+static void MutexLeaveStarving(PthreadMutexPrivate* mutex, Pthread self) {
+	auto it = std::find(mutex->starving.begin(), mutex->starving.end(), self);
+	if (it != mutex->starving.end()) {
+		mutex->starving.erase(it);
+	}
+}
+
+// Called with mutex->m held after each wait step: joins the starving queue once the wait is
+// longer than the hand-off limit (again if a signal handler on this thread took and released
+// the mutex in between, which removed this thread from the queue).
+static void MutexUpdateStarving(PthreadMutexPrivate* mutex, Pthread self,
+                                std::chrono::steady_clock::time_point wait_start, bool* starving) {
+	const auto limit = MutexHandoffMicros();
+	if (limit <= 0) {
+		return;
+	}
+	if (*starving) {
+		if (std::find(mutex->starving.begin(), mutex->starving.end(), self) ==
+		    mutex->starving.end()) {
+			mutex->starving.push_back(self);
+		}
+		return;
+	}
+	if (std::chrono::steady_clock::now() - wait_start >= std::chrono::microseconds(limit)) {
+		*starving = true;
+		mutex->starving.push_back(self);
+	}
+}
+
+static std::chrono::steady_clock::duration MutexWaitStep(bool starving) {
+	const auto limit = MutexHandoffMicros();
+	if (!starving && limit > 0 && limit < SIGNAL_APC_POLL_MICROS) {
+		return std::chrono::microseconds(limit);
+	}
+	return std::chrono::microseconds(SIGNAL_APC_POLL_MICROS);
+}
+
 static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_us) {
 	EXIT_IF(mutex == nullptr);
 
@@ -1433,49 +1499,66 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 			mutex->count++;
 			return OK;
 		}
-		if (timeout_us != nullptr) {
-			if (*timeout_us > 0) {
-				mutex->cv.wait_for(lock, std::chrono::microseconds(*timeout_us));
-			}
-			return ETIMEDOUT;
-		}
+		// A non-recursive self lock reports EDEADLK at once, timed or not (upstream e87fb8c85's
+		// change of this case; its FIFO hand-off is not taken).
 		return EDEADLK;
 	}
 
 	std::optional<HangWatchdog::Scope> blocked;
-	if (mutex->owner != nullptr)
+	if (!MutexMayTake(mutex, self))
 		blocked.emplace("guest-mutex", reinterpret_cast<uint64_t>(mutex),
 		                reinterpret_cast<uint64_t>(self), reinterpret_cast<uint64_t>(mutex->owner));
+	// Guest mutex waits are not cancellation points, unlike the host condition wait (upstream
+	// e87fb8c85's cancellation part; its FIFO hand-off is not taken). Only a waiting lock pays.
+	struct CancelStateGuard {
+		int  previous = 0;
+		bool active   = false;
+		~CancelStateGuard() {
+			if (active) {
+				::pthread_setcancelstate(previous, nullptr);
+			}
+		}
+	} cancel_state;
+	if (blocked) {
+		::pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state.previous);
+		cancel_state.active = true;
+	}
+	const auto wait_start = std::chrono::steady_clock::now();
+	bool       starving   = false;
 	if (timeout_us == nullptr) {
-		while (mutex->owner != nullptr) {
+		while (!MutexMayTake(mutex, self)) {
 			if (blocked) blocked->Observed(reinterpret_cast<uint64_t>(mutex->owner));
-			mutex->cv.wait_for(lock, std::chrono::microseconds(SIGNAL_APC_POLL_MICROS));
-			if (mutex->owner != nullptr) {
+			mutex->cv.wait_for(lock, MutexWaitStep(starving));
+			if (!MutexMayTake(mutex, self)) {
+				MutexUpdateStarving(mutex, self, wait_start, &starving);
 				lock.unlock();
 				KernelDispatchPendingSignalForCurrentThread();
 				lock.lock();
 			}
 		}
 	} else if (*timeout_us == 0) {
-		if (mutex->owner != nullptr) {
+		if (!MutexMayTake(mutex, self)) {
 			return ETIMEDOUT;
 		}
 	} else {
-		const auto deadline =
-		    std::chrono::steady_clock::now() + std::chrono::microseconds(*timeout_us);
-		while (mutex->owner != nullptr) {
+		const auto deadline = wait_start + std::chrono::microseconds(*timeout_us);
+		while (!MutexMayTake(mutex, self)) {
 			const auto now = std::chrono::steady_clock::now();
 			if (now >= deadline) {
+				if (starving) {
+					MutexLeaveStarving(mutex, self);
+					lock.unlock();
+					// The next starving waiter may be the one allowed to take the mutex now.
+					mutex->cv.notify_all();
+				}
 				return ETIMEDOUT;
 			}
 
 			const auto remaining = deadline - now;
-			const auto poll      = (remaining < std::chrono::microseconds(SIGNAL_APC_POLL_MICROS)
-			                            ? remaining
-			                            : std::chrono::steady_clock::duration(
-			                                  std::chrono::microseconds(SIGNAL_APC_POLL_MICROS)));
-			mutex->cv.wait_for(lock, poll);
-			if (mutex->owner != nullptr) {
+			const auto step      = MutexWaitStep(starving);
+			mutex->cv.wait_for(lock, (remaining < step ? remaining : step));
+			if (!MutexMayTake(mutex, self)) {
+				MutexUpdateStarving(mutex, self, wait_start, &starving);
 				lock.unlock();
 				KernelDispatchPendingSignalForCurrentThread();
 				lock.lock();
@@ -1483,6 +1566,9 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 		}
 	}
 
+	if (!mutex->starving.empty()) {
+		MutexLeaveStarving(mutex, self);
+	}
 	mutex->owner = self;
 	mutex->count = 1;
 	return OK;
@@ -1507,7 +1593,8 @@ static int NativeMutexTrylock(PthreadMutexPrivate* mutex) {
 		return EBUSY;
 	}
 
-	if (mutex->owner != nullptr) {
+	// A starving waiter has priority (see MutexHandoffMicros).
+	if (mutex->owner != nullptr || !mutex->starving.empty()) {
 		return EBUSY;
 	}
 
@@ -1540,8 +1627,14 @@ static int NativeMutexUnlock(PthreadMutexPrivate* mutex, uint32_t* recurse = nul
 
 	mutex->owner = nullptr;
 	mutex->count = 0;
+	// With starving waiters only the queue's front may take the mutex: wake all so it runs now.
+	const bool hand_off = !mutex->starving.empty();
 	lock.unlock();
-	mutex->cv.notify_one();
+	if (hand_off) {
+		mutex->cv.notify_all();
+	} else {
+		mutex->cv.notify_one();
+	}
 
 	return OK;
 }
@@ -3045,9 +3138,9 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 
 	HangWatchdog::Scope wait("guest-condition", reinterpret_cast<uint64_t>(cond_value),
 	                         reinterpret_cast<uint64_t>(mutex_value));
-	std::unique_lock cond_lock(cond_value->m);
-	auto*            thread          = g_pthread_self;
-	const auto       thread_sequence = thread->cond_sequence;
+	std::unique_lock    cond_lock(cond_value->m);
+	auto*               thread          = g_pthread_self;
+	const auto          thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
 
 	uint32_t recurse = 0;
@@ -3117,9 +3210,9 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex
 
 	HangWatchdog::Scope wait("guest-condition", reinterpret_cast<uint64_t>(cond_value),
 	                         reinterpret_cast<uint64_t>(mutex_value));
-	std::unique_lock cond_lock(cond_value->m);
-	auto*            thread          = g_pthread_self;
-	const auto       thread_sequence = thread->cond_sequence;
+	std::unique_lock    cond_lock(cond_value->m);
+	auto*               thread          = g_pthread_self;
+	const auto          thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
 
 	uint32_t recurse = 0;
@@ -3176,9 +3269,9 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
 
 	HangWatchdog::Scope wait("guest-condition", reinterpret_cast<uint64_t>(cond_value),
 	                         reinterpret_cast<uint64_t>(mutex_value));
-	std::unique_lock cond_lock(cond_value->m);
-	auto*            thread          = g_pthread_self;
-	const auto       thread_sequence = thread->cond_sequence;
+	std::unique_lock    cond_lock(cond_value->m);
+	auto*               thread          = g_pthread_self;
+	const auto          thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
 
 	uint32_t recurse = 0;
@@ -3343,8 +3436,8 @@ static void CleanupThread(void* arg) {
 	thread->almost_done = true;
 }
 
-/// Entry point of the host thread behind every guest thread: records its identity, applies the guest
-/// priority, then runs the guest entry function on the guest stack and cleans up afterwards.
+/// Entry point of the host thread behind every guest thread: records its identity, applies the
+/// guest priority, then runs the guest entry function on the guest stack and cleans up afterwards.
 /// @param arg the Pthread that this host thread runs
 /// @return the value the guest entry function returned
 static void* RunThread(void* arg) {
@@ -3514,7 +3607,7 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value) {
 
 	HangWatchdog::Scope wait("guest-thread-join", reinterpret_cast<uint64_t>(thread),
 	                         thread->host_thread_id);
-	int result = pthread_join(thread->p, value);
+	int                 result = pthread_join(thread->p, value);
 
 	if (PRINT_NAME_ENABLED) {
 		LOGF("\tthread join: %s, %d\n", thread->name.c_str(), result);
@@ -3541,6 +3634,11 @@ int KYTY_SYSV_ABI PthreadCancel(Pthread thread) {
 
 	if (thread == nullptr) {
 		return KERNEL_ERROR_EINVAL;
+	}
+
+	// A joined thread's native handle is gone; the guest may still hold its handle.
+	if (thread->free) {
+		return KERNEL_ERROR_ESRCH;
 	}
 
 	int result = pthread_cancel(thread->p);
@@ -3646,10 +3744,8 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio) {
 
 	EXIT_NOT_IMPLEMENTED(prio == nullptr);
 
-	sched_param native_param {};
-	int         native_policy = 0;
-	if (pthread_getschedparam(thread->p, &native_policy, &native_param) != 0) {
-		return KERNEL_ERROR_EINVAL;
+	if (thread->free) {
+		return KERNEL_ERROR_ESRCH;
 	}
 
 	*prio = thread->attr->guest_priority;
@@ -3657,12 +3753,18 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio) {
 	return OK;
 }
 
-/// Sets the priority of a guest thread: the guest value is stored and, on Windows, the host priority
-/// of its band is applied, one step lower for a thread that started pinned to a single core.
+/// Sets the priority of a guest thread: the guest value is stored and, on Windows, the host
+/// priority of its band is applied, one step lower for a thread that started pinned to a single
+/// core.
 int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio) {
 	PRINT_NAME();
 
 	if (thread == nullptr) {
+		return KERNEL_ERROR_ESRCH;
+	}
+
+	// A joined thread's native handle is gone; the guest may still hold its handle.
+	if (thread->free) {
 		return KERNEL_ERROR_ESRCH;
 	}
 

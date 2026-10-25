@@ -45,12 +45,21 @@ bool CmaskFastClearEnabled() {
 	return enabled;
 }
 
+// Keep this fork's existing MSAA fast-clear support enabled unless explicitly disabled.
+bool CmaskMsaaEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_CMASK_MSAA");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
 bool DrawSequenceEnabled(DrawSequencePart part) {
 	static std::atomic<int64_t> parts_once {Common::OnceUnset};
-	const auto parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
-		constexpr uint32_t all = static_cast<uint32_t>(DrawSequencePart::Targets) |
-		                         static_cast<uint32_t>(DrawSequencePart::Textures);
-		const auto* value = std::getenv("KYTY_DRAW_SEQUENCE_FAST");
+	const auto                  parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
+		constexpr uint32_t all   = static_cast<uint32_t>(DrawSequencePart::Targets) |
+		                           static_cast<uint32_t>(DrawSequencePart::Textures);
+		const auto*        value = std::getenv("KYTY_DRAW_SEQUENCE_FAST");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "1") == 0) {
 			return all;
 		}
@@ -71,7 +80,7 @@ bool DrawSequenceEnabled(DrawSequencePart part) {
 
 int DrawSequenceVerifyMode() {
 	static std::atomic<int64_t> mode_once {Common::OnceUnset};
-	const auto mode = static_cast<int>(Common::Once(mode_once, [] {
+	const auto                  mode = static_cast<int>(Common::Once(mode_once, [] {
 		const auto* value = std::getenv("KYTY_DRAW_SEQUENCE_VERIFY");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "0") == 0) {
 			return 0;
@@ -94,11 +103,11 @@ void ReportDrawSequenceMismatch(const char* what) {
 
 bool RenderStateFastEnabled(RenderStatePart part) {
 	static std::atomic<int64_t> parts_once {Common::OnceUnset};
-	const auto parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
-		constexpr uint32_t all = static_cast<uint32_t>(RenderStatePart::VertexCopy) |
-		                         static_cast<uint32_t>(RenderStatePart::PrepSwap) |
-		                         static_cast<uint32_t>(RenderStatePart::Reset);
-		const auto* value = std::getenv("KYTY_RENDER_STATE_FAST");
+	const auto                  parts = static_cast<uint32_t>(Common::Once(parts_once, [] {
+		constexpr uint32_t all   = static_cast<uint32_t>(RenderStatePart::VertexCopy) |
+		                           static_cast<uint32_t>(RenderStatePart::PrepSwap) |
+		                           static_cast<uint32_t>(RenderStatePart::Reset);
+		const auto*        value = std::getenv("KYTY_RENDER_STATE_FAST");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "1") == 0) {
 			return all;
 		}
@@ -122,7 +131,7 @@ bool RenderStateFastEnabled(RenderStatePart part) {
 
 int RenderStateVerifyMode() {
 	static std::atomic<int64_t> mode_once {Common::OnceUnset};
-	const auto mode = static_cast<int>(Common::Once(mode_once, [] {
+	const auto                  mode = static_cast<int>(Common::Once(mode_once, [] {
 		const auto* value = std::getenv("KYTY_RENDER_STATE_VERIFY");
 		if (value == nullptr || *value == '\0' || std::strcmp(value, "0") == 0) {
 			return 0;
@@ -146,34 +155,34 @@ void ReportRenderStateMismatch(const char* what) {
 bool SameImageDesc(const TextureCache::ImageDesc& a, const TextureCache::ImageDesc& b) {
 	// The bindings name every field in declaration order: a new field stops this compiling until
 	// it is compared below.
-	const auto& [a_info, a_view, a_type, a_cmask] = a;
-	const auto& [b_info, b_view, b_type, b_cmask] = b;
+	const auto& [a_info, a_view, a_type, a_cmask]                                   = a;
+	const auto& [b_info, b_view, b_type, b_cmask]                                   = b;
 	const auto& [a_data, a_stencil, a_meta, a_htile_clear_mask, a_pixel_format, a_guest_format,
 	             a_image_type, a_extent, a_resources, a_pitch, a_bytes_per_block, a_samples,
-	             a_tile_mode, a_bgra16, a_mip_layout] = a_info;
+	             a_tile_mode, a_bgra16, a_mip_layout]                               = a_info;
 	const auto& [b_data, b_stencil, b_meta, b_htile_clear_mask, b_pixel_format, b_guest_format,
 	             b_image_type, b_extent, b_resources, b_pitch, b_bytes_per_block, b_samples,
-	             b_tile_mode, b_bgra16, b_mip_layout] = b_info;
+	             b_tile_mode, b_bgra16, b_mip_layout]                               = b_info;
 	const auto& [a_range, a_kind, a_control, a_dcc_clear_word, a_dcc_clear_word1, a_compression,
 	             a_stencil_compressed, a_dcc_clear_register_valid, a_dcc_alpha_msb] = a_meta;
 	const auto& [b_range, b_kind, b_control, b_dcc_clear_word, b_dcc_clear_word1, b_compression,
 	             b_stencil_compressed, b_dcc_clear_register_valid, b_dcc_alpha_msb] = b_meta;
-	const auto& [a_cmask_range, a_clear_word0, a_clear_word1, a_cmask_valid] = a_cmask;
-	const auto& [b_cmask_range, b_clear_word0, b_clear_word1, b_cmask_valid] = b_cmask;
+	const auto& [a_cmask_range, a_clear_word0, a_clear_word1, a_cmask_valid]        = a_cmask;
+	const auto& [b_cmask_range, b_clear_word0, b_clear_word1, b_cmask_valid]        = b_cmask;
 	// ImageViewInfo::operator== compares all of its fields.
 	return a_data == b_data && a_stencil == b_stencil && a_range == b_range && a_kind == b_kind &&
 	       a_control == b_control && a_dcc_clear_word == b_dcc_clear_word &&
-	       a_dcc_clear_word1 == b_dcc_clear_word1 &&
-	       a_compression == b_compression && a_stencil_compressed == b_stencil_compressed &&
+	       a_dcc_clear_word1 == b_dcc_clear_word1 && a_compression == b_compression &&
+	       a_stencil_compressed == b_stencil_compressed &&
 	       a_dcc_clear_register_valid == b_dcc_clear_register_valid &&
 	       a_dcc_alpha_msb == b_dcc_alpha_msb && a_htile_clear_mask == b_htile_clear_mask &&
 	       a_pixel_format == b_pixel_format && a_guest_format == b_guest_format &&
 	       a_image_type == b_image_type && a_extent == b_extent && a_resources == b_resources &&
-	       a_pitch == b_pitch && a_bytes_per_block == b_bytes_per_block &&
-	       a_samples == b_samples && a_tile_mode == b_tile_mode && a_bgra16 == b_bgra16 &&
-	       a_mip_layout == b_mip_layout && a_view == b_view && a_type == b_type &&
-	       a_cmask_range == b_cmask_range && a_clear_word0 == b_clear_word0 &&
-	       a_clear_word1 == b_clear_word1 && a_cmask_valid == b_cmask_valid;
+	       a_pitch == b_pitch && a_bytes_per_block == b_bytes_per_block && a_samples == b_samples &&
+	       a_tile_mode == b_tile_mode && a_bgra16 == b_bgra16 && a_mip_layout == b_mip_layout &&
+	       a_view == b_view && a_type == b_type && a_cmask_range == b_cmask_range &&
+	       a_clear_word0 == b_clear_word0 && a_clear_word1 == b_clear_word1 &&
+	       a_cmask_valid == b_cmask_valid;
 }
 
 bool SameRenderColorInfo(const RenderColorInfo& a, const RenderColorInfo& b) {
@@ -203,7 +212,7 @@ ImageId RenderExecutor::FindTargetImage(TextureCache::ImageDesc& desc, bool exac
 	if (!record->valid) {
 		return full();
 	}
-	const bool verify  = DrawSequenceVerifyMode() != 0;
+	const bool verify = DrawSequenceVerifyMode() != 0;
 	// Read before the check: a guest write fault changing the recorded fills after it (on another
 	// thread) races the lookup (verify below).
 	const auto foreign = m_context.GetBufferCache().ForeignKnownFillChanges();
@@ -261,22 +270,21 @@ static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
-                                              uint32_t         render_target_slice_offset,
-                                              uint32_t rt_slot, bool ignore_target_mask,
-                                              bool exact_format) {
+                                              uint32_t render_target_slice_offset, uint32_t rt_slot,
+                                              bool ignore_target_mask, bool exact_format) {
 	KYTY_PROFILER_FUNCTION();
 	const auto& hw = buffer.GetRegisters();
 
-	const auto& rt      = hw.GetRenderTarget(rt_slot);
-	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
-	if (ignore_target_mask && rt.base.addr != 0 && mask == 0) {
+	const auto& rt   = hw.GetRenderTarget(rt_slot);
+	auto        mask = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
+	if (ignore_target_mask && render_target_bound(rt) && mask == 0) {
 		mask = 0x0f;
 	}
 
 	// KYTY_RENDER_STATE_FAST reset: both paths below that resolve a target assign every field of
 	// the entry (desc, image_id, target_slot, guest_mip_level, guest_array_layer, export_mapping;
 	// SameRenderColorInfo names them all), so only an entry without a target is value-initialised.
-	const bool output = rt.base.addr != 0 && mask != 0;
+	const bool output = render_target_bound(rt) && mask != 0;
 	if (!output || !RenderStateFastEnabled(RenderStatePart::Reset)) {
 		r = {};
 	}
@@ -322,7 +330,16 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		CommitStats::AddItems(CommitStats::Item::ColorMemoMiss, 1);
 	}
 	const auto samples = render_sample_count(rt.attrib.num_fragments);
-	if (samples == 0 || rt.attrib.num_samples != rt.attrib.num_fragments) {
+	// TODO(PPSA24156): Replace this 2x MSAA approximation with proper 4-coverage/2-fragment EQAA.
+	const bool approximate_eqaa = rt.attrib.num_samples == 2 && rt.attrib.num_fragments == 1;
+	if (approximate_eqaa) {
+		static std::atomic_bool logged = false;
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(
+			    "Warning: approximating 4-coverage/2-fragment EQAA with 2x MSAA.\n");
+		}
+	}
+	if (samples == 0 || (rt.attrib.num_samples != rt.attrib.num_fragments && !approximate_eqaa)) {
 		EXIT("unsupported render-target sample configuration: samples=%u fragments=%u\n",
 		     rt.attrib.num_samples, rt.attrib.num_fragments);
 	}
@@ -355,12 +372,12 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	const uint32_t depth = volume ? rt.attrib3.depth + 1u : 1u;
 	// For volumes, CB_COLOR_VIEW bounds exported slices; ATTRIB3 defines storage depth.
 	// The host attachment contains only the selected slices that exist in this mip.
-	const uint32_t last_layer = volume
-	                                ? std::min(rt.view.last_array_slice_index,
-	                                           std::max(depth >> rt.view.current_mip_level, 1u) - 1u)
-	                                : rt.view.last_array_slice_index;
-	const auto view = ResolveTargetViewInfo(
-	    rt.view.base_array_slice_index, last_layer, render_target_slice_offset);
+	const uint32_t last_layer =
+	    volume ? std::min(rt.view.last_array_slice_index,
+	                      std::max(depth >> rt.view.current_mip_level, 1u) - 1u)
+	           : rt.view.last_array_slice_index;
+	const auto view = ResolveTargetViewInfo(rt.view.base_array_slice_index, last_layer,
+	                                        render_target_slice_offset);
 	switch (view.type) {
 		case TargetViewType::Image2D:
 		case TargetViewType::Image2DArray: break;
@@ -389,15 +406,15 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	// Nonlinear clear values are still stored as normalized components.
 	// Fast color clears are metadata driven and must be handled explicitly when
 	// that metadata path is implemented; render-pass load must preserve contents.
-	uint32_t   width  = 0;
-	uint32_t   height = 0;
-	uint32_t   pitch  = 0;
-	uint64_t   size   = 0;
-	bool       tile   = false;
-	const bool     standard4    = rt.attrib3.tile_mode == Prospero::TileMode::kStandard4KB;
-	const bool     standard64   = rt.attrib3.tile_mode == Prospero::TileMode::kStandard64KB;
-	const bool     depth_tile   = rt.attrib3.tile_mode == Prospero::TileMode::kDepth;
-	const bool     texture_tile = standard4 || standard64 || depth_tile;
+	uint32_t   width        = 0;
+	uint32_t   height       = 0;
+	uint32_t   pitch        = 0;
+	uint64_t   size         = 0;
+	bool       tile         = false;
+	const bool standard4    = rt.attrib3.tile_mode == Prospero::TileMode::kStandard4KB;
+	const bool standard64   = rt.attrib3.tile_mode == Prospero::TileMode::kStandard64KB;
+	const bool depth_tile   = rt.attrib3.tile_mode == Prospero::TileMode::kDepth;
+	const bool texture_tile = standard4 || standard64 || depth_tile;
 
 	switch (rt.attrib3.tile_mode) {
 		case Prospero::TileMode::kLinear:
@@ -485,7 +502,7 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 			TileGetTextureSize(transfer_format, width, height, levels, rt.attrib3.tile_mode,
 			                   &layout, mip_sizes, mip_padded);
 			const auto alignment = tile ? texture_tile_layout.block.block_size : 256u;
-			valid_layout = layout.size != 0 && layout.align == alignment;
+			valid_layout         = layout.size != 0 && layout.align == alignment;
 		} else {
 			valid_layout =
 			    levels == 1 ? TileGetRenderTargetSize(width, height, pitch, bytes_per_element,
@@ -535,14 +552,14 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	}
 
 	TextureCache::ImageDesc desc {};
-	desc.type              = TextureCache::BindingType::RenderTarget;
-	desc.info.data         = {rt.base.addr, backing_size};
-	desc.info.pixel_format = target_format.format;
-	desc.info.guest_format = target_format.guest_format;
-	desc.info.type         = image_type;
-	desc.info.extent       = {width, height, depth};
-	desc.info.resources    = {levels, volume ? 1u : view.image_layers};
-	desc.info.pitch        = pitch;
+	desc.type                 = TextureCache::BindingType::RenderTarget;
+	desc.info.data            = {rt.base.addr, backing_size};
+	desc.info.pixel_format    = target_format.format;
+	desc.info.guest_format    = target_format.guest_format;
+	desc.info.type            = image_type;
+	desc.info.extent          = {width, height, depth};
+	desc.info.resources       = {levels, volume ? 1u : view.image_layers};
+	desc.info.pitch           = pitch;
 	desc.info.bytes_per_block = bytes_per_element;
 	desc.info.samples         = samples;
 	desc.info.tile_mode       = rt.attrib3.tile_mode;
@@ -563,7 +580,8 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	// The host image holds expanded texels, so the texture cache applies a pending clear when the
 	// target is bound (TextureCache::MaterializeCmaskClear). Single-mip 2D targets, including MSAA.
 	if (!has_dcc && CmaskFastClearEnabled() && rt.info.cmask_fast_clear_enable &&
-	    rt.cmask.addr != 0 && tile && !texture_tile && !volume && levels == 1 &&
+	    rt.cmask.addr != 0 && tile && !texture_tile && !volume &&
+	    (samples == 1 || CmaskMsaaEnabled()) && levels == 1 &&
 	    !rt.attrib3.write_vrs_rate_hint_to_cmask) {
 		TileSizeAlign cmask_size {};
 		if (TileGetCmaskSize(width, height, view.image_layers, cmask_size)) {
@@ -622,11 +640,11 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		memo->lookup            = {};
 		memo->valid             = true;
 	}
-	r.desc                     = std::move(desc);
-	r.guest_mip_level          = rt.view.current_mip_level;
-	r.guest_array_layer        = view.base_layer;
+	r.desc              = std::move(desc);
+	r.guest_mip_level   = rt.view.current_mip_level;
+	r.guest_array_layer = view.base_layer;
 	r.image_id = FindTargetImage(r.desc, exact_format, memo != nullptr ? &memo->lookup : nullptr);
-	r.export_mapping           = target_format.export_mapping;
+	r.export_mapping = target_format.export_mapping;
 	BindRenderTarget(r.image_id);
 }
 

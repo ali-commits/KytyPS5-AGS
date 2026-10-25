@@ -62,6 +62,15 @@ constexpr vk::AccessFlags2 TransitWriteAccess = vk::AccessFlagBits2::eTransferWr
                                                 vk::AccessFlagBits2::eShaderWrite |
                                                 vk::AccessFlagBits2::eMemoryWrite;
 
+// KYTY_IMAGE_PARTIAL_INPLACE=1 (default off; chenxiao07/KytyPS5 1384c1811): Image::GetBarriers.
+bool PartialInPlaceEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_IMAGE_PARTIAL_INPLACE");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
 // Image::RecordedTransitions.
 std::atomic<uint64_t> g_recorded_transitions {0};
 
@@ -83,15 +92,17 @@ bool CopyViaBufferBatchEnabled() {
 	}
 }
 
-[[nodiscard]] vk::ImageCreateFlags ImageCreateFlags(const GraphicContext& graphics,
-                                                    const ImageInfo&      info) {
+[[nodiscard]] vk::ImageCreateFlags
+ImageCreateFlags(const GraphicContext& graphics, const ImageInfo& info, vk::ImageUsageFlags usage) {
 	vk::ImageCreateFlags flags {};
 	if (DepthAspectTransferFormat(info.pixel_format) == vk::Format::eUndefined) {
 		flags |= vk::ImageCreateFlagBits::eMutableFormat;
-		flags |= vk::ImageCreateFlagBits::eExtendedUsage;
 		if (info.IsBlock() && graphics.supports_block_texel_view) {
 			flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
 		}
+	}
+	if (usage & vk::ImageUsageFlagBits::eStorage) {
+		flags |= vk::ImageCreateFlagBits::eExtendedUsage;
 	}
 	if (info.IsVolume()) {
 		flags |= vk::ImageCreateFlagBits::e2DArrayCompatible;
@@ -152,9 +163,10 @@ bool CopyViaBufferBatchEnabled() {
 		    ImageOps::BlockStorageUploadsEnabled()) {
 			const auto                storage = usage | vk::ImageUsageFlagBits::eStorage;
 			vk::ImageFormatProperties properties {};
-			if (graphics.GetImageFormatProperties(
-			        info.pixel_format, HostImageType(info.type), vk::ImageTiling::eOptimal, storage,
-			        ImageCreateFlags(graphics, info), &properties) == vk::Result::eSuccess) {
+			if (graphics.GetImageFormatProperties(info.pixel_format, HostImageType(info.type),
+			                                      vk::ImageTiling::eOptimal, storage,
+			                                      ImageCreateFlags(graphics, info, storage),
+			                                      &properties) == vk::Result::eSuccess) {
 				usage = storage;
 			}
 		}
@@ -273,6 +285,39 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 	              range->base_layer != 0 || range->layer_count != info.resources.layers);
 	const bool has_subresource_states = !subresource_states.empty();
 	const bool guest                  = g_guest_transit;
+
+	if (partial && PartialInPlaceEnabled() &&
+	    !static_cast<bool>(destination_access & TransitWriteAccess)) {
+		// KYTY_IMAGE_PARTIAL_INPLACE: a read-only transition of part of an image whose state (and
+		// the part's subresource states, if it has them) already has the layout and the access
+		// changes nothing: no barrier, no split into per-subresource states and no image state
+		// epoch move (which ends draw-run continuations). A view of a texture's levels from a base
+		// level above 0 (resident mips, streamed textures) took the per-subresource path at every
+		// use.
+		bool in_place = true;
+		if (!has_subresource_states) {
+			in_place =
+			    state.layout == destination_layout && state.access_mask == destination_access;
+		} else {
+			for (uint32_t level = range->base_level;
+			     in_place && level < range->base_level + range->level_count; level++) {
+				for (uint32_t layer = range->base_layer;
+				     layer < range->base_layer + range->layer_count; layer++) {
+					const auto index = level * info.resources.layers + layer;
+					if (index >= subresource_states.size() ||
+					    subresource_states[index].layout != destination_layout ||
+					    subresource_states[index].access_mask != destination_access) {
+						in_place = false;
+						break;
+					}
+				}
+			}
+		}
+		if (in_place) {
+			Profiler::CountFrameEvent(Profiler::FrameEvent::ImageTransitSkips);
+			return {};
+		}
+	}
 
 	Barriers barriers;
 	if (partial || has_subresource_states) {
@@ -983,7 +1028,8 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	}
 
 	vk::ImageCreateInfo create {};
-	create.flags         = ImageCreateFlags(graphics, info);
+	create.usage         = ImageUsageFlags(graphics, info);
+	create.flags         = ImageCreateFlags(graphics, info, create.usage);
 	create.imageType     = HostImageType(info.type);
 	create.extent        = info.extent;
 	create.mipLevels     = info.resources.levels;
@@ -991,7 +1037,6 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.format        = info.pixel_format;
 	create.tiling        = vk::ImageTiling::eOptimal;
 	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.usage         = ImageUsageFlags(graphics, info);
 	create.samples       = vulkan_sample_count(info.samples);
 
 	const auto accepts = [&](vk::ImageUsageFlags usage, vk::ImageCreateFlags flags) {

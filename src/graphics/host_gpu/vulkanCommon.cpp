@@ -1,14 +1,13 @@
 #include "graphics/host_gpu/vulkanCommon.h"
-#include "graphics/host_gpu/spirvCacheSalt.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
+#include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/spirvCacheSalt.h"
 #include "graphics/host_gpu/spirvLocalArrays.h"
 #include "graphics/host_gpu/vramStats.h"
-
-#include <spirv-tools/libspirv.hpp>
 
 #include <algorithm>
 #include <array>
@@ -17,6 +16,7 @@
 #include <cstring>
 #include <mutex>
 #include <set>
+#include <spirv-tools/libspirv.hpp>
 #include <string>
 #include <vector>
 
@@ -137,6 +137,9 @@ void RequireVulkanSuccess(vk::Result result, const char* operation) {
 		if (result == vk::Result::eErrorDeviceLost) {
 			// Another thread may see the loss first (the upload DMA worker, a side readback).
 			GpuBreadcrumbs::Dump();
+			// The thread reporting the loss (DumpDeviceLossDiagnostics) finishes its report and
+			// the device-fault dump file before this exit ends the process.
+			WaitForDeviceLossDiagnostics();
 		}
 		EXIT("%s failed: %s (%d)\n", operation, vk::to_string(result).c_str(),
 		     static_cast<int>(result));
@@ -172,7 +175,8 @@ const ShrinkMode& FunctionArrayShrinkMode() {
 		}
 		result.enabled = std::strcmp(value, "0") != 0;
 		if (!result.enabled) {
-			Log::WriteToConsoleAndLog("Kyty Function-storage arrays: not shrunk (KYTY_FUNCTION_ARRAY_SHRINK=0)\n");
+			Log::WriteToConsoleAndLog(
+			    "Kyty Function-storage arrays: not shrunk (KYTY_FUNCTION_ARRAY_SHRINK=0)\n");
 		}
 		if (result.enabled) {
 			if (std::strcmp(value, "zero") == 0) {
@@ -181,12 +185,14 @@ const ShrinkMode& FunctionArrayShrinkMode() {
 				result.init = SpirvLocalArrays::Init::Poison;
 			}
 			char text[192];
-			std::snprintf(text, sizeof(text), "Kyty Function-storage arrays: shrunk to their proven index bound%s "
-			            "(KYTY_FUNCTION_ARRAY_SHRINK=%s)\n",
-			            result.init == SpirvLocalArrays::Init::Zero     ? ", zero-filled"
-			            : result.init == SpirvLocalArrays::Init::Poison ? ", filled with NaNs (diagnostic)"
-			                                                            : "",
-			            value);
+			std::snprintf(text, sizeof(text),
+			              "Kyty Function-storage arrays: shrunk to their proven index bound%s "
+			              "(KYTY_FUNCTION_ARRAY_SHRINK=%s)\n",
+			              result.init == SpirvLocalArrays::Init::Zero ? ", zero-filled"
+			              : result.init == SpirvLocalArrays::Init::Poison
+			                  ? ", filled with NaNs (diagnostic)"
+			                  : "",
+			              value);
 			Log::WriteToConsoleAndLog(text);
 		}
 		return result;
@@ -199,41 +205,45 @@ const ShrinkMode& FunctionArrayShrinkMode() {
 std::vector<uint32_t> ShrinkFunctionArrays(std::span<const uint32_t> code, uint64_t& declared,
                                            uint64_t& created) {
 	std::vector<uint32_t> shrunk;
-	const auto            result = SpirvLocalArrays::Shrink(code, shrunk, FunctionArrayShrinkMode().init);
-	declared                     = result.bytes_before;
-	created                      = result.bytes_before;
+	const auto result = SpirvLocalArrays::Shrink(code, shrunk, FunctionArrayShrinkMode().init);
+	declared          = result.bytes_before;
+	created           = result.bytes_before;
 	if (!result.changed) {
 		return {};
 	}
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
 	std::string          messages;
-	tools.SetMessageConsumer([&messages](spv_message_level_t, const char*, const spv_position_t&,
-	                                     const char* message) {
-		if (messages.size() < 512) {
-			messages += message;
-			messages += "; ";
-		}
-	});
-	const bool valid = tools.Validate(shrunk);
-	static std::mutex                   log_mutex;
-	static std::set<std::string>        logged;
-	std::string                         arrays;
+	tools.SetMessageConsumer(
+	    [&messages](spv_message_level_t, const char*, const spv_position_t&, const char* message) {
+		    if (messages.size() < 512) {
+			    messages += message;
+			    messages += "; ";
+		    }
+	    });
+	const bool                   valid = tools.Validate(shrunk);
+	static std::mutex            log_mutex;
+	static std::set<std::string> logged;
+	std::string                  arrays;
 	for (const auto& array: result.arrays) {
 		char part[160];
 		std::snprintf(part, sizeof(part), "%s%s %u -> %u", arrays.empty() ? "" : ", ",
-		              array.name.empty() ? "array" : array.name.c_str(), array.old_length, array.new_length);
+		              array.name.empty() ? "array" : array.name.c_str(), array.old_length,
+		              array.new_length);
 		arrays += part;
 	}
 	{
 		std::scoped_lock lock(log_mutex);
 		if (logged.insert(arrays + (valid ? "" : " invalid")).second) {
 			char text[1024];
-			std::snprintf(text, sizeof(text), "Kyty Function-storage arrays (KYTY_FUNCTION_ARRAY_SHRINK): %s elements, %llu -> %llu "
-			            "bytes per invocation%s%s\n",
-			            arrays.c_str(), static_cast<unsigned long long>(result.bytes_before),
-			            static_cast<unsigned long long>(result.bytes_after),
-			            valid ? "" : "; the rewritten module failed validation, the original is used: ",
-			            valid ? "" : messages.c_str());
+			std::snprintf(
+			    text, sizeof(text),
+			    "Kyty Function-storage arrays (KYTY_FUNCTION_ARRAY_SHRINK): %s elements, %llu -> "
+			    "%llu "
+			    "bytes per invocation%s%s\n",
+			    arrays.c_str(), static_cast<unsigned long long>(result.bytes_before),
+			    static_cast<unsigned long long>(result.bytes_after),
+			    valid ? "" : "; the rewritten module failed validation, the original is used: ",
+			    valid ? "" : messages.c_str());
 			Log::WriteToConsoleAndLog(text);
 		}
 	}

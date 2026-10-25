@@ -45,8 +45,9 @@ class Buffer;
 [[nodiscard]] bool UploadDmaRequested();
 // KYTY_UPLOAD_DMA_VERIFY=1: every staged upload also copies its ring bytes, in the recording that
 // reads them, into a host-visible buffer; at completion they are compared with a snapshot of the
-// staged host bytes taken when the copy was queued (UploadDmaVerifyChecks / UploadDmaVerifyMismatches
-// and a log line). The copy ends the active rendering instance, so verify runs are for correctness.
+// staged host bytes taken when the copy was queued (UploadDmaVerifyChecks /
+// UploadDmaVerifyMismatches and a log line). The copy ends the active rendering instance, so verify
+// runs are for correctness.
 [[nodiscard]] bool UploadDmaVerify();
 // KYTY_UPLOAD_DMA_HOST_COPY (default on; =0: the command processor copies as before). A staged
 // read upload's guest bytes are copied into the host staging ring by the DMA worker, just before
@@ -62,13 +63,38 @@ class Buffer;
 // host copies. Ranges without an alias (not direct memory, or spanning mappings) are copied by
 // the command processor as before.
 [[nodiscard]] bool UploadDmaHostCopyEnabled();
+// KYTY_UPLOAD_DMA_WRITE_DRAIN=1 (live, default off). The host copy above runs later than the
+// command processor's own writes of guest memory that come after the upload in the command
+// stream (DUMP_CONST_RAM, WRITE_DATA, DMA_DATA, COPY_DATA, CP-side labels: everything that calls
+// StreamCopyDefer::NoteGuestWrite). Those are ordered, not races: the draw that the upload is for
+// must not see them. When the worker is late (a loaded CP thread, KYTY_DEFER_PROTECTS=all sending
+// every small upload to it), it copied them into the earlier upload: the earlier draws read
+// "future" constants, arguments or descriptors (reproduced as a device loss on
+// big_hand_pirate_island with the worker delayed 2 ms, with or without KYTY_DEFER_PROTECTS). With
+// this switch such a write first makes the queued host copies that read the same bytes itself
+// (UploadDma::DrainHostCopies: it takes them from the worker, or waits while the worker is
+// copying them). =labels also makes EVERY queued host copy first for the writes the guest may
+// observe early (labels written at CP time, WRITE_DATA, flip labels: NoteGuestWrite), because the
+// guest may then rewrite memory an earlier upload still reads; that closed the residual losses
+// (verify-all plus a 2 ms delayed worker, 0 of 5 instead of 4 of 6) but costs about 4% on Sky
+// Garden (as slow as KYTY_DEFER_PROTECTS=0). =all (diagnostic) does that for every write.
+// KYTY_UPLOAD_DMA_WRITE_DRAIN_LOG=1 logs the first drains and a running count.
+[[nodiscard]] bool UploadDmaWriteDrainEnabled();
+// KYTY_UPLOAD_DMA_LATE_AUDIT=1 (diagnostic, default off): hashes each host copy's guest bytes when
+// it is staged and again just before the worker copies them; a difference is a write that landed
+// in between (from a writer the drain does not order: guest CPU threads, other emulator threads).
+// Counted (UploadDma late audit line), first ones logged with their guest address.
+[[nodiscard]] bool UploadDmaLateAuditEnabled();
 
 // A copy of host bytes into a staging buffer's mapping that the DMA worker performs before it
-// submits the transfer reading them (KYTY_UPLOAD_DMA_HOST_COPY).
+// submits the transfer reading them (KYTY_UPLOAD_DMA_HOST_COPY). `guest`: the guest address the
+// source bytes belong to (KYTY_UPLOAD_DMA_WRITE_DRAIN).
 struct UploadHostCopy {
 	uint8_t*       destination = nullptr;
 	const uint8_t* source      = nullptr;
 	uint64_t       size        = 0;
+	uint64_t       guest       = 0;
+	uint64_t       stage_hash  = 0; // KYTY_UPLOAD_DMA_LATE_AUDIT: the source bytes at Stage()
 };
 
 class UploadDma final: public SubmitDependency {
@@ -91,10 +117,25 @@ public:
 	// protections of the pages the host copies read, applied by the worker before it copies them.
 	// llow_small: queue it even below the minimum size.
 	[[nodiscard]] std::optional<uint64_t> Stage(vk::Buffer source, uint64_t source_offset,
-	                                            uint64_t                     size,
-	                                            std::vector<UploadHostCopy>* host_copies = nullptr,
-	                                            PageManager::PendingProtects* protects = nullptr,
-	                                            bool allow_small = false);
+	                                            uint64_t                      size,
+	                                            std::vector<UploadHostCopy>*  host_copies = nullptr,
+	                                            PageManager::PendingProtects* protects    = nullptr,
+	                                            bool                          allow_small = false);
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN, recording thread: before a command-processor write of guest
+	// memory [address, address + size), waits until the worker has made every queued host copy
+	// that reads those bytes. Returns true when it waited.
+	// `all`: the write may be observed by the guest (a label), which may then rewrite memory any
+	// queued host copy still reads: makes every queued host copy
+	// (KYTY_UPLOAD_DMA_WRITE_DRAIN=labels; =1 only the overlapping ones; =all every one always).
+	// Copies are taken from the worker.
+	bool DrainHostCopies(uint64_t address, uint64_t size, bool all = false);
+	struct DrainStats {
+		uint64_t checks  = 0; // writes that overlapped the queued host-copy bounds
+		uint64_t waits   = 0; // writes that made (or waited for) queued host copies first
+		uint64_t wait_ns = 0;
+		uint64_t stolen  = 0; // host copies the command processor made itself
+	};
+	[[nodiscard]] DrainStats GetDrainStats() const noexcept { return m_drain; }
 	// Host-copy totals (tests): bytes queued by Stage and bytes the worker has copied.
 	[[nodiscard]] uint64_t HostCopyBytesQueued() const noexcept { return m_host_bytes_queued; }
 	[[nodiscard]] uint64_t HostCopyBytesDone() const noexcept {
@@ -102,12 +143,12 @@ public:
 	}
 	// Tests: while held, the worker leaves queued jobs (host copies and transfers) alone. The
 	// thread submitting a batch that depends on them would wait until the hold ends.
-	void HoldWorkerForTest(bool hold);
+	void                     HoldWorkerForTest(bool hold);
 	[[nodiscard]] vk::Buffer RingHandle() const noexcept;
 	[[nodiscard]] uint64_t   RingSize() const noexcept { return m_ring_size; }
 	// Copies queued so far (recording thread).
-	[[nodiscard]] uint64_t   Staged() const noexcept { return m_enqueued; }
-	[[nodiscard]] uint64_t   MinBytes() const noexcept { return m_min_bytes; }
+	[[nodiscard]] uint64_t Staged() const noexcept { return m_enqueued; }
+	[[nodiscard]] uint64_t MinBytes() const noexcept { return m_min_bytes; }
 
 	// SubmitDependency (the guest scheduler's submissions). A batch waits for the transfer on the
 	// device, and reaches its queue only after the worker submitted that transfer (Submittable).
@@ -123,15 +164,30 @@ public:
 	void WaitHost(uint64_t value) override;
 
 private:
+	// The host copies of one job. The worker makes them before it submits the job's transfer,
+	// unless the command processor took them first (KYTY_UPLOAD_DMA_WRITE_DRAIN: a CP write the
+	// guest may observe, or one over the same bytes). state: 0 queued, 1 being copied, 2 copied.
+	struct HostCopyTicket {
+		uint64_t                     value = 0;
+		std::vector<UploadHostCopy>  copies;
+		PageManager::PendingProtects protects; // the job's deferred protections (CP copies)
+		uint64_t                     lo = UINT64_MAX;
+		uint64_t                     hi = 0;
+		std::atomic<uint32_t>        state {0};
+	};
+	// Makes the ticket's copies unless the other thread took them (then waits until they are
+	// made). `cp`: the command processor (applies the deferred protections first). True when
+	// this call copied.
+	bool ClaimAndCopy(HostCopyTicket& ticket, bool cp);
 	struct Job {
-		vk::Buffer            source        = nullptr;
-		uint64_t              source_offset = 0;
-		uint64_t              ring_offset   = 0;
-		uint64_t              size          = 0;
-		uint64_t              value         = 0;
-		uint64_t              reuse_tick    = 0; // newest completed tick whose ring bytes were released
-		std::vector<UploadHostCopy> host_copies; // performed by the worker before the transfer
-		PageManager::PendingProtects protects;   // applied by the worker before the host copies
+		vk::Buffer source        = nullptr;
+		uint64_t   source_offset = 0;
+		uint64_t   ring_offset   = 0;
+		uint64_t   size          = 0;
+		uint64_t   value         = 0;
+		uint64_t   reuse_tick    = 0; // newest completed tick whose ring bytes were released
+		std::shared_ptr<HostCopyTicket> ticket;   // host copies, made before the transfer
+		PageManager::PendingProtects    protects; // applied by the worker before the host copies
 	};
 	struct Span {
 		uint64_t begin = 0;
@@ -155,32 +211,36 @@ private:
 	vk::Semaphore           m_semaphore = nullptr;
 	vk::CommandPool         m_pool      = nullptr;
 	// Recording thread.
-	std::deque<Span>        m_spans; // allocated ring ranges in allocation order
-	uint64_t                m_head        = 0;
+	std::deque<Span> m_spans; // allocated ring ranges in allocation order
+	uint64_t         m_head = 0;
 	// Newest reading tick of released ranges. Released space may be written by any later job, so
 	// every job carries it (the master semaphore is monotonic and that tick has completed).
-	uint64_t                m_reuse_tick  = 0;
-	uint64_t                m_enqueued    = 0;
-	uint64_t                m_host_bytes_queued = 0;
-	uint64_t                m_known_value = 0; // semaphore value observed by PendingValue
+	uint64_t m_reuse_tick        = 0;
+	uint64_t m_enqueued          = 0;
+	uint64_t m_host_bytes_queued = 0;
+	uint64_t m_known_value       = 0; // semaphore value observed by PendingValue
 	// Newest value staged while recording m_stage_tick. Only the submission of that tick reads
 	// its ring bytes (the graphics copies are recorded before the tick's End at the latest), so
 	// only it waits; later submissions order after those copies through their own barriers.
-	uint64_t                m_stage_tick  = 0;
-	uint64_t                m_stage_value = 0;
+	uint64_t m_stage_tick  = 0;
+	uint64_t m_stage_value = 0;
+	// KYTY_UPLOAD_DMA_WRITE_DRAIN: tickets of queued host copies in staging order; copied ones
+	// are pruned from the front.
+	std::deque<std::shared_ptr<HostCopyTicket>> m_tickets;
+	DrainStats                                  m_drain;
 	// Worker.
-	std::vector<Batch>      m_batches;
-	size_t                  m_next_batch = 0;
-	std::atomic<uint64_t>   m_host_bytes_done {0};
+	std::vector<Batch>    m_batches;
+	size_t                m_next_batch = 0;
+	std::atomic<uint64_t> m_host_bytes_done {0};
 	// Newest value whose transfer vkQueueSubmit2 has returned for (written by the worker).
-	std::atomic<uint64_t>   m_submitted {0};
+	std::atomic<uint64_t> m_submitted {0};
 	// Shared.
 	std::mutex              m_mutex;
 	std::condition_variable m_available;
 	std::vector<Job>        m_jobs;
 	bool                    m_stopping = false;
 	bool                    m_hold     = false; // HoldWorkerForTest
-	std::jthread            m_worker; // last: joined before the members it uses go away
+	std::jthread            m_worker;           // last: joined before the members it uses go away
 };
 
 } // namespace Libs::Graphics

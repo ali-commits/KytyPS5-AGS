@@ -143,32 +143,35 @@ struct Totals {
 // their capacity).
 struct PreparedDraw {
 	// Optional clean-snapshot program compilation; CP wait attribution at CommitHead.
-	uint64_t                                            program_compile_ns = 0;
-	bool                                                ok      = false;
-	Failure                                             failure = Failure::None;
-	bool                                                pixel_active = false;
-	std::array<Prospero::ColorComponentMapping, 8>      target_export_mapping {};
-	PipelineCache::GraphicsPrograms                     programs;
-	ShaderVertexInputInfo                               vertex_info;
-	ShaderPixelInputInfo                                pixel_info;
-	PipelineCache::StagePrep                            vertex_prep;
-	PipelineCache::StagePrep                            pixel_prep;
-	ReadSet                                             reads;
-	uint64_t                                            coherence_generation  = 0;
-	uint64_t                                            shader_map_generation = 0;
+	uint64_t                                       program_compile_ns = 0;
+	bool                                           ok                 = false;
+	Failure                                        failure            = Failure::None;
+	bool                                           pixel_active       = false;
+	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping {};
+	PipelineCache::GraphicsPrograms                programs;
+	ShaderVertexInputInfo                          vertex_info;
+	ShaderPixelInputInfo                           pixel_info;
+	PipelineCache::StagePrep                       vertex_prep;
+	PipelineCache::StagePrep                       pixel_prep;
+	ReadSet                                        reads;
+	uint64_t                                       coherence_generation  = 0;
+	uint64_t                                       shader_map_generation = 0;
 	// KYTY_DRAW_PREP_CERT_RANGES=worker: reads.BuildCertificate() of a successful preparation,
 	// built by the preparing thread (certificate_built); Validate uses it for the log check.
 	std::vector<Coherence::Range> certificate;
 	bool                          certificate_built = false;
+	// KYTY_CLEAN_UNTOUCHED: no page of a read or digest range had ever been touched by a GPU-side
+	// transition when the preparation finished (GpuTouched, checked by the preparing thread).
+	bool reads_untouched = false;
 	// KYTY_DRAW_PREP_DISPATCH: a dispatch slot's preparation (GetComputeProgram's outputs).
 	ShaderComputeInputInfo   compute_info;
 	PipelineCache::StagePrep compute_prep;
 	ShaderProgram            compute_program;
 };
 
-// KYTY_DRAW_PREP_DISPATCH=1 (live, default 0; parallel mode with the CP sequencer, KYTY_CP_SEQ=1): direct
-// dispatches are published to the window like draws, and a worker prepares their compute program
-// (GetComputeProgram: static input info, SRT materialization, permutation lookup) from the
+// KYTY_DRAW_PREP_DISPATCH=1 (live, default 0; parallel mode with the CP sequencer, KYTY_CP_SEQ=1):
+// direct dispatches are published to the window like draws, and a worker prepares their compute
+// program (GetComputeProgram: static input info, SRT materialization, permutation lookup) from the
 // register snapshot meanwhile. The resolver executes the dispatch op as before, with the
 // preparation offered where DispatchDirect would call GetComputeProgram, under the same
 // certificate as a draw's (ValidateDispatch: no logged coherence transition touched a read range,
@@ -197,9 +200,11 @@ void MakeComputeInputInfo(const HW::ComputeShaderInfo& cs, const DispatchArgs& a
 void PrepareDispatch(PipelineCache& pipeline_cache, const RegisterSnapshot& registers,
                      const DispatchArgs& args, bool eligible, bool exact, PreparedDraw& prepared);
 
-// GPU thread, where DispatchDirect would call GetComputeProgram for `input_info` (MakeComputeInputInfo
-// of the op's arguments): whether the prepared outputs equal what the serial lookup would produce.
-[[nodiscard]] bool ValidateDispatch(PreparedDraw& prepared, const ShaderComputeInputInfo& input_info);
+// GPU thread, where DispatchDirect would call GetComputeProgram for `input_info`
+// (MakeComputeInputInfo of the op's arguments): whether the prepared outputs equal what the serial
+// lookup would produce.
+[[nodiscard]] bool ValidateDispatch(PreparedDraw&                 prepared,
+                                    const ShaderComputeInputInfo& input_info);
 
 // KYTY_DRAW_PREP_VERIFY for a dispatch: the accepted preparation against a serial lookup's.
 bool VerifyDispatch(const PreparedDraw& prepared, const ShaderProgram& program,
@@ -209,9 +214,9 @@ bool VerifyDispatch(const PreparedDraw& prepared, const ShaderProgram& program,
 // counts (renderDraw.cpp: the early returns before PrepareDrawRenderState, with target operations
 // as a superset). Only such draws are prepared, so a preparation never evaluates registers the
 // serial path would not have evaluated for that draw.
-[[nodiscard]] bool DrawReachesPrograms(const HW::Context& context, const HW::UserConfig& user_config,
-                                       const HW::Shader& shaders, uint32_t count,
-                                       uint32_t instance_count);
+[[nodiscard]] bool DrawReachesPrograms(const HW::Context&    context,
+                                       const HW::UserConfig& user_config, const HW::Shader& shaders,
+                                       uint32_t count, uint32_t instance_count);
 
 // The pure preparation of one draw from a register snapshot. `exact`: the caller is the GPU
 // thread (exact clean predicate for reads); otherwise a DrawPrep worker. Never touches the
@@ -224,17 +229,19 @@ void Prepare(PipelineCache& pipeline_cache, const RegisterSnapshot& registers, b
 // GPU thread, at the point where the serial path would prepare the programs: whether the
 // prepared outputs equal what the serial preparation would produce now. Counts the committed
 // draw or the fallback reason.
-[[nodiscard]] bool Validate(PreparedDraw& prepared, bool pixel_active,
-                            std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping);
+[[nodiscard]] bool
+Validate(PreparedDraw& prepared, bool pixel_active,
+         std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping);
 
 // KYTY_DRAW_PREP_VERIFY: compares committed outputs with a serial preparation's (the pixel stage
 // only when it is active). Returns true when equal; otherwise counts, logs and (exit mode) stops.
 bool VerifyCommitted(bool pixel_active, const PipelineCache::GraphicsPrograms& programs,
-                     const ShaderVertexInputInfo& vertex_info, const ShaderPixelInputInfo& pixel_info,
+                     const ShaderVertexInputInfo&             vertex_info,
+                     const ShaderPixelInputInfo&              pixel_info,
                      const PipelineCache::GraphicsStagePreps& preps,
-                     const PipelineCache::GraphicsPrograms& serial_programs,
-                     const ShaderVertexInputInfo&            serial_vertex_info,
-                     const ShaderPixelInputInfo&             serial_pixel_info,
+                     const PipelineCache::GraphicsPrograms&   serial_programs,
+                     const ShaderVertexInputInfo&             serial_vertex_info,
+                     const ShaderPixelInputInfo&              serial_pixel_info,
                      const PipelineCache::GraphicsStagePreps& serial_preps);
 
 enum class DrawKind : uint8_t { Index, Auto, Dispatch };
@@ -249,9 +256,9 @@ enum class DrawKind : uint8_t { Index, Auto, Dispatch };
 // slot no worker has claimed yet is prepared by the command processor itself. For a claimed one,
 // the command processor can first prepare later unclaimed slots as a worker would
 // (KYTY_DRAW_PREP_STEAL, off by default). Then it waits, spinning; only after 2 ms, as a deadlock
-// guard, does the wait service commands from other threads. Draws are committed in order either way. Workers
-// never touch the caches, the scheduler or Vulkan, and never dereference guest memory; a failed
-// preparation or certificate runs the serial preparation at commit.
+// guard, does the wait service commands from other threads. Draws are committed in order either
+// way. Workers never touch the caches, the scheduler or Vulkan, and never dereference guest memory;
+// a failed preparation or certificate runs the serial preparation at commit.
 class Engine {
 public:
 	// service_commands runs the GPU thread's pending cross-thread commands (used while waiting).
@@ -272,7 +279,7 @@ public:
 	                          const DrawAutoArgs* auto_args, const HW::Context& context,
 	                          const HW::UserConfig& user_config, const HW::Shader& shaders);
 	// Commits every pending draw in submission order.
-	void Drain();
+	void               Drain();
 	[[nodiscard]] bool Pending() const noexcept;
 
 	// P3b (KYTY_CP_SEQ=1, cpSequencer.h): the sequencer thread publishes each direct draw (the
@@ -285,9 +292,9 @@ public:
 	// inherited instance count are only known at commit (CommitPublished).
 	[[nodiscard]] uint64_t Publish(const DrawIndexArgs* index_args, const DrawAutoArgs* auto_args,
 	                               const HW::Context& context, const HW::UserConfig& user_config,
-	                               const HW::Shader& shaders,
+	                               const HW::Shader&            shaders,
 	                               const std::function<bool()>& wait_for_space);
-	[[nodiscard]] bool WindowHasSpace() const noexcept;
+	[[nodiscard]] bool     WindowHasSpace() const noexcept;
 	// Sequencer, diagnostics: it passed a barrier (kind 1, a lockstep op) or another stop (kind 2:
 	// a submission start, the frame fence, a handoff, a pending CP write); the next published draw
 	// is marked as the first after it (FrameEvent DrawPrepCommitWaitsBarrier/Start,
@@ -313,8 +320,8 @@ public:
 	[[nodiscard]] static bool IndirectEnabled();
 	// Sequencer: publishes an indirect draw's preparation; the window position, or UINT64_MAX.
 	[[nodiscard]] uint64_t PublishIndirect(bool indexed, const HW::Context& context,
-	                                       const HW::UserConfig& user_config,
-	                                       const HW::Shader& shaders,
+	                                       const HW::UserConfig&        user_config,
+	                                       const HW::Shader&            shaders,
 	                                       const std::function<bool()>& wait_for_space);
 	// Resolver: runs `draw` (the indirect draw's execution) with the head slot (window position
 	// `position`) prepared and offered to it, then retires the slot.
@@ -325,8 +332,8 @@ public:
 	// op's execution) with the head slot prepared and offered to RenderExecutor::DispatchDirect,
 	// then retires the slot.
 	[[nodiscard]] uint64_t PublishDispatch(const DispatchArgs& args, const HW::Context& context,
-	                                       const HW::UserConfig& user_config,
-	                                       const HW::Shader& shaders,
+	                                       const HW::UserConfig&        user_config,
+	                                       const HW::Shader&            shaders,
 	                                       const std::function<bool()>& wait_for_space);
 	void ExecuteDispatch(uint64_t position, const std::function<void()>& dispatch);
 
@@ -345,10 +352,10 @@ public:
 	// Sequencer: speculative slots not adopted or dropped yet.
 	[[nodiscard]] uint64_t SpeculativeSlots() const noexcept;
 	enum class Adoption : uint8_t { None, Adopted, Dropped };
-	// Sequencer, before publishing a draw: None (no speculative slot), Adopted (the next one has the
-	// draw's packets and inputs: `position` is its window position, publish nothing), or Dropped
-	// (it differs: every speculative slot is given up, `dropped` of them, which the caller hands
-	// to the resolver as a SkipSlots op before it publishes the draw).
+	// Sequencer, before publishing a draw: None (no speculative slot), Adopted (the next one has
+	// the draw's packets and inputs: `position` is its window position, publish nothing), or
+	// Dropped (it differs: every speculative slot is given up, `dropped` of them, which the caller
+	// hands to the resolver as a SkipSlots op before it publishes the draw).
 	[[nodiscard]] Adoption TryAdopt(uint64_t packets, uint64_t inputs, uint64_t& position,
 	                                uint64_t& dropped);
 	// Sequencer: gives up every speculative slot (a barrier, the stream end); returns how many.
@@ -371,10 +378,10 @@ private:
 	// The head slot once prepared (by a worker, or here); the caller commits or uses it, then
 	// retires it.
 	Slot& ReadyHead();
-	void NoteFence();
-	void FillSlot(Slot& slot, uint64_t submit_id, const DrawIndexArgs* index_args,
-	              const DrawAutoArgs* auto_args, const HW::Context& context,
-	              const HW::UserConfig& user_config, const HW::Shader& shaders);
+	void  NoteFence();
+	void  FillSlot(Slot& slot, uint64_t submit_id, const DrawIndexArgs* index_args,
+	               const DrawAutoArgs* auto_args, const HW::Context& context,
+	               const HW::UserConfig& user_config, const HW::Shader& shaders);
 
 	RenderContext&           m_renderer;
 	Mode                     m_mode;
@@ -386,7 +393,7 @@ private:
 	uint8_t                  m_stop_pending      = 0; // sequencer only (NoteStop)
 	// P3c, sequencer only: the window position of the real parse's next draw; the slots from here
 	// to the window's tail are speculative.
-	uint64_t                 m_real_tail = 0;
+	uint64_t m_real_tail = 0;
 };
 
 } // namespace DrawPrep

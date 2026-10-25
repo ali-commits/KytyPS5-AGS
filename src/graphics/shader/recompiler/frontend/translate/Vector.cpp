@@ -5,6 +5,8 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 	using O = Decoder::Opcode;
 	switch (inst.opcode) {
 		case O::V_NOP: return;
+		case O::V_INTERP_P1LL_F16:
+		case O::V_INTERP_P2_F16: return EmitInterpolation(inst);
 		case O::V_ADD_I32: ADD_U32(inst, true, false); return;
 		case O::V_ADDC_U32: ADD_U32(inst, true, true); return;
 		case O::V_SUB_I32: SUB_U32(inst, true, false); return;
@@ -139,22 +141,26 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitIntegerCompare(inst, IR::ValueOpcode::SLessThan64, IR::Type::U64, false, true);
 			return;
 		case O::V_CMP_LE_I64:
-			EmitIntegerCompare(inst, IR::ValueOpcode::SLessThanEqual64, IR::Type::U64, false, false);
+			EmitIntegerCompare(inst, IR::ValueOpcode::SLessThanEqual64, IR::Type::U64, false,
+			                   false);
 			return;
 		case O::V_CMPX_LE_I64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::SLessThanEqual64, IR::Type::U64, false, true);
 			return;
 		case O::V_CMP_LE_U64:
-			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThanEqual64, IR::Type::U64, false, false);
+			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThanEqual64, IR::Type::U64, false,
+			                   false);
 			return;
 		case O::V_CMPX_LE_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThanEqual64, IR::Type::U64, false, true);
 			return;
 		case O::V_CMP_GE_U64:
-			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThanEqual64, IR::Type::U64, false, false);
+			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThanEqual64, IR::Type::U64, false,
+			                   false);
 			return;
 		case O::V_CMPX_GE_U64:
-			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThanEqual64, IR::Type::U64, false, true);
+			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThanEqual64, IR::Type::U64, false,
+			                   true);
 			return;
 
 		case O::V_CMP_EQ_U16:
@@ -512,8 +518,8 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_MIN_F32: return FloatBinary(inst, IR::ValueOpcode::FPMin32, false);
 		case O::V_MAX_F32: return FloatBinary(inst, IR::ValueOpcode::FPMax32, false);
 		case O::V_LDEXP_F32: return FloatBinary(inst, IR::ValueOpcode::FPLdexp, false);
-		// PS5 keeps the legacy unfused MAD/MAC (VOP2 0x1f-0x21, VOP3 0x11f and 0x141; removed from the
-		// RDNA2 ISA document): the product is rounded before the add. The fused RDNA2
+		// PS5 keeps the legacy unfused MAD/MAC (VOP2 0x1f-0x21, VOP3 0x11f and 0x141; removed from
+		// the RDNA2 ISA document): the product is rounded before the add. The fused RDNA2
 		// V_FMAC/V_FMAMK/V_FMAAK_F32 (VOP2 0x2b-0x2d, VOP3 0x12b) decode to their own opcodes.
 		case O::V_MAC_F32: return FloatTernary(inst, IR::ValueOpcode::FPMad32, true, true);
 		case O::V_MADMK_F32:

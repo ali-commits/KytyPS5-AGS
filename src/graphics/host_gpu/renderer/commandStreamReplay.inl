@@ -458,6 +458,12 @@ void Replay(const Header& header, Exec& exec, ReplayState& state, MismatchHandle
 			exec.dispatch(p.x, p.y, p.z);
 			break;
 		}
+		case Op::DispatchBase: {
+			const auto& p = reader.Get<DispatchBasePacket>();
+			check(VerifyHash::Value(op, p.base_x, p.base_y, p.base_z, p.x, p.y, p.z));
+			exec.dispatchBase(p.base_x, p.base_y, p.base_z, p.x, p.y, p.z);
+			break;
+		}
 		case Op::DispatchIndirect: {
 			const auto& p           = reader.Get<DispatchIndirectPacket>();
 			uint64_t    buffer_bits = 0;
@@ -515,6 +521,13 @@ void Replay(const Header& header, Exec& exec, ReplayState& state, MismatchHandle
 			check(VerifyHash::Value(op, pool_bits, p.query, p.stage));
 			const auto stage = vk::PipelineStageFlags2(static_cast<VkPipelineStageFlags2>(p.stage));
 			exec.writeTimestamp2(stage, p.pool, p.query);
+			break;
+		}
+		case Op::HostCopy: {
+			const auto& p = reader.Get<HostCopyPacket>();
+			check(VerifyHash::Value(op, p.destination, p.source, p.size));
+			exec.hostCopy(reinterpret_cast<void*>(static_cast<uintptr_t>(p.destination)), p.source,
+			              p.size);
 			break;
 		}
 		case Op::WriteBufferMarker: {

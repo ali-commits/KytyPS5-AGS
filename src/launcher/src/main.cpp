@@ -1,7 +1,6 @@
-#include "mainDialog.h"
-#include "launcherTheme.h"
-
 #include "common/u59Preset.h"
+#include "launcherTheme.h"
+#include "mainDialog.h"
 
 #include <QApplication>
 #include <QDebug>
@@ -18,7 +17,8 @@
 // for the main window: the emulator then runs with its code defaults.
 static QString ApplyBundledPreset() {
 	const QDir                         app_dir(QApplication::applicationDirPath());
-	std::vector<std::filesystem::path> dirs {std::filesystem::path(app_dir.absolutePath().toStdU16String())};
+	std::vector<std::filesystem::path> dirs {
+	    std::filesystem::path(app_dir.absolutePath().toStdU16String())};
 	if (QDir parent = app_dir; parent.cdUp()) {
 		dirs.emplace_back(parent.absolutePath().toStdU16String());
 	}
@@ -30,7 +30,7 @@ static QString ApplyBundledPreset() {
 		return warning;
 	}
 
-	for (const QString& key : QProcessEnvironment::systemEnvironment().keys()) {
+	for (const QString& key: QProcessEnvironment::systemEnvironment().keys()) {
 		if (key == "KYTY_STREAMING_CONFIG_DIR") {
 			continue;
 		}
@@ -39,14 +39,26 @@ static QString ApplyBundledPreset() {
 			qunsetenv(key.toLocal8Bit().constData());
 		}
 	}
-	for (const auto& entry : result.entries) {
+	for (const auto& entry: result.entries) {
 		qputenv(entry.key.c_str(), QByteArray::fromStdString(entry.value));
 	}
 	return {};
 }
+#include <QIcon>
 
 int main(int argc, char* argv[]) {
 	QApplication a(argc, argv);
+	// Title bars and taskbars get the bolder small-size artwork.
+	const QIcon small_art(QStringLiteral(":/icons/kyty-small.svg"));
+	const QIcon large_art(QStringLiteral(":/icons/kyty.svg"));
+	QIcon       icon;
+	for (int size: {16, 24, 32, 48, 64}) {
+		icon.addPixmap(small_art.pixmap(QSize(size, size), 1.0));
+	}
+	for (int size: {128, 256}) {
+		icon.addPixmap(large_art.pixmap(QSize(size, size), 1.0));
+	}
+	QApplication::setWindowIcon(icon);
 	const QString preset_warning = ApplyBundledPreset();
 	LauncherTheme::Initialize(a);
 

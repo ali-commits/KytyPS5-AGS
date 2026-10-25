@@ -18,6 +18,7 @@ namespace AudioOut {
 
 struct AudioOutOutputParam;
 struct AudioOutPortState;
+struct AudioOutSystemState;
 
 int KYTY_SYSV_ABI AudioOutInit();
 int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, uint32_t freq,
@@ -27,6 +28,7 @@ int KYTY_SYSV_ABI AudioOutOutputs(AudioOutOutputParam* param, uint32_t num);
 int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr);
 int KYTY_SYSV_ABI AudioOutClose(int handle);
 int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state);
+int KYTY_SYSV_ABI AudioOutGetSystemState(AudioOutSystemState* state);
 
 } // namespace AudioOut
 
@@ -71,8 +73,8 @@ int KYTY_SYSV_ABI AudioOut2GetSystemState(AudioOut2SystemState* state);
 int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, AudioOut2UserHandle* handle);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(AudioOut2UserHandle handle);
 int KYTY_SYSV_ABI AudioOut2UserGetSupportedAttributes(AudioOut2UserHandle handle,
-                                                       uint32_t* context_attributes,
-                                                       uint32_t* port_attributes);
+                                                      uint32_t*           context_attributes,
+                                                      uint32_t*           port_attributes);
 size_t KYTY_SYSV_ABI AudioOut2GetSpeakerArrayMemorySize(uint32_t num_speakers, uint8_t is_3d,
                                                         uint8_t is_ambisonics);
 int KYTY_SYSV_ABI    AudioOut2SpeakerArrayCreate(AudioOut2SpeakerArrayHandle* handle,
@@ -99,10 +101,10 @@ int KYTY_SYSV_ABI AudioOut2MasteringTerm();
 
 namespace AudioIn {
 
-int KYTY_SYSV_ABI AudioInOpen(int user_id, int type, int index, uint32_t len,
-                              uint32_t freq, uint32_t param);
-int KYTY_SYSV_ABI AudioInHqOpen(int user_id, int type, int index, uint32_t len,
-                                uint32_t freq, uint32_t param);
+int KYTY_SYSV_ABI AudioInOpen(int user_id, int type, int index, uint32_t len, uint32_t freq,
+                              uint32_t param);
+int KYTY_SYSV_ABI AudioInHqOpen(int user_id, int type, int index, uint32_t len, uint32_t freq,
+                                uint32_t param);
 int KYTY_SYSV_ABI AudioInClose(int handle);
 int KYTY_SYSV_ABI AudioInInput(int handle, void* dest);
 int KYTY_SYSV_ABI AudioInGetSilentState(int handle);
