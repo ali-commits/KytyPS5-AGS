@@ -36,9 +36,11 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderCodeSnapshot.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderJournalMigration.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/pipeline/stagePrepWorker.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/spirvModule.h"
 #include "graphics/shader/recompiler/CodegenFingerprint.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -72,6 +74,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -401,19 +404,24 @@ void FlushCompileStall() {
 // pinned; destroying a pinned module waits for its last unpin, which then destroys it.
 class ShaderModuleRegistry {
 public:
-	void Add(vk::ShaderModule module, std::span<const uint32_t> spirv) {
-		const auto       hash = XXH3_64bits(spirv.data(), spirv.size_bytes());
+	struct Layout {
+		vk::ShaderStageFlagBits                     stage {};
+		std::vector<vk::DescriptorSetLayoutBinding> bindings;
+	};
+	void Add(vk::ShaderModule module, uint64_t hash) {
 		std::scoped_lock lock(m_mutex);
 		m_modules[static_cast<VkShaderModule>(module)] = {hash};
 		m_by_hash.try_emplace(hash, static_cast<VkShaderModule>(module));
 	}
 	// The module was published for the permutation `identity` with these descriptor bindings.
-	void SetIdentity(vk::ShaderModule module, uint64_t identity, uint64_t bindings) {
+	void SetIdentity(vk::ShaderModule module, uint64_t identity, uint64_t bindings,
+	                 const Layout& layout) {
 		std::scoped_lock lock(m_mutex);
 		const auto       found = m_modules.find(static_cast<VkShaderModule>(module));
 		if (found == m_modules.end() || found->second.doomed) return;
 		found->second.identity = identity;
 		found->second.bindings = bindings;
+		found->second.layout   = layout;
 		m_by_identity.try_emplace(identity, found->first);
 	}
 	// {identity, bindings hash} of a published module ({0, 0} if unknown).
@@ -423,16 +431,26 @@ public:
 		if (found == m_modules.end() || found->second.doomed) return {0, 0};
 		return {found->second.identity, found->second.bindings};
 	}
-	// A live module published for this permutation identity with these bindings, pinned; null if
-	// none.
-	[[nodiscard]] vk::ShaderModule PinIdentity(uint64_t identity, uint64_t bindings) {
+	// A live module for this exact permutation. A caller accepting changed bindings must take
+	// current_layout and reconstruct its pipeline layout before using the module.
+	[[nodiscard]] vk::ShaderModule PinIdentity(uint64_t identity, uint64_t bindings,
+	                                           Layout* current_layout = nullptr) {
 		std::scoped_lock lock(m_mutex);
 		const auto       found = m_by_identity.find(identity);
 		if (found == m_by_identity.end()) return nullptr;
 		auto& info = m_modules[found->second];
-		if (info.bindings != bindings) return nullptr;
+		if (info.doomed || (info.bindings != bindings && current_layout == nullptr)) return nullptr;
+		if (current_layout != nullptr) *current_layout = info.layout;
 		info.pins++;
 		return found->second;
+	}
+	[[nodiscard]] bool LayoutOf(vk::ShaderModule module, Layout& layout) const {
+		std::scoped_lock lock(m_mutex);
+		const auto       found = m_modules.find(static_cast<VkShaderModule>(module));
+		if (found == m_modules.end() || found->second.doomed || found->second.identity == 0)
+			return false;
+		layout = found->second.layout;
+		return true;
 	}
 	[[nodiscard]] uint64_t HashOf(vk::ShaderModule module) const {
 		std::scoped_lock lock(m_mutex);
@@ -495,6 +513,7 @@ private:
 		uint64_t bindings = 0;
 		uint32_t pins     = 0;
 		bool     doomed   = false;
+		Layout   layout;
 	};
 	mutable std::mutex                           m_mutex;
 	std::unordered_map<VkShaderModule, Info>     m_modules;
@@ -1969,11 +1988,12 @@ struct PipelineCache::ProgramCache {
 
 		const auto       module_begin = CompileClockNs();
 		vk::ShaderModule module       = nullptr;
+		uint64_t         driver_hash  = 0;
 		{
 			KYTY_PROFILER_BLOCK("Shader::CreateModule");
-			module = CompileSPV(emitted.spirv, device);
+			module = CompileSPVWithHash(emitted.spirv, device, driver_hash);
 		}
-		g_shader_modules.Add(module, emitted.spirv);
+		g_shader_modules.Add(module, driver_hash);
 		times.module_ns = CompileClockNs() - module_begin;
 		EXIT_IF(module == nullptr);
 		if (options.dump_ir) {
@@ -1997,9 +2017,11 @@ struct PipelineCache::ProgramCache {
 					     options.dump_label, options.shader_hash);
 				}
 			}
-			const auto plain_module = CompileSPV(emitted.spirv_plain, device);
+			uint64_t   plain_driver_hash = 0;
+			const auto plain_module =
+			    CompileSPVWithHash(emitted.spirv_plain, device, plain_driver_hash);
 			EXIT_IF(plain_module == nullptr);
-			g_shader_modules.Add(plain_module, emitted.spirv_plain);
+			g_shader_modules.Add(plain_module, plain_driver_hash);
 			if (validator != nullptr) {
 				validator->Submit(options.dump_label, stage_name, options.shader_hash,
 				                  std::move(emitted.spirv_plain));
@@ -3332,18 +3354,24 @@ struct PipelineCache::ProgramCache {
 		    static_cast<uint32_t>(key.stage), key.hash, key.user_data_count, key.code_size,
 		    options.wave_size, options.user_data_base, options.plain_mip_stats_variant,
 		    push_data_cursor, key.static_state, specialization_bytes);
-		std::vector<uint32_t> layout;
-		const auto&           program = permutation.program;
+		std::vector<uint32_t>        layout;
+		const auto&                  program = permutation.program;
+		ShaderModuleRegistry::Layout current_layout;
+		current_layout.stage = NativeShaderStage(program.stage);
 		for (const auto& binding: program.bindings.descriptors) {
 			layout.push_back(ShaderRecompiler::IR::NativeBinding(program.stage, binding.kind));
 			layout.push_back(static_cast<uint32_t>(NativeDescriptorType(binding.kind)));
 			layout.push_back(NativeDescriptorCount(binding));
+			current_layout.bindings.push_back(
+			    {layout[layout.size() - 3], NativeDescriptorType(binding.kind),
+			     NativeDescriptorCount(binding), current_layout.stage, nullptr});
 		}
 		const auto bindings = XXH3_64bits(layout.data(), layout.size() * sizeof(uint32_t)) | 1u;
-		g_shader_modules.SetIdentity(permutation.handle.module, identity, bindings);
+		g_shader_modules.SetIdentity(permutation.handle.module, identity, bindings, current_layout);
 		if (permutation.plain.module != nullptr) {
 			g_shader_modules.SetIdentity(permutation.plain.module,
-			                             identity ^ PlainModuleIdentitySalt, bindings);
+			                             identity ^ PlainModuleIdentitySalt, bindings,
+			                             current_layout);
 		}
 	}
 	// Called by the precompile replay for each software RT compute program it publishes: starts the
@@ -5382,7 +5410,7 @@ struct PipelineCache::JournalReplay {
 		}
 		const std::span<const uint32_t> words(payload.words);
 		const auto                      snapshot_words = words.first(payload.snapshot_words);
-		const auto                      signature      = words.subspan(payload.snapshot_words + 1);
+		auto                            signature      = words.subspan(payload.snapshot_words + 1);
 		auto&                           device         = cache.m_graphics.device;
 		// Pin the modules (a program cache teardown waits for the build).
 		// A module of the recorded code, or else (KYTY_PIPELINE_JOURNAL_RETARGET, default on;
@@ -5390,17 +5418,25 @@ struct PipelineCache::JournalReplay {
 		// revision made from the same permutation inputs with the same bindings: the pipeline is
 		// then rebuilt with the new code under its new key.
 		std::vector<std::pair<uint64_t, vk::ShaderModule>> modules;
-		bool                                               found      = true;
-		bool                                               retargeted = false;
+		std::vector<ShaderModuleRegistry::Layout>          current_layouts;
+		bool                                               found          = true;
+		bool                                               retargeted     = false;
+		bool                                               all_layouts    = true;
+		bool                                               layout_changed = false;
 		const auto hashes = GraphicsPipelineSnapshot::SerializedModules(snapshot_words);
 		for (size_t i = 0; i < hashes.size(); i++) {
-			vk::ShaderModule module = nullptr;
+			vk::ShaderModule             module = nullptr;
+			ShaderModuleRegistry::Layout current_layout;
 			if ((retarget || hashes[i] == 0) && i < payload.identities.size() &&
 			    payload.identities[i].first != 0) {
 				// Prefer this replay's permutation, even if another live permutation
 				// happens to retain the recorded module's old content hash.
-				module = g_shader_modules.PinIdentity(payload.identities[i].first,
-				                                      payload.identities[i].second);
+				module = g_shader_modules.PinIdentity(
+				    payload.identities[i].first, payload.identities[i].second,
+				    retarget || item.from_list ? &current_layout : nullptr);
+				if (module != nullptr)
+					layout_changed |=
+					    g_shader_modules.IdentityOf(module).second != payload.identities[i].second;
 			}
 			if (module == nullptr && hashes[i] != 0) module = g_shader_modules.Pin(hashes[i]);
 			if (module != nullptr)
@@ -5410,6 +5446,8 @@ struct PipelineCache::JournalReplay {
 				break;
 			}
 			modules.emplace_back(hashes[i], module);
+			all_layouts &= g_shader_modules.LayoutOf(module, current_layout);
+			current_layouts.push_back(std::move(current_layout));
 		}
 		const auto unpin = [&] {
 			for (const auto& [hash, module]: modules)
@@ -5422,13 +5460,6 @@ struct PipelineCache::JournalReplay {
 			missing.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		std::vector<vk::DescriptorSetLayoutBinding> bindings;
-		for (size_t i = 4; i < signature.size(); i += 4) {
-			bindings.push_back({signature[i], static_cast<vk::DescriptorType>(signature[i + 1]),
-			                    signature[i + 2], vk::ShaderStageFlags(signature[i + 3]), nullptr});
-		}
-		const auto layouts = AcquirePipelineLayout(
-		    cache.m_graphics, bindings, vk::ShaderStageFlags(signature[2]), signature[3]);
 		// Modules by stage index: list records have every hash 0.
 		uint32_t   lookup   = 0;
 		const auto snapshot = GraphicsPipelineSnapshot::Deserialize(
@@ -5442,12 +5473,62 @@ struct PipelineCache::JournalReplay {
 			    }
 			    return vk::ShaderModule {};
 		    },
-		    layouts.pipeline_layout);
+		    vk::PipelineLayout {});
+		std::vector<vk::DescriptorSetLayoutBinding> bindings;
+		std::vector<uint32_t>                       rebuilt_signature;
+		if ((retarget || item.from_list) && all_layouts && snapshot != nullptr) {
+			vk::ShaderStageFlags push_stages = vk::ShaderStageFlagBits::eFragment;
+			std::set<uint32_t>   used_bindings;
+			for (size_t i = 0; i < current_layouts.size(); i++) {
+				const auto& layout = current_layouts[i];
+				if (layout.stage != snapshot->Info().pStages[i].stage) found = false;
+				push_stages |= layout.stage;
+				for (const auto& binding: layout.bindings) {
+					if (!used_bindings.insert(binding.binding).second) found = false;
+					bindings.push_back(binding);
+				}
+			}
+			const auto canonical = MakePipelineLayoutSignature(
+			    bindings, push_stages, ShaderRecompiler::IR::NativePushConstantSize,
+			    cache.m_graphics.max_push_descriptors);
+			rebuilt_signature = {PipelineLayoutInterningEnabled() ? 1u : 0u,
+			                     canonical.push_descriptors ? 1u : 0u, canonical.push_stages,
+			                     canonical.push_size};
+			if (PipelineLayoutInterningEnabled()) {
+				for (const auto& binding: canonical.bindings)
+					rebuilt_signature.insert(rebuilt_signature.end(), binding.begin(),
+					                         binding.end());
+			} else {
+				for (const auto& binding: bindings)
+					rebuilt_signature.insert(
+					    rebuilt_signature.end(),
+					    {binding.binding, static_cast<uint32_t>(binding.descriptorType),
+					     binding.descriptorCount,
+					     static_cast<uint32_t>(VkShaderStageFlags(binding.stageFlags))});
+			}
+			retargeted |= !std::ranges::equal(signature, rebuilt_signature);
+			signature = rebuilt_signature;
+		} else {
+			if (layout_changed) found = false;
+			for (size_t i = 4; i < signature.size(); i += 4)
+				bindings.push_back({signature[i], static_cast<vk::DescriptorType>(signature[i + 1]),
+				                    signature[i + 2], vk::ShaderStageFlags(signature[i + 3]),
+				                    nullptr});
+		}
+		if (!found || snapshot == nullptr) {
+			unpin();
+			missing.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		const auto layouts = AcquirePipelineLayout(
+		    cache.m_graphics, bindings, vk::ShaderStageFlags(signature[2]), signature[3]);
+		auto pipeline_info    = snapshot->Info();
+		pipeline_info.layout  = layouts.pipeline_layout;
 		vk::Pipeline pipeline = nullptr;
 		bool         ok       = false;
 		if (snapshot != nullptr) {
 			// The rebuilt create info must describe the journaled pipeline exactly.
-			const auto check = DescribeGraphicsPipeline(snapshot->Info(), signature.subspan(0));
+			const auto check = DescribeGraphicsPipeline(pipeline_info, signature);
 			if (check.key != 0) NoteReplayKey(check.key);
 			if ((retargeted || check.key == record.key) && check.key != 0 && !force &&
 			    cache.IsKnownPipeline(check.key)) {
@@ -5464,7 +5545,7 @@ struct PipelineCache::JournalReplay {
 				HangWatchdog::Scope compile("graphics-pipeline-journal", record.key, 0, 0);
 				// A driver fault on a rebuilt create info (another translator's modules) costs the
 				// record, not the session.
-				BuildContext context {&cache, &snapshot->Info(), &pipeline};
+				BuildContext context {&cache, &pipeline_info, &pipeline};
 				const auto fault = Common::CallCatchingStructuredException(&BuildSafely, &context);
 				const auto ns    = CompileClockNs() - begin;
 				ok = fault == 0 && context.result == vk::Result::eSuccess && pipeline != nullptr;

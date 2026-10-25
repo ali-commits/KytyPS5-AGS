@@ -58,6 +58,8 @@
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/host_gpu/syncEpoch.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/vramStats.h"
+#include "graphics/host_gpu/spirvModule.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "graphics/shader/recompiler/CodegenFingerprint.h"
 #include "graphics/shader/recompiler/BvhReference.h"
@@ -24680,6 +24682,62 @@ public:
   // KYTY_UPLOAD_DMA: CPU-dirty buffer uploads staged through the transfer queue reach the cache
   // buffer intact (BufferCache path), the ring refuses space that the recording tick may still
   // read and reuses it once that tick completed, and small uploads keep the direct copy.
+  void CheckUniformFunctionArrayShrink() {
+    constexpr const char* name = "UniformFunctionArrayShrink";
+    const char* text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %ubo
+OpExecutionMode %main LocalSize 1 1 1
+OpName %local "lds_dwords"
+OpDecorate %values ArrayStride 4
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %block Block
+OpDecorate %ubo DescriptorSet 0
+OpDecorate %ubo Binding 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%seven = OpConstant %uint 7
+%sixteen = OpConstant %uint 16
+%length = OpConstant %uint 256
+%values = OpTypeArray %uint %sixteen
+%block = OpTypeStruct %values
+%uniform_block = OpTypePointer Uniform %block
+%uniform_uint = OpTypePointer Uniform %uint
+%ubo = OpVariable %uniform_block Uniform
+%array = OpTypeArray %uint %length
+%function_array = OpTypePointer Function %array
+%function_uint = OpTypePointer Function %uint
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%local = OpVariable %function_array Function
+%source = OpAccessChain %uniform_uint %ubo %zero %zero
+%value = OpLoad %uint %source
+%destination = OpAccessChain %function_uint %local %seven
+OpStore %destination %value
+OpReturn
+OpFunctionEnd
+)";
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+    std::vector<uint32_t> words;
+    Require(name, "assembly", tools.Assemble(text, &words), "cannot assemble the UBO fixture");
+    const auto before = VramStats::FunctionStorageMax();
+    Require(name, "isolated counters", before.modules == 0, "run this fixture in its own process");
+    uint64_t driver_hash = 0;
+    auto module = CompileSPVWithHash(words, m_device, driver_hash);
+    const auto after = VramStats::FunctionStorageMax();
+    m_device.destroyShaderModule(module);
+    Require(name, "UBO retains local-array optimization",
+            after.modules == 1 && after.declared == 1024 && after.created == 32,
+            "valid std430 UBO layout caused the local-array shrink to be rejected");
+    Require(name, "pipeline identity follows driver input",
+            driver_hash != XXH3_64bits(words.data(), words.size() * sizeof(uint32_t)),
+            "shrunk module was identified by its original unoptimized words");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckUploadDma(bool guest_visible_label = false) {
     constexpr const char *name = "UploadDma";
     constexpr uintptr_t base = 0x0000000206800000ull;
@@ -58697,6 +58755,11 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
+  if (argc == 2 && std::strcmp(argv[1], "--uniform-function-array-shrink-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckUniformFunctionArrayShrink();
+    return 0;
+  }
   if (argc == 2 && (std::strcmp(argv[1], "--upload-dma-only") == 0 ||
                     std::strcmp(argv[1], "--upload-dma-label-only") == 0)) {
     VulkanHarness vulkan;

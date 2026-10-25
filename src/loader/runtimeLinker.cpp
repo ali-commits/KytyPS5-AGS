@@ -22,6 +22,7 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "loader/elf.h"
+#include "loader/faultMemoryDump.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
 #include "loader/jit.h"
@@ -30,6 +31,7 @@
 #include "loader/x64InstructionEmulator.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -919,6 +921,56 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				append("{} {:016x}", (i % 4 == 0) ? "\n " : "", stack[i]);
 			}
 			append("\n");
+		}
+		// A bad argument can originate in guest object data or in a saved-register restore.
+		// Preserve bounded readable object contents so a later report can distinguish them.
+		if (const auto* dump = std::getenv("KYTY_FAULT_REGISTER_MEMORY");
+		    dump != nullptr && std::strcmp(dump, "1") == 0) {
+			const std::array<uint64_t, FaultMemoryDump::REGISTER_COUNT> registers = {
+			    info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi,
+			    info->rbp, info->rsp, info->r8,  info->r9,  info->r10, info->r11,
+			    info->r12, info->r13, info->r14, info->r15};
+			constexpr std::array names = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+			                              "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+			std::array<FaultMemoryDump::Window, FaultMemoryDump::REGISTER_COUNT> windows {};
+			const auto count = FaultMemoryDump::PickWindows(registers.data(), IsReadableRange,
+			                                                windows.data(), windows.size());
+			for (size_t index = 0; index < count; index++) {
+				const auto& window = windows[index];
+				std::array<uint8_t, FaultMemoryDump::BEFORE + FaultMemoryDump::AFTER> data {};
+#if defined(__APPLE__)
+				mach_vm_size_t copied = 0;
+				if (mach_vm_read_overwrite(mach_task_self(), window.start, window.size,
+				                           reinterpret_cast<mach_vm_address_t>(data.data()),
+				                           &copied) != KERN_SUCCESS ||
+				    copied != window.size)
+					continue;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+				iovec local {data.data(), static_cast<size_t>(window.size)};
+				iovec remote {reinterpret_cast<void*>(window.start),
+				              static_cast<size_t>(window.size)};
+				if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) !=
+				    static_cast<ssize_t>(window.size))
+					continue;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+				SIZE_T copied = 0;
+				if (!ReadProcessMemory(GetCurrentProcess(),
+				                       reinterpret_cast<const void*>(window.start), data.data(),
+				                       window.size, &copied) ||
+				    copied != window.size)
+					continue;
+#else
+				std::memcpy(data.data(), reinterpret_cast<const void*>(window.start), window.size);
+#endif
+				append("register memory {}=0x{:016x}, start=0x{:016x}:", names[window.reg],
+				       window.value, window.start);
+				for (size_t i = 0; i < window.size / sizeof(uint64_t); i++) {
+					uint64_t value = 0;
+					std::memcpy(&value, data.data() + i * sizeof(value), sizeof(value));
+					append("{} {:016x}", i % 4 == 0 ? "\n " : "", value);
+				}
+				append("\n");
+			}
 		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		// The faulting host call chain, unwound from the fault context, with each frame's module

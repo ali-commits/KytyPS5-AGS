@@ -506,7 +506,7 @@ void TestRewrite() {
 
 // Recreate an old-translator journal: its content hashes are unavailable, but its
 // input identities/layouts remain compatible and its old keys are known to the driver.
-static int MakeStaleKnownJournal(const char* journal_path, const char* known_path) {
+static int MakeStaleKnownJournal(const char* journal_path, const char* known_path, bool layout_changed = false) {
   PipelineJournal::Settings js, ks;
   js.path = journal_path; ks.path = known_path;
   js.background_writer = ks.background_writer = false;
@@ -522,6 +522,13 @@ static int MakeStaleKnownJournal(const char* journal_path, const char* known_pat
     if (!PipelineList::RewriteSnapshotModules(
             std::span(payload.words).first(payload.snapshot_words),
             [](uint32_t stage) { return uint64_t{0xbaad000000000001ull} + stage; })) return 5;
+    if (layout_changed) {
+      // Preserve exact shader permutation identities, but simulate a translator's old
+      // descriptor ABI. Retargeting must rebuild this layout, not just ignore its digest.
+      for (auto& identity : payload.identities) identity.second ^= 0x12345678u;
+      for (size_t i = payload.snapshot_words + 1 + 4; i < payload.words.size(); i += 4)
+        payload.words[i] += 512;
+    }
     const auto old_key = (record.key ^ 0x7bad1234567890abull) | 1u;
     const auto bytes = EncodePipelineJournalPayload(payload.level, payload.words,
                                                     payload.snapshot_words, payload.identities);
@@ -533,6 +540,8 @@ static int MakeStaleKnownJournal(const char* journal_path, const char* known_pat
 int main(int argc, char** argv) {
   if (argc == 4 && std::strcmp(argv[1], "--stale-known-journal") == 0)
     return MakeStaleKnownJournal(argv[2], argv[3]);
+  if (argc == 4 && std::strcmp(argv[1], "--stale-layout-journal") == 0)
+    return MakeStaleKnownJournal(argv[2], argv[3], true);
 	TestExportAndRoundTrip();
 	TestResolve();
 	TestMergedStage();

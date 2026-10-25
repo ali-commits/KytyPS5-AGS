@@ -1387,6 +1387,11 @@ if(BUILD_TESTING)
 		-DJOURNAL_TOOL=$<TARGET_FILE:pipeline_list_tests>
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelineJournalRetarget.cmake)
 	set_tests_properties(pipeline_journal_retarget_known PROPERTIES TIMEOUT 180)
+	add_test(NAME pipeline_journal_retarget_layout
+		COMMAND ${CMAKE_COMMAND} -DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>
+		-DJOURNAL_TOOL=$<TARGET_FILE:pipeline_list_tests> -DSTALE_LAYOUT=1
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelineJournalRetarget.cmake)
+	set_tests_properties(pipeline_journal_retarget_layout PROPERTIES TIMEOUT 180)
 	add_test(NAME pipeline_prepare_missing_metadata
 		COMMAND ${CMAKE_COMMAND} -DFIXTURE=$<TARGET_FILE:shader_recompiler_compute_tests>
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/PipelinePrepareMode.cmake)
@@ -1846,6 +1851,10 @@ if(BUILD_TESTING)
 	# processor does.
 	add_test(NAME upload_dma
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --upload-dma-only)
+	add_test(NAME uniform_function_array_shrink
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --uniform-function-array-shrink-only)
+	set_tests_properties(uniform_function_array_shrink PROPERTIES
+		ENVIRONMENT "KYTY_VRAM_STATS=1;KYTY_FUNCTION_ARRAY_SHRINK=1")
 	add_test(NAME upload_dma_host_copy_off
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --upload-dma-only)
 	set_tests_properties(upload_dma_host_copy_off PROPERTIES

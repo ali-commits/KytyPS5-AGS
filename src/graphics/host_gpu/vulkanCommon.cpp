@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/spirvCacheSalt.h"
 #include "graphics/host_gpu/spirvLocalArrays.h"
+#include "graphics/host_gpu/spirvModule.h"
 #include "graphics/host_gpu/vramStats.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <spirv-tools/libspirv.hpp>
 #include <string>
 #include <vector>
+#include <xxhash.h>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -220,7 +222,11 @@ std::vector<uint32_t> ShrinkFunctionArrays(std::span<const uint32_t> code, uint6
 			    messages += "; ";
 		    }
 	    });
-	const bool                   valid = tools.Validate(shrunk);
+	spvtools::ValidatorOptions options;
+	// The recompiler emits std430 UBO arrays only when the device supports and enables
+	// uniformBufferStandardLayout. Validate the shrink under that same layout contract.
+	options.SetUniformBufferStandardLayout(true);
+	const bool                   valid = tools.Validate(shrunk.data(), shrunk.size(), options);
 	static std::mutex            log_mutex;
 	static std::set<std::string> logged;
 	std::string                  arrays;
@@ -256,6 +262,12 @@ std::vector<uint32_t> ShrinkFunctionArrays(std::span<const uint32_t> code, uint6
 } // namespace
 
 vk::ShaderModule CompileSPV(std::span<const uint32_t> code, vk::Device device) {
+	uint64_t ignored = 0;
+	return CompileSPVWithHash(code, device, ignored);
+}
+
+vk::ShaderModule CompileSPVWithHash(std::span<const uint32_t> code, vk::Device device,
+                                    uint64_t& driver_hash) {
 	std::vector<uint32_t> shrunk;
 	uint64_t              declared = 0;
 	uint64_t              created  = 0;
@@ -284,6 +296,7 @@ vk::ShaderModule CompileSPV(std::span<const uint32_t> code, vk::Device device) {
 		code = salted;
 	}
 	vk::ShaderModuleCreateInfo create_info {};
+	driver_hash             = XXH3_64bits(code.data(), code.size_bytes());
 	create_info.codeSize    = code.size_bytes();
 	create_info.pCode       = code.data();
 	vk::ShaderModule module = nullptr;
