@@ -24680,7 +24680,7 @@ public:
   // KYTY_UPLOAD_DMA: CPU-dirty buffer uploads staged through the transfer queue reach the cache
   // buffer intact (BufferCache path), the ring refuses space that the recording tick may still
   // read and reuses it once that tick completed, and small uploads keep the direct copy.
-  void CheckUploadDma() {
+  void CheckUploadDma(bool guest_visible_label = false) {
     constexpr const char *name = "UploadDma";
     constexpr uintptr_t base = 0x0000000206800000ull;
     constexpr uint64_t allocation_size = 0x400000;
@@ -24799,6 +24799,30 @@ public:
               "bytes");
       // Return the range to the CPU before the unmap below.
       cache.ReadMemory(base, upload_size, false);
+
+      if (guest_visible_label) {
+        // A CP label outside the upload tells the guest that it may reuse the source.
+        // Hold the worker so the test deterministically exercises that ordering, rather
+        // than relying on the worker winning a race with the guest's next frame.
+        const std::vector<uint32_t> original(upload_size / sizeof(uint32_t), 0x12345678u);
+        Require(name, "label source dirty", context.InvalidateMemory(base, upload_size),
+                "the label test source is not mapped");
+        Libs::LibKernel::Memory::WriteBacking(base, original.data(), upload_size);
+        dma->HoldWorkerForTest(true);
+        const auto queued_before = dma->HostCopyBytesQueued();
+        const auto [label_buffer, label_offset] = cache.ObtainBuffer(base, upload_size, false, false);
+        const bool queued_copy = dma->HostCopyBytesQueued() > queued_before;
+        const uint64_t label = base + upload_size + 64;
+        const bool drained = dma->DrainHostCopies(label, sizeof(uint32_t), true);
+        const uint32_t value = 1, next_frame = 0xdeadbeefu;
+        Libs::LibKernel::Memory::WriteBacking(label, &value, sizeof(value));
+        Libs::LibKernel::Memory::WriteBacking(base, &next_frame, sizeof(next_frame));
+        dma->HoldWorkerForTest(false);
+        const auto uploaded = read_back(label_buffer->Handle(), label_offset, upload_size);
+        Require(name, "guest-visible label preserves earlier upload",
+                queued_copy && drained && uploaded == original,
+                "a nonoverlapping label let the guest's next-frame bytes reach an earlier draw");
+      }
 
       // KYTY_UPLOAD_DMA_WRITE_DRAIN: a command-processor write that follows an upload in the
       // command stream waits until the worker has copied the bytes it overwrites, so the upload
@@ -58673,9 +58697,10 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
-  if (argc == 2 && std::strcmp(argv[1], "--upload-dma-only") == 0) {
+  if (argc == 2 && (std::strcmp(argv[1], "--upload-dma-only") == 0 ||
+                    std::strcmp(argv[1], "--upload-dma-label-only") == 0)) {
     VulkanHarness vulkan;
-    vulkan.CheckUploadDma();
+    vulkan.CheckUploadDma(std::strcmp(argv[1], "--upload-dma-label-only") == 0);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--tiler-image-bench") == 0) {

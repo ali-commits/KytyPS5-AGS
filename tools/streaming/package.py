@@ -61,6 +61,8 @@ def package(args):
     (prefix/'kyty_emulator').rename(prefix/'libexec'/'kyty_emulator')
     shutil.copy2(TOOLS/'emulator_guard.py', prefix/'kyty_emulator')
     (prefix/'kyty_emulator').chmod(0o755)
+    for name in ('runtime_resources.py', 'hang_stacks.py'):
+        shutil.copy2(TOOLS.parent/'diagnostics'/name, prefix/'libexec'/name)
     shutil.copy2(backend, prefix/'libexec'/'kyty_stream_host')
     (prefix/'libexec'/'kyty_stream_host').chmod(0o755)
     shutil.copy2(link_map, prefix/'kyty_emulator_clang_lld.map')

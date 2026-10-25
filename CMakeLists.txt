@@ -1842,6 +1842,15 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --upload-dma-only)
 	set_tests_properties(upload_dma_host_copy_off PROPERTIES
 		ENVIRONMENT "KYTY_UPLOAD_DMA_HOST_COPY=0")
+	# The shipped upload policy must preserve queued bytes before a guest-visible label
+	# lets the guest recycle a different buffer. An overlap-only policy cannot do that.
+	set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/u59-preset.json")
+	file(READ "${CMAKE_SOURCE_DIR}/tools/u59-preset.json" KYTY_UPLOAD_PRESET)
+	string(JSON KYTY_UPLOAD_DRAIN GET "${KYTY_UPLOAD_PRESET}" KYTY_UPLOAD_DMA_WRITE_DRAIN)
+	add_test(NAME upload_dma_preset_label_order
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --upload-dma-label-only)
+	set_tests_properties(upload_dma_preset_label_order PROPERTIES
+		ENVIRONMENT "KYTY_UPLOAD_DMA=1;KYTY_UPLOAD_DMA_HOST_COPY=1;KYTY_UPLOAD_DMA_WRITE_DRAIN=${KYTY_UPLOAD_DRAIN}" TIMEOUT 60)
 	# KYTY_RENDER_STATE_FAST: default and off.
 	add_test(NAME render_state
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --render-state-only)

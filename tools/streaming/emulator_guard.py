@@ -31,8 +31,44 @@ def capture(native, args, lock_fd):
             (output/name).write_bytes(source.read_bytes())
     print('Crash capture:', output, flush=True)
     done = threading.Event()
+    def diagnostic_error(name, error):
+        try:
+            (output/(name+'-capture-error.txt')).write_text(str(error)+'\n')
+        except OSError:
+            pass
+    # Optional diagnostics are isolated from launching and never prevent gameplay.
+    import importlib.util
+    def diagnostic(name):
+        spec = importlib.util.spec_from_file_location(name, prefix/'libexec'/(name+'.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    stacks = None
+    options = {}
+    try:
+        stacks = diagnostic('hang_stacks')
+        env, preexec = stacks.launch_options(output)
+        options = {'env': env, 'preexec_fn': preexec}
+        metadata['effective_settings'] = {k: v for k, v in env.items()
+            if k.upper().startswith(('KYTY_', 'TRACY_', '__NV_PRIME', '__VK_LAYER'))}
+    except Exception as error:
+        diagnostic_error('hang', error)
     child = subprocess.Popen([str(native), *args], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, bufsize=0, pass_fds=(lock_fd,))
+                             stderr=subprocess.STDOUT, bufsize=0, pass_fds=(lock_fd,), **options)
+    diagnostic_threads = []
+    try:
+        sampler = diagnostic('runtime_resources')
+        thread = sampler.start_capture(child.pid, output, done)
+        if thread is not None:
+            diagnostic_threads.append(thread)
+    except Exception as error:
+        diagnostic_error('resource', error)
+    if stacks is not None and options:
+        try:
+            diagnostic_threads.append(stacks.start_capture(child, output,
+                options['env']['KYTY_HANG_TRACE_DIR'], done))
+        except Exception as error:
+            diagnostic_error('hang', error)
     metadata['pid'] = child.pid
     (output/'manifest.json').write_text(json.dumps(metadata, indent=2)+'\n')
     old_handlers = {}
@@ -76,6 +112,8 @@ def capture(native, args, lock_fd):
     finally:
         done.set()
         reader.join(timeout=1)
+        for thread in diagnostic_threads:
+            thread.join(timeout=5)
         if child.poll() is None:
             child.terminate()
             try:

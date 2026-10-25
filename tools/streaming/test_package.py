@@ -45,6 +45,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual((config/'Kyty.ini').read_text(), (base/'Kyty.ini').read_text())
             self.assertEqual((prefix/'libexec'/'kyty_stream_host').read_bytes(), b'backend')
             self.assertTrue((prefix/'kyty_emulator').stat().st_mode & 0o100)
+            for name in ('runtime_resources.py', 'hang_stacks.py'):
+                self.assertTrue((prefix/'libexec'/name).is_file())
             self.assertEqual((prefix/'kyty_emulator_clang_lld.map').read_bytes(), b'exact matching map')
             provenance = json.loads((prefix/'installation-provenance.json').read_text())
             self.assertEqual((prefix/'bin'/'controller-audio-receiver').read_bytes(), b'companion')
