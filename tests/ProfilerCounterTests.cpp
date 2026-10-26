@@ -12,6 +12,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 // Per-thread profiler counters (common/profiler.h): totals summed over every thread, blocks reused
 // after a thread exits with their totals kept, and a timing comparison of the counting paths
 // (KYTY_PROFILE_COUNTERS=shared restores the previous one).
@@ -27,6 +31,33 @@ void Check(bool value, const char* text) {
 		std::abort();
 	}
 }
+
+#if defined(__linux__)
+// Resource capture reads native thread names even when the manual-lifetime Tracy profiler
+// never starts. Naming a worker must not require or implicitly start that profiler.
+void TestThreadNamesWithoutProfiler() {
+	Check(!tracy::ProfilerAvailable(), "the test process has a Tracy profiler");
+	std::thread([] {
+		Check(pthread_setname_np(pthread_self(), "BeforeName") == 0,
+		      "could not set the test thread's initial native name");
+		const auto check_name = [](const char* expected) {
+			char name[16] {};
+			Check(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0,
+			      "could not read the native thread name");
+			Check(std::strcmp(name, expected) == 0,
+			      "native thread name was not updated without Tracy");
+		};
+		Profiler::SetThreadName("PipelineWorker");
+		check_name("PipelineWorker");
+		Profiler::SetThreadName("PipelineCompilerWorker");
+		check_name("PipelineCompile"); // Linux's 15-byte native name limit.
+		Profiler::SetThreadName(nullptr);
+		check_name("PipelineCompile");
+		Check(!tracy::ProfilerAvailable(), "naming a thread started the Tracy profiler");
+	}).join();
+	std::puts("ProfilerCounterTests: native names without Tracy ok");
+}
+#endif
 
 void SetSink(CounterSink sink) {
 	Profiler::Detail::g_event_sink.store(sink, std::memory_order_relaxed);
@@ -343,6 +374,9 @@ int main(int argc, char** argv) {
 	(void)_putenv_s("KYTY_HANG_TRACE", "1");
 #else
 	(void)setenv("KYTY_HANG_TRACE", "1", 1);
+#endif
+#if defined(__linux__)
+	TestThreadNamesWithoutProfiler();
 #endif
 	TestTotalsAcrossThreads();
 	TestBlockReuse();
