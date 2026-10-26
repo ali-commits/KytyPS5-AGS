@@ -158,6 +158,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 
 	main_dialog->setMinimumSize(700, 650);
 	main_dialog->resize(920, 860);
+	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
+		// Rescans after archive conversion can change the library without rewriting Kyty.ini.
+		m_host->Request({{"type", "reload-library"}}, {});
+	});
 	connect(m_host, &HostControlClient::StatusChanged, this, [this](const QJsonObject& status) {
 		const bool was_running = StreamGameRunning();
 		m_host_status          = status;

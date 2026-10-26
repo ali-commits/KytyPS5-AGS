@@ -11,6 +11,10 @@
 #include "emulatorCommand.h"
 #include "mainDialog.h"
 #include "hostSocket.h"
+#include "hostDaemon.h"
+#include "gameContent.h"
+#include "gameLibrary.h"
+#include "common/archive.h"
 #include "streamingCatalog.h"
 #include "streamingWidget.h"
 
@@ -46,6 +50,8 @@
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QtTest>
+#include <QtConcurrent>
+#include <QScopeGuard>
 
 #include <array>
 #include <vector>
@@ -182,6 +188,67 @@ private slots:
 #else
         QSKIP("The isolated executable fixture uses a Linux shell version stub");
 #endif
+    }
+
+    void archiveRescanRefreshesDaemonWithoutSettingsWrite() {
+        QTemporaryDir temp, run, profile;
+        QVERIFY(temp.isValid() && run.isValid() && profile.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(CreateGridFixture(temp));
+        const auto runtime_before = qgetenv("XDG_RUNTIME_DIR");
+        const auto profile_before = qgetenv("KYTY_STREAMING_CONFIG_DIR");
+        const auto no_autostart_before = qgetenv("KYTY_HOST_NO_AUTOSTART");
+        const auto socket_before = qgetenv("KYTY_HOST_SOCKET");
+        const auto restore = qScopeGuard([&] {
+            for (const auto& entry : {std::pair{"XDG_RUNTIME_DIR", runtime_before},
+                                      std::pair{"KYTY_STREAMING_CONFIG_DIR", profile_before},
+                                      std::pair{"KYTY_HOST_NO_AUTOSTART", no_autostart_before},
+                                      std::pair{"KYTY_HOST_SOCKET", socket_before}}) {
+                if (entry.second.isNull()) qunsetenv(entry.first);
+                else qputenv(entry.first, entry.second);
+            }
+        });
+        qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+        qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+        qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+        qputenv("KYTY_HOST_SOCKET", run.filePath("kyty-host/control.sock").toUtf8());
+        HostDaemon daemon;
+        QString error;
+        QVERIFY2(daemon.Start(&error), qPrintable(error));
+        MainDialog dialog;
+        auto* widget = dialog.findChild<ConfigurationListWidget*>();
+        QVERIFY(widget);
+        // Drain startup/settings-watch events before replacing a game under the game root.
+        QTest::qWait(700);
+        const auto settings_before = Read(temp.filePath("Kyty.ini"));
+        const auto game = temp.filePath("games/Astro Fixture");
+        const auto archive = game + ".zar";
+        const auto old_id = GameLibraryFiles::CatalogId(GameLibraryFiles::NormalizeGameDirectory(game));
+        const auto new_id = GameLibraryFiles::CatalogId(GameLibraryFiles::NormalizeGameDirectory(archive));
+        const auto daemon_ids = [&] {
+            auto reply = QtConcurrent::run([&] {
+                return HostSocketCall(run.filePath("kyty-host/api.sock"),
+                                      {{"method", "GET"}, {"path", "/kyty/v1/library"}}, 2000, nullptr);
+            });
+            while (!reply.isFinished()) QTest::qWait(10);
+            QSet<QString> ids;
+            if (const auto result = reply.result()) {
+                for (const auto& entry : QJsonDocument::fromJson(result->body).object()["games"].toArray())
+                    ids.insert(entry.toObject()["id"].toString());
+            }
+            return ids;
+        };
+        QVERIFY(daemon_ids().contains(old_id));
+        QVERIFY(Common::PackArchive(GameContent::ToPath(game), GameContent::ToPath(archive), [](uint64_t, uint64_t) { return true; }));
+        QVERIFY(QDir(game).removeRecursively());
+        // This is the same rescan used by Compress to ZAR after deleting the original folder.
+        widget->ScanGameDirectory();
+        QCOMPARE(Read(temp.filePath("Kyty.ini")), settings_before);
+        QTRY_VERIFY_WITH_TIMEOUT(daemon_ids().contains(new_id), 3000);
+        QVERIFY(!daemon_ids().contains(old_id));
+        QCOMPARE(daemon_ids().size(), 3);
+        QCOMPARE(Read(temp.filePath("Kyty.ini")), settings_before);
+        daemon.Shutdown();
     }
 
     void upstreamGridSharesSelectionResizesPersistsAndKeepsCatalog() {

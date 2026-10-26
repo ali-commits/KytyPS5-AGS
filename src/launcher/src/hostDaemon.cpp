@@ -416,6 +416,10 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 	if (type == "status") return done(Json(StatusObject()));
 	if (type == "get-preferences") return done(Json(PreferencesObject()));
 	if (type == "set-preferences") return done(Json(SetPreferences(request)));
+	if (type == "reload-library") {
+		m_reload.start();
+		return done(Json({{"ok", true}}));
+	}
 	if (type == "stop-game") {
 		m_backend.CloseSession();
 		return done(Json({{"ok", true}}));
