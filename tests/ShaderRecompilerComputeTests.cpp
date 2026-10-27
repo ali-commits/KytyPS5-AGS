@@ -19346,9 +19346,95 @@ public:
       if (combined != nullptr && std::strcmp(combined, "1") == 0 &&
           context.GetPipelineCache().PipelinePrefetchEnabled() &&
           DrawPrep::GetMode() == DrawPrep::Mode::Inline) {
+        // Obsolete predictions must not permanently fill the 128-entry look-ahead table.
+        // These valid blend/write-mask combinations are never drawn; completing one build
+        // before requesting the next makes capacity recovery independent of driver speed.
+        auto &cache = context.GetPipelineCache();
+        const DrawPrep::BindingPlanContext plan_context{
+            &cache, &context.GetSamplerCache(), &context.GetGraphics(), &executor.GetTextureMemo()};
+        constexpr std::array factors{
+            Prospero::BlendFactor::kZero, Prospero::BlendFactor::kSrcColor,
+            Prospero::BlendFactor::kOneMinusSrcColor, Prospero::BlendFactor::kSrcAlpha,
+            Prospero::BlendFactor::kOneMinusSrcAlpha, Prospero::BlendFactor::kDstAlpha,
+            Prospero::BlendFactor::kOneMinusDstAlpha, Prospero::BlendFactor::kDstColor,
+            Prospero::BlendFactor::kOneMinusDstColor, Prospero::BlendFactor::kConstantColor};
+        constexpr std::array<uint32_t, 14> masks{1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15};
+        const auto before_obsolete = cache.GetPrefetchTotals();
+        for (uint32_t i = 0; i < 129; ++i) {
+          DrawPrep::RegisterSnapshot obsolete{registers, processor.GetUcfg(), shaders};
+          obsolete.context.SetRenderTargetMask(masks[i % masks.size()]);
+          auto obsolete_blend = obsolete.context.GetBlendControl(0);
+          obsolete_blend.color_srcblend = static_cast<uint8_t>(factors[i / masks.size()]);
+          obsolete.context.SetBlendControl(0, obsolete_blend);
+          obsolete.shaders.SetPsShaderBase(pixel_addresses[0]);
+          DrawPrep::PreparedDraw prepared;
+          DrawPrep::Prepare(cache, obsolete, true, true, prepared);
+          Require(name, "obsolete prediction prepared", prepared.ok,
+                  "the obsolete prediction's shader inputs could not be prepared");
+          const auto before = cache.GetPrefetchTotals();
+          const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+          do {
+            DrawPrep::PrefetchBindingPipeline(plan_context, obsolete, nullptr, prepared);
+            DrawPrep::BindingPlan plan;
+            DrawPrep::ComputeBindingPlan(plan_context, obsolete, nullptr, prepared, plan);
+            if (cache.GetPrefetchTotals().submitted > before.submitted) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          } while (std::chrono::steady_clock::now() < deadline);
+          Require(name, "prefetch capacity recovered",
+                  cache.GetPrefetchTotals().submitted == before.submitted + 1,
+                  "completed unused predictions blocked prediction " + std::to_string(i + 1));
+          const auto build_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+          while (cache.GetPrefetchTotals().compile_ns == before.compile_ns &&
+                 std::chrono::steady_clock::now() < build_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+          Require(name, "obsolete prediction completed",
+                  cache.GetPrefetchTotals().compile_ns > before.compile_ns,
+                  "a speculative build did not complete");
+        }
+        Require(name, "obsolete predictions stayed unused",
+                cache.GetPrefetchTotals().used == before_obsolete.used,
+                "capacity reclamation published an obsolete pipeline");
+        Require(name, "obsolete reservations remain bounded",
+                cache.GetFastFirstTotals().pending <= 128,
+                "reclaiming completed predictions leaked optimizer reservations");
+
+        // A later real draw must still consume an early prediction and retain exact pixels.
+        registers.SetRenderTargetMask(0x2);
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+        DrawPrep::RegisterSnapshot later{registers, processor.GetUcfg(), shaders};
+        DrawPrep::PreparedDraw later_prepared;
+        DrawPrep::Prepare(cache, later, true, true, later_prepared);
+        Require(name, "later prediction prepared", later_prepared.ok,
+                "the later draw's shader inputs could not be prepared");
+        const auto before_later = cache.GetPrefetchTotals();
+        DrawPrep::PrefetchBindingPipeline(plan_context, later, nullptr, later_prepared);
+        DrawPrep::BindingPlan later_plan;
+        DrawPrep::ComputeBindingPlan(plan_context, later, nullptr, later_prepared, later_plan);
+        Require(name, "later prediction admitted",
+                cache.GetPrefetchTotals().submitted == before_later.submitted + 1,
+                "the obsolete predictions blocked a later real draw");
+        clear();
+        Pm4Execution execution;
+        Require(name, "draw after prefetch capacity pressure",
+                processor.Process(execution, stream) == Pm4ProcessResult::Complete,
+                "the later draw stream did not complete");
+        const auto pixels = read();
+        constexpr std::array<u32, 4> green_expected{0u, 0x3f000000u, 0u, 0u};
+        Require(name, "pixels after prefetch capacity pressure",
+                pixels.size() == size_t{extent} * extent * 4u &&
+                    std::ranges::equal(pixels, std::views::iota(size_t{0}, pixels.size()) |
+                        std::views::transform([&](size_t i) { return green_expected[i % 4]; })),
+                "reclaiming an unused prediction lost a draw or changed its write mask");
+        Require(name, "later prediction consumed",
+                cache.GetPrefetchTotals().used > before_later.used,
+                "the later real draw did not consume its early prediction");
+        registers.SetRenderTargetMask(0xf);
+        shaders.SetPsShaderBase(pixel_addresses[0]);
+        RenderExecutorTestAccess::ResetBindings(executor);
+
         // A prediction can become obsolete before any draw consumes it. Save must join its
         // build, destroy its pipeline and release its optimizer reservation without a swap.
-        auto &cache = context.GetPipelineCache();
         DrawPrep::RegisterSnapshot unused_registers{registers, processor.GetUcfg(), shaders};
         unused_registers.context.SetRenderTargetMask(0x1);
         unused_registers.shaders.SetPsShaderBase(pixel_addresses[0]);
@@ -19356,8 +19442,6 @@ public:
         DrawPrep::Prepare(cache, unused_registers, true, true, unused_prepared);
         Require(name, "unused prediction prepared", unused_prepared.ok,
                 "the unused prediction's shader inputs could not be prepared");
-        const DrawPrep::BindingPlanContext plan_context{
-            &cache, &context.GetSamplerCache(), &context.GetGraphics(), &executor.GetTextureMemo()};
         DrawPrep::BindingPlan unused_plan;
         const auto before = cache.GetPrefetchTotals();
         const auto fast_before = cache.GetFastFirstTotals();

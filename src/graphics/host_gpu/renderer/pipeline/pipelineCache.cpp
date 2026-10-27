@@ -4631,7 +4631,27 @@ struct PipelineCache::PrefetchState {
 	bool Request(const GraphicsPipelineKey& key, const ShaderVertexInputInfo& vertex,
 	             const ShaderPixelInputInfo* pixel, const GraphicsPrograms& programs) {
 		std::lock_guard lock(mutex);
-		if (stopped || pending.size() >= max_pending || pending.contains(key)) return false;
+		if (stopped || pending.contains(key)) return false;
+		if (pending.size() >= max_pending) {
+			// Predictions may never be consumed. Reclaim the oldest completed, unclaimed
+			// result under pressure so obsolete hints cannot disable all future look-ahead.
+			// The skip builder must retain its results for the next recurring draw.
+			if (keyed) return false;
+			auto oldest = pending.end();
+			for (auto it = pending.begin(); it != pending.end(); ++it) {
+				if (!it->second.future.valid() ||
+				    it->second.future.wait_for(std::chrono::nanoseconds::zero()) !=
+				        std::future_status::ready)
+					continue;
+				if (oldest == pending.end() || it->second.ticket < oldest->second.ticket)
+					oldest = it;
+			}
+			if (oldest == pending.end()) return false;
+			auto result = oldest->second.future.get();
+			Discard(result);
+			pending.erase(oldest);
+			pending_count.fetch_sub(1, std::memory_order_relaxed);
+		}
 		// Interface/resource arrays are copied. Compiled program metadata and shader modules
 		// are immutable and owned by ProgramCache until after Stop has joined every task.
 		auto task = std::make_shared<std::packaged_task<Result()>>(

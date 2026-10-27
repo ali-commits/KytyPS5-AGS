@@ -1,5 +1,6 @@
 #include "common/profiler.h"
 
+#include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
@@ -34,6 +35,9 @@
 #include <sys/stat.h>
 #else
 #include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <sys/prctl.h>
 #endif
 
 namespace {
@@ -1284,10 +1288,22 @@ void EndBlock() {
 }
 
 void SetThreadName(const char* name) {
-	if (name != nullptr) HangWatchdog::SetThreadName(name);
-	if (tracy::ProfilerAvailable() && name != nullptr) {
+	if (name == nullptr) return;
+	HangWatchdog::SetThreadName(name);
+#if defined(__linux__)
+	// KYTY_CPU_RESERVE_LINUX (common/cpuPlacement.h): a thread the CP started inherited its core.
+	Common::PlaceNewThread();
+#endif
+	if (tracy::ProfilerAvailable()) {
 		tracy::SetThreadName(name);
 	}
+#if defined(__linux__)
+	else {
+		// Resource capture reads /proc thread names even when Tracy never starts. The kernel
+		// truncates the native name to 15 bytes; Tracy's full-name registry stays untouched.
+		(void)prctl(PR_SET_NAME, name, 0UL, 0UL, 0UL);
+	}
+#endif
 }
 
 // KYTY_PROFILE_COUNTERS=shared: the previous counting, every call checking the switches and the

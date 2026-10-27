@@ -67,6 +67,130 @@ class RuntimeResourcesTests(unittest.TestCase):
             self.assertEqual([cpu["core_class_hint"] for cpu in result],
                              ["performance-like", "performance-like", "efficiency-like"])
 
+    def capture_with_proc_inputs(self, reader, count=1):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stop = threading.Event()
+            with mock.patch.object(resources, "_text", side_effect=reader):
+                thread = resources.start_capture(os.getpid(), root, stop, interval_s=0.03,
+                                                  nvidia_smi=str(root / "missing-gpu"))
+                try:
+                    wait_for(lambda: len(rows(root / "resources.jsonl")) >= count)
+                finally:
+                    stop.set()
+                    thread.join(3)
+            self.assertFalse(thread.is_alive())
+            return rows(root / "resources.jsonl"), json.loads(
+                (root / "resource-metadata.json").read_text())
+
+    def test_memory_samples_distinguish_process_swap_from_host_pressure_and_page_io(self):
+        original = resources._text
+        vmstat_reads = 0
+        taint_reads = 0
+
+        def read(path):
+            nonlocal vmstat_reads, taint_reads
+            if path == Path(f"/proc/{os.getpid()}/status"):
+                return "\n".join("VmSwap:\t13 kB" if line.startswith("VmSwap:") else line
+                                 for line in original(path).splitlines())
+            if path == Path("/proc/meminfo"):
+                return ("MemTotal: 32000 kB\nMemAvailable: 1234 kB\nSwapTotal: 8192 kB\n"
+                        "SwapFree: 0 kB\nCached: 300 kB\nShmem: 7 kB\n")
+            if path == Path("/proc/vmstat"):
+                values = [(100, 200), (103, 205), (2, 1)]
+                incoming, outgoing = values[min(vmstat_reads, 2)]
+                vmstat_reads += 1
+                return f"pswpin {incoming}\npswpout {outgoing}\npgfault 90000\n"
+            if path == Path("/proc/pressure/memory"):
+                return ("some avg10=1.25 avg60=0.50 avg300=0.10 total=12345\n"
+                        "full avg10=0.25 avg60=0.00 avg300=0.00 total=67\n")
+            if path == Path("/proc/sys/kernel/random/boot_id"):
+                return "12345678-1234-1234-1234-123456789abc\n"
+            if path == Path("/proc/sys/kernel/osrelease"):
+                return "test-kernel\n"
+            if path == Path("/proc/sys/kernel/tainted"):
+                taint_reads += 1
+                return "0\n" if taint_reads == 1 else "128\n"
+            return original(path)
+
+        captured, metadata = self.capture_with_proc_inputs(read, count=3)
+        first = captured[0]
+        self.assertIn("swap_bytes", first)
+        self.assertEqual(first["swap_bytes"], 13312)
+        self.assertEqual(first["host_memory"], {
+            "total_bytes": 32768000, "available_bytes": 1263616,
+            "swap_total_bytes": 8388608, "swap_free_bytes": 0,
+            "cached_bytes": 307200, "shmem_bytes": 7168})
+        self.assertEqual(first["host_memory_pressure"], {
+            "some": {"avg10_percent": 1.25, "total_us": 12345},
+            "full": {"avg10_percent": 0.25, "total_us": 67}})
+        self.assertEqual(first["host_swap_pages"], {"in": 100, "out": 200})
+        self.assertEqual(first["host_swap_pages_delta"], {"in": None, "out": None})
+        self.assertEqual(captured[1]["host_swap_pages_delta"], {"in": 3, "out": 5})
+        self.assertEqual(captured[2]["host_swap_pages"], {"in": 2, "out": 1})
+        self.assertEqual(captured[2]["host_swap_pages_delta"], {"in": None, "out": None})
+        self.assertEqual(metadata["boot_id"], "12345678-1234-1234-1234-123456789abc")
+        self.assertEqual(metadata["kernel_release"], "test-kernel")
+        self.assertEqual(metadata["kernel_taint_start"], 0)
+        self.assertEqual(metadata["kernel_taint_end"], 128)
+        self.assertNotIn("capture_error", metadata)
+
+    def test_missing_or_malformed_optional_memory_inputs_remain_unknown(self):
+        original = resources._text
+        optional = {Path("/proc/meminfo"), Path("/proc/vmstat"),
+                    Path("/proc/pressure/memory"), Path("/proc/sys/kernel/tainted"),
+                    Path("/proc/sys/kernel/random/boot_id"), Path("/proc/sys/kernel/osrelease")}
+        for malformed in (False, True):
+            with self.subTest(malformed=malformed):
+                def read(path):
+                    if path == Path(f"/proc/{os.getpid()}/status"):
+                        return "\n".join(line for line in original(path).splitlines()
+                                         if not line.startswith("VmSwap:"))
+                    if path in optional:
+                        if not malformed:
+                            return ""
+                        if path == Path("/proc/meminfo"):
+                            return "MemAvailable: not-a-number kB\nSwapFree: -1 kB\n"
+                        if path == Path("/proc/vmstat"):
+                            return "pswpin -1\npswpout nope\n"
+                        if path == Path("/proc/pressure/memory"):
+                            return "some avg10=nan total=-1\nfull avg10=101 total=nope\n"
+                        if path == Path("/proc/sys/kernel/tainted"):
+                            return "not-a-number\n"
+                        return ""
+                    return original(path)
+
+                captured, metadata = self.capture_with_proc_inputs(read)
+                self.assertIn("swap_bytes", captured[0])
+                self.assertIsNone(captured[0]["swap_bytes"])
+                self.assertTrue(all(value is None for value in captured[0]["host_memory"].values()))
+                self.assertEqual(captured[0]["host_swap_pages"], {"in": None, "out": None})
+                self.assertEqual(captured[0]["host_swap_pages_delta"], {"in": None, "out": None})
+                self.assertEqual(captured[0]["host_memory_pressure"], {"some": None, "full": None})
+                for field in ("boot_id", "kernel_release", "kernel_taint_start", "kernel_taint_end"):
+                    self.assertIsNone(metadata[field])
+                self.assertNotIn("capture_error", metadata)
+
+    def test_permission_denied_optional_proc_files_do_not_stop_capture(self):
+        original = Path.read_text
+        optional = {Path("/proc/meminfo"), Path("/proc/vmstat"),
+                    Path("/proc/pressure/memory"), Path("/proc/sys/kernel/tainted"),
+                    Path("/proc/sys/kernel/random/boot_id"), Path("/proc/sys/kernel/osrelease")}
+
+        def read(path, *args, **kwargs):
+            if path in optional:
+                raise PermissionError("test proc access denied")
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read):
+            captured, metadata = self.capture_with_proc_inputs(resources._text)
+        self.assertIsNone(captured[0]["host_memory"]["available_bytes"])
+        self.assertEqual(captured[0]["host_swap_pages"], {"in": None, "out": None})
+        self.assertEqual(captured[0]["host_memory_pressure"], {"some": None, "full": None})
+        self.assertIsNone(metadata["kernel_taint_start"])
+        self.assertIsNone(metadata["kernel_taint_end"])
+        self.assertNotIn("capture_error", metadata)
+
     def make_gpu(self, directory):
         pid_file = directory / "gpu-pid"
         helper = directory / "fake-nvidia-smi"

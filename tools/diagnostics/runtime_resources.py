@@ -3,6 +3,7 @@
 Call start_capture(pid, output_dir, stop_event), then set the event and join the
 returned daemon thread during wrapper cleanup. CPU percent uses 100% per logical
 CPU; NVIDIA telemetry is device-wide. No smaps/PSS reads or profiler attachment.
+Process swap is separate from host memory, swap I/O and pressure measurements.
 """
 from datetime import datetime, timezone
 import json
@@ -106,6 +107,48 @@ def _numbers(path):
     return result
 
 
+def _nonnegative_int(text):
+    try:
+        value = int(text)
+        return value if value >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _kb_bytes(value):
+    return value * 1024 if value is not None and value >= 0 else None
+
+
+def _host_memory():
+    info = _numbers(Path("/proc/meminfo"))
+    fields = {"total_bytes": "MemTotal", "available_bytes": "MemAvailable",
+              "swap_total_bytes": "SwapTotal", "swap_free_bytes": "SwapFree",
+              "cached_bytes": "Cached", "shmem_bytes": "Shmem"}
+    memory = {key: _kb_bytes(info.get(source)) for key, source in fields.items()}
+    swap = {"in": None, "out": None}
+    for line in _text(Path("/proc/vmstat")).splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("pswpin", "pswpout"):
+            swap["in" if parts[0] == "pswpin" else "out"] = _nonnegative_int(parts[1])
+    pressure = {"some": None, "full": None}
+    for line in _text(Path("/proc/pressure/memory")).splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in pressure:
+            continue
+        values = dict(part.split("=", 1) for part in parts[1:] if "=" in part)
+        try:
+            average = float(values.get("avg10", ""))
+            if not math.isfinite(average) or not 0 <= average <= 100:
+                average = None
+        except ValueError:
+            average = None
+        total = _nonnegative_int(values.get("total"))
+        if average is not None or total is not None:
+            pressure[parts[0]] = {"avg10_percent": average, "total_us": total}
+    return {"host_memory": memory, "host_swap_pages": swap,
+            "host_memory_pressure": pressure}
+
+
 def _threads(process, previous, elapsed, hz):
     current = {}
     try:
@@ -143,6 +186,12 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
                 "cpu_percent_definition": "100 percent is one logical CPU; process totals may exceed 100",
                 "core_class_hint_definition": "Heuristic only: SMT cores with higher maximum frequency versus lower-frequency single-thread cores",
                 "gpu_scope": "Device-wide, not per-process", "gpu_fields": GPU_FIELDS.split(","),
+                "host_memory_scope": "host_* fields are system-wide; swap_bytes is the target process's VmSwap (excludes swapped shared memory)",
+                "host_swap_pages_definition": "in/out are cumulative pswpin/pswpout pages; deltas cover adjacent samples only",
+                "host_memory_pressure_definition": "PSI some/full: avg10_percent is the 10-second average; total_us is cumulative stall time",
+                "boot_id": _text(Path("/proc/sys/kernel/random/boot_id")).strip() or None,
+                "kernel_release": _text(Path("/proc/sys/kernel/osrelease")).strip() or None,
+                "kernel_taint_start": _nonnegative_int(_text(Path("/proc/sys/kernel/tainted"))),
                 "end_reason": "stop-event"}
     metadata_path = output_dir / "resource-metadata.json"
     try:
@@ -174,7 +223,7 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
         else:
             metadata["gpu_error"] = "nvidia-smi unavailable" if not command else "capture already stopped"
         _save_metadata(metadata_path, metadata)
-        previous = previous_io = None
+        previous = previous_io = previous_swap = None
         previous_threads = {}
         began = previous_time = time.monotonic()
         with (output_dir / "resources.jsonl").open("w", buffering=1) as output:
@@ -195,10 +244,18 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
                        "cpu_percent": _cpu_percent(current["cpu_ticks"], previous["cpu_ticks"] if previous else None, elapsed, hz),
                        "rss_bytes": max(0, current["rss_pages"]) * page_size,
                        "peak_rss_bytes": status["VmHWM"] * 1024 if "VmHWM" in status else None,
+                       "swap_bytes": _kb_bytes(status.get("VmSwap")),
                        "minor_faults": current["minor_faults"], "major_faults": current["major_faults"],
                        "thread_count": current["thread_count"], "io": io, "top_threads": threads[:8],
                        "renderer_threads": [thread for thread in threads if any(
                            token in thread["name"].lower() for token in ("cp", "command", "drawprep", "render", "gpu"))][:32]}
+                row.update(_host_memory())
+                swap = row["host_swap_pages"]
+                row["host_swap_pages_delta"] = {
+                    key: value - previous_swap[key]
+                    if previous_swap is not None and previous_swap[key] is not None and
+                    value is not None and value >= previous_swap[key] else None
+                    for key, value in swap.items()}
                 if previous:
                     row["minor_faults_delta"] = current["minor_faults"] - previous["minor_faults"]
                     row["major_faults_delta"] = current["major_faults"] - previous["major_faults"]
@@ -207,6 +264,7 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
                                        if key in previous_io and value >= previous_io[key]}
                 output.write(json.dumps(row) + "\n")
                 previous, previous_io, previous_time = current, io, now
+                previous_swap = swap
                 if stop.wait(max(0, interval_s - (time.monotonic() - now))):
                     break
     except Exception as error:
@@ -242,6 +300,7 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
             except OSError:
                 pass
         metadata["ended_at"] = datetime.now(timezone.utc).isoformat()
+        metadata["kernel_taint_end"] = _nonnegative_int(_text(Path("/proc/sys/kernel/tainted")))
         _save_metadata(metadata_path, metadata)
 
 

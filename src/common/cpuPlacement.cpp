@@ -21,6 +21,11 @@
 #include <windows.h>
 // After windows.h.
 #include <tlhelp32.h>
+#elif defined(__linux__)
+#include <bit>
+#include <dirent.h>
+#include <sched.h>
+#include <unistd.h>
 #endif
 
 namespace Common {
@@ -183,6 +188,14 @@ uint64_t GeneralPoolAffinity(uint64_t affinity, const CpuLayout& layout) {
 		return affinity;
 	}
 	return layout.general_mask;
+}
+
+uint64_t GeneralThreadAffinity(uint64_t affinity, uint64_t general) {
+	if (general == 0 || (affinity & ~general) == 0) {
+		return affinity;
+	}
+	const auto narrowed = affinity & general;
+	return narrowed != 0 ? narrowed : general;
 }
 
 CpuReserveMode ParseCpuReserveMode(const char* text, bool* valid) {
@@ -368,6 +381,110 @@ std::vector<CpuSetInfo> ReadCpuSets(uint64_t& affinity, const std::vector<ULONG>
 	return sets;
 }
 
+#elif defined(__linux__)
+
+// KYTY_CPU_RESERVE_LINUX=1: apply KYTY_CPU_RESERVE and KYTY_CPU_SETS on Linux.
+bool LinuxPlacementEnabled() {
+	static const bool enabled = [] {
+		const auto* value = EnvValue("KYTY_CPU_RESERVE_LINUX");
+		return value != nullptr && std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+// Logical processors 0-63 of a CPU set; `beyond` tells whether it holds any above 63.
+uint64_t MaskOf(const cpu_set_t& set, bool* beyond = nullptr) {
+	uint64_t mask = 0;
+	for (uint32_t cpu = 0; cpu < 64; cpu++) {
+		if (CPU_ISSET(cpu, &set)) {
+			mask |= uint64_t {1} << cpu;
+		}
+	}
+	if (beyond != nullptr) {
+		*beyond = CPU_COUNT(&set) != std::popcount(mask);
+	}
+	return mask;
+}
+
+// A thread's hard affinity (tid 0: the calling thread); 0 when it cannot be read.
+uint64_t ThreadAffinity(pid_t tid) {
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	return sched_getaffinity(tid, sizeof(set), &set) == 0 ? MaskOf(set) : 0;
+}
+
+bool SetThreadAffinity(pid_t tid, uint64_t mask) {
+	if (mask == 0) {
+		return false;
+	}
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	for (uint32_t cpu = 0; cpu < 64; cpu++) {
+		if (((mask >> cpu) & 1u) != 0) {
+			CPU_SET(cpu, &set);
+		}
+	}
+	return sched_setaffinity(tid, sizeof(set), &set) == 0;
+}
+
+// The first number in a sysfs file of logical processor `cpu` ("8-9" gives 8); -1 if unreadable.
+long CpuSysfsNumber(const char* format, uint32_t cpu) {
+	char path[128];
+	std::snprintf(path, sizeof(path), format, cpu);
+	FILE* file = std::fopen(path, "r");
+	if (file == nullptr) {
+		return -1;
+	}
+	long value = -1;
+	if (std::fscanf(file, "%ld", &value) != 1) {
+		value = -1;
+	}
+	std::fclose(file);
+	return value;
+}
+
+// Every online logical processor 0-63, `allowed` when in the calling thread's affinity and in
+// KYTY_CPU_SETS (if set). The core is the lowest SMT sibling, the cache the L3 id, and the
+// preference the rank of the processor's highest performance among the distinct values.
+std::vector<CpuSetInfo> ReadCpuSets(uint64_t& affinity, bool& beyond64) {
+	cpu_set_t own;
+	CPU_ZERO(&own);
+	affinity = sched_getaffinity(0, sizeof(own), &own) == 0 ? MaskOf(own, &beyond64) : 0;
+	const auto              restriction = CpuSetsMask();
+	std::vector<CpuSetInfo> sets;
+	std::vector<long>       performance;
+	for (uint32_t cpu = 0; cpu < 64; cpu++) {
+		const auto core =
+		    CpuSysfsNumber("/sys/devices/system/cpu/cpu%u/topology/thread_siblings_list", cpu);
+		if (core < 0 || core > 255) {
+			continue; // offline or absent
+		}
+		auto perf = CpuSysfsNumber("/sys/devices/system/cpu/cpu%u/acpi_cppc/highest_perf", cpu);
+		if (perf < 0) {
+			perf = CpuSysfsNumber("/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", cpu);
+		}
+		const auto cache = CpuSysfsNumber("/sys/devices/system/cpu/cpu%u/cache/index3/id", cpu);
+		CpuSetInfo set;
+		set.id      = cpu;
+		set.logical = static_cast<uint8_t>(cpu);
+		set.core    = static_cast<uint8_t>(core);
+		set.cache   = static_cast<uint8_t>(std::clamp(cache, 0L, 255L));
+		set.allowed =
+		    ((affinity >> cpu) & 1u) != 0 && (restriction == 0 || ((restriction >> cpu) & 1u) != 0);
+		sets.push_back(set);
+		performance.push_back(perf);
+	}
+	auto distinct = performance;
+	std::sort(distinct.begin(), distinct.end());
+	distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+	for (size_t i = 0; i < sets.size(); i++) {
+		const auto rank =
+		    std::lower_bound(distinct.begin(), distinct.end(), performance[i]) - distinct.begin();
+		sets[i].scheduling_class = static_cast<uint8_t>(std::min<ptrdiff_t>(rank, 255));
+	}
+	return sets;
+}
+
 #endif
 
 struct State {
@@ -456,6 +573,73 @@ uint64_t LogicalMaskOfIds(const State& state, const std::vector<ULONG>& ids) {
 }
 #endif
 
+#if defined(__linux__)
+// Lock-free (PlaceNewThread): the general processors while a Linux layout is applied (0: none),
+// and the threads that keep their reserved cores.
+std::atomic<uint64_t> g_linux_general {0};
+std::atomic<pid_t>    g_linux_cp_tid {0};
+std::atomic<pid_t>    g_linux_recorder_tid {0};
+
+// Whether `tid` keeps a reserved core: the CP, or the recorder in cp+recorder mode.
+bool KeepsReservedCore(pid_t tid) {
+	return tid == g_linux_cp_tid.load(std::memory_order_relaxed) ||
+	       (tid == g_linux_recorder_tid.load(std::memory_order_relaxed) &&
+	        g_recorder_mask.load(std::memory_order_relaxed) != 0);
+}
+
+// Every thread of the process other than the CP and the recorder to GeneralThreadAffinity;
+// `moved` gets the threads changed, logged (first 32) when `log`. Returns the threads seen.
+uint32_t MoveThreadsToGeneral(uint64_t general, bool repin, bool log, uint32_t& moved,
+                              uint32_t& confined, uint64_t reserved) {
+	static std::atomic<uint32_t> logged {0};
+	uint32_t                     threads = 0;
+	DIR*                         tasks   = opendir("/proc/self/task");
+	if (tasks == nullptr) {
+		return 0;
+	}
+	while (const auto* entry = readdir(tasks)) {
+		const auto tid = static_cast<pid_t>(std::strtol(entry->d_name, nullptr, 10));
+		if (tid <= 0) {
+			continue;
+		}
+		threads++;
+		if (KeepsReservedCore(tid)) {
+			continue;
+		}
+		const auto current = ThreadAffinity(tid);
+		const auto wanted  = GeneralThreadAffinity(current, general);
+		if (current == 0 || wanted == current) {
+			continue;
+		}
+		if (reserved != 0 && (current & ~reserved) == 0) {
+			confined++;
+		}
+		if (!repin || !SetThreadAffinity(tid, wanted)) {
+			continue;
+		}
+		moved++;
+		if (log && logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+			char path[64];
+			char name[32] = "?";
+			std::snprintf(path, sizeof(path), "/proc/self/task/%d/comm", static_cast<int>(tid));
+			if (FILE* file = std::fopen(path, "r"); file != nullptr) {
+				if (std::fgets(name, sizeof(name), file) != nullptr) {
+					name[std::strcspn(name, "\n")] = '\0';
+				}
+				std::fclose(file);
+			}
+			std::printf("Kyty CPU placement: thread %d '%s' ran on %s (inherited a reserved core "
+			            "or outside the layout), moved to %s\n",
+			            static_cast<int>(tid), name, MaskText(current).c_str(),
+			            MaskText(wanted).c_str());
+			std::fflush(stdout);
+		}
+	}
+	closedir(tasks);
+	return threads;
+}
+#endif
+
 // State mutex held: computes the layout for the current process mask and constraint and applies
 // it: the process default CPU sets (the general processors of a reservation, or every allowed
 // processor with only KYTY_CPU_SETS) and the reserved threads' selected CPU sets.
@@ -463,6 +647,9 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true) {
 	uint64_t affinity = 0;
 #if defined(_WIN32)
 	state.sets = ReadCpuSets(affinity, state.external);
+#elif defined(__linux__)
+	bool beyond64 = false;
+	state.sets    = ReadCpuSets(affinity, beyond64);
 #else
 	state.sets.clear();
 #endif
@@ -524,6 +711,35 @@ void ApplyLayoutLocked(State& state, const char* why, bool log = true) {
 			}
 		}
 	}
+#elif defined(__linux__)
+	uint64_t general = 0;
+	if (!LinuxPlacementEnabled() || beyond64) {
+		state.layout = {};
+		state.layout.description =
+		    beyond64 ? "not applied on Linux with more than 64 logical processors"
+		             : "not applied: on Linux a placement is a hard thread affinity that new "
+		               "threads inherit; KYTY_CPU_RESERVE_LINUX=1 applies it";
+	} else if (state.layout.reserved) {
+		general = state.layout.general_mask;
+	} else if (restriction != 0) {
+		for (const auto& set: state.sets) {
+			general |= set.allowed ? uint64_t {1} << set.logical : 0;
+		}
+		const auto text = "every thread on logical " + MaskText(general) + " (KYTY_CPU_SETS)";
+		state.layout.description =
+		    mode == CpuReserveMode::Off ? text : state.layout.description + "; " + text;
+	}
+	g_cp_mask.store(state.layout.reserved ? state.layout.cp_mask : 0, std::memory_order_relaxed);
+	g_recorder_mask.store(state.layout.reserved ? state.layout.recorder_mask : 0,
+	                      std::memory_order_relaxed);
+	g_linux_general.store(general, std::memory_order_relaxed);
+	if (general != 0) {
+		uint32_t   moved    = 0;
+		uint32_t   confined = 0;
+		const auto threads  = MoveThreadsToGeneral(general, true, false, moved, confined, 0);
+		state.layout.description += "; " + std::to_string(moved) + " of " +
+		                            std::to_string(threads) + " threads moved there";
+	}
 #else
 	state.layout.reserved = false;
 #endif
@@ -558,6 +774,17 @@ void StartMonitor() {
 			if (scan && second % 5 == 2) {
 				(void)ScanThreadAffinities(repin);
 			}
+		}
+	}).detach();
+#elif defined(__linux__)
+	if (g_linux_general.load(std::memory_order_relaxed) == 0) {
+		return;
+	}
+	std::thread([] {
+		Profiler::SetThreadName("CPU placement monitor");
+		for (;;) {
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			(void)ScanThreadAffinities(true);
 		}
 	}).detach();
 #endif
@@ -656,8 +883,43 @@ void PlaceCurrentThread(ThreadRole role) {
 		ApplyThreadSets(GetCurrentThread(),
 		                role == ThreadRole::Cp ? state.layout.cp_ids : state.layout.recorder_ids);
 	}
+#elif defined(__linux__)
+	if (role != ThreadRole::Cp && role != ThreadRole::Recorder) {
+		PlaceNewThread();
+		return;
+	}
+	auto&           state = GetState();
+	std::lock_guard lock(state.mutex);
+	(role == ThreadRole::Cp ? g_linux_cp_tid : g_linux_recorder_tid)
+	    .store(gettid(), std::memory_order_relaxed);
+	const auto general = g_linux_general.load(std::memory_order_relaxed);
+	if (general == 0) {
+		return;
+	}
+	auto wanted = !state.layout.reserved   ? 0
+	              : role == ThreadRole::Cp ? state.layout.cp_mask
+	                                       : state.layout.recorder_mask;
+	if (wanted == 0) {
+		// The recorder in cp mode, or KYTY_CPU_SETS alone: the general processors.
+		wanted = GeneralThreadAffinity(ThreadAffinity(0), general);
+	}
+	(void)SetThreadAffinity(0, wanted);
 #else
 	(void)role;
+#endif
+}
+
+void PlaceNewThread() {
+#if defined(__linux__)
+	const auto general = g_linux_general.load(std::memory_order_relaxed);
+	if (general == 0 || KeepsReservedCore(gettid())) {
+		return;
+	}
+	const auto current = ThreadAffinity(0);
+	const auto wanted  = GeneralThreadAffinity(current, general);
+	if (current != 0 && wanted != current) {
+		(void)SetThreadAffinity(0, wanted);
+	}
 #endif
 }
 
@@ -766,6 +1028,19 @@ AffinityScan ScanThreadAffinities(bool repin) {
 		CloseHandle(thread);
 	}
 	CloseHandle(snapshot);
+#elif defined(__linux__)
+	const auto general = g_linux_general.load(std::memory_order_relaxed);
+	if (general == 0) {
+		return scan;
+	}
+	const auto reserved =
+	    g_cp_mask.load(std::memory_order_relaxed) | g_recorder_mask.load(std::memory_order_relaxed);
+	std::lock_guard lock(GetState().scan_mutex);
+	scan.threads =
+	    MoveThreadsToGeneral(general, repin, true, scan.repinned, scan.reserved_only, reserved);
+	for (uint32_t i = 0; i < scan.repinned; i++) {
+		Profiler::CountFrameEvent(Profiler::FrameEvent::CpuPlacementRepinned);
+	}
 #else
 	(void)repin;
 #endif
@@ -788,6 +1063,9 @@ uint32_t CurrentLogicalProcessor() {
 	PROCESSOR_NUMBER number {};
 	GetCurrentProcessorNumberEx(&number);
 	return static_cast<uint32_t>(number.Group) * 64u + number.Number;
+#elif defined(__linux__)
+	const int cpu = sched_getcpu();
+	return cpu >= 0 ? static_cast<uint32_t>(cpu) : UINT32_MAX;
 #else
 	return UINT32_MAX;
 #endif

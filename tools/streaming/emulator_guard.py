@@ -3,8 +3,54 @@
 import fcntl
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+
+
+def settings_of(env):
+    return {k: v for k, v in env.items()
+            if k.upper().startswith(('KYTY_', 'TRACY_', '__NV_PRIME', '__VK_LAYER'))}
+
+
+def runtime_settings(prefix, env):
+    """Applies runtime-env.json (next to this file) to `env` and returns what it did.
+
+    The launcher keeps only the KYTY_* variables of the shared u59-preset.json, so a runtime's own
+    experiments and diagnostics are set here, after the GUI: {"KYTY_NAME": "value"}; null removes
+    a variable; keys starting with "_" are notes. Other names and values are ignored and reported.
+    """
+    import hashlib
+    import json
+
+    path = prefix/'runtime-env.json'
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    report = {'file': str(path), 'sha256': hashlib.sha256(raw).hexdigest(),
+              'set': {}, 'removed': [], 'ignored': {}}
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        report['ignored']['(file)'] = 'not a JSON object'
+        return report
+    for name, value in data.items():
+        if name.startswith('_'):
+            continue
+        if not re.fullmatch(r'KYTY_[A-Z0-9_]+', name):
+            report['ignored'][name] = 'only KYTY_* names'
+        elif value is None:
+            env.pop(name, None)
+            report['removed'].append(name)
+        elif isinstance(value, str):
+            env[name] = value
+            report['set'][name] = value
+        else:
+            report['ignored'][name] = 'value must be a string or null'
+    changes = [f'{k}={v}' for k, v in report['set'].items()] + [f'-{k}' for k in report['removed']]
+    print('Runtime settings (runtime-env.json):', ', '.join(changes) or 'none',
+          *(f'(ignored {k}: {v})' for k, v in report['ignored'].items()), flush=True)
+    return report
 
 
 def capture(native, args, lock_fd):
@@ -22,8 +68,7 @@ def capture(native, args, lock_fd):
     metadata = {'started_at_utc': stamp, 'command': [str(native), *args],
                 'native_sha256': hashlib.sha256(native.read_bytes()).hexdigest(),
                 'cwd': os.getcwd(), 'capture_only': True,
-                'effective_settings': {k: v for k, v in os.environ.items()
-                    if k.upper().startswith(('KYTY_', 'TRACY_', '__NV_PRIME', '__VK_LAYER'))}}
+                'effective_settings': settings_of(os.environ)}
     (output/'manifest.json').write_text(json.dumps(metadata, indent=2)+'\n')
     for name in ('kyty_run.sh', 'Kyty.ini', 'u59-preset.json', 'installation-provenance.json'):
         source = prefix/name
@@ -49,10 +94,14 @@ def capture(native, args, lock_fd):
         stacks = diagnostic('hang_stacks')
         env, preexec = stacks.launch_options(output)
         options = {'env': env, 'preexec_fn': preexec}
-        metadata['effective_settings'] = {k: v for k, v in env.items()
-            if k.upper().startswith(('KYTY_', 'TRACY_', '__NV_PRIME', '__VK_LAYER'))}
     except Exception as error:
         diagnostic_error('hang', error)
+    try:
+        metadata['runtime_env'] = runtime_settings(prefix, options.setdefault('env', dict(os.environ)))
+    except Exception as error:
+        diagnostic_error('runtime-env', error)
+    # What the native program actually receives (KYTY_FAULT_MAP is read at its static init).
+    metadata['effective_settings'] = settings_of(options.get('env', os.environ))
     child = subprocess.Popen([str(native), *args], stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, bufsize=0, pass_fds=(lock_fd,), **options)
     diagnostic_threads = []

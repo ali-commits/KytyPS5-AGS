@@ -891,6 +891,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		append("--- Guest fault context ---\n");
 		append("thread: {}\n", thread_name);
 		append("pc: 0x{:016x} in {}\n", info->exception_address, pc_module);
+		if (info->trap_number != UINT32_MAX) {
+			append("fault: trap {} ({}), error code 0x{:x}, si_code {}\n", info->trap_number,
+			       Common::HostException::FaultKindText(*info), info->error_code,
+			       info->signal_code);
+		}
 		{
 			// The driver call this thread was in (a pipeline build: its guest shader hashes).
 			char doing[160] = {};
@@ -1008,10 +1013,12 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64 " (%s)"
-	     " access=%u address=0x%016" PRIx64 "\n",
+	     " access=%u address=0x%016" PRIx64 "%s%s\n",
 	     static_cast<unsigned>(info->type), info->native_code, info->exception_address,
 	     pc_module.c_str(), static_cast<unsigned>(info->access_violation_type),
-	     info->access_violation_vaddr);
+	     info->access_violation_vaddr,
+	     *Common::HostException::FaultKindText(*info) != '\0' ? " - " : "",
+	     Common::HostException::FaultKindText(*info));
 }
 static void EncodeId64(uint16_t in_id, std::string* out_id) {
 	static const char* str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
