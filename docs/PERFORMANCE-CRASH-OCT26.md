@@ -128,3 +128,47 @@ fresh boot and a clean capture. Original run copies, hashes, analysis and the
 kernel journal are retained privately under
 `~/.local/state/kytyps5-bot-of-war-20261026/` (the folder retains its initial,
 subsequently withdrawn level label).
+
+## Follow-up after reboot — 27 October
+
+The relevant crash is capture `20261027T030543.157624Z`, ending at **11:20:52
+MYT** with exit 65 after about 15 minutes. A subsequent ten-second launch,
+`20261027T032055.272318Z`, exited zero and is not the crash being diagnosed.
+The boot ID changed, and kernel taint stayed at `12288` (`O/E`) throughout the
+crash run. The current boot journal has no new Oops, MCE, NVIDIA Xid or OOM event.
+This reproduces the guest failure after a reboot without a new kernel Oops.
+
+This time `RoomLoad_ATQT` faults in guest cleanup at `0x9004eb61d`. A vector-like
+allocation header contains `{0x0001000000000000, 0, 0}`. Its invalid start pointer
+makes the size subtraction wrap and select a large-allocation cleanup branch;
+reading `[start-8]` then faults before `free` is called. The pointer is already
+present in captured memory, and all 96 nearby instruction bytes match the
+original executable. This is a different guest subsystem with the same bit-48
+pattern. The previous value and the writer remain unknown.
+
+The run averaged **47.62 FPS**, with **16.77 GiB peak RSS**. At least **8.55 GiB
+of host RAM remained available**. There were 89 major faults in total and none
+in the final 129 seconds; memory-pressure stall time was about 0.37 seconds over
+the whole run. Process VmSwap was zero, with its shared-memory limitation noted
+above. Host swap counters also show no significant activity near failure.
+Memory exhaustion or paging is therefore unsupported as this crash's cause.
+
+During seconds 900–906, the command processor used 96.3% of one logical CPU while
+the GPU averaged 58.5% utilization and the game averaged 34.5 FPS. The late
+984 ms frame interval is close to failure and may include crash handling.
+
+A bounded `memtester` smoke test returned zero, but its requested 128 MiB was
+reduced by the user's locking limit to **8 MiB actually locked and tested**.
+This small pass cannot establish the health of all RAM or exclude an intermittent
+CPU/cache/memory error. Btrfs also reports historical `corrupt=1` counters on both
+NVMe devices at boot; these are not fresh errors attributable to this run. Both
+devices belong to the same filesystem, so an NVMe0 path alone cannot exclude
+NVMe1 involvement.
+
+The CP-gap and fault-map flags were absent from the crash run. They are now
+temporarily enabled by the Performance Test launch command and its menu shortcut,
+so the next user run records them automatically. Explicit environment values can
+override these defaults. This is an instrumentation change, not a crash fix;
+timing comparisons must account for diagnostic overhead. Native binaries,
+Current/Streaming launchers, saves, shared settings and shader caches remain
+unchanged. Evidence is in `~/.local/state/kytyps5-crash-20261027/`.
