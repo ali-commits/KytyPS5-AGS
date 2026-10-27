@@ -51,6 +51,14 @@ class RuntimeResourcesTests(unittest.TestCase):
         self.assertEqual(resources._cpu_percent(250, 150, 0.5, 100), 200.0)
         self.assertIsNone(resources._cpu_percent(10, 20, 1, 100))
 
+    def test_cpu_mhz_reads_each_cpu_clock_and_tolerates_missing_or_bad_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for cpu, text in [(0, "5200000\n"), (2, "garbage")]:
+                (root / f"cpu{cpu}" / "cpufreq").mkdir(parents=True)
+                (root / f"cpu{cpu}" / "cpufreq" / "scaling_cur_freq").write_text(text)
+            self.assertEqual(resources._cpu_mhz([0, 1, 2], root), [5200, None, None])
+
     def test_topology_keeps_both_performance_frequencies_in_same_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

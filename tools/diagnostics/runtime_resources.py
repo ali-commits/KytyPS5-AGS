@@ -95,6 +95,17 @@ def _cpu_topology(root=Path("/sys/devices/system/cpu")):
     return sorted(cpus, key=lambda cpu: cpu["cpu"])
 
 
+def _cpu_mhz(cpus, root=Path("/sys/devices/system/cpu")):
+    """Each listed CPU's current clock in MHz (cpufreq scaling_cur_freq); None if unreadable."""
+    result = []
+    for cpu in cpus:
+        try:
+            result.append(int(_text(root / f"cpu{cpu}" / "cpufreq/scaling_cur_freq").strip()) // 1000)
+        except ValueError:
+            result.append(None)
+    return result
+
+
 def _numbers(path):
     result = {}
     for line in _text(path).splitlines():
@@ -198,6 +209,8 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
         output_dir.mkdir(parents=True, exist_ok=True)
         hz, page_size = os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE")
         metadata.update(clock_ticks_per_second=hz, page_size=page_size, cpu_topology=_cpu_topology())
+        cpu_ids = [cpu["cpu"] for cpu in metadata["cpu_topology"]]
+        metadata["cpu_mhz_definition"] = "Each sample's cpu_mhz[i] is CPU cpu_topology[i] clock (scaling_cur_freq, MHz)"
         try:
             metadata["allowed_cpus"] = sorted(os.sched_getaffinity(pid))
         except (AttributeError, OSError):
@@ -247,6 +260,7 @@ def _capture(pid, output_dir, stop, interval_s, nvidia_smi):
                        "swap_bytes": _kb_bytes(status.get("VmSwap")),
                        "minor_faults": current["minor_faults"], "major_faults": current["major_faults"],
                        "thread_count": current["thread_count"], "io": io, "top_threads": threads[:8],
+                       "cpu_mhz": _cpu_mhz(cpu_ids),
                        "renderer_threads": [thread for thread in threads if any(
                            token in thread["name"].lower() for token in ("cp", "command", "drawprep", "render", "gpu"))][:32]}
                 row.update(_host_memory())
