@@ -2869,7 +2869,8 @@ bool HandleStackFault(const Common::HostException::ExceptionInfo &info) {
                              FAULT_STACK_SIZE - sizeof(uintptr_t);
   if (info.type != ExceptionType::AccessViolation ||
       info.access_violation_type != AccessViolationType::Write ||
-      info.access_violation_vaddr != fault_address ||
+      info.access_violation_vaddr != fault_address || info.trap_number != 14 ||
+      info.signal_code <= 0 ||
       ::sigaltstack(nullptr, &active_stack) != 0 ||
       (active_stack.ss_flags & SS_ONSTACK) == 0) {
     std::_Exit(1);
@@ -2916,6 +2917,34 @@ void TestFaultOnProtectedStack() {
   Check(::waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
             WEXITSTATUS(status) == 0,
         "fault on a protected stack did not recover");
+}
+
+// A non-canonical pointer raises a general-protection fault, which reports no address. The
+// October 2026 crash reports read it as a read of address 0 ("access=1 address=0x0").
+bool HandleGeneralProtectionFault(const Common::HostException::ExceptionInfo &info) {
+  using namespace Common::HostException;
+  const bool reported = info.type == ExceptionType::AccessViolation &&
+                        info.access_violation_type == AccessViolationType::NoAddress &&
+                        info.access_violation_vaddr == 0 && info.trap_number == 13 &&
+                        info.signal_code == SI_KERNEL &&
+                        std::strstr(FaultKindText(info), "general-protection") != nullptr;
+  std::_Exit(reported ? 0 : 1);
+}
+
+void TestGeneralProtectionFaultHasNoAddress() {
+  const pid_t pid = ::fork();
+  Check(pid >= 0, "general-protection fault fork failed");
+  if (pid == 0) {
+    Check(Common::HostException::InstallHandler(HandleGeneralProtectionFault),
+          "install general-protection fault handler failed");
+    // Non-canonical with 48- and 57-bit virtual addresses alike.
+    *reinterpret_cast<volatile uint64_t *>(uintptr_t{0x8000000000000000}) = 1;
+    std::_Exit(2);
+  }
+  int status = 0;
+  Check(::waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0,
+        "a general-protection fault was not reported as an access without an address");
 }
 #endif
 
@@ -2999,6 +3028,7 @@ int main(int argc, char **argv) {
   TestFatalPaths();
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
   TestFaultOnProtectedStack();
+  TestGeneralProtectionFaultHasNoAddress();
 #endif
 
   // Everything above ran with deferred write-unprotect (the default). The fault and upload cases

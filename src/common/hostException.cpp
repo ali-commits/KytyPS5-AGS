@@ -258,6 +258,9 @@ static void SignalHandler(int sig, siginfo_t* si, void* uctx) {
 // x86-64 page-fault error bits.
 constexpr uint64_t PAGE_FAULT_ERROR_WRITE       = 0x02;
 constexpr uint64_t PAGE_FAULT_ERROR_INSTRUCTION = 0x10;
+// x86-64 exception vector of a page fault, as the kernel records it in the signal frame
+// (REG_TRAPNO; 13 is a general-protection fault, see FaultKindText).
+constexpr uint32_t X86_TRAP_PAGE_FAULT = 14;
 
 // Let the kernel handle an unresolved fault on retry.
 static void ChainToDefault(int signal_number) noexcept {
@@ -278,16 +281,29 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
 	info.native_context    = context;
 
 	if (signal_number == SIGSEGV || signal_number == SIGBUS) {
-		info.type             = ExceptionType::AccessViolation;
-		const auto error_code = static_cast<uint64_t>(gregs[REG_ERR]);
-		if ((error_code & PAGE_FAULT_ERROR_INSTRUCTION) != 0) {
-			info.access_violation_type = AccessViolationType::Execute;
-		} else if ((error_code & PAGE_FAULT_ERROR_WRITE) != 0) {
-			info.access_violation_type = AccessViolationType::Write;
+		info.type        = ExceptionType::AccessViolation;
+		info.trap_number = static_cast<uint32_t>(gregs[REG_TRAPNO]);
+		info.error_code  = static_cast<uint64_t>(gregs[REG_ERR]);
+		info.signal_code = signal_info->si_code;
+		if (signal_info->si_code <= 0) {
+			// Sent by a thread or process (kill, tgkill): the frame's trap number is stale.
+			info.trap_number           = UINT32_MAX;
+			info.access_violation_type = AccessViolationType::NoAddress;
+		} else if (info.trap_number != X86_TRAP_PAGE_FAULT) {
+			// No page-fault error bits and no address: si_addr is 0 for a general-protection
+			// fault, which is not a null pointer (the instruction's operands hold the bad one).
+			info.access_violation_type = AccessViolationType::NoAddress;
 		} else {
-			info.access_violation_type = AccessViolationType::Read;
+			const auto error_code = info.error_code;
+			if ((error_code & PAGE_FAULT_ERROR_INSTRUCTION) != 0) {
+				info.access_violation_type = AccessViolationType::Execute;
+			} else if ((error_code & PAGE_FAULT_ERROR_WRITE) != 0) {
+				info.access_violation_type = AccessViolationType::Write;
+			} else {
+				info.access_violation_type = AccessViolationType::Read;
+			}
+			info.access_violation_vaddr = reinterpret_cast<uint64_t>(signal_info->si_addr);
 		}
-		info.access_violation_vaddr = reinterpret_cast<uint64_t>(signal_info->si_addr);
 	} else if (signal_number == SIGILL) {
 		info.type = ExceptionType::IllegalInstruction;
 	} else {
@@ -406,5 +422,25 @@ bool InstallFirstAccessHandler(Handler handler) {
 void EnterProbe() {}
 void LeaveProbe() {}
 #endif
+
+const char* FaultKindText(const ExceptionInfo& info) noexcept {
+	if (info.type != ExceptionType::AccessViolation) {
+		return "";
+	}
+	if (info.trap_number == UINT32_MAX) {
+		return info.access_violation_type == AccessViolationType::NoAddress
+		           ? "signal sent by a thread or process, not a CPU fault"
+		           : "";
+	}
+	switch (info.trap_number) {
+		case 14: return "page fault";
+		case 13:
+			return "general-protection fault: no address is reported (address=0 is not a null "
+			       "pointer); a non-canonical pointer, a misaligned aligned-SSE access or a "
+			       "privileged instruction, see the instruction and registers";
+		case 17: return "alignment-check fault";
+		default: return "CPU exception other than a page fault";
+	}
+}
 
 } // namespace Common::HostException

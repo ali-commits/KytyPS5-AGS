@@ -7,7 +7,11 @@ namespace Common::HostException {
 
 enum class ExceptionType { Unknown, AccessViolation, IllegalInstruction };
 
-enum class AccessViolationType { Unknown, Read, Write, Execute };
+// NoAddress (Linux): a SIGSEGV/SIGBUS that is not a page fault, so neither the access kind nor an
+// address is known. Mostly a general-protection fault: a non-canonical pointer (such as one with
+// bit 48 set), a misaligned aligned-SSE access or a privileged instruction. It is reported, never
+// resolved.
+enum class AccessViolationType { Unknown, Read, Write, Execute, NoAddress };
 
 struct ExceptionInfo {
 	ExceptionType       type                   = ExceptionType::Unknown;
@@ -31,9 +35,18 @@ struct ExceptionInfo {
 	uint64_t            r14                    = 0;
 	uint64_t            r15                    = 0;
 	uint32_t            native_code            = 0;
+	// Linux x86-64 SIGSEGV/SIGBUS: the CPU exception (14 page fault, 13 general protection), its
+	// error code and the signal's si_code. trap_number is UINT32_MAX when unknown (other
+	// platforms, or a signal another thread or process sent).
+	uint32_t trap_number = UINT32_MAX;
+	uint64_t error_code  = 0;
+	int32_t  signal_code = 0;
 	// Platform-specific mutable context, valid only for the duration of the handler call.
 	void* native_context = nullptr;
 };
+
+// One line for a fault report: which CPU exception it was (empty when unknown).
+[[nodiscard]] const char* FaultKindText(const ExceptionInfo& info) noexcept;
 
 // Windows: the stack range the TEB gives while guest code runs on a guest stack (pthread.cpp
 // RunOnGuestStack, runtimeLinker.cpp RunEntry). Those used to zero StackBase and StackLimit so that
