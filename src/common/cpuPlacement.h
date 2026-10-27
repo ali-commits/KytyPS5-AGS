@@ -52,6 +52,18 @@
 // Placement samples, with the profiler's aggregates, the hang trace or
 // KYTY_CPU_PLACEMENT_SAMPLES=1: the CP, the recorder, guest threads, draw-prep workers and service
 // threads note where they run.
+//
+// Linux (KYTY_CPU_RESERVE_LINUX=1, default off): the same layouts as hard thread affinities, since
+// Linux has no CPU sets. Without it nothing changes on Linux: the bundled preset's
+// KYTY_CPU_RESERVE=cp was chosen on Windows. The topology comes from sysfs (a core is a set of SMT
+// siblings; the preference ranks each processor's highest performance, ACPI CPPC highest_perf or
+// else cpuinfo_max_freq, so P-cores come before E-cores and the favored cores first). At startup
+// every thread of the process gets the general processors, and a new thread inherits its
+// creator's affinity, so later threads get them too. The CP and the recorder then take their
+// reserved cores. A thread they create inherits their core: it moves to the general processors
+// when it names itself (Profiler::SetThreadName calls PlaceNewThread), and the monitor moves any
+// other thread it finds on a reserved processor once a second (logged). KYTY_CPU_SETS restricts
+// every thread the same way. Not applied with more than 64 logical processors.
 // - FrameEvents: CpuPlacement{Cp,Guest,Host}Samples; CpuPlacementCpOffCore and
 //   CpuPlacementRecorderOffCore (outside their reserved cores); CpuPlacement{Guest,Host}OnCpCore
 //   (on the physical core of the CP's latest sample: SMT sharing); CpuPlacementHardAffinity
@@ -97,6 +109,14 @@ inline constexpr uint32_t kMinGeneralProcessors = 6;
 // reserved cores: unchanged when nothing is reserved or it already meets the general processors
 // (the CPU sets narrow it), otherwise every general processor.
 [[nodiscard]] uint64_t GeneralPoolAffinity(uint64_t affinity, const CpuLayout& layout);
+// Pure (tested), Linux: the hard affinity a thread other than the CP and the recorder gets: kept
+// when it lies within `general`, else narrowed to its general processors, else every general
+// processor (a thread the CP created inherited the CP's core).
+[[nodiscard]] uint64_t GeneralThreadAffinity(uint64_t affinity, uint64_t general);
+// Linux: moves the calling thread to the general processors when it runs on a reserved core it
+// inherited. Lock-free; a no-op on the CP and the recorder, when nothing is applied, and on other
+// platforms.
+void PlaceNewThread();
 
 // KYTY_CPU_RESERVE=off|cp|cp+recorder (also 0|1|2); nullptr is off. `valid` false: unknown text.
 [[nodiscard]] CpuReserveMode ParseCpuReserveMode(const char* text, bool* valid = nullptr);

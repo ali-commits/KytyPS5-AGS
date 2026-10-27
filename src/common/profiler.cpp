@@ -1,5 +1,6 @@
 #include "common/profiler.h"
 
+#include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
@@ -1289,6 +1290,10 @@ void EndBlock() {
 void SetThreadName(const char* name) {
 	if (name == nullptr) return;
 	HangWatchdog::SetThreadName(name);
+#if defined(__linux__)
+	// KYTY_CPU_RESERVE_LINUX (common/cpuPlacement.h): a thread the CP started inherited its core.
+	Common::PlaceNewThread();
+#endif
 	if (tracy::ProfilerAvailable()) {
 		tracy::SetThreadName(name);
 	}

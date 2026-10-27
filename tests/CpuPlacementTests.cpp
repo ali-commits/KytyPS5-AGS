@@ -8,6 +8,9 @@
 //    meets them is narrowed by the CPU sets; process default CPU sets replaced by another process
 //    (Process Lasso's CPU-set rule) are applied again (KYTY_CPU_RESERVE_REASSERT).
 //    KYTY_CPU_SETS: its list parser (ParseLogicalMask).
+//    Linux (KYTY_CPU_RESERVE_LINUX=1; without it nothing changes, checked in a child process): the
+//    CP and the recorder on their cores, threads created before and after the layout off them, and
+//    threads the CP starts leave its core when they name themselves or when the monitor scans.
 // 3. --bench [seconds] [reps]: KYTY_CPU_RESERVE=off against cp, in child processes on logical
 //    processors 0-15 at HIGH priority (Process Lasso's rule for the game). A CP-like thread runs
 //    fixed work chunks after ~100 us blocking waits, next to bursty guest-like threads and a yield
@@ -36,6 +39,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__linux__)
+#include <sched.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -187,6 +194,33 @@ void TestAffinityAndModes() {
 	Check(Common::GeneralPoolAffinity(0x14, layout) == 0x14,
 	      "a hard affinity that meets the general processors is kept");
 	Check(Common::GeneralPoolAffinity(0x4, CpuLayout {}) == 0x4, "nothing reserved: kept");
+	// Linux hard affinities, general processors 0xFFF3 (CP on logical 2-3).
+	Check(Common::GeneralThreadAffinity(0xC, 0xFFF3) == 0xFFF3,
+	      "a thread on the CP's core (it inherited it) gets every general processor");
+	Check(Common::GeneralThreadAffinity(0x1C, 0xFFF3) == 0x10,
+	      "a thread that also allows general processors is narrowed to them");
+	Check(Common::GeneralThreadAffinity(0x30, 0xFFF3) == 0x30, "a general thread is kept");
+	Check(Common::GeneralThreadAffinity(0xC, 0) == 0xC, "nothing applied: kept");
+	{
+		// This PC on Linux (Core i7-13700, ReadCpuSets): P-cores 0-15 in SMT pairs, E-cores
+		// 16-23; preference by CPPC highest_perf: E 41 (rank 0), P 65 (1), favored 67 on 8-11 (2).
+		std::vector<CpuSetInfo> sets;
+		for (uint32_t lp = 0; lp < 24; lp++) {
+			CpuSetInfo set;
+			set.id               = lp;
+			set.logical          = static_cast<uint8_t>(lp);
+			set.core             = static_cast<uint8_t>(lp < 16 ? lp & ~1u : lp);
+			set.scheduling_class = static_cast<uint8_t>(lp >= 16 ? 0 : (lp >= 8 && lp < 12) ? 2 : 1);
+			set.allowed          = true;
+			sets.push_back(set);
+		}
+		const auto cp = Common::ComputeCpuLayout(sets, CpuReserveMode::Cp, -1);
+		Check(cp.reserved && cp.cp_mask == 0x300 && cp.general_mask == (0xFFFFFFull & ~0x300ull),
+		      "i7-13700: CP on favored P-core logical 8-9, E-cores general");
+		const auto both = Common::ComputeCpuLayout(sets, CpuReserveMode::CpRecorder, -1);
+		Check(both.reserved && both.cp_mask == 0x300 && both.recorder_mask == 0xC00,
+		      "i7-13700: recorder on the other favored P-core, logical 10-11");
+	}
 	bool valid = false;
 	Check(Common::ParseCpuReserveMode("cp", &valid) == CpuReserveMode::Cp && valid, "mode cp");
 	Check(Common::ParseCpuReserveMode("1", &valid) == CpuReserveMode::Cp && valid, "mode 1");
@@ -210,7 +244,7 @@ void TestAffinityAndModes() {
 	std::puts("CpuPlacementTests: general-pool affinity and modes ok");
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
 
 volatile uint64_t g_sink = 0;
 
@@ -235,6 +269,7 @@ uint64_t RunAndRecord(uint32_t ms, const Common::ThreadRole* role = nullptr) {
 	return seen;
 }
 
+#if defined(_WIN32)
 uint64_t ProcessMask() {
 	DWORD_PTR process = 0;
 	DWORD_PTR system  = 0;
@@ -242,6 +277,7 @@ uint64_t ProcessMask() {
 	      "GetProcessAffinityMask");
 	return process;
 }
+#endif
 
 // One busy thread per logical processor, recording where each ran.
 struct Load {
@@ -274,6 +310,157 @@ struct Load {
 	std::vector<uint64_t>    per_thread;
 	std::vector<std::thread> threads;
 };
+
+#if defined(__linux__)
+
+uint64_t OwnAffinity() {
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	Check(sched_getaffinity(0, sizeof(set), &set) == 0, "sched_getaffinity");
+	uint64_t mask = 0;
+	for (uint32_t cpu = 0; cpu < 64; cpu++) {
+		mask |= CPU_ISSET(cpu, &set) ? uint64_t {1} << cpu : 0;
+	}
+	return mask;
+}
+
+// Without KYTY_CPU_RESERVE_LINUX=1 the preset's KYTY_CPU_RESERVE=cp changes nothing on Linux
+// (a child process: the switch is read once).
+void TestLinuxNeedsOptIn() {
+	const pid_t pid = ::fork();
+	Check(pid >= 0, "fork");
+	if (pid == 0) {
+		(void)unsetenv("KYTY_CPU_RESERVE_LINUX");
+		const auto before = OwnAffinity();
+		Common::InitCpuPlacement();
+		const auto layout = Common::CurrentCpuLayout();
+		std::thread cp([] { Common::PlaceCurrentThread(Common::ThreadRole::Cp); });
+		cp.join();
+		const bool unchanged = !layout.reserved && OwnAffinity() == before &&
+		                       layout.description.find("KYTY_CPU_RESERVE_LINUX") != std::string::npos;
+		std::_Exit(unchanged ? 0 : 1);
+	}
+	int status = 0;
+	Check(::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+	      "KYTY_CPU_RESERVE applied on Linux without KYTY_CPU_RESERVE_LINUX=1");
+	std::puts("CpuPlacementTests: Linux opt-in ok");
+}
+
+void TestLiveLinux(CpuReserveMode mode) {
+	// A thread that exists before the layout is applied.
+	std::atomic<int> phase {0};
+	uint64_t         early_seen = 0;
+	std::thread      early([&] {
+        while (phase.load() == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        early_seen = RunAndRecord(300);
+    });
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	const auto original = OwnAffinity();
+	Common::InitCpuPlacement();
+	const auto layout = Common::CurrentCpuLayout();
+	std::printf("CpuPlacementTests: live Linux %s, affinity 0x%llx: %s\n",
+	            mode == CpuReserveMode::Cp ? "cp" : "cp+recorder",
+	            static_cast<unsigned long long>(original), layout.description.c_str());
+	if (!layout.reserved) {
+		phase = 1;
+		early.join();
+		std::puts("CpuPlacementTests: live skipped (nothing reserved on this machine)");
+		return;
+	}
+	const uint64_t reserved = layout.cp_mask | layout.recorder_mask;
+	Check(OwnAffinity() == layout.general_mask, "the main thread did not get the general processors");
+
+	uint64_t          cp_seen = 0, recorder_seen = 0, named_seen = 0, unnamed_seen = 0, load_seen = 0;
+	std::atomic<int>  unnamed_phase {0};
+	Common::AffinityScan scan;
+	{
+		Load        load(load_seen);
+		std::thread cp([&] {
+			Common::PlaceCurrentThread(Common::ThreadRole::Cp);
+			// Threads the CP starts inherit its core: the recorder takes its own processors, a
+			// thread that names itself leaves at once, an unnamed one when the monitor scans.
+			std::thread recorder([&] {
+				Common::PlaceCurrentThread(Common::ThreadRole::Recorder);
+				const auto role = Common::ThreadRole::Recorder;
+				recorder_seen   = RunAndRecord(300, &role);
+			});
+			std::thread named([&] {
+				Profiler::SetThreadName("placement named");
+				named_seen = RunAndRecord(300);
+			});
+			std::thread unnamed([&] {
+				unnamed_phase = 1;
+				while (unnamed_phase.load() != 2) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				unnamed_seen = RunAndRecord(300);
+			});
+			const auto role = Common::ThreadRole::Cp;
+			cp_seen         = RunAndRecord(300, &role);
+			recorder.join();
+			named.join();
+			unnamed.join();
+		});
+		while (unnamed_phase.load() != 1) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		scan          = Common::ScanThreadAffinities(true);
+		unnamed_phase = 2;
+		phase         = 1;
+		cp.join();
+		early.join();
+	}
+	std::printf("  ran on: CP 0x%llx, recorder 0x%llx, named 0x%llx, unnamed 0x%llx, early 0x%llx, "
+	            "load 0x%llx; scan %u threads, %u confined, %u moved\n",
+	            static_cast<unsigned long long>(cp_seen),
+	            static_cast<unsigned long long>(recorder_seen),
+	            static_cast<unsigned long long>(named_seen),
+	            static_cast<unsigned long long>(unnamed_seen),
+	            static_cast<unsigned long long>(early_seen),
+	            static_cast<unsigned long long>(load_seen), scan.threads, scan.reserved_only,
+	            scan.repinned);
+	Check(cp_seen != 0 && (cp_seen & ~layout.cp_mask) == 0, "the CP ran off its core");
+	if (mode == CpuReserveMode::CpRecorder) {
+		Check(recorder_seen != 0 && (recorder_seen & ~layout.recorder_mask) == 0,
+		      "the recorder ran off its core");
+	} else {
+		Check(recorder_seen != 0 && (recorder_seen & reserved) == 0,
+		      "the recorder (cp mode) ran on the CP's core");
+	}
+	Check(named_seen != 0 && (named_seen & reserved) == 0,
+	      "a named thread the CP started stayed on its core");
+	Check(scan.reserved_only >= 1 && scan.repinned >= 1, "the scan missed the unnamed thread");
+	Check(unnamed_seen != 0 && (unnamed_seen & reserved) == 0,
+	      "the scan did not move the unnamed thread off the CP's core");
+	Check(early_seen != 0 && (early_seen & reserved) == 0,
+	      "a thread created before the layout ran on a reserved core");
+	Check(load_seen != 0 && (load_seen & ~layout.general_mask) == 0,
+	      "the load ran outside the general processors");
+	Common::PlacementHistogram histogram;
+	Common::TakePlacementHistogram(histogram);
+	for (uint32_t lp = 0; lp < Common::PlacementHistogram::Processors; lp++) {
+		const auto bit = uint64_t {1} << lp;
+		Check(histogram.samples[0][lp] == 0 || (layout.cp_mask & bit) != 0,
+		      "CP samples outside its core");
+		Check(histogram.samples[2][lp] == 0 || (reserved & bit) == 0,
+		      "guest samples on a reserved core");
+	}
+	Check(histogram.on_cp_core[2] == 0, "guest samples on the CP's core");
+	Check(Profiler::FrameEventTotal(FrameEvent::CpuPlacementCpSamples) > 0 &&
+	          Profiler::FrameEventTotal(FrameEvent::CpuPlacementCpOffCore) == 0 &&
+	          Profiler::FrameEventTotal(FrameEvent::CpuPlacementGuestOnCpCore) == 0 &&
+	          Profiler::FrameEventTotal(FrameEvent::CpuPlacementRepinned) >= 1,
+	      "placement counters");
+	std::puts("CpuPlacementTests: live Linux placement ok");
+}
+
+#endif
+
+#endif
+
+#if defined(_WIN32)
 
 void TestLive(CpuReserveMode mode) {
 	// A thread that exists before the layout is applied (like the process's early threads).
@@ -893,8 +1080,12 @@ int main(int argc, char** argv) {
 	Check(Common::GetCpuReserveMode() == mode, "KYTY_CPU_RESERVE");
 #if defined(_WIN32)
 	TestLive(mode);
+#elif defined(__linux__)
+	TestLinuxNeedsOptIn();
+	SetEnv("KYTY_CPU_RESERVE_LINUX", "1");
+	TestLiveLinux(mode);
 #else
-	std::puts("CpuPlacementTests: live placement skipped (Windows only)");
+	std::puts("CpuPlacementTests: live placement skipped (Windows and Linux only)");
 #endif
 	std::puts("CpuPlacementTests: ok");
 	return 0;
