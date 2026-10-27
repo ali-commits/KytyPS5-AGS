@@ -145,7 +145,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
         with (root / "api-requests.jsonl").open("a") as file:
             file.write(json.dumps({"path": self.path, "body": body}) + "\n")
-        if self.path == "/api/pin" and body.get("pairing_id") != "a" * 32:
+        if self.path == "/api/kyty/apps/reload" and (root / "reload-fail").exists():
+            self.send_json({"status": False, "error": "app-running"})
+        elif self.path == "/api/pin" and body.get("pairing_id") != "a" * 32:
             self.send_json({"status": False, "error": "wrong pairing ID"})
         else:
             self.send_json({"status": True})

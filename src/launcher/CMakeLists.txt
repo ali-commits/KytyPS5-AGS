@@ -253,9 +253,11 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/LauncherStreamingTests.cpp"
         src/streamingSettings.cpp src/streamingCatalog.cpp src/streamingAudio.cpp
         src/streamingApi.cpp src/streamingBackend.cpp src/streamingWidget.cpp
-        include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h)
+        src/hostControlClient.cpp src/hostSocket.cpp
+        include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h
+        include/hostControlClient.h include/hostSocket.h)
     target_include_directories(launcher_streaming_tests PRIVATE include)
-    target_link_libraries(launcher_streaming_tests PRIVATE Qt6::Widgets Qt6::Network Qt6::Test)
+    target_link_libraries(launcher_streaming_tests PRIVATE Qt6::Concurrent Qt6::Widgets Qt6::Network Qt6::Test)
     set_target_properties(launcher_streaming_tests PROPERTIES AUTOMOC ON)
     if(TARGET kyty_stream_launch)
         add_dependencies(launcher_streaming_tests kyty_stream_launch)
@@ -264,4 +266,5 @@ if(BUILD_TESTING)
     set_tests_properties(launcher_streaming PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     target_compile_definitions(launcher_streaming_tests PRIVATE KYTY_LAUNCHER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/LauncherStreamingFixtures.py")
     include(tests/preservation.cmake)
+    include(tests/host.cmake)
 endif()

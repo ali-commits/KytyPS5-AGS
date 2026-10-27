@@ -2,8 +2,9 @@
 #define KYTY_STREAMING_WIDGET_H
 #include "streamingSettings.h"
 
+#include <QJsonObject>
 #include <QWidget>
-class StreamingBackend;
+class HostControlClient;
 class QLineEdit;
 class QLabel;
 class QComboBox;
@@ -13,51 +14,62 @@ class QPushButton;
 class QPlainTextEdit;
 class QListWidget;
 class QGroupBox;
+class QTimer;
 class StreamingWidget: public QWidget {
 	Q_OBJECT
 public:
-	explicit StreamingWidget(StreamingBackend* backend, QWidget* parent = nullptr);
+	explicit StreamingWidget(HostControlClient* client, QWidget* parent = nullptr);
 	StreamingSettings Settings() const;
 
 public slots:
 	void StartHosting();
 
 private:
-	void              Update();
-	bool              Save();
-	StreamingBackend* m_backend;
-	QLineEdit*        m_path;
-	QSpinBox*         m_port;
-	QComboBox*        m_resolution;
-	QComboBox*        m_fps;
-	QSpinBox*         m_bitrate;
-	QComboBox*        m_codec;
-	QLineEdit*        m_adapter;
-	QCheckBox*        m_monitor;
-	QCheckBox*        m_show_local;
-	QCheckBox*        m_controller_audio;
-	QSpinBox*         m_controller_audio_port;
-	QLabel*           m_status;
-	QLabel*           m_error;
-	QLabel*           m_version;
-	QLabel*           m_session;
-	QLabel*           m_controller_audio_status;
-	QListWidget*      m_receivers;
-	QPushButton*      m_receiver_toggle;
-	QPushButton*      m_receiver_remove;
-	QComboBox*        m_address;
-	QPushButton*      m_start;
-	QPushButton*      m_stop;
-	QPushButton*      m_pair;
-	QPushButton*      m_forget;
-	QPushButton*      m_close;
-	QPushButton*      m_save;
-	QPushButton*      m_browse;
-	QListWidget*      m_pending;
-	QListWidget*      m_clients;
-	QLineEdit*        m_pin;
-	QLineEdit*        m_name;
-	QPlainTextEdit*   m_logs;
-	QGroupBox*        m_quality;
+	void               Update();
+	void               OnStatus(const QJsonObject& status);
+	void               LoadPreferences();
+	void               ApplyPreferences(const QJsonObject& preferences);
+	bool               Apply();
+	void               ScheduleApply();
+	HostControlClient* m_host;
+	QJsonObject        m_host_status;
+	QString            m_daemon_error;
+	bool               m_prefs_loaded      = false;
+	bool               m_autostart_touched = false;
+	bool               m_loading_prefs     = false;
+	QTimer*            m_autosave          = nullptr;
+	QCheckBox*         m_autostart;
+	QLineEdit*         m_path;
+	QSpinBox*          m_port;
+	QComboBox*         m_resolution;
+	QComboBox*         m_fps;
+	QSpinBox*          m_bitrate;
+	QComboBox*         m_codec;
+	QLineEdit*         m_adapter;
+	QCheckBox*         m_monitor;
+	QCheckBox*         m_show_local;
+	QCheckBox*         m_controller_audio;
+	QSpinBox*          m_controller_audio_port;
+	QLabel*            m_status;
+	QLabel*            m_error;
+	QLabel*            m_version;
+	QLabel*            m_session;
+	QLabel*            m_controller_audio_status;
+	QListWidget*       m_receivers;
+	QPushButton*       m_receiver_toggle;
+	QPushButton*       m_receiver_remove;
+	QComboBox*         m_address;
+	QPushButton*       m_start;
+	QPushButton*       m_stop;
+	QPushButton*       m_pair;
+	QPushButton*       m_forget;
+	QPushButton*       m_close;
+	QPushButton*       m_browse;
+	QListWidget*       m_pending;
+	QListWidget*       m_clients;
+	QLineEdit*         m_pin;
+	QLineEdit*         m_name;
+	QPlainTextEdit*    m_logs;
+	QGroupBox*         m_quality;
 };
 #endif

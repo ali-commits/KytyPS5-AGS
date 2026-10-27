@@ -7,7 +7,7 @@
 #include "controllerPreview.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
-#include "streamingBackend.h"
+#include "hostControlClient.h"
 #include "streamingWidget.h"
 #include "titleSound.h"
 #include "updateChecker.h"
@@ -21,6 +21,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QIODevice>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
 #include <QObject>
@@ -49,12 +50,6 @@
 // IWYU pragma: no_include <winbase.h>
 
 class QWidget;
-
-#if defined(_WIN32)
-constexpr char EMULATOR_EXE[] = "kyty_emulator.exe";
-#else
-constexpr char EMULATOR_EXE[] = "kyty_emulator";
-#endif
 
 #if defined(_WIN32)
 constexpr char CMD_EXE[] = "cmd.exe";
@@ -88,6 +83,9 @@ public:
 	void SetPresetWarning(const QString& text);
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
+	[[nodiscard]] bool           StreamGameRunning() const {
+		return m_host_status.value("stream_game_running").toBool();
+	}
 
 	static void WriteSettings(QSettings& s);
 	static void ReadSettings(QSettings& s);
@@ -117,10 +115,11 @@ private:
 	QLabel*           m_preset_label = nullptr;
 	bool              m_started      = false;
 
-	QProcess          m_process;
-	StreamingBackend* m_streaming        = nullptr;
-	StreamingWidget*  m_streaming_widget = nullptr;
-	QTabWidget*       m_tabs             = nullptr;
+	QProcess           m_process;
+	HostControlClient* m_host = nullptr;
+	QJsonObject        m_host_status;
+	StreamingWidget*   m_streaming_widget = nullptr;
+	QTabWidget*        m_tabs             = nullptr;
 
 	QPointer<ConfigurationItem> m_running_item;
 };
@@ -137,8 +136,6 @@ MainDialogPrivate::~MainDialogPrivate() {
 	m_process.disconnect(this);
 	m_title_sound.SetTitle({});
 	m_controller_preview.Stop();
-	m_streaming->disconnect();
-	delete m_streaming;
 	delete m_ui;
 }
 
@@ -151,8 +148,8 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_tabs = new QTabWidget(main_dialog);
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
 	m_tabs->addTab(m_ui->widget, tr("Library"));
-	m_streaming        = new StreamingBackend(StreamingSettings::ProfileDirectory(), this);
-	m_streaming_widget = new StreamingWidget(m_streaming, m_tabs);
+	m_host             = new HostControlClient(QString(), this);
+	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
 	m_tabs->addTab(m_streaming_widget, tr("Streaming"));
 	if (QApplication::arguments().contains("--start-streaming-host"))
 		m_tabs->setCurrentWidget(m_streaming_widget);
@@ -162,10 +159,15 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	main_dialog->setMinimumSize(700, 650);
 	main_dialog->resize(920, 860);
 	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
-		if (!m_interpreter.isEmpty())
-			m_streaming->SetCatalog(m_ui->widget->CreateStreamingCatalog(m_interpreter));
+		// Rescans after archive conversion can change the library without rewriting Kyty.ini.
+		m_host->Request({{"type", "reload-library"}}, {});
 	});
-	connect(m_streaming, &StreamingBackend::Changed, this, &MainDialogPrivate::Update);
+	connect(m_host, &HostControlClient::StatusChanged, this, [this](const QJsonObject& status) {
+		const bool was_running = StreamGameRunning();
+		m_host_status          = status;
+		// Status arrives every second; only a change in the streamed-game guard needs a refresh.
+		if (was_running != StreamGameRunning()) Update();
+	});
 
 	m_main_dialog    = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
@@ -182,9 +184,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
-		        if (m_process.state() == QProcess::NotRunning &&
-		            (m_streaming->GetState() == StreamingBackend::State::Stopped ||
-		             m_streaming->GetState() == StreamingBackend::State::Error)) {
+		        if (m_process.state() == QProcess::NotRunning && !StreamGameRunning()) {
 			        m_controller_preview.SetColor(color);
 		        }
 	        });
@@ -269,7 +269,6 @@ void MainDialogPrivate::FindInterpreter() {
 
 	m_ui->label_settings_file->setText(tr("Settings file: ") + m_ui->widget->GetSettingsFile());
 
-	m_streaming->SetCatalog(m_ui->widget->CreateStreamingCatalog(m_interpreter));
 	const bool start_streaming_host =
 	    !m_started && QApplication::arguments().contains("--start-streaming-host");
 	m_started = true;
@@ -283,7 +282,7 @@ void MainDialogPrivate::FindInterpreter() {
 	}
 	if (start_streaming_host) {
 		m_tabs->setCurrentWidget(m_streaming_widget);
-		QTimer::singleShot(0, m_streaming_widget, &StreamingWidget::StartHosting);
+		m_host->StartDaemon();
 	}
 }
 
@@ -527,9 +526,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 
 void MainDialogPrivate::Run() {
 	if (m_update_checker->IsInstalling()) return;
-	if (m_streaming->GetState() != StreamingBackend::State::Stopped &&
-	    m_streaming->GetState() != StreamingBackend::State::Error)
-		return;
+	if (StreamGameRunning()) return;
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
 		return;
@@ -548,9 +545,9 @@ void MainDialogPrivate::Run() {
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	m_streaming->SetLocalGameRunning(m_process.state() != QProcess::NotRunning);
-	const bool hosting = m_streaming->GetState() != StreamingBackend::State::Stopped &&
-	                     m_streaming->GetState() != StreamingBackend::State::Error;
+	// The daemon reads the global emulator lock itself; local play is blocked only while a
+	// streamed game runs, not while hosting is merely ready.
+	const bool hosting = StreamGameRunning();
 	const bool busy =
 	    hosting || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
 	m_update_checker->SetGameRunning(hosting || m_process.state() != QProcess::NotRunning);

@@ -1,38 +1,39 @@
 #include "streamingWidget.h"
 
-#include "streamingBackend.h"
-#include "streamingCatalog.h"
+#include "hostControlClient.h"
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
-#include <QFileDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIntValidator>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QNetworkInterface>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
-StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
-    : QWidget(parent), m_backend(backend) {
+StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
+    : QWidget(parent), m_host(client) {
 	setObjectName("streamingWidget");
-	QSettings  file(QDir(backend->Profile()).filePath("streaming.ini"), QSettings::IniFormat);
-	const auto settings = StreamingSettings::Read(file);
-	auto*      outer    = new QVBoxLayout(this);
-	auto*      scroll   = new QScrollArea(this);
+	// Defaults until get-preferences answers: the daemon owns the stored preferences.
+	const StreamingSettings settings;
+	auto*                   outer  = new QVBoxLayout(this);
+	auto*                   scroll = new QScrollArea(this);
 	scroll->setWidgetResizable(true);
 	scroll->setFrameShape(QFrame::NoFrame);
 	auto* content = new QWidget(scroll);
@@ -46,10 +47,10 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	font.setBold(true);
 	title->setFont(font);
 	layout->addWidget(title);
-	auto* description =
-	    new QLabel(tr("Start hosting here, then choose a PC and game in Kyty TV. Video comes from "
-	                  "the game before local window scaling; only private game audio is captured."),
-	               content);
+	auto* description = new QLabel(
+	    tr("Start hosting here, then choose this host and a game on a client. Video comes from "
+	       "the game before local window scaling; only private game audio is captured."),
+	    content);
 	description->setWordWrap(true);
 	layout->addWidget(description);
 	auto* host      = new QGroupBox(tr("Host"), content);
@@ -58,10 +59,14 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	auto* path_row = new QHBoxLayout;
 	m_path         = new QLineEdit(settings.backend, host);
 	m_path->setObjectName("streamBackendPath");
+	m_path->setReadOnly(true);
 	path_row->addWidget(m_path);
 	m_browse = new QPushButton(tr("Browse…"), host);
+	m_browse->setEnabled(false);
 	path_row->addWidget(m_browse);
 	host_form->addRow(tr("Streaming helper"), path_row);
+	// The daemon owns the helper path, so the control is read-only (and hidden).
+	host_form->setRowVisible(path_row, false);
 	m_version = new QLabel(tr("Version checked when hosting starts"), host);
 	m_version->setWordWrap(true);
 	host_form->addRow(tr("Backend"), m_version);
@@ -86,10 +91,14 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	actions->addWidget(m_stop);
 	actions->addWidget(m_status, 1);
 	host_form->addRow(actions);
+	m_autostart = new QCheckBox(tr("Start at login"), host);
+	m_autostart->setObjectName("streamAutostart");
+	host_form->addRow(m_autostart);
 	m_error = new QLabel(host);
 	m_error->setObjectName("streamError");
 	m_error->setWordWrap(true);
 	m_error->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	m_error->hide();
 	host_form->addRow(m_error);
 	layout->addWidget(host);
 	m_quality          = new QGroupBox(tr("Streaming host connection"), content);
@@ -120,20 +129,20 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	quality_form->addRow(tr("Preferred output"), profile_row);
 	quality_form->setRowVisible(profile_row, false);
 	auto* hint = new QLabel(
-	    tr("Choose resolution, frame rate, quality and bitrate in Kyty TV. "
+	    tr("Choose resolution, frame rate, quality and bitrate on the client. "
 	       "The negotiated TV profile controls host capture and emulator streaming output. "
 	       "Local Library game settings stay separate. Streaming is headless."),
 	    m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
-	m_show_local = new QCheckBox(tr("Show game window on this PC"), m_quality);
+	m_show_local = new QCheckBox(tr("Show game window on this host"), m_quality);
 	m_show_local->setObjectName("streamShowLocal");
 	m_show_local->setChecked(settings.show_local);
 	quality_form->addRow(m_show_local);
 	quality_form->setRowVisible(m_show_local, false);
 	auto* display_hint =
 	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
-	                  "The PC still runs and renders the game."),
+	                  "The host still runs and renders the game."),
 	               m_quality);
 	display_hint->setWordWrap(true);
 	quality_form->addRow(display_hint);
@@ -147,21 +156,23 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_port->setRange(1024, 65514);
 	m_port->setValue(settings.port);
 	quality_form->addRow(tr("GameStream base port"), m_port);
-	m_monitor = new QCheckBox(tr("Also play game audio on this computer"), m_quality);
+	m_monitor = new QCheckBox(tr("Also play game audio on this host"), m_quality);
 	m_monitor->setObjectName("streamLocalAudio");
 	m_monitor->setChecked(settings.local_audio);
 	quality_form->addRow(m_monitor);
-	m_controller_audio = new QCheckBox(tr("Laptop controller audio companion"), m_quality);
+	m_controller_audio = new QCheckBox(tr("Client controller audio companion"), m_quality);
 	m_controller_audio->setObjectName("streamControllerAudio");
 	m_controller_audio->setChecked(settings.controller_audio);
 	m_controller_audio->setEnabled(true);
 	quality_form->addRow(m_controller_audio);
+	quality_form->setRowVisible(m_controller_audio, false); // not a daemon preference
 	auto* controller_hint =
-	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered laptop "
+	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered client "
 	                  "companion while video and game audio remain on Kyty TV."),
 	               m_quality);
 	controller_hint->setWordWrap(true);
 	quality_form->addRow(controller_hint);
+	quality_form->setRowVisible(controller_hint, false);
 	m_controller_audio_port = new QSpinBox(m_quality);
 	m_controller_audio_port->setObjectName("streamControllerAudioPort");
 	m_controller_audio_port->setRange(0, 65535);
@@ -169,8 +180,12 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_controller_audio_port->setValue(settings.controller_audio_port);
 	m_controller_audio_port->setEnabled(true);
 	quality_form->addRow(tr("Controller audio port"), m_controller_audio_port);
-	m_save = new QPushButton(tr("Save preferences"), m_quality);
-	quality_form->addRow(m_save);
+	quality_form->setRowVisible(m_controller_audio_port, false);
+	// Preferences save themselves shortly after the last edit; no Apply button.
+	m_autosave = new QTimer(this);
+	m_autosave->setSingleShot(true);
+	m_autosave->setInterval(600);
+	connect(m_autosave, &QTimer::timeout, this, [this] { Apply(); });
 	layout->addWidget(m_quality);
 	auto* sessions       = new QGroupBox(tr("Session"), content);
 	auto* session_layout = new QHBoxLayout(sessions);
@@ -178,6 +193,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	m_session->setWordWrap(true);
 	session_layout->addWidget(m_session, 1);
 	m_close = new QPushButton(tr("Stop game"), sessions);
+	m_close->setObjectName("streamStopGame");
 	session_layout->addWidget(m_close);
 	layout->addWidget(sessions);
 	auto* devices     = new QHBoxLayout;
@@ -222,6 +238,7 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	layout->addLayout(devices);
 	auto* receiver_group = new QGroupBox(tr("Controller audio companions"), content);
 	receiver_group->setEnabled(true);
+	receiver_group->setVisible(false); // companion management is not part of the daemon yet
 	auto* receiver_layout     = new QVBoxLayout(receiver_group);
 	m_controller_audio_status = new QLabel(receiver_group);
 	m_controller_audio_status->setObjectName("streamControllerAudioStatus");
@@ -241,24 +258,6 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	receiver_buttons->addWidget(m_receiver_remove);
 	receiver_layout->addLayout(receiver_buttons);
 	layout->addWidget(receiver_group);
-	connect(m_receiver_toggle, &QPushButton::clicked, this, [this] {
-		if (auto* item = m_receivers->currentItem())
-			m_backend->SetControllerAudioReceiverEnabled(item->data(Qt::UserRole).toString(),
-			                                             !item->data(Qt::UserRole + 1).toBool());
-	});
-	connect(m_receiver_remove, &QPushButton::clicked, this, [this] {
-		if (auto* item = m_receivers->currentItem())
-			m_backend->RemoveControllerAudioReceiver(item->data(Qt::UserRole).toString());
-	});
-	connect(m_receivers, &QListWidget::currentRowChanged, this, [this] {
-		const bool  ready = m_backend->GetState() == StreamingBackend::State::Ready;
-		const auto* item  = m_receivers->currentItem();
-		m_receiver_toggle->setEnabled(ready && item);
-		m_receiver_remove->setEnabled(ready && item);
-		m_receiver_toggle->setText(item && !item->data(Qt::UserRole + 1).toBool()
-		                               ? tr("Enable selected companion")
-		                               : tr("Disable selected companion"));
-	});
 	auto* logs        = new QGroupBox(tr("Diagnostics"), content);
 	auto* logs_layout = new QVBoxLayout(logs);
 	m_logs            = new QPlainTextEdit(logs);
@@ -270,43 +269,67 @@ StreamingWidget::StreamingWidget(StreamingBackend* backend, QWidget* parent)
 	logs_layout->addWidget(m_logs);
 	auto* private_path =
 	    new QLabel(tr("Private profile: %1\nManagement: HTTPS on 127.0.0.1 only (base port + 1)")
-	                   .arg(backend->Profile()),
+	                   .arg(StreamingSettings::ProfileDirectory()),
 	               logs);
 	private_path->setWordWrap(true);
 	private_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	logs_layout->addWidget(private_path);
 	layout->addWidget(logs);
-	connect(m_browse, &QPushButton::clicked, this, [this] {
-		const auto path =
-		    QFileDialog::getOpenFileName(this, tr("Choose Kyty streaming helper"), m_path->text());
-		if (!path.isEmpty()) m_path->setText(path);
-	});
 	connect(copy, &QPushButton::clicked, this,
 	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
-	connect(m_save, &QPushButton::clicked, this, [this] { Save(); });
 	connect(m_start, &QPushButton::clicked, this, &StreamingWidget::StartHosting);
-	connect(m_stop, &QPushButton::clicked, backend, &StreamingBackend::Stop);
-	connect(m_close, &QPushButton::clicked, backend, &StreamingBackend::CloseSession);
+	connect(m_stop, &QPushButton::clicked, m_host, &HostControlClient::StopDaemon);
+	connect(m_close, &QPushButton::clicked, this,
+	        [this] { m_host->Request({{"type", "stop-game"}}, [](QJsonObject, QString) {}); });
 	connect(m_pair, &QPushButton::clicked, this, [this] {
 		if (auto* item = m_pending->currentItem()) {
-			m_backend->Pair(item->data(Qt::UserRole).toString(), m_pin->text(), m_name->text());
+			m_host->Request({{"type", "pairing-pin"},
+			                 {"id", item->data(Qt::UserRole).toString()},
+			                 {"pin", m_pin->text()},
+			                 {"name", m_name->text()}},
+			                [self = QPointer(this)](QJsonObject reply, QString error) {
+				                if (!self) return;
+				                if (error.isEmpty() && !reply.value("ok").toBool())
+					                error = reply.value("error").toString(tr("Pairing failed."));
+				                self->m_error->setText(error);
+				                self->m_error->setVisible(!error.isEmpty());
+			                });
 			m_pin->clear();
 		}
 	});
 	connect(m_forget, &QPushButton::clicked, this, [this] {
 		if (auto* item = m_clients->currentItem())
-			m_backend->Unpair(item->data(Qt::UserRole).toString());
+			m_host->Request({{"type", "unpair"}, {"uuid", item->data(Qt::UserRole).toString()}},
+			                [](QJsonObject, QString) {});
 	});
-	connect(m_pending, &QListWidget::currentRowChanged, this, [this] {
-		m_pair->setEnabled(m_backend->GetState() == StreamingBackend::State::Ready &&
-		                   m_pending->currentItem());
-	});
-	connect(m_clients, &QListWidget::currentRowChanged, this, [this] {
-		m_forget->setEnabled(m_backend->GetState() == StreamingBackend::State::Ready &&
-		                     m_clients->currentItem());
-	});
+	const auto ready = [this] { return m_host_status.value("state").toString() == "Ready"; };
+	connect(m_pending, &QListWidget::currentRowChanged, this,
+	        [this, ready] { m_pair->setEnabled(ready() && m_pending->currentItem()); });
+	connect(m_clients, &QListWidget::currentRowChanged, this,
+	        [this, ready] { m_forget->setEnabled(ready() && m_clients->currentItem()); });
 	connect(m_port, &QSpinBox::valueChanged, this, [this] { Update(); });
-	connect(backend, &StreamingBackend::Changed, this, &StreamingWidget::Update);
+	for (auto* box: {m_resolution, m_fps, m_codec})
+		connect(box, &QComboBox::currentIndexChanged, this, &StreamingWidget::ScheduleApply);
+	for (auto* spin: {m_port, m_bitrate})
+		connect(spin, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
+	for (auto* check: {m_monitor, m_show_local})
+		connect(check, &QCheckBox::toggled, this, &StreamingWidget::ScheduleApply);
+	connect(m_adapter, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
+	connect(m_autostart, &QCheckBox::toggled, this, [this](bool on) {
+		m_autostart_touched = true;
+		m_host->SetAutostart(on);
+	});
+	m_host->QueryAutostart([self = QPointer(this)](bool enabled) {
+		if (!self || self->m_autostart_touched) return; // gone, or the user already chose
+		const QSignalBlocker blocker(self->m_autostart);
+		self->m_autostart->setChecked(enabled);
+	});
+	connect(m_host, &HostControlClient::CommandFailed, this, [this](const QString& message) {
+		m_error->setText(message);
+		m_error->show();
+	});
+	connect(m_host, &HostControlClient::StatusChanged, this, &StreamingWidget::OnStatus);
+	LoadPreferences();
 	Update();
 }
 StreamingSettings StreamingWidget::Settings() const {
@@ -325,12 +348,45 @@ StreamingSettings StreamingWidget::Settings() const {
 	return s;
 }
 void StreamingWidget::StartHosting() {
-	if (!Save()) return;
-	auto settings = Settings();
-	// Input stays on the selected client; controller PCM uses its separate companion.
-	m_backend->Start(settings);
+	// `systemctl start` is a no-op on an active unit, so an idle or failed daemon needs a restart.
+	if (m_host_status.isEmpty())
+		m_host->StartDaemon();
+	else
+		m_host->RestartDaemon();
 }
-bool StreamingWidget::Save() {
+void StreamingWidget::LoadPreferences() {
+	m_host->Request({{"type", "get-preferences"}},
+	                [self = QPointer(this)](QJsonObject reply, QString error) {
+		                if (self && error.isEmpty()) self->ApplyPreferences(reply);
+	                });
+}
+void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
+	if (p.isEmpty()) return;
+	m_prefs_loaded  = true;
+	m_loading_prefs = true; // values from the daemon are not user edits
+	if (p.contains("port")) m_port->setValue(p.value("port").toInt());
+	if (p.contains("resolution")) m_resolution->setCurrentText(p.value("resolution").toString());
+	if (p.contains("fps")) m_fps->setCurrentIndex(p.value("fps").toInt() == 30 ? 0 : 1);
+	if (p.contains("bitrate")) m_bitrate->setValue(p.value("bitrate").toInt());
+	if (p.contains("codec")) m_codec->setCurrentText(p.value("codec").toString());
+	if (p.contains("adapter")) m_adapter->setText(p.value("adapter").toString());
+	if (p.contains("local_audio")) m_monitor->setChecked(p.value("local_audio").toBool());
+	if (p.contains("show_local")) m_show_local->setChecked(p.value("show_local").toBool());
+	m_loading_prefs = false;
+	Update();
+}
+void StreamingWidget::ScheduleApply() {
+	// Before the daemon's stored values arrive, an edit would overwrite them with defaults.
+	if (m_loading_prefs || !m_prefs_loaded) return;
+	m_autosave->start();
+}
+void StreamingWidget::OnStatus(const QJsonObject& status) {
+	m_host_status = status;
+	// The daemon may start after this widget: fetch its stored preferences once it answers.
+	if (!status.isEmpty() && !m_prefs_loaded) LoadPreferences();
+	Update();
+}
+bool StreamingWidget::Apply() {
 	const auto settings = Settings();
 	const auto error    = settings.Validate();
 	if (!error.isEmpty()) {
@@ -338,63 +394,79 @@ bool StreamingWidget::Save() {
 		m_error->show();
 		return false;
 	}
-	if (!QDir().mkpath(m_backend->Profile()) ||
-	    !QFile::setPermissions(m_backend->Profile(),
-	                           QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) {
-		m_error->setText(tr("Cannot create private settings directory."));
-		m_error->show();
-		return false;
-	}
-	const auto path = QDir(m_backend->Profile()).filePath("streaming.ini");
-	QSettings  file(path, QSettings::IniFormat);
-	settings.Write(file);
-	file.sync();
-	if (file.status() != QSettings::NoError ||
-	    !QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner)) {
-		m_error->setText(tr("Cannot save streaming preferences."));
-		m_error->show();
-		return false;
-	}
+	m_host->Request({{"type", "set-preferences"},
+	                 {"port", settings.port},
+	                 {"resolution", settings.resolution},
+	                 {"fps", settings.fps},
+	                 {"bitrate", settings.bitrate},
+	                 {"codec", settings.codec},
+	                 {"adapter", settings.adapter},
+	                 {"local_audio", settings.local_audio},
+	                 {"show_local", settings.show_local}},
+	                [self = QPointer(this)](QJsonObject reply, QString failure) {
+		                if (!self) return;
+		                if (failure.isEmpty() && !reply.value("ok").toBool())
+			                failure = reply.value("error").toString(tr("Cannot save preferences."));
+		                if (failure.isEmpty() && reply.value("deferred").toBool()) {
+			                self->m_error->setText(tr("Applies after the current game"));
+			                self->m_error->show();
+			                return;
+		                }
+		                self->m_error->setText(failure);
+		                self->m_error->setVisible(!failure.isEmpty());
+	                });
 	return true;
 }
 void StreamingWidget::Update() {
-	const auto state = m_backend->GetState();
-	const bool ready = state == StreamingBackend::State::Ready;
-	const bool stopped =
-	    state == StreamingBackend::State::Stopped || state == StreamingBackend::State::Error;
+	const bool reachable = !m_host_status.isEmpty();
+	const auto state     = m_host_status.value("state").toString();
+	const bool ready     = reachable && state == "Ready";
+	const bool stopped   = !reachable || state == "Stopped" || state == "Error";
 	m_start->setEnabled(stopped);
-	m_stop->setEnabled(!stopped && state != StreamingBackend::State::Stopping);
-	m_quality->setEnabled(stopped);
-	m_path->setEnabled(stopped);
-	m_browse->setEnabled(stopped);
-	switch (state) {
-		case StreamingBackend::State::Stopped: m_status->setText(tr("Stopped")); break;
-		case StreamingBackend::State::Starting:
-			m_status->setText(tr("Starting · checking host and private audio…"));
-			break;
-		case StreamingBackend::State::Ready:
-			m_status->setText(tr("Hosting ready · choose a game in Kyty TV"));
-			break;
-		case StreamingBackend::State::Stopping:
-			m_status->setText(tr("Stopping host and owned audio routes…"));
-			break;
-		case StreamingBackend::State::Error:
-			m_status->setText(tr("Host stopped after an error"));
-			break;
+	m_stop->setEnabled(reachable && state != "Stopping");
+	if (!reachable) {
+		m_status->setText(tr("Host daemon is not running"));
+	} else if (state == "Starting") {
+		m_status->setText(tr("Starting · checking host and private audio…"));
+	} else if (state == "Ready") {
+		m_status->setText(tr("Hosting ready · choose a game on a client"));
+	} else if (state == "Stopping") {
+		m_status->setText(tr("Stopping host and owned audio routes…"));
+	} else if (state == "Error") {
+		m_status->setText(tr("Host stopped after an error"));
+	} else {
+		m_status->setText(tr("Stopped"));
 	}
-	m_error->setText(m_backend->Error());
-	m_error->setVisible(!m_backend->Error().isEmpty());
-	if (!m_backend->Version().isEmpty()) m_version->setText(m_backend->Version());
-	m_session->setText(ready ? m_backend->Session() : tr("No managed stream session"));
-	m_close->setEnabled(ready && m_backend->Session().startsWith("Game running"));
+	const auto error = m_host_status.value("error").toString();
+	// Command and preference failures set m_error themselves; the daemon's error wins only
+	// while one is reported, so a transient local message is not wiped by the 1 s poll.
+	if (error != m_daemon_error) {
+		if (error.isEmpty() && m_error->text() == m_daemon_error) {
+			m_error->clear();
+			m_error->hide();
+		} else if (!error.isEmpty()) {
+			m_error->setText(error);
+			m_error->show();
+		}
+		m_daemon_error = error;
+	}
+	const auto session = m_host_status.value("session").toString();
+	m_session->setText(ready ? session : tr("No managed stream session"));
+	m_close->setEnabled(ready && m_host_status.value("stream_game_running").toBool());
 	QStringList addresses;
-	for (const auto& interface: QNetworkInterface::allInterfaces()) {
-		if (!interface.flags().testFlag(QNetworkInterface::IsUp) ||
-		    interface.flags().testFlag(QNetworkInterface::IsLoopBack))
-			continue;
-		for (const auto& entry: interface.addressEntries())
-			if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
-				addresses.append(entry.ip().toString() + ':' + QString::number(m_port->value()));
+	const auto  host_address = m_host_status.value("address").toString();
+	if (!host_address.isEmpty()) {
+		addresses.append(host_address + ':' + QString::number(m_host_status.value("port").toInt()));
+	} else {
+		for (const auto& interface: QNetworkInterface::allInterfaces()) {
+			if (!interface.flags().testFlag(QNetworkInterface::IsUp) ||
+			    interface.flags().testFlag(QNetworkInterface::IsLoopBack))
+				continue;
+			for (const auto& entry: interface.addressEntries())
+				if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
+					addresses.append(entry.ip().toString() + ':' +
+					                 QString::number(m_port->value()));
+		}
 	}
 	if (addresses.isEmpty()) addresses.append(tr("No LAN IPv4 address available"));
 	const auto chosen = m_address->currentText();
@@ -417,55 +489,19 @@ void StreamingWidget::Update() {
 		for (const auto& value: entries) {
 			const auto entry = value.toObject();
 			const auto id    = entry.value(paired ? "uuid" : "id").toString();
-			const auto text =
-			    paired ? entry.value("name").toString()
-			           : entry.value("name").toString() + " · " + entry.value("address").toString();
-			auto* item = new QListWidgetItem(text, list);
+			auto*      item  = new QListWidgetItem(entry.value("name").toString(), list);
 			item->setData(Qt::UserRole, id);
 			if (id == selected) list->setCurrentItem(item);
 		}
 	};
-	refresh_list(m_pending, m_backend->Pairings(), false);
-	refresh_list(m_clients, m_backend->Clients(), true);
+	refresh_list(m_pending, m_host_status.value("pairings").toArray(), false);
+	refresh_list(m_clients, m_host_status.value("clients").toArray(), true);
 	m_pair->setEnabled(ready && m_pending->currentItem());
 	m_forget->setEnabled(ready && m_clients->currentItem());
-	const auto audio = m_backend->ControllerAudioStatus();
-	m_controller_audio_status->setText(
-	    audio.isEmpty()
-	        ? tr("Enable laptop controller audio and connect a registered companion "
-	             "while the TV game is running.")
-	        : tr("%1 · %2 · %3 bytes · %4 ms queued%5")
-	              .arg(audio.value("state").toString(), audio.value("receiver_name").toString())
-	              .arg(audio.value("bytes").toVariant().toULongLong())
-	              .arg(audio.value("queue_us").toDouble() / 1000.0, 0, 'f', 1)
-	              .arg(audio.value("last_error").toString().isEmpty()
-	                       ? QString()
-	                       : " · " + audio.value("last_error").toString()));
-	const auto selected_receiver = m_receivers->currentItem()
-	                                   ? m_receivers->currentItem()->data(Qt::UserRole).toString()
-	                                   : QString();
-	const QSignalBlocker receiver_blocker(m_receivers);
-	m_receivers->clear();
-	for (const auto& value: m_backend->ControllerAudioReceivers()) {
-		const auto entry = value.toObject();
-		auto*      item  = new QListWidgetItem(
-		    entry.value("name").toString() + " · " +
-		        (entry.value("enabled").toBool() ? tr("enabled") : tr("disabled")),
-		    m_receivers);
-		item->setData(Qt::UserRole, entry.value("id").toString());
-		item->setData(Qt::UserRole + 1, entry.value("enabled").toBool());
-		if (entry.value("id").toString() == selected_receiver) m_receivers->setCurrentItem(item);
-	}
-	const auto* receiver = m_receivers->currentItem();
-	m_receiver_toggle->setEnabled(ready && receiver);
-	m_receiver_remove->setEnabled(ready && receiver);
-	m_receiver_toggle->setText(receiver && !receiver->data(Qt::UserRole + 1).toBool()
-	                               ? tr("Enable selected companion")
-	                               : tr("Disable selected companion"));
 	m_pin->setEnabled(ready);
 	m_name->setEnabled(ready);
-	if (m_logs->toPlainText() != m_backend->Logs()) {
-		m_logs->setPlainText(m_backend->Logs());
-		m_logs->moveCursor(QTextCursor::End);
-	}
+	const auto log = error.isEmpty()
+	                     ? tr("Logs: journalctl --user -u kyty-host.service")
+	                     : error + "\n" + tr("Logs: journalctl --user -u kyty-host.service");
+	if (m_logs->toPlainText() != log) m_logs->setPlainText(log);
 }

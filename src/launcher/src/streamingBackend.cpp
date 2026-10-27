@@ -326,9 +326,22 @@ void StreamingBackend::Start(const StreamingSettings& settings) {
 		emit Changed();
 	});
 }
-bool StreamingBackend::WriteConfiguration() {
+static QJsonObject RunningSession(const QString& runtime) {
+	QFile session(QDir(runtime).filePath("session.json"));
+	if (!session.open(QIODevice::ReadOnly)) return {};
+	const auto current = QJsonDocument::fromJson(session.readAll()).object();
+#ifdef __linux__
+	const auto pid        = current.value("pid").toInteger();
+	const auto executable = QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid)).symLinkTarget();
+	if (!(pid > 1 && ::kill(pid_t(pid), 0) == 0 &&
+	      QFileInfo(executable).fileName() == "kyty_stream_launch"))
+		return {};
+#endif
+	// A live session always yields a non-empty object for the caller's emptiness test.
+	return current.isEmpty() ? QJsonObject {{"pid", 0}} : current;
+}
+bool StreamingBackend::WriteManifest(QString* error) {
 	const QDir profile(m_profile);
-	QString    error;
 	const auto manifest = StreamingCatalog::Manifest(
 	    m_catalog, m_socket, m_audio.Device(), QDir(m_runtime).filePath("emulator.lock"),
 	    m_settings.resolution, m_settings.fps, m_settings.show_local);
@@ -342,17 +355,33 @@ bool StreamingBackend::WriteConfiguration() {
 		actual_manifest.insert("environment", env);
 	}
 	actual_manifest.insert("session_file", QDir(m_runtime).filePath("session.json"));
+	return StreamingCatalog::WritePrivate(profile.filePath("launch.json"),
+	                                      QJsonDocument(actual_manifest).toJson(), error);
+}
+bool StreamingBackend::WriteApps(QString* error) {
+	const QDir profile(m_profile);
 	const auto apps = StreamingCatalog::Apps(
 	    m_catalog,
 	    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch"),
 	    profile.filePath("launch.json"));
-	if (!StreamingCatalog::WritePrivate(profile.filePath("launch.json"),
-	                                    QJsonDocument(actual_manifest).toJson(), &error) ||
-	    !StreamingCatalog::WritePrivate(profile.filePath("apps.json"), QJsonDocument(apps).toJson(),
-	                                    &error)) {
+	return StreamingCatalog::WritePrivate(profile.filePath("apps.json"),
+	                                      QJsonDocument(apps).toJson(), error);
+}
+static QStringList AppKeys(const QList<StreamingLaunchEntry>& catalog) {
+	QStringList keys;
+	for (const auto& e: catalog)
+		keys << e.id + '|' + e.name + '|' + e.image_path;
+	return keys;
+}
+bool StreamingBackend::WriteConfiguration() {
+	const QDir profile(m_profile);
+	QString    error;
+	if (!WriteManifest(&error) || !WriteApps(&error)) {
 		Fail(error);
 		return false;
 	}
+	m_published_app_keys  = AppKeys(m_catalog);
+	m_apps_reload_pending = false;
 	QString config = "capture = kyty\nencoder = nvenc\nkyty_private_audio = true\nkyty_input = "
 	                 "true\nmanagement_bind_address = 127.0.0.1\nupnp = disabled\nsystem_tray = "
 	                 "disabled\norigin_web_ui_allowed = pc\nsunshine_name = Kyty PS5 "
@@ -371,6 +400,7 @@ bool StreamingBackend::WriteConfiguration() {
 		    '\n';
 	}
 	config += "kyty_socket = " + m_socket + '\n';
+	if (!m_api_socket.isEmpty()) config += "kyty_api_socket = " + m_api_socket + '\n';
 	config += "audio_sink = " + m_audio.Sink() + '\n';
 	if (!m_settings.adapter.isEmpty()) config += "adapter_name = " + m_settings.adapter + '\n';
 	for (const auto& item: QList<QPair<QString, QString>> {{"file_apps", "apps.json"},
@@ -553,6 +583,7 @@ void StreamingBackend::TryFinishStop() {
 	m_session.clear();
 	m_pairings                    = {};
 	m_clients                     = {};
+	m_hid                         = {};
 	m_receivers                   = {};
 	m_controller_audio_status     = {};
 	m_controller_audio_refreshing = false;
@@ -607,26 +638,20 @@ void StreamingBackend::Refresh() {
 				                  emit Changed();
 			                  }
 		                  });
+		    m_api.Request("GET", "/api/kyty/hid", {},
+		                  [this, generation](const QJsonObject& hid, const QString& error) {
+			                  if (generation != m_generation) return;
+			                  m_hid = error.isEmpty() ? hid : QJsonObject {}; // optional endpoint
+		                  });
 		    RefreshControllerAudio();
 		    m_session = "No game running · choose a game in Moonlight";
-		    QFile session(QDir(m_runtime).filePath("session.json"));
-		    if (session.open(QIODevice::ReadOnly)) {
-			    const auto current = QJsonDocument::fromJson(session.readAll()).object();
-#ifdef __linux__
-			    const auto pid = current.value("pid").toInteger();
-			    const auto executable =
-			        QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid)).symLinkTarget();
-			    if (pid > 1 && ::kill(pid_t(pid), 0) == 0 &&
-			        QFileInfo(executable).fileName() == "kyty_stream_launch")
-#endif
-				    m_session =
-				        QStringLiteral("Game running · Moonlight requested %1×%2 at %3 FPS · %4")
-				            .arg(current.value("width").toString(),
-				                 current.value("height").toString(),
-				                 current.value("fps").toString(),
-				                 current.value("client").toString());
-		    }
-		    if (m_catalog_dirty && m_session.startsWith("No game")) PublishCatalog();
+		    if (const auto current = RunningSession(m_runtime); !current.isEmpty())
+			    m_session =
+			        QStringLiteral("Game running · Moonlight requested %1×%2 at %3 FPS · %4")
+			            .arg(current.value("width").toString(), current.value("height").toString(),
+			                 current.value("fps").toString(), current.value("client").toString());
+		    if ((m_catalog_dirty || m_apps_reload_pending) && !StreamGameRunning())
+			    PublishCatalog();
 		    emit Changed();
 	    });
 }
@@ -769,9 +794,38 @@ void StreamingBackend::SetCatalog(const QList<StreamingLaunchEntry>& catalog) {
 	m_catalog       = catalog;
 	m_catalog_dirty = true;
 }
+bool StreamingBackend::StreamGameRunning() const {
+	return !RunningSession(m_runtime).isEmpty();
+}
+QString StreamingBackend::RunningGameId() const {
+	return RunningSession(m_runtime).value("game").toString();
+}
 void StreamingBackend::PublishCatalog() {
-	// Replacing proc while an app runs invalidates upstream session ownership. Defer until idle.
-	if (m_catalog_dirty)
-		Log("Library changed. Stop and restart hosting to publish the refreshed catalog safely.");
+	if (m_state != State::Ready) return;
+	QString error;
+	// launch.json is read by kyty_stream_launch at each launch, so arguments apply on next Play.
 	m_catalog_dirty = false;
+	if (!WriteManifest(&error)) {
+		Log(error);
+		return;
+	}
+	const auto keys = AppKeys(m_catalog);
+	if (keys == m_published_app_keys && !m_apps_reload_pending) return;
+	if (StreamGameRunning()) { // replacing proc kills the session
+		m_apps_reload_pending = true;
+		return;
+	}
+	if (!WriteApps(&error)) {
+		Log(error);
+		return;
+	}
+	m_published_app_keys  = keys;
+	m_apps_reload_pending = false;
+	m_api.Request("POST", "/api/kyty/apps/reload", {},
+	              [this](const QJsonObject&, const QString& error) {
+		              if (error.isEmpty()) return;
+		              Log(tr("Sunshine app reload failed: %1").arg(error));
+		              m_published_app_keys.clear(); // not published: the Refresh tick retries
+		              m_apps_reload_pending = true;
+	              });
 }

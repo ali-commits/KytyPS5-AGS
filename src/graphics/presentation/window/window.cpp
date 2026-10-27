@@ -840,6 +840,11 @@ static void WindowCreate(WindowContext& context) {
 		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
 	}
 #endif
+	// A streamed game's window is hidden and never focused, and SDL drops controller input
+	// for an unfocused app by default. The tunnelled DualSense is an SDL pad, so keep its input.
+	if (std::getenv("KYTY_STREAM_SOCKET") != nullptr) {
+		SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+	}
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
 		EXIT("%s\n", SDL_GetError());
 	}

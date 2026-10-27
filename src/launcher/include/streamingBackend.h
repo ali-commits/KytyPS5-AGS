@@ -43,6 +43,13 @@ public:
 	void           SetControllerAudioReceiverEnabled(const QString& id, bool enabled);
 	void           RemoveControllerAudioReceiver(const QString& id);
 	static QString PreflightPorts(int base, int controller_audio_port = 0);
+
+	[[nodiscard]] bool StreamGameRunning() const; // true while a kyty_stream_launch child is live
+	[[nodiscard]] QString     RunningGameId() const; // catalog id from session.json, or empty
+	[[nodiscard]] QJsonObject Hid() const { return m_hid; } // last GET /api/kyty/hid reply
+	void PublishCatalog(); // rewrite launch.json now; apps.json when the app set changed
+	void SetApiSocket(const QString& path) { m_api_socket = path; }
+	[[nodiscard]] QString ApiSocket() const { return m_api_socket; }
 signals:
 	void Changed();
 	void LogAdded(const QString& text);
@@ -58,10 +65,11 @@ private:
 	void    StartProcess();
 	void    AfterHostExit();
 	void    WriteHostIdentity();
+	bool    WriteManifest(QString* error);
+	bool    WriteApps(QString* error);
 	void    DrainOwnedGames();
 	void    CancelTools();
 	void    TryFinishStop();
-	void    PublishCatalog();
 	void    RefreshControllerAudio();
 	void    ApiError(const QString& error);
 	void    SetState(State state);
@@ -70,7 +78,11 @@ private:
 	StreamingSettings           m_settings;
 	QList<StreamingLaunchEntry> m_catalog;
 	QJsonArray                  m_pairings, m_clients, m_receivers;
+	QJsonObject                 m_hid;
 	QJsonObject                 m_controller_audio_status;
+	QString                     m_api_socket;
+	QStringList                 m_published_app_keys; // id|name|image_path of the last apps.json
+	bool                        m_apps_reload_pending         = false;
 	bool                        m_controller_audio_refreshing = false;
 	State                       m_state                       = State::Stopped;
 	QProcess                    m_host;

@@ -4,6 +4,7 @@
 #include "configuration.h"
 #include "streamingCatalog.h"
 
+#include <QByteArray>
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -15,6 +16,8 @@ class ConfigurationItem;
 class CompatibilityDatabase;
 class ControllerPreview;
 class QEvent;
+class QFileSystemWatcher;
+class QTimer;
 class QTreeWidgetItem;
 
 namespace Ui {
@@ -75,13 +78,16 @@ protected slots:
 	void filter_configurations(const QString& text);
 
 private:
-	void               SelectItem(QTreeWidgetItem* witem);
-	void               ShowContextMenu(QTreeWidgetItem* witem);
-	void               ApplyCompatibility();
-	void               UpdateToolbarIcons();
-	void               ImportGameSettings(QWidget* parent);
-	void               ExportGameSettings(QWidget* parent) const;
-	[[nodiscard]] bool HasValidGameDirectory() const;
+	void                     SelectItem(QTreeWidgetItem* witem);
+	void                     ShowContextMenu(QTreeWidgetItem* witem);
+	void                     ApplyCompatibility();
+	void                     UpdateToolbarIcons();
+	void                     WatchSettingsFile();
+	void                     ReloadSettingsFromDisk();
+	[[nodiscard]] QByteArray SettingsFileBytes() const;
+	void                     ImportGameSettings(QWidget* parent);
+	void                     ExportGameSettings(QWidget* parent) const;
+	[[nodiscard]] bool       HasValidGameDirectory() const;
 
 	ConfigurationItem*            m_selected_item = nullptr;
 	bool                          m_run_enabled   = true;
@@ -94,6 +100,9 @@ private:
 	QMap<QString, Configuration*> m_custom_infos;
 	CompatibilityDatabase*        m_compatibility      = nullptr;
 	ControllerPreview*            m_controller_preview = nullptr;
+	QFileSystemWatcher*           m_settings_watcher   = nullptr;
+	QTimer*                       m_reload_timer       = nullptr;
+	QByteArray                    m_settings_snapshot;
 };
 
 #endif // CONFIGURATION_LIST_WIDGET_H

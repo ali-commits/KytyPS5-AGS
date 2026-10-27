@@ -12,6 +12,7 @@ import subprocess
 
 TOOLS = Path(__file__).resolve().parent
 SOURCE = TOOLS.parent.parent
+UNIT_NAME = 'kyty-host.service'
 STATE_DIRS = ('_SaveData', '_PipelineCache', '_Trophies', '_DownloadData', '_TempData', '_Textures')
 
 
@@ -25,6 +26,24 @@ def revision(directory):
     status = subprocess.run(['git', '-C', str(directory), 'status', '--porcelain'], capture_output=True, text=True)
     return {'commit': result.stdout.strip() if result.returncode == 0 else None,
             'changes': status.stdout.splitlines() if status.returncode == 0 else []}
+
+
+def systemd_word(path):
+    text = str(path).replace('%', '%%').replace('$', '$$')
+    if not any(char.isspace() or char in '"\\%$' for char in str(path)):
+        return text
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def install_unit(args, command, config, unit_path, old_unit):
+    if old_unit is not None:
+        (config/'rollback').mkdir(mode=0o700, exist_ok=True)
+        (config/'rollback'/UNIT_NAME).write_text(old_unit)
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text((TOOLS/(UNIT_NAME+'.in')).read_text().replace('@COMMAND@', systemd_word(command)))
+    if args.enable:
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+        subprocess.run(['systemctl', '--user', 'enable', UNIT_NAME], check=True)
 
 
 def package(args):
@@ -52,6 +71,11 @@ def package(args):
             raise SystemExit('Only the dedicated kytyps5-streaming command may be installed')
         if command.exists() or command.is_symlink():
             raise SystemExit(f'Command already exists: {command}')
+    unit_path = args.systemd_dir.expanduser().absolute()/UNIT_NAME
+    if args.command:
+        old_unit = unit_path.read_text() if unit_path.is_file() else None
+        if old_unit is not None and f'ExecStart={systemd_word(command)} --host\n' not in old_unit and not args.replace_unit:
+            raise SystemExit(f'{unit_path} points to a different installation; pass --replace-unit to back it up and replace it')
     base_hash = sha256(base/'Kyty.ini')
     prefix.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(stage, prefix, symlinks=False)
@@ -116,11 +140,21 @@ def package(args):
         f'cd {shlex.quote(str(prefix))}\nexec ./launcher "$@"\n')
     (prefix/'start-streaming.sh').write_text(wrapper)
     (prefix/'start-streaming.sh').chmod(0o755)
+    share = prefix/'share'/'kyty'
+    share.mkdir(parents=True, exist_ok=True)
+    for name in ('71-kyty-uhid.rules', 'uhid.conf'):
+        shutil.copy2(TOOLS/name, share/name)
+    print(json.dumps(result, indent=2))
+    print('Run once to allow the virtual DualSense (not executed by this packager):\n'
+          f'sudo install -m 644 {share}/71-kyty-uhid.rules /etc/udev/rules.d/\n'
+          f'sudo install -m 644 {share}/uhid.conf /etc/modules-load.d/\n'
+          'sudo modprobe uhid && sudo udevadm control --reload-rules && sudo udevadm trigger', flush=True)
+    # Last: a failing systemctl then leaves a complete prefix and the commands above printed.
     if args.command:
         command.parent.mkdir(parents=True, exist_ok=True)
         command.write_text(wrapper)
         command.chmod(0o755)
-    print(json.dumps(result, indent=2))
+        install_unit(args, command, config, unit_path, old_unit)
 
 
 def main():
@@ -128,6 +162,11 @@ def main():
     for option in ('stage', 'backend', 'backend-source', 'base-install', 'runtime', 'prefix', 'config', 'map'):
         parser.add_argument('--'+option, type=Path, required=True)
     parser.add_argument('--command', type=Path, help='Optional dedicated kytyps5-streaming command to create')
+    parser.add_argument('--systemd-dir', type=Path, default=Path('~/.config/systemd/user'),
+                        help='User unit directory; kyty-host.service is written only with --command')
+    parser.add_argument('--replace-unit', action='store_true',
+                        help='Replace a kyty-host.service that points at another installation (old one is backed up)')
+    parser.add_argument('--enable', action='store_true', help='Run systemctl --user daemon-reload and enable the unit')
     parser.add_argument('--skip-running-check', action='store_true', help='For synthetic packaging tests only')
     package(parser.parse_args())
 
