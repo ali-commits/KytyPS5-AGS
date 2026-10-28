@@ -72,6 +72,10 @@ public:
 	[[nodiscard]] const QList<GameEntry>&     Games() const { return m_games; }
 	[[nodiscard]] const GameEntry*            Find(const QString& id) const;
 	[[nodiscard]] QList<StreamingLaunchEntry> Catalog(const QString& interpreter) const;
+	// Per-device launch catalog: entries built from each paired client's own profile (settings +
+	// per-client cheat plan), keyed by client UUID, for launch.json's client_games.
+	[[nodiscard]] QHash<QString, QList<StreamingLaunchEntry>>
+	ClientCatalog(const QString& interpreter) const;
 	// Validates through Configuration::SetGameSettings, stores as a custom entry, rewrites
 	// Kyty.ini.
 	[[nodiscard]] QString SaveGameSettings(const QString& id, const QJsonObject& settings);

@@ -157,6 +157,14 @@ HostDaemon::HostDaemon(QObject* parent)
 		WatchSettings();
 	});
 	connect(&m_backend, &StreamingBackend::Changed, this, &HostDaemon::OnBackendChanged);
+	// A device profile write only changes launch.json's client_games: regenerate and republish it
+	// without reloading the whole library.
+	connect(&m_api, &HostApi::ClientProfileChanged, this, [this] {
+		m_backend.SetClientCatalog(m_library.ClientCatalog(Interpreter()));
+		if (m_backend.GetState() == StreamingBackend::State::Ready &&
+		    !m_backend.StreamGameRunning())
+			m_backend.PublishCatalog();
+	});
 }
 
 HostDaemon::~HostDaemon() {
@@ -237,6 +245,7 @@ bool HostDaemon::Start(QString* error) {
 	}
 	m_backend.SetApiSocket(directory + "/api.sock");
 	m_backend.SetCatalog(m_library.Catalog(Interpreter()));
+	m_backend.SetClientCatalog(m_library.ClientCatalog(Interpreter()));
 	WatchSettings();
 	m_refresh.start();
 	if (autostart) {
@@ -267,6 +276,7 @@ void HostDaemon::ReloadLibrary() {
 		return;
 	}
 	m_backend.SetCatalog(m_library.Catalog(Interpreter()));
+	m_backend.SetClientCatalog(m_library.ClientCatalog(Interpreter()));
 	if (!m_backend.StreamGameRunning()) m_backend.PublishCatalog();
 }
 

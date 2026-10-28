@@ -11,17 +11,21 @@ QString StreamingCatalog::QuoteBackendToken(QString value) {
 	value.replace('"', "\\\"");
 	return '"' + value + '"';
 }
-QJsonObject StreamingCatalog::Manifest(const QList<StreamingLaunchEntry>& entries,
-                                       const QString& socket, const QString& audio_device,
-                                       const QString& lock_file, const QString& resolution, int fps,
-                                       bool show_local) {
-	QJsonObject games;
-	for (const auto& entry: entries) {
-		games.insert(entry.id,
-		             QJsonObject {{"program", entry.program},
-		                          {"arguments", QJsonArray::fromStringList(entry.arguments)},
-		                          {"working_directory", entry.working_directory}});
-	}
+QJsonObject
+StreamingCatalog::Manifest(const QList<StreamingLaunchEntry>& entries, const QString& socket,
+                           const QString& audio_device, const QString& lock_file,
+                           const QString& resolution, int fps, bool show_local,
+                           const QHash<QString, QList<StreamingLaunchEntry>>& client_games) {
+	const auto games_object = [](const QList<StreamingLaunchEntry>& list) {
+		QJsonObject games;
+		for (const auto& entry: list) {
+			games.insert(entry.id,
+			             QJsonObject {{"program", entry.program},
+			                          {"arguments", QJsonArray::fromStringList(entry.arguments)},
+			                          {"working_directory", entry.working_directory}});
+		}
+		return games;
+	};
 	QJsonObject env {{"KYTY_STREAM_SOCKET", socket},
 	                 {"SDL_AUDIO_DRIVER", "pulseaudio"},
 	                 {"KYTY_AUDIO_OUTPUT_DEVICE", audio_device},
@@ -31,7 +35,15 @@ QJsonObject StreamingCatalog::Manifest(const QList<StreamingLaunchEntry>& entrie
 		env.insert("KYTY_STREAM_WIDTH", resolution == "1080p" ? "1920" : "2560");
 		env.insert("KYTY_STREAM_HEIGHT", resolution == "1080p" ? "1080" : "1440");
 	}
-	return {{"version", 1}, {"games", games}, {"environment", env}, {"lock_file", lock_file}};
+	QJsonObject clients;
+	for (auto it = client_games.constBegin(); it != client_games.constEnd(); ++it) {
+		clients.insert(it.key(), games_object(it.value()));
+	}
+	return {{"version", 1},
+	        {"games", games_object(entries)},
+	        {"client_games", clients},
+	        {"environment", env},
+	        {"lock_file", lock_file}};
 }
 QJsonObject StreamingCatalog::Apps(const QList<StreamingLaunchEntry>& entries,
                                    const QString& wrapper, const QString& manifest) {

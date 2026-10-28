@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSocketNotifier>
 #include <QTextStream>
@@ -113,7 +114,24 @@ int main(int argc, char** argv) {
 		return fail("Invalid launch manifest.");
 	const auto manifest = QJsonDocument::fromJson(file.readAll()).object();
 	if (manifest.value("version").toInt() != 1) return fail("Unsupported manifest version.");
-	const auto game    = manifest.value("games").toObject().value(app.arguments()[2]).toObject();
+	// Prefer this device's own catalog entry (client_games[uuid][game]); fall back to the shared
+	// PC entry (games[game]) exactly as before. The id is validated before it indexes the manifest.
+	const auto                      game_id     = app.arguments()[2];
+	const auto                      client_uuid = qEnvironmentVariable("SUNSHINE_CLIENT_UUID");
+	static const QRegularExpression uuid_pattern(QStringLiteral(
+	    "\\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\\z"));
+	QJsonObject                     game;
+	if (!client_uuid.isEmpty() && uuid_pattern.match(client_uuid).hasMatch()) {
+		game = manifest.value("client_games")
+		           .toObject()
+		           .value(client_uuid)
+		           .toObject()
+		           .value(game_id)
+		           .toObject();
+	}
+	if (game.isEmpty()) {
+		game = manifest.value("games").toObject().value(game_id).toObject();
+	}
 	const auto program = game.value("program").toString();
 	if (game.isEmpty() || !QFileInfo(program).isAbsolute() || !QFileInfo(program).isExecutable())
 		return fail("Catalog entry is missing or its emulator is unavailable.");

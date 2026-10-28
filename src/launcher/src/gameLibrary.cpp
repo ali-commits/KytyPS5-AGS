@@ -1,20 +1,25 @@
 #include "gameLibrary.h"
 
+#include "clientProfiles.h"
 #include "common/archive.h"
 #include "compatibilityDatabase.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
+#include "hostApi.h"
+#include "streamingSettings.h"
 
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QJsonParseError>
 #include <QRegularExpression>
 #include <QSet>
 
 #include <algorithm>
+#include <optional>
 
 namespace {
 constexpr char CONF_FILE_NAME[] = "Kyty.ini";
@@ -392,6 +397,53 @@ QList<StreamingLaunchEntry> GameLibrary::Catalog(const QString& interpreter) con
 		                      : QDir(g.info->basedir).filePath("sce_sys/icon0.png");
 		out.append({g.id, g.info->name, interpreter, arguments,
 		            QFileInfo(interpreter).absolutePath(), QFile::exists(icon) ? icon : QString()});
+	}
+	return out;
+}
+
+QHash<QString, QList<StreamingLaunchEntry>>
+GameLibrary::ClientCatalog(const QString& interpreter) const {
+	QHash<QString, QList<StreamingLaunchEntry>> out;
+	const QDir clients(QDir(StreamingSettings::ProfileDirectory()).filePath("clients"));
+	if (!clients.exists()) {
+		return out;
+	}
+	for (const auto& uuid: clients.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+		if (!ClientProfiles::IsValidClientId(uuid)) {
+			continue; // ignore anything that is not a validated device directory
+		}
+		QList<StreamingLaunchEntry> entries;
+		for (const auto& g: m_games) {
+			bool       seeded  = false;
+			const auto profile = ClientProfiles::ReadGame(uuid, g.id, &seeded);
+			if (!seeded) {
+				continue; // no device profile yet: launch uses the PC catalog entry
+			}
+			const auto config = HostApi::ClientConfig(
+			    *g.info, profile.value(QStringLiteral("settings")).toObject());
+			if (config == nullptr) {
+				continue;
+			}
+			// Use the per-client cheat plan when it exists, and no --game-patch otherwise.
+			const auto                   plan_path = ClientProfiles::PatchPlanPath(uuid, g.id);
+			const std::optional<QString> patch_plan =
+			    !plan_path.isEmpty() && QFileInfo::exists(plan_path)
+			        ? std::optional<QString>(plan_path)
+			        : std::optional<QString>(QString {});
+			auto arguments = BuildEmulatorArgs(*config, patch_plan);
+			if (arguments.isEmpty()) {
+				continue;
+			}
+			const auto icon = GameContent::IsArchive(g.info->basedir)
+			                      ? QString()
+			                      : QDir(g.info->basedir).filePath("sce_sys/icon0.png");
+			entries.append({g.id, g.info->name, interpreter, arguments,
+			                QFileInfo(interpreter).absolutePath(),
+			                QFile::exists(icon) ? icon : QString()});
+		}
+		if (!entries.isEmpty()) {
+			out.insert(uuid, entries);
+		}
 	}
 	return out;
 }

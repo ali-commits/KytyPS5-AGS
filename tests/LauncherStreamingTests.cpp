@@ -2143,6 +2143,57 @@ while :; do sleep 0.05; done
 		QVERIFY(original.open(QIODevice::ReadOnly));
 		QCOMPARE(original.readAll(), QByteArray("[Library]\nuntouched=yes\n"));
 	}
+
+	void manifestAndWrapperPickClientGamesByUuid() {
+#ifdef __linux__
+		QTemporaryDir dir;
+		const auto    wrapper =
+		    QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_launch");
+		const QString uuid = "44444444-4444-4444-4444-444444444444";
+		// PC and device entries differ only by a marker argument the program echoes back.
+		const QString              marker_prog = "/usr/bin/python3";
+		const StreamingLaunchEntry pc {"g1", "Game", marker_prog,
+		                               {"-c", "import sys; print(sys.argv[1])", "PC"}, dir.path()};
+		const StreamingLaunchEntry device {
+		    "g1", "Game", marker_prog, {"-c", "import sys; print(sys.argv[1])", "DEVICE"},
+		    dir.path()};
+		QHash<QString, QList<StreamingLaunchEntry>> client_games;
+		client_games.insert(uuid, {device});
+		// client_games lands in the manifest keyed by uuid.
+		auto manifest = StreamingCatalog::Manifest({pc}, dir.filePath("frames.sock"), "private",
+		                                           dir.filePath("game.lock"), "1080p", 60, true,
+		                                           client_games);
+		QVERIFY(manifest.value("client_games").toObject().contains(uuid));
+		QVERIFY(manifest.value("client_games")
+		            .toObject()
+		            .value(uuid)
+		            .toObject()
+		            .contains("g1"));
+		manifest.insert("session_file", dir.filePath("session.json"));
+		QVERIFY(AttachHostOwner(&manifest, dir.path()));
+		QString error;
+		QVERIFY(StreamingCatalog::WritePrivate(dir.filePath("launch.json"),
+		                                       QJsonDocument(manifest).toJson(), &error));
+		const auto run = [&](const QString& client_uuid) {
+			QProcess launch;
+			HostEnvironment(&launch, manifest);
+			auto env = launch.processEnvironment();
+			env.insert("KYTY_STREAM_ONLY", "1");
+			if (!client_uuid.isEmpty())
+				env.insert("SUNSHINE_CLIENT_UUID", client_uuid);
+			else
+				env.remove("SUNSHINE_CLIENT_UUID");
+			launch.setProcessEnvironment(env);
+			launch.start(wrapper, {dir.filePath("launch.json"), "g1"});
+			if (!launch.waitForFinished(5000)) return QByteArray("timeout");
+			return launch.readAllStandardOutput().trimmed();
+		};
+		// Matching uuid picks the device entry; absence (and an unknown uuid) falls back to PC.
+		QCOMPARE(run(uuid), QByteArray("DEVICE"));
+		QCOMPARE(run(QString()), QByteArray("PC"));
+		QCOMPARE(run("99999999-9999-9999-9999-999999999999"), QByteArray("PC"));
+#endif
+	}
 };
 QTEST_MAIN(LauncherStreamingTests)
 #include "LauncherStreamingTests.moc"

@@ -11,7 +11,8 @@ static QString BoolArg(bool value) {
 	return value ? QStringLiteral("true") : QStringLiteral("false");
 }
 
-QStringList BuildEmulatorArgs(const Configuration& info) {
+QStringList BuildEmulatorArgs(const Configuration&          info,
+                              const std::optional<QString>& patch_plan_override) {
 	QStringList args;
 	auto        r = EnumToText(info.screen_resolution).split('x');
 
@@ -112,8 +113,9 @@ QStringList BuildEmulatorArgs(const Configuration& info) {
 		args << "--addcont-dir" << info.addons_dir;
 	}
 
-	const auto patch_plan = Cheats::PlanPath(info.title_id);
-	if (QFileInfo::exists(patch_plan)) {
+	const auto patch_plan =
+	    patch_plan_override.has_value() ? *patch_plan_override : Cheats::PlanPath(info.title_id);
+	if (!patch_plan.isEmpty() && QFileInfo::exists(patch_plan)) {
 		args << "--game-patch" << patch_plan;
 	}
 

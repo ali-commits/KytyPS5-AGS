@@ -344,7 +344,7 @@ bool StreamingBackend::WriteManifest(QString* error) {
 	const QDir profile(m_profile);
 	const auto manifest = StreamingCatalog::Manifest(
 	    m_catalog, m_socket, m_audio.Device(), QDir(m_runtime).filePath("emulator.lock"),
-	    m_settings.resolution, m_settings.fps, m_settings.show_local);
+	    m_settings.resolution, m_settings.fps, m_settings.show_local, m_client_catalog);
 	auto actual_manifest = manifest;
 	actual_manifest.insert("unified_stream_profile", true);
 	actual_manifest.insert("host_nonce", m_host_nonce);
@@ -792,6 +792,13 @@ void StreamingBackend::CloseSession() {
 void StreamingBackend::SetCatalog(const QList<StreamingLaunchEntry>& catalog) {
 	if (m_catalog == catalog) return;
 	m_catalog       = catalog;
+	m_catalog_dirty = true;
+}
+void StreamingBackend::SetClientCatalog(
+    const QHash<QString, QList<StreamingLaunchEntry>>& catalog) {
+	if (m_client_catalog == catalog) return;
+	m_client_catalog = catalog;
+	// client_games lives only in launch.json (not apps.json), so a manifest rewrite is enough.
 	m_catalog_dirty = true;
 }
 bool StreamingBackend::StreamGameRunning() const {
