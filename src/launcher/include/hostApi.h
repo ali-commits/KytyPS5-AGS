@@ -42,6 +42,10 @@ public:
 	                                                                 const QJsonObject&   settings);
 
 	// Trophy progress in the contract shape, read from the same data as the trophy viewer.
+	// One trophy's icon PNG; 404 for a hidden trophy that is still locked.
+	[[nodiscard]] static HostReply   TrophyIcon(const Configuration& info,
+	                                            const QString& runtime_directory, int label, int id,
+	                                            const QString& if_none_match);
 	[[nodiscard]] static QJsonObject Trophies(const Configuration& info,
 	                                          const QString&       runtime_directory);
 

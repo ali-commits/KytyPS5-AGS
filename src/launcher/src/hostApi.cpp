@@ -194,7 +194,8 @@ QJsonArray HostApi::SettingsSchema(const Configuration& info) {
 void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> done) {
 	static const QRegularExpression ROUTE(QStringLiteral(
 	    R"(\A/kyty/v1/(?:(library)|art/([0-9a-f]{64})/(icon|background)|games/([0-9a-f]{64})/)"
-	    R"((settings|settings/reset|trophies|cheats|cheats/remote|cheats/remote/fetch))\z)"));
+	    R"((settings|settings/reset|trophies|trophies/icon/[0-9]{1,3}-[0-9]{1,4}|cheats|cheats/remote|)"
+	    R"(cheats/remote/fetch))\z)"));
 
 	const auto method = request.value(QStringLiteral("method")).toString();
 	const auto match  = ROUTE.match(request.value(QStringLiteral("path")).toString());
@@ -220,12 +221,13 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 		ClientProfiles::TouchClient(client.id, client.name);
 	}
 
-	const bool    is_library = !match.captured(1).isEmpty();
-	const bool    is_art     = !match.captured(2).isEmpty();
-	const QString sub        = match.captured(5);
-	const bool    reads      = is_library || is_art || sub == QLatin1String("cheats/remote") ||
-	                           sub == QLatin1String("trophies");
-	const bool    writes     = sub == QLatin1String("settings") || sub == QLatin1String("cheats");
+	const bool    is_library     = !match.captured(1).isEmpty();
+	const bool    is_art         = !match.captured(2).isEmpty();
+	const QString sub            = match.captured(5);
+	const bool    is_trophy_icon = sub.startsWith(QLatin1String("trophies/icon/"));
+	const bool    reads          = is_library || is_art || sub == QLatin1String("cheats/remote") ||
+	                               sub == QLatin1String("trophies") || is_trophy_icon;
+	const bool    writes = sub == QLatin1String("settings") || sub == QLatin1String("cheats");
 	const bool    posts =
 	    sub == QLatin1String("cheats/remote/fetch") || sub == QLatin1String("settings/reset");
 	if (!((method == QLatin1String("GET") && (reads || writes)) ||
@@ -264,6 +266,12 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	}
 	if (sub == QLatin1String("trophies")) {
 		return GetTrophies(*game, done);
+	}
+	if (is_trophy_icon) {
+		const auto key = sub.mid(QStringLiteral("trophies/icon/").size()).split(QLatin1Char('-'));
+		return done(TrophyIcon(*game->info, QCoreApplication::applicationDirPath(),
+		                       key.value(0).toInt(), key.value(1).toInt(),
+		                       request.value(QStringLiteral("if_none_match")).toString()));
 	}
 	if (sub == QLatin1String("cheats")) {
 		return method == QLatin1String("GET") ? GetCheats(*game, client, done)
@@ -634,6 +642,10 @@ QJsonObject HostApi::Trophies(const Configuration& info, const QString& runtime_
 			                   {"grade", grade_name(trophy.grade)},
 			                   {"hidden", trophy.hidden},
 			                   {"unlocked", is_unlocked}};
+			// Icon is fetched separately (GET .../trophies/icon/<key>); hidden locked trophies
+			// get none so their art is not revealed.
+			if (!trophy.icon_png.empty() && (is_unlocked || !trophy.hidden))
+				entry["icon"] = QStringLiteral("%1-%2").arg(label).arg(id);
 			if (is_unlocked) {
 				const auto found = unlocks.timestamps.find(id);
 				if (found != unlocks.timestamps.end()) {
@@ -649,6 +661,33 @@ QJsonObject HostApi::Trophies(const Configuration& info, const QString& runtime_
 		}
 	}
 	return {{"trophies", trophies}, {"unlocked", unlocked_count}, {"total", total}};
+}
+
+HostReply HostApi::TrophyIcon(const Configuration& info, const QString& runtime_directory,
+                              int label, int id, const QString& if_none_match) {
+	static const QRegularExpression file_pattern(QStringLiteral("^trophy(\\d+)\\.ucp$"));
+	for (const auto& file: GameContent::ListFiles(
+	         info.basedir, QString::fromLatin1(Common::Trophies::PackageDirectory))) {
+		const auto match = file_pattern.match(QFileInfo(file).fileName());
+		if (!match.hasMatch() || match.captured(1).toInt() != label) continue;
+		const auto package =
+		    Common::Trophies::LoadPackage(GameContent::ToPath(file), info.console_language);
+		const auto found = package.trophies.find(id);
+		if (found == package.trophies.end() || found->second.icon_png.empty()) break;
+		if (found->second.hidden) {
+			const auto unlocks = Common::Trophies::LoadUnlockDataMigrating(
+			    GameContent::ToPath(runtime_directory), info.title_id.toStdString(), info.user_id,
+			    static_cast<uint32_t>(label));
+			if (!unlocks.unlocked.contains(id)) return Error(404, QStringLiteral("hidden"));
+		}
+		const QByteArray data(reinterpret_cast<const char*>(found->second.icon_png.data()),
+		                      static_cast<qsizetype>(found->second.icon_png.size()));
+		const auto       etag =
+		    QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex().left(16);
+		if (if_none_match.toLatin1() == etag) return {304, "image/png", {}, etag};
+		return {200, "image/png", data, etag};
+	}
+	return Error(404, QStringLiteral("no-icon"));
 }
 
 void HostApi::Enqueue(std::function<void()> job) {

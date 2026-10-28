@@ -194,6 +194,19 @@ private slots:
 		QCOMPARE(again.status, 304);
 		QFile::remove(path);
 	}
+	void apiTrophyIconRoute() {
+		const auto id   = library.Games().first().id;
+		const auto base = "/kyty/v1/games/" + id + "/trophies/icon/";
+		// Routed (not "not-found"), but this fixture game has no trophy package.
+		const auto none = Call(api, {{"method", "GET"}, {"path", base + "0-1"}});
+		QCOMPARE(none.status, 404);
+		QCOMPARE(QJsonDocument::fromJson(none.body).object()["error"].toString(),
+		         QString("no-icon"));
+		QCOMPARE(Call(api, {{"method", "GET"}, {"path", base + "x-1"}}).status, 404);
+		QCOMPARE(
+		    Call(api, {{"method", "PUT"}, {"path", base + "0-1"}, {"body", QJsonObject {}}}).status,
+		    405);
+	}
 	void apiRejectsTraversalAndUnknown() {
 		QCOMPARE(
 		    Call(api, {{"method", "GET"}, {"path", "/kyty/v1/art/../../etc/passwd/icon"}}).status,
