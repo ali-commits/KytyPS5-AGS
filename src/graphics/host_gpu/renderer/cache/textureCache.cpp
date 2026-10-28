@@ -3907,11 +3907,11 @@ void TextureCache::MaterializeCmaskClear(ImageId id, const ImageDesc& desc,
 			}
 		} else {
 			provable = false;
-			std::vector<uint32_t> words(metadata.size / sizeof(uint32_t));
-			if (LibKernel::Memory::TryReadBacking(metadata.address, words.data(), metadata.size) &&
-			    std::all_of(words.begin(), words.end(),
-			                [first = words.front()](uint32_t word) { return word == first; })) {
-				value = words.front();
+			// In place: this runs on every lookup of a CMASK target and the slice is often 16 KB.
+			uint32_t first = 0;
+			if (LibKernel::Memory::TryReadUniformBacking32(metadata.address, metadata.size,
+			                                               first)) {
+				value = first;
 			}
 		}
 		if (!value || *value != 0) {

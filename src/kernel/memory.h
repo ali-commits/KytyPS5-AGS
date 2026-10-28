@@ -130,6 +130,10 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 // then): any size through a per-thread mapping record, without the mapping lock (see
 // GuestBackingStore::TryReadBackingDirect). Any thread.
 bool TryReadBackingDirect(uint64_t vaddr, void* data, uint64_t size);
+// Whether every 32-bit word of [vaddr, vaddr + size) holds the same value, checked in place: the
+// bytes a TryReadBacking at that moment returns, without copying them. `first` receives the first
+// word. False when the range cannot be read or is not uniform. size: a nonzero multiple of 4.
+[[nodiscard]] bool TryReadUniformBacking32(uint64_t vaddr, uint64_t size, uint32_t& first);
 // The direct-memory backing alias of [vaddr, vaddr + size) when one mapping holds the whole range,
 // or nullptr (not direct memory, or spanning mappings). The alias stays mapped and writable for
 // the process lifetime: reading it never faults, whatever the guest view's protection, and after

@@ -1618,6 +1618,21 @@ bool HashGpuCleanBacking(uint64_t vaddr, uint64_t size, uint64_t& digest, InPlac
 	return reads.RecordDigest(vaddr, size, digest);
 }
 
+bool TryReadUniformBacking32(uint64_t vaddr, uint64_t size, uint32_t& first) {
+	if (size < sizeof(uint32_t) || size % sizeof(uint32_t) != 0) {
+		return false;
+	}
+	bool uniform = false;
+	auto check   = [&](const uint8_t* bytes) {
+		std::memcpy(&first, bytes, sizeof(first));
+		// Every word equals the first exactly when the bytes repeat with a period of one word; the
+		// library memcmp compares them a vector at a time.
+		uniform = std::memcmp(bytes, bytes + sizeof(uint32_t),
+		                      static_cast<size_t>(size - sizeof(uint32_t))) == 0;
+	};
+	return TryInspectBacking(vaddr, size, check, nullptr) && uniform;
+}
+
 bool IsGpuMapped(uint64_t vaddr, uint64_t size) {
 	return g_gpu_resources != nullptr && g_gpu_resources->IsMapped(vaddr, size);
 }

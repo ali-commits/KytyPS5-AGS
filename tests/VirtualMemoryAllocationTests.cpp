@@ -710,8 +710,33 @@ void TestBackingInPlaceInspection() {
 	          digest == digest_of(base + 0x300, 0x40),
 	      "the in-place digest differs from the copying one");
 
+	// TryReadUniformBacking32 (CMASK fast-clear proofs): every word equal, read in place.
+	auto* words = reinterpret_cast<uint32_t*>(bytes);
+	std::fill_n(words, SceKernelPageSize * 2 / sizeof(uint32_t), 0xffffffffu);
+	uint32_t word = 0;
+	Check(test, Memory::TryReadUniformBacking32(base, SceKernelPageSize * 2, word) &&
+	                word == 0xffffffffu,
+	      "a uniform range across two mappings did not read as uniform");
+	Check(test, Memory::TryReadUniformBacking32(base + 0x40, 4, word) && word == 0xffffffffu,
+	      "a single word did not read as uniform");
+	bytes[SceKernelPageSize + 0x7f2] = 0;
+	Check(test, !Memory::TryReadUniformBacking32(base, SceKernelPageSize * 2, word),
+	      "a changed byte in the second mapping still read as uniform");
+	Check(test, Memory::TryReadUniformBacking32(base, SceKernelPageSize, word),
+	      "the untouched first mapping no longer read as uniform");
+	words[1] = 0x12345678u;
+	Check(test, !Memory::TryReadUniformBacking32(base, 8, word) && word == 0xffffffffu,
+	      "two different words read as uniform");
+	Check(test, !Memory::TryReadUniformBacking32(base, 6, word),
+	      "a size that is not whole words was accepted");
+	for (uint64_t i = 0; i < SceKernelPageSize * 2; i++) {
+		bytes[i] = static_cast<uint8_t>(i * 131u + 7u);
+	}
+
 	CheckOk(test, Memory::KernelMunmap(base + SceKernelPageSize, SceKernelPageSize),
 	        "KernelMunmap(high)");
+	Check(test, !Memory::TryReadUniformBacking32(spanning, 0x100, word),
+	      "a range reaching an unmapped page read as uniform");
 	std::vector<uint8_t> probe(0x100);
 	Check(test,
 	      Memory::CompareGpuCleanBacking(spanning, expected.data() + SceKernelPageSize - 0x80,
