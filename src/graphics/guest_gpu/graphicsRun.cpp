@@ -464,7 +464,7 @@ void GuestGpu::AddDeferredLabel(uint64_t address, uint32_t size, uint64_t tick, 
 	if (cp_visible) {
 		m_cp_visible_labels.store(true, std::memory_order_relaxed);
 	}
-	HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, 0, size);
+	HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, value, size);
 	m_deferred_label_count.store(static_cast<uint32_t>(m_deferred_labels.size()),
 	                             std::memory_order_release);
 }
@@ -3388,7 +3388,6 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 	auto&      scheduler = GetScheduler();
 	const auto tick      = scheduler.CurrentTick();
 	gpu.AddDeferredLabel(address, size, tick, value, LabelSplitMode());
-	HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, value, size);
 	TraceCpLabel(proxy ? "label-defer-proxy" : (ordered ? "label-defer-ordered" : "label-defer"),
 	             dst, value, size);
 	const int64_t trace_queue =

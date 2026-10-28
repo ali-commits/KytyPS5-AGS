@@ -2,6 +2,7 @@
 #include "common/hostException.h"
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -93,6 +94,30 @@ void ConcurrentSnapshot() {
   Check(HangWatchdog::SnapshotForTest().find("name='test-equeue'") ==
             std::string::npos,
         "deleted registrations disappear");
+}
+// Deferred labels take a new key (their tick) each, so their deletions leave tombstones. Those once
+// filled the whole event table and every note scanned all of it on the GPU thread. Keys stored
+// before and after such churn must still be found, and deleted ones must stay deleted.
+void EventTombstones() {
+  HangWatchdog::NoteEvent(0x333, "test-long-lived", 0x55, -7, false, 0, 0);
+  for (unsigned tick = 1; tick <= 5000; ++tick) {
+    const auto address = 0x5600000000ULL + tick * 8ULL;
+    HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, tick, 4);
+    HangWatchdog::NoteEvent(address, "deferred-label", tick, INT16_MIN, false, 0, 0, true);
+  }
+  HangWatchdog::NoteEvent(0x56ffff0000ULL, "deferred-label", 7777, INT16_MIN, false, 0xabc, 4);
+  auto text = HangWatchdog::SnapshotForTest();
+  Check(text.find("tick=7777 value=0xabc size=4") != std::string::npos,
+        "a label is noted after tombstone churn");
+  Check(text.find("name='test-long-lived'") != std::string::npos,
+        "a registration survives the churn");
+  Check(text.find("tick=4999 ") == std::string::npos, "deleted labels stay deleted");
+  HangWatchdog::NoteEvent(0x56ffff0000ULL, "deferred-label", 7777, INT16_MIN, false, 0, 0, true);
+  HangWatchdog::NoteEvent(0x333, "test-long-lived", 0x55, -7, false, 0, 0, true);
+  text = HangWatchdog::SnapshotForTest();
+  Check(text.find("tick=7777 ") == std::string::npos &&
+            text.find("name='test-long-lived'") == std::string::npos,
+        "keys stored before and after the churn delete");
 }
 void PublicationStress() {
   std::atomic<bool> finish{false};
@@ -280,6 +305,7 @@ int main(int argc, char **argv) {
 
   Decisions();
   ConcurrentSnapshot();
+  EventTombstones();
   PublicationStress();
   ConcurrentPackets();
   AutoDetection();

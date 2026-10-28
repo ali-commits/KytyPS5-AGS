@@ -44,6 +44,7 @@ static Live::Switch g_switch("KYTY_HANG_WATCHDOG", ParseWatchdog, [](int64_t, in
 });
 namespace {
 constexpr size_t MaxThreads = 512, MaxDepth = 16, MaxQueues = 57, History = 32, MaxEvents = 1024;
+constexpr size_t EventProbeWindow = 64; // NoteEvent's probe length (a full window overflows)
 struct Record {
 	std::atomic<uint64_t>                version {0};
 	std::atomic<const char*>             kind {nullptr};
@@ -729,7 +730,10 @@ void NoteEvent(uint64_t queue, std::string_view name, uint64_t ident, int16_t fi
 	std::lock_guard lock(g_event_mutex);
 	Event*          target = nullptr;
 	const auto      hash   = (queue >> 4) ^ ident ^ (ident >> 32) ^ static_cast<uint16_t>(filter);
-	for (size_t probe = 0; probe < MaxEvents; ++probe) {
+	// Insertions and lookups probe the same bounded window, so a key is always found where it was
+	// stored. Unbounded, the tombstones of deferred labels (a new tick each) filled the whole table
+	// within minutes and every call scanned all MaxEvents slots on the GPU thread.
+	for (size_t probe = 0; probe < EventProbeWindow; ++probe) {
 		auto&      e    = g_events[(hash + probe) % MaxEvents];
 		const auto kind = e.record.kind.load(std::memory_order_relaxed);
 		if (!kind && !target) target = &e;
