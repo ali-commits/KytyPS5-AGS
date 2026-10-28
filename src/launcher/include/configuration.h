@@ -170,10 +170,14 @@ public:
 		gpu_occlusion_accurate = other.gpu_occlusion_accurate;
 	}
 
-	Resolution             screen_resolution = Resolution::R1280X720;
-	QString                user_name         = "Kyty";
-	int                    user_id           = Config::DEFAULT_USER_ID;
-	QString                audio_input_device;
+	Resolution screen_resolution = Resolution::R1280X720;
+	QString    user_name         = "Kyty";
+	int        user_id           = Config::DEFAULT_USER_ID;
+	QString    audio_input_device;
+	// Streaming presentation when the client aspect ratio differs from the game render
+	// (e.g. a 16:9 render on a 20:9 phone): "fit" (letter/pillarbox, default), "fill" (crop), or
+	// "stretch". Streaming-only; the local window ignores it.
+	QString                stream_aspect_mode          = "fit";
 	PresentMode            present_mode                = PresentMode::Mailbox;
 	int                    gpu_index                   = -1;
 	bool                   fullscreen_enabled          = false;
@@ -215,6 +219,7 @@ public:
 		user_name                   = other.user_name;
 		user_id                     = other.user_id;
 		audio_input_device          = other.audio_input_device;
+		stream_aspect_mode          = other.stream_aspect_mode;
 		present_mode                = other.present_mode;
 		gpu_index                   = other.gpu_index;
 		fullscreen_enabled          = other.fullscreen_enabled;

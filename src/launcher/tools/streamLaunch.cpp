@@ -183,8 +183,9 @@ int main(int argc, char** argv) {
 		return fail("Another Kyty streaming game is already running, or its lock is unavailable.");
 	const auto        env = manifest.value("environment").toObject();
 	const QStringList allowed {
-	    "KYTY_STREAM_SOCKET", "PULSE_SERVER",       "SDL_AUDIO_DRIVER", "KYTY_AUDIO_OUTPUT_DEVICE",
-	    "KYTY_STREAM_WIDTH",  "KYTY_STREAM_HEIGHT", "KYTY_STREAM_FPS",  "KYTY_STREAM_ONLY"};
+	    "KYTY_STREAM_SOCKET",       "PULSE_SERVER",      "SDL_AUDIO_DRIVER",
+	    "KYTY_AUDIO_OUTPUT_DEVICE", "KYTY_STREAM_WIDTH", "KYTY_STREAM_HEIGHT",
+	    "KYTY_STREAM_FPS",          "KYTY_STREAM_ONLY",  "KYTY_STREAM_ASPECT"};
 	for (const auto& key: allowed)
 		qunsetenv(key.toLatin1().constData());
 	for (auto it = env.begin(); it != env.end(); ++it) {

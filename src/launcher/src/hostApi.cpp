@@ -42,6 +42,7 @@ constexpr Field FIELDS[] = {
     {"user_name", "User name", "string", 0, 0},
     {"user_id", "User ID", "int", 0, 2147483647},
     {"audio_input_device", "Audio input device", "string", 0, 0},
+    {"stream_aspect_mode", "Stream aspect mode", "enum", 0, 0},
     {"present_mode", "Present mode", "enum", 0, 0},
     {"gpu_index", "GPU index", "int", -1, 16},
     {"fullscreen_enabled", "Fullscreen", "bool", 0, 0},
@@ -78,6 +79,9 @@ const QStringList PATH_KEYS {QStringLiteral("elf"), QStringLiteral("shader_log_f
 QStringList Choices(const QString& key) {
 	if (key == QLatin1String("screen_resolution")) {
 		return EnumToList<Configuration::Resolution>();
+	}
+	if (key == QLatin1String("stream_aspect_mode")) {
+		return {QStringLiteral("fit"), QStringLiteral("fill"), QStringLiteral("stretch")};
 	}
 	if (key == QLatin1String("present_mode")) {
 		return EnumToList<Configuration::PresentMode>();

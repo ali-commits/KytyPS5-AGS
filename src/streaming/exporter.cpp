@@ -45,8 +45,8 @@ void ImageBarrier(vk::CommandBuffer command, vk::Image image, vk::ImageLayout ol
 } // namespace
 std::unique_ptr<GpuPool> GpuPool::Create(vk::PhysicalDevice physical, vk::Device device,
                                          uint32_t family, uint32_t width, uint32_t height,
-                                         uint64_t epoch, std::string& error) {
-	auto pool = std::unique_ptr<GpuPool>(new GpuPool(device, family));
+                                         uint64_t epoch, std::string& error, AspectMode aspect) {
+	auto pool = std::unique_ptr<GpuPool>(new GpuPool(device, family, aspect));
 	if (!pool->Initialize(physical, width, height, epoch, error)) return {};
 	return pool;
 }
@@ -316,11 +316,24 @@ void GpuPool::Record(vk::CommandBuffer command, const Lease& lease, const Captur
 	             vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferRead,
 	             vk::AccessFlagBits2::eTransferWrite);
 	if (main.image) {
+		const BlitRect geometry =
+		    ComputeBlitRect(int32_t(main.extent.width), int32_t(main.extent.height),
+		                    int32_t(m_descriptor.width), int32_t(m_descriptor.height), m_aspect);
+		// Letter/pillarbox: paint the surface black before the inset blit so the bars are
+		// opaque black rather than whatever the composite image held last frame.
+		if (geometry.clear_background) {
+			const vk::ClearColorValue       black {};
+			const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+			command.clearColorImage(m_image, vk::ImageLayout::eTransferDstOptimal, &black, 1,
+			                        &range);
+		}
 		vk::ImageBlit blit {};
 		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-		blit.srcOffsets[1]  = {int32_t(main.extent.width), int32_t(main.extent.height), 1};
+		blit.srcOffsets[0]  = {geometry.src_x0, geometry.src_y0, 0};
+		blit.srcOffsets[1]  = {geometry.src_x1, geometry.src_y1, 1};
 		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-		blit.dstOffsets[1]  = {int32_t(m_descriptor.width), int32_t(m_descriptor.height), 1};
+		blit.dstOffsets[0]  = {geometry.dst_x0, geometry.dst_y0, 0};
+		blit.dstOffsets[1]  = {geometry.dst_x1, geometry.dst_y1, 1};
 		command.blitImage(main.image, vk::ImageLayout::eTransferSrcOptimal, m_image,
 		                  vk::ImageLayout::eTransferDstOptimal, 1, &blit, vk::Filter::eLinear);
 	} else {

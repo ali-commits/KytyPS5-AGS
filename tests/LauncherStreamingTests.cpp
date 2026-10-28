@@ -350,10 +350,13 @@ private slots:
 	}
 	void unifiedProfileRejectsInvalidOrMissingModeWithoutMutation() {
 		for (const auto &mode : QList<QStringList>{{},
-																							 {"1920", "1440", "60"},
-																							 {"0", "0", "60"},
-																							 {"1920", "1080", "999"},
-																							 {"1920bad", "1080", "60"}}) {
+		                                           {"1921", "1080", "60"},  // odd width
+		                                           {"1920", "1081", "60"},  // odd height
+		                                           {"0", "0", "60"},        // zero
+		                                           {"640", "358", "60"},    // below min height
+		                                           {"3842", "1080", "60"},  // above max width
+		                                           {"1920", "1080", "999"}, // unsupported fps
+		                                           {"1920bad", "1080", "60"}}) {
 			QProcessEnvironment client;
 			if (mode.size() == 3) {
 				client.insert("SUNSHINE_CLIENT_WIDTH", mode[0]);
@@ -375,6 +378,34 @@ private slots:
 		QVERIFY(StreamingProfile::Apply(false, {}, &args, &untouched, &error));
 		QCOMPARE(args.at(1), QString("2560"));
 		QVERIFY(untouched.isEmpty());
+	}
+	void unifiedProfileAcceptsNonSixteenNineAndCarriesAspect() {
+		// A 20:9 phone panel (2412 is odd, so the host negotiates the even 2412->2412? keep even):
+		// verify a genuinely non-16:9 even mode is accepted and the aspect mode is propagated.
+		struct Case { const char* w; const char* h; const char* in; const char* out; };
+		const Case cases[] = {
+		    {"2412", "1080", "", "fit"},        // default when unset
+		    {"2412", "1080", "fill", "fill"},   // explicit fill
+		    {"2560", "1080", "stretch", "stretch"},
+		    {"1080", "1920", "bogus", "fit"},   // portrait (within bounds), unknown -> fit
+		};
+		for (const auto& c : cases) {
+			QProcessEnvironment client;
+			client.insert("SUNSHINE_CLIENT_WIDTH", c.w);
+			client.insert("SUNSHINE_CLIENT_HEIGHT", c.h);
+			client.insert("SUNSHINE_CLIENT_FPS", "60");
+			QStringList args;
+			QProcessEnvironment output;
+			if (*c.in) output.insert("KYTY_STREAM_ASPECT", c.in);
+			QString error;
+			QVERIFY2(StreamingProfile::Apply(true, client, &args, &output, &error),
+			         qPrintable(error));
+			QCOMPARE(output.value("KYTY_STREAM_WIDTH"), QString(c.w));
+			QCOMPARE(output.value("KYTY_STREAM_HEIGHT"), QString(c.h));
+			QCOMPARE(output.value("KYTY_STREAM_ASPECT"), QString(c.out));
+			QCOMPARE(args.at(args.indexOf("--screen-width") + 1), QString(c.w));
+			QCOMPARE(args.at(args.indexOf("--screen-height") + 1), QString(c.h));
+		}
 	}
 	void tvHostingEnablesLaptopControllerAudio() {
 		QTemporaryDir dir;
