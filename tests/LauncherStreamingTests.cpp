@@ -37,7 +37,10 @@
 #include <cmath>
 #include <cstring>
 #ifdef __linux__
+#include <QThread>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 class LocalTlsServer: public QTcpServer {
@@ -2186,6 +2189,16 @@ while :; do sleep 0.05; done
 			launch.setProcessEnvironment(env);
 			launch.start(wrapper, {dir.filePath("launch.json"), "g1"});
 			if (!launch.waitForFinished(5000)) return QByteArray("timeout");
+			// The wrapper's guardian outlives it briefly while it holds the stream lock; wait
+			// for the lock so the next run is not refused as a second concurrent game.
+			const auto lock_path = QFile::encodeName(dir.filePath("game.lock"));
+			for (int i = 0; i < 300; ++i) {
+				const int fd = ::open(lock_path.constData(), O_RDWR | O_CLOEXEC);
+				const bool free = fd >= 0 && ::flock(fd, LOCK_EX | LOCK_NB) == 0;
+				if (fd >= 0) ::close(fd);
+				if (free) break;
+				QThread::msleep(10);
+			}
 			return launch.readAllStandardOutput().trimmed();
 		};
 		// Matching uuid picks the device entry; absence (and an unknown uuid) falls back to PC.
