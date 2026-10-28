@@ -7,12 +7,14 @@
 #include "configuration.h"
 #include "gameContent.h"
 
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStringList>
@@ -23,6 +25,7 @@
 #include <utility>
 
 namespace {
+constexpr int MAX_BACKGROUND_WIDTH = 1920;
 
 struct Field {
 	const char* key;
@@ -368,18 +371,36 @@ void HostApi::Art(const QString& id, const QString& kind, const QString& if_none
 	    kind == QLatin1String("icon")
 	        ? QStringList {QStringLiteral("sce_sys/icon0.png")}
 	        : QStringList {QStringLiteral("sce_sys/pic0.png"), QStringLiteral("sce_sys/pic1.png")};
+	const bool background = kind != QLatin1String("icon");
 	for (const auto& name: names) {
 		const auto data =
 		    GameContent::ReadFile(game->info->basedir, name, GameContent::MaxImageSize);
 		if (data.isEmpty()) {
 			continue;
 		}
-		const auto etag =
-		    QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex().left(16);
+		// The ETag covers the source bytes plus the delivery format, so a cached phone copy
+		// revalidates without re-encoding.
+		auto hash = QCryptographicHash(QCryptographicHash::Sha256);
+		hash.addData(data);
+		if (background) hash.addData(QByteArrayView("jpeg-1920"));
+		const auto       etag = hash.result().toHex().left(16);
+		const QByteArray png_type("image/png");
 		if (if_none_match.toLatin1() == etag) {
-			return done({304, "image/png", {}, etag});
+			return done({304, background ? QByteArray("image/jpeg") : png_type, {}, etag});
 		}
-		return done({200, "image/png", data, etag});
+		if (background) {
+			// Game backgrounds are often 4K PNGs (~10 MB); phones get a 1920-wide JPEG.
+			QImage image;
+			if (image.loadFromData(data)) {
+				if (image.width() > MAX_BACKGROUND_WIDTH)
+					image = image.scaledToWidth(MAX_BACKGROUND_WIDTH, Qt::SmoothTransformation);
+				QByteArray jpeg;
+				QBuffer    buffer(&jpeg);
+				if (buffer.open(QIODevice::WriteOnly) && image.save(&buffer, "JPG", 85))
+					return done({200, "image/jpeg", jpeg, etag});
+			}
+		}
+		return done({200, png_type, data, etag});
 	}
 	done(Error(404, QStringLiteral("no-art")));
 }

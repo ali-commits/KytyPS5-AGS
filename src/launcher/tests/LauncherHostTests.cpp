@@ -7,6 +7,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -172,6 +173,26 @@ private slots:
 		QCOMPARE(
 		    Call(api, {{"method", "GET"}, {"path", "/kyty/v1/art/" + id + "/background"}}).status,
 		    404);
+	}
+	void apiBackgroundIsDownscaledJpeg() {
+		const auto id   = library.Games().first().id;
+		const auto path = QFileInfo(library.Games().first().info->basedir).absoluteFilePath() +
+		                  "/sce_sys/pic0.png";
+		QImage     big(3840, 2160, QImage::Format_RGB32);
+		big.fill(Qt::blue);
+		QVERIFY(big.save(path, "PNG"));
+		auto r = Call(api, {{"method", "GET"}, {"path", "/kyty/v1/art/" + id + "/background"}});
+		QCOMPARE(r.status, 200);
+		QCOMPARE(r.content_type, QByteArray("image/jpeg"));
+		QImage sent;
+		QVERIFY(sent.loadFromData(r.body));
+		QCOMPARE(sent.width(), 1920);
+		QCOMPARE(sent.height(), 1080);
+		auto again = Call(api, {{"method", "GET"},
+		                        {"path", "/kyty/v1/art/" + id + "/background"},
+		                        {"if_none_match", QString::fromLatin1(r.etag)}});
+		QCOMPARE(again.status, 304);
+		QFile::remove(path);
 	}
 	void apiRejectsTraversalAndUnknown() {
 		QCOMPARE(
