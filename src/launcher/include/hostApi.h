@@ -13,6 +13,7 @@
 #include <QString>
 
 #include <functional>
+#include <memory>
 
 // Daemon side of the /kyty/v1/* requests the Sunshine fork forwards over api.sock.
 class HostApi: public QObject {
@@ -25,24 +26,54 @@ public:
 
 	HostApi(GameLibrary* library, std::function<Status()> status, QObject* parent = nullptr);
 
-	// request: {"method":"GET|PUT|POST","path":"/kyty/v1/...","body":{...}?,"if_none_match":"..."?}
+	// request: {"method":"GET|PUT|POST","path":"/kyty/v1/...","body":{...}?,"if_none_match":"..."?,
+	//           "client":{"id":"<uuid>","name":"<pair name>"}?}
+	// When "client" is present and valid the request is scoped to that device's own profile;
+	// absent, it keeps today's PC behaviour so the laptop client and old hosts keep working.
 	void Handle(const QJsonObject& request, std::function<void(HostReply)> done);
 
 	[[nodiscard]] static QString    SettingsRevision(const Configuration& info);
 	[[nodiscard]] static QJsonArray SettingsSchema(const Configuration& info);
 
+	// Build a Configuration carrying this client's effective game settings: the game's current
+	// settings, overlaid with the client's stored values (or seeded from them when a profile does
+	// not exist yet). The catalog uses this to build per-client launch arguments.
+	[[nodiscard]] static std::unique_ptr<Configuration> ClientConfig(const Configuration& game,
+	                                                                 const QJsonObject&   settings);
+
+	// Trophy progress in the contract shape, read from the same data as the trophy viewer.
+	[[nodiscard]] static QJsonObject Trophies(const Configuration& info,
+	                                          const QString&       runtime_directory);
+
 	static constexpr qsizetype MAX_BODY = 16384;
 
+	// A validated per-request device identity (empty id => PC scope).
+	struct Client {
+		QString            id;
+		QString            name;
+		[[nodiscard]] bool scoped() const { return !id.isEmpty(); }
+	};
+
+signals:
+	// Emitted after a device profile write changes launch arguments, so the daemon can regenerate
+	// launch.json's client_games.
+	void ClientProfileChanged();
+
 private:
-	void Library(const std::function<void(HostReply)>& done) const;
+	void Library(const Client& client, const std::function<void(HostReply)>& done) const;
 	void Art(const QString& id, const QString& kind, const QString& if_none_match,
 	         const std::function<void(HostReply)>& done) const;
-	void GetSettings(const GameEntry& game, const std::function<void(HostReply)>& done) const;
-	void PutSettings(const GameEntry& game, const QJsonObject& body,
+	void GetSettings(const GameEntry& game, const Client& client,
+	                 const std::function<void(HostReply)>& done) const;
+	void PutSettings(const GameEntry& game, const Client& client, const QJsonObject& body,
 	                 const std::function<void(HostReply)>& done);
-	void GetCheats(const GameEntry& game, const std::function<void(HostReply)>& done) const;
-	void PutCheats(const GameEntry& game, const QJsonObject& body,
+	void ResetSettings(const GameEntry& game, const Client& client,
+	                   const std::function<void(HostReply)>& done);
+	void GetTrophies(const GameEntry& game, const std::function<void(HostReply)>& done) const;
+	void GetCheats(const GameEntry& game, const Client& client,
 	               const std::function<void(HostReply)>& done) const;
+	void PutCheats(const GameEntry& game, const Client& client, const QJsonObject& body,
+	               const std::function<void(HostReply)>& done);
 	void GetRemote(const GameEntry& game, std::function<void(HostReply)> done);
 	void FetchRemote(const GameEntry& game, const QJsonObject& body,
 	                 std::function<void(HostReply)> done);

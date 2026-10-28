@@ -27,6 +27,11 @@ static void WriteFile(const QString& path, const QByteArray& data) {
 	f.write(data);
 }
 
+static QByteArray ReadFile(const QString& path) {
+	QFile f(path);
+	return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray {};
+}
+
 static HostReply Call(HostApi& api, const QJsonObject& request) {
 	std::optional<HostReply> reply;
 	api.Handle(request, [&reply](HostReply r) { reply = std::move(r); });
@@ -501,6 +506,192 @@ private slots:
 		QCOMPARE(Control(sock, {{"type", "get-preferences"}})["port"].toInt(), 48189);
 		QVERIFY(!Control(sock, {{"type", "nonsense"}})["ok"].toBool());
 		daemon.Shutdown();
+	}
+
+	// ---- Per-device (per paired client) profiles ----
+
+	static QJsonObject ClientReq(const QString& method, const QString& path, const QString& uuid,
+	                             const QJsonObject& body = {}) {
+		QJsonObject req {{"method", method},
+		                 {"path", path},
+		                 {"client", QJsonObject {{"id", uuid}, {"name", "Phone"}}}};
+		if (!body.isEmpty() || method != "GET") {
+			req["body"] = body;
+		}
+		return req;
+	}
+	static QString SettingsValue(const QJsonObject& get, const QString& key) {
+		for (const auto& f: get["fields"].toArray()) {
+			if (f.toObject()["key"] == key) {
+				return f.toObject()["value"].toString();
+			}
+		}
+		return {};
+	}
+
+	void clientGetSeedsFromPcAndPutIsolatesFromPc() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "11111111-1111-1111-1111-111111111111";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+		// Device GET seeds from the PC's current settings (same field values), scope=device.
+		auto get = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(get["scope"].toString(), QString("device"));
+		QCOMPARE(SettingsValue(get, "vblank_frequency"), QString("60"));
+		// Device PUT changes only this client's profile.
+		auto put = Call(api, ClientReq("PUT", path, uuid,
+		                               {{"revision", get["revision"]},
+		                                {"values", QJsonObject {{"vblank_frequency", "120"}}}}));
+		QCOMPARE(put.status, 200);
+		auto after = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(SettingsValue(after, "vblank_frequency"), QString("120"));
+		// The PC config is untouched (unscoped GET still reads 60).
+		auto pc =
+		    QJsonDocument::fromJson(Call(api, {{"method", "GET"}, {"path", path}}).body).object();
+		QCOMPARE(pc["scope"].toString(), QString("pc"));
+		QCOMPARE(SettingsValue(pc, "vblank_frequency"), QString("60"));
+		// And the files live under the client's own directory.
+		QVERIFY(QFileInfo::exists(config.filePath("clients/" + uuid + "/games/" + id + ".json")));
+	}
+
+	void twoClientsAreIsolated() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString a    = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const QString b    = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+		auto          rev  = [&](const QString& u) {
+			return QJsonDocument::fromJson(Call(api, ClientReq("GET", path, u)).body)
+			    .object()["revision"]
+			    .toString();
+		};
+		QCOMPARE(Call(api, ClientReq("PUT", path, a,
+		                             {{"revision", rev(a)},
+		                              {"values", QJsonObject {{"vblank_frequency", "90"}}}}))
+		             .status,
+		         200);
+		QCOMPARE(Call(api, ClientReq("PUT", path, b,
+		                             {{"revision", rev(b)},
+		                              {"values", QJsonObject {{"vblank_frequency", "144"}}}}))
+		             .status,
+		         200);
+		auto ga = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, a)).body).object();
+		auto gb = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, b)).body).object();
+		QCOMPARE(SettingsValue(ga, "vblank_frequency"), QString("90"));
+		QCOMPARE(SettingsValue(gb, "vblank_frequency"), QString("144"));
+	}
+
+	void noClientKeepsOldBehaviour() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const auto id   = library.Games().first().id;
+		const auto path = "/kyty/v1/games/" + id + "/settings";
+		auto       get =
+		    QJsonDocument::fromJson(Call(api, {{"method", "GET"}, {"path", path}}).body).object();
+		QCOMPARE(get["scope"].toString(), QString("pc"));
+		auto put = Call(
+		    api, {{"method", "PUT"},
+		          {"path", path},
+		          {"body", QJsonObject {{"revision", get["revision"]},
+		                                {"values", QJsonObject {{"vblank_frequency", "90"}}}}}});
+		QCOMPARE(put.status, 200);
+		// Unscoped writes still hit the PC config (GameLibrary), so a reload persists them.
+		GameLibrary reloaded;
+		QString     error;
+		QVERIFY(reloaded.Load(nullptr, &error));
+		QCOMPARE(reloaded.Find(id)->info->GameSettings().value("vblank_frequency").toString(),
+		         QString("90"));
+		// No client directory was created.
+		QVERIFY(!QDir(config.filePath("clients")).exists() ||
+		        QDir(config.filePath("clients")).isEmpty());
+	}
+
+	void invalidClientIdIsRejectedWithoutTouchingDisk() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const auto id   = library.Games().first().id;
+		const auto path = "/kyty/v1/games/" + id + "/settings";
+		for (const auto& bad: {QString("../../x"), QString("not-a-uuid"), QString()}) {
+			auto r = Call(api, {{"method", "GET"},
+			                    {"path", path},
+			                    {"client", QJsonObject {{"id", bad}, {"name", "x"}}}});
+			QCOMPARE(r.status, 400);
+			QCOMPARE(QJsonDocument::fromJson(r.body).object()["error"].toString(),
+			         QString("bad-client"));
+		}
+		QVERIFY(!QDir(config.filePath("clients")).exists() ||
+		        QDir(config.filePath("clients")).isEmpty());
+	}
+
+	void clientCheatsNeverModifyPcPlanAndProducePerClientPlan() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const auto plan = Cheats::PlanPath("PPSA00001");
+		WriteFile(
+		    plan,
+		    R"({"id":"PPSA00001","version":"01.002","process":"eboot.bin","mods":[)"
+		    R"({"name":"Inf HP","enabled":false,"memory":[{"offset":"0x10","off":"00","on":"01"}]},)"
+		    R"({"name":"Inf MP","enabled":false,"memory":[{"offset":"0x20","off":"00","on":"01"}]}]})");
+		const auto    pc_before = ReadFile(plan);
+		const QString uuid      = "22222222-2222-2222-2222-222222222222";
+		const auto    id        = library.Games().first().id;
+		const auto    path      = "/kyty/v1/games/" + id + "/cheats";
+		auto get = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(get["mods"].toArray().size(), 2);
+		auto put = Call(
+		    api, ClientReq("PUT", path, uuid,
+		                   {{"revision", get["revision"]}, {"enabled", QJsonArray {true, false}}}));
+		QCOMPARE(put.status, 200);
+		// The PC plan file is byte-for-byte unchanged.
+		QCOMPARE(ReadFile(plan), pc_before);
+		// The device sees its own selection.
+		auto after = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QVERIFY(after["mods"].toArray()[0].toObject()["enabled"].toBool());
+		QVERIFY(!after["mods"].toArray()[1].toObject()["enabled"].toBool());
+		// A per-client plan was written, enabling exactly the first mod.
+		const auto patch = config.filePath("clients/" + uuid + "/games/" + id + ".patch.json");
+		QVERIFY(QFileInfo::exists(patch));
+		auto mods = QJsonDocument::fromJson(ReadFile(patch)).object()["mods"].toArray();
+		QVERIFY(mods[0].toObject()["enabled"].toBool());
+		QVERIFY(!mods[1].toObject()["enabled"].toBool());
+		QFile::remove(plan);
+	}
+
+	void settingsResetReseedsFromPc() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "33333333-3333-3333-3333-333333333333";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+		auto get = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(Call(api, ClientReq("PUT", path, uuid,
+		                             {{"revision", get["revision"]},
+		                              {"values", QJsonObject {{"vblank_frequency", "120"}}}}))
+		             .status,
+		         200);
+		// Reset returns the GET body re-seeded from the PC (back to 60).
+		auto reset = Call(api, ClientReq("POST", path + "/reset", uuid, {}));
+		QCOMPARE(reset.status, 200);
+		auto body = QJsonDocument::fromJson(reset.body).object();
+		QCOMPARE(body["scope"].toString(), QString("device"));
+		QCOMPARE(SettingsValue(body, "vblank_frequency"), QString("60"));
+	}
+
+	void trophiesReturnsContractShape() {
+		const auto id = library.Games().first().id;
+		auto r = Call(api, {{"method", "GET"}, {"path", "/kyty/v1/games/" + id + "/trophies"}});
+		QCOMPARE(r.status, 200);
+		auto body = QJsonDocument::fromJson(r.body).object();
+		QVERIFY(body.contains("trophies"));
+		QVERIFY(body["trophies"].isArray());
+		QVERIFY(body.contains("unlocked"));
+		QVERIFY(body.contains("total"));
+		// No trophy packages in the fixture game: an empty, well-formed payload.
+		QCOMPARE(body["total"].toInt(), 0);
+		QCOMPARE(body["unlocked"].toInt(), 0);
+		QCOMPARE(body["trophies"].toArray().size(), 0);
 	}
 };
 

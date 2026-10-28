@@ -1,17 +1,25 @@
 #include "hostApi.h"
 
 #include "cheatFile.h"
+#include "clientProfiles.h"
+#include "common/archive.h"
+#include "common/trophies.h"
 #include "configuration.h"
 #include "gameContent.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QTimeZone>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 namespace {
@@ -183,26 +191,47 @@ QJsonArray HostApi::SettingsSchema(const Configuration& info) {
 void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> done) {
 	static const QRegularExpression ROUTE(QStringLiteral(
 	    R"(\A/kyty/v1/(?:(library)|art/([0-9a-f]{64})/(icon|background)|games/([0-9a-f]{64})/)"
-	    R"((settings|cheats|cheats/remote|cheats/remote/fetch))\z)"));
+	    R"((settings|settings/reset|trophies|cheats|cheats/remote|cheats/remote/fetch))\z)"));
 
 	const auto method = request.value(QStringLiteral("method")).toString();
 	const auto match  = ROUTE.match(request.value(QStringLiteral("path")).toString());
 	if (!match.hasMatch()) {
 		return done(Error(404, QStringLiteral("not-found")));
 	}
+
+	// Resolve the device identity before any path is touched. A present-but-invalid id is a hard
+	// 400 and NOTHING is created; an absent client keeps today's PC behaviour.
+	Client     client;
+	const auto client_value = request.value(QStringLiteral("client"));
+	if (!client_value.isUndefined()) {
+		if (!client_value.isObject()) {
+			return done(Error(400, QStringLiteral("bad-client")));
+		}
+		const auto object = client_value.toObject();
+		const auto id     = object.value(QStringLiteral("id")).toString();
+		if (!ClientProfiles::IsValidClientId(id)) {
+			return done(Error(400, QStringLiteral("bad-client")));
+		}
+		client.id   = id;
+		client.name = object.value(QStringLiteral("name")).toString();
+		ClientProfiles::TouchClient(client.id, client.name);
+	}
+
 	const bool    is_library = !match.captured(1).isEmpty();
 	const bool    is_art     = !match.captured(2).isEmpty();
 	const QString sub        = match.captured(5);
-	const bool    reads      = is_library || is_art || sub == QLatin1String("cheats/remote");
+	const bool    reads      = is_library || is_art || sub == QLatin1String("cheats/remote") ||
+	                           sub == QLatin1String("trophies");
 	const bool    writes     = sub == QLatin1String("settings") || sub == QLatin1String("cheats");
-	const bool    posts      = sub == QLatin1String("cheats/remote/fetch");
+	const bool    posts =
+	    sub == QLatin1String("cheats/remote/fetch") || sub == QLatin1String("settings/reset");
 	if (!((method == QLatin1String("GET") && (reads || writes)) ||
 	      (method == QLatin1String("PUT") && writes) ||
 	      (method == QLatin1String("POST") && posts))) {
 		return done(Error(405, QStringLiteral("method-not-allowed")));
 	}
 	if (is_library) {
-		return Library(done);
+		return Library(client, done);
 	}
 	if (is_art) {
 		return Art(match.captured(2), match.captured(3),
@@ -224,12 +253,18 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 		}
 	}
 	if (sub == QLatin1String("settings")) {
-		return method == QLatin1String("GET") ? GetSettings(*game, done)
-		                                      : PutSettings(*game, body, done);
+		return method == QLatin1String("GET") ? GetSettings(*game, client, done)
+		                                      : PutSettings(*game, client, body, done);
+	}
+	if (sub == QLatin1String("settings/reset")) {
+		return ResetSettings(*game, client, done);
+	}
+	if (sub == QLatin1String("trophies")) {
+		return GetTrophies(*game, done);
 	}
 	if (sub == QLatin1String("cheats")) {
-		return method == QLatin1String("GET") ? GetCheats(*game, done)
-		                                      : PutCheats(*game, body, done);
+		return method == QLatin1String("GET") ? GetCheats(*game, client, done)
+		                                      : PutCheats(*game, client, body, done);
 	}
 	if (sub == QLatin1String("cheats/remote")) {
 		return GetRemote(*game, std::move(done));
@@ -237,7 +272,69 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	FetchRemote(*game, body, std::move(done));
 }
 
-void HostApi::Library(const std::function<void(HostReply)>& done) const {
+std::unique_ptr<Configuration> HostApi::ClientConfig(const Configuration& game,
+                                                     const QJsonObject&   settings) {
+	auto config = std::make_unique<Configuration>();
+	config->CopyGameInfoFrom(game);
+	config->CopyEmulatorSettingsFrom(game);
+	config->CopyGlobalOnlySettingsFrom(game);
+	config->elf        = game.elf;
+	config->addons_dir = game.addons_dir;
+	config->basedir    = game.basedir;
+	if (!settings.isEmpty()) {
+		QString error;
+		if (!config->SetGameSettings(settings, error)) {
+			return nullptr; // a stored/seeded profile should always validate
+		}
+	}
+	return config;
+}
+
+namespace {
+
+// The raw GameSettings map (the values info.GameSettings() emits) a client profile stores for one
+// game, seeding a COPY of the PC's current settings on first access. Never writes the PC config.
+QJsonObject ClientSettings(const HostApi::Client& client, const GameEntry& game) {
+	bool       seeded = false;
+	const auto stored = ClientProfiles::ReadGame(client.id, game.id, &seeded);
+	if (seeded) {
+		return stored.value(QStringLiteral("settings")).toObject();
+	}
+	return QJsonObject::fromVariantMap(game.info->GameSettings());
+}
+
+// A Configuration carrying this client's effective settings, or the game's own when unscoped.
+std::unique_ptr<Configuration> EffectiveConfig(const HostApi::Client& client,
+                                               const GameEntry&       game) {
+	if (!client.scoped()) {
+		auto config = std::make_unique<Configuration>();
+		config->CopyGameInfoFrom(*game.info);
+		config->CopyEmulatorSettingsFrom(*game.info);
+		config->CopyGlobalOnlySettingsFrom(*game.info);
+		config->elf        = game.info->elf;
+		config->addons_dir = game.info->addons_dir;
+		config->basedir    = game.info->basedir;
+		return config;
+	}
+	return HostApi::ClientConfig(*game.info, ClientSettings(client, game));
+}
+
+// Persist a client's game profile (settings + cheat selection), leaving the other half untouched.
+QString SaveClientProfile(const HostApi::Client& client, const GameEntry& game,
+                          const QJsonObject& settings, const QJsonObject& cheats) {
+	bool seeded                        = false;
+	auto current                       = ClientProfiles::ReadGame(client.id, game.id, &seeded);
+	current[QStringLiteral("version")] = 1;
+	current[QStringLiteral("settings")] =
+	    settings.isEmpty() ? current.value(QStringLiteral("settings")) : settings;
+	current[QStringLiteral("cheats")] =
+	    cheats.isEmpty() ? current.value(QStringLiteral("cheats")) : cheats;
+	return ClientProfiles::WriteGame(client.id, game.id, current);
+}
+
+} // namespace
+
+void HostApi::Library(const Client& client, const std::function<void(HostReply)>& done) const {
 	const auto status = m_status();
 	QJsonArray games;
 	for (const auto& game: m_library->Games()) {
@@ -252,9 +349,13 @@ void HostApi::Library(const std::function<void(HostReply)>& done) const {
 		    {"running", !status.running_id.isEmpty() && status.running_id == game.id},
 		});
 	}
-	done(Json(200, {{"capabilities", QJsonArray {QStringLiteral("hid-tunnel-v1")}},
-	                {"pc_busy", status.pc_busy},
-	                {"games", games}}));
+	QJsonObject reply {{"capabilities", QJsonArray {QStringLiteral("hid-tunnel-v1")}},
+	                   {"pc_busy", status.pc_busy},
+	                   {"games", games}};
+	if (client.scoped()) {
+		reply["profile"] = QStringLiteral("device");
+	}
+	done(Json(200, reply));
 }
 
 void HostApi::Art(const QString& id, const QString& kind, const QString& if_none_match,
@@ -283,18 +384,37 @@ void HostApi::Art(const QString& id, const QString& kind, const QString& if_none
 	done(Error(404, QStringLiteral("no-art")));
 }
 
-void HostApi::GetSettings(const GameEntry& game, const std::function<void(HostReply)>& done) const {
-	done(Json(200, {{"revision", SettingsRevision(*game.info)},
+void HostApi::GetSettings(const GameEntry& game, const Client& client,
+                          const std::function<void(HostReply)>& done) const {
+	const auto config = EffectiveConfig(client, game);
+	if (config == nullptr) {
+		return done(Error(500, QStringLiteral("profile-corrupt")));
+	}
+	// Seed the device profile on first read so later PC changes do not flow into it.
+	if (client.scoped()) {
+		bool seeded = false;
+		(void)ClientProfiles::ReadGame(client.id, game.id, &seeded);
+		if (!seeded) {
+			(void)SaveClientProfile(client, game,
+			                        QJsonObject::fromVariantMap(config->GameSettings()), {});
+		}
+	}
+	done(Json(200, {{"revision", SettingsRevision(*config)},
 	                {"running", m_status().running_id == game.id},
-	                {"fields", SettingsSchema(*game.info)}}));
+	                {"scope", client.scoped() ? QStringLiteral("device") : QStringLiteral("pc")},
+	                {"fields", SettingsSchema(*config)}}));
 }
 
-void HostApi::PutSettings(const GameEntry& game, const QJsonObject& body,
+void HostApi::PutSettings(const GameEntry& game, const Client& client, const QJsonObject& body,
                           const std::function<void(HostReply)>& done) {
 	if (!m_status().running_id.isEmpty() && m_status().running_id == game.id) {
 		return done(Error(409, QStringLiteral("game-running")));
 	}
-	if (body.value(QStringLiteral("revision")).toString() != SettingsRevision(*game.info)) {
+	const auto config = EffectiveConfig(client, game);
+	if (config == nullptr) {
+		return done(Error(500, QStringLiteral("profile-corrupt")));
+	}
+	if (body.value(QStringLiteral("revision")).toString() != SettingsRevision(*config)) {
 		return done(Error(409, QStringLiteral("stale")));
 	}
 	const auto values = body.value(QStringLiteral("values"));
@@ -307,21 +427,59 @@ void HostApi::PutSettings(const GameEntry& game, const QJsonObject& body,
 			return done(Error(400, QStringLiteral("read-only-setting")));
 		}
 	}
-	// SaveGameSettings starts from the game's current values, so only the changed keys are sent.
+	// Both scopes speak choice text for enums; store the raw ("R1280X720") form.
 	for (const auto& f: FIELDS) {
 		const auto key = QString::fromLatin1(f.key);
 		if (QLatin1String(f.type) == QLatin1String("enum") && changes.value(key).isString()) {
 			changes[key] = RawText(changes.value(key).toString());
 		}
 	}
-	const auto error = m_library->SaveGameSettings(game.id, changes);
-	if (!error.isEmpty()) {
+	if (!client.scoped()) {
+		// SaveGameSettings starts from the game's current values, so only the changed keys are
+		// sent.
+		const auto error = m_library->SaveGameSettings(game.id, changes);
+		if (!error.isEmpty()) {
+			return done(Error(400, error));
+		}
+		return done(Json(200, {{"revision", SettingsRevision(*game.info)}}));
+	}
+	// Device scope: overlay onto the client's effective settings, validate, and store the whole
+	// map. The PC's Kyty.ini is never touched.
+	auto next = QJsonObject::fromVariantMap(config->GameSettings());
+	for (auto it = changes.constBegin(); it != changes.constEnd(); ++it) {
+		next[it.key()] = it.value();
+	}
+	const auto validated = ClientConfig(*game.info, next);
+	if (validated == nullptr) {
+		return done(Error(400, QStringLiteral("invalid")));
+	}
+	const auto canonical = QJsonObject::fromVariantMap(validated->GameSettings());
+	if (const auto error = SaveClientProfile(client, game, canonical, {}); !error.isEmpty()) {
 		return done(Error(400, error));
 	}
-	done(Json(200, {{"revision", SettingsRevision(*game.info)}}));
+	emit ClientProfileChanged();
+	done(Json(200, {{"revision", SettingsRevision(*validated)}}));
 }
 
-void HostApi::GetCheats(const GameEntry& game, const std::function<void(HostReply)>& done) const {
+void HostApi::ResetSettings(const GameEntry& game, const Client& client,
+                            const std::function<void(HostReply)>& done) {
+	if (client.scoped()) {
+		if (const auto error = ClientProfiles::RemoveGame(client.id, game.id); !error.isEmpty()) {
+			return done(Error(400, error));
+		}
+		(void)ClientProfiles::WritePatchPlan(client.id, game.id, {}, nullptr);
+		emit ClientProfileChanged();
+	}
+	// Returns the GET body; GetSettings re-seeds the now-missing device profile from the PC.
+	GetSettings(game, client, done);
+}
+
+void HostApi::GetTrophies(const GameEntry& game, const std::function<void(HostReply)>& done) const {
+	done(Json(200, Trophies(*game.info, QCoreApplication::applicationDirPath())));
+}
+
+void HostApi::GetCheats(const GameEntry& game, const Client& client,
+                        const std::function<void(HostReply)>& done) const {
 	const auto path = Cheats::PlanPath(TitleId(*game.info));
 	if (path.isEmpty()) {
 		return done(Json(200, {{"supported", false}, {"revision", ""}, {"mods", QJsonArray {}}}));
@@ -330,15 +488,24 @@ void HostApi::GetCheats(const GameEntry& game, const std::function<void(HostRepl
 	QJsonDocument document;
 	QJsonArray    mods;
 	QString       error;
+	QJsonObject   client_cheats;
+	if (client.scoped()) {
+		bool seeded   = false;
+		client_cheats = ClientProfiles::ReadGame(client.id, game.id, &seeded)
+		                    .value(QStringLiteral("cheats"))
+		                    .toObject();
+	}
 	if (!bytes.isEmpty()) {
 		error     = Cheats::ParseDocument(bytes, &document);
 		int index = 0;
 		for (const auto& value: document.object().value(QStringLiteral("mods")).toArray()) {
-			const auto mod = value.toObject();
-			mods.append(
-			    QJsonObject {{"index", index++},
-			                 {"name", mod.value(QStringLiteral("name")).toString()},
-			                 {"enabled", mod.value(QStringLiteral("enabled")).toBool(true)}});
+			const auto mod  = value.toObject();
+			const auto name = mod.value(QStringLiteral("name")).toString();
+			// Device scope shows this client's own selection, seeded from the plan's flag.
+			const bool enabled = client.scoped() && client_cheats.contains(name)
+			                         ? client_cheats.value(name).toBool()
+			                         : mod.value(QStringLiteral("enabled")).toBool(true);
+			mods.append(QJsonObject {{"index", index++}, {"name", name}, {"enabled", enabled}});
 		}
 	}
 	QJsonObject reply {{"supported", true}, {"revision", CheatRevision(bytes)}, {"mods", mods}};
@@ -348,8 +515,8 @@ void HostApi::GetCheats(const GameEntry& game, const std::function<void(HostRepl
 	done(Json(200, reply));
 }
 
-void HostApi::PutCheats(const GameEntry& game, const QJsonObject& body,
-                        const std::function<void(HostReply)>& done) const {
+void HostApi::PutCheats(const GameEntry& game, const Client& client, const QJsonObject& body,
+                        const std::function<void(HostReply)>& done) {
 	const auto path = Cheats::PlanPath(TitleId(*game.info));
 	if (path.isEmpty()) {
 		return done(Error(400, QStringLiteral("unsupported-title-id")));
@@ -377,10 +544,90 @@ void HostApi::PutCheats(const GameEntry& game, const QJsonObject& body,
 	if (updated.isNull()) {
 		return done(Error(400, QStringLiteral("selection-size-mismatch")));
 	}
-	if (!Cheats::SaveDocument(path, updated, bytes).isEmpty()) {
-		return done(Error(409, QStringLiteral("stale")));
+	if (!client.scoped()) {
+		if (!Cheats::SaveDocument(path, updated, bytes).isEmpty()) {
+			return done(Error(409, QStringLiteral("stale")));
+		}
+		return done(Json(200, {{"revision", CheatRevision(ReadCheatBytes(path))}}));
 	}
-	done(Json(200, {{"revision", CheatRevision(ReadCheatBytes(path))}}));
+	// Device scope: store the selection keyed by mod name, write the per-client plan, and NEVER
+	// touch _Patches/<TITLE>.json.
+	const auto  mods = document.object().value(QStringLiteral("mods")).toArray();
+	QJsonObject cheats;
+	bool        any_enabled = false;
+	for (qsizetype i = 0; i < mods.size(); ++i) {
+		cheats[mods[i].toObject().value(QStringLiteral("name")).toString()] = enabled[i];
+		any_enabled = any_enabled || enabled[i];
+	}
+	if (const auto error = SaveClientProfile(client, game, {}, cheats); !error.isEmpty()) {
+		return done(Error(400, error));
+	}
+	const auto plan = any_enabled ? updated.toJson() : QByteArray {};
+	if (const auto error = ClientProfiles::WritePatchPlan(client.id, game.id, plan, nullptr);
+	    !error.isEmpty()) {
+		return done(Error(400, error));
+	}
+	emit ClientProfileChanged();
+	done(Json(200, {{"revision", CheatRevision(bytes)}}));
+}
+
+QJsonObject HostApi::Trophies(const Configuration& info, const QString& runtime_directory) {
+	static const QRegularExpression file_pattern(QStringLiteral("^trophy(\\d+)\\.ucp$"));
+	const auto                      grade_name = [](int grade) -> QString {
+		switch (grade) {
+			case 1: return QStringLiteral("platinum");
+			case 2: return QStringLiteral("gold");
+			case 3: return QStringLiteral("silver");
+			case 4: return QStringLiteral("bronze");
+			default: return QStringLiteral("bronze");
+		}
+	};
+	QJsonArray  trophies;
+	int         unlocked_count = 0;
+	int         total          = 0;
+	const auto  reader         = Common::OpenArchive(GameContent::ToPath(info.basedir));
+	QStringList files;
+	for (const auto& file: GameContent::ListFiles(
+	         info.basedir, QString::fromLatin1(Common::Trophies::PackageDirectory))) {
+		if (file_pattern.match(QFileInfo(file).fileName()).hasMatch()) {
+			files.append(file);
+		}
+	}
+	files.sort();
+	for (const auto& file: files) {
+		const auto label = file_pattern.match(QFileInfo(file).fileName()).captured(1).toUInt();
+		const auto package =
+		    Common::Trophies::LoadPackage(GameContent::ToPath(file), info.console_language);
+		const auto unlocks = Common::Trophies::LoadUnlockDataMigrating(
+		    GameContent::ToPath(runtime_directory), info.title_id.toStdString(), info.user_id,
+		    label);
+		for (const auto& [id, trophy]: package.trophies) {
+			const bool is_unlocked = unlocks.unlocked.contains(id);
+			++total;
+			if (is_unlocked) {
+				++unlocked_count;
+			}
+			QJsonObject entry {{"id", id},
+			                   {"name", QString::fromStdString(trophy.name)},
+			                   {"detail", QString::fromStdString(trophy.description)},
+			                   {"grade", grade_name(trophy.grade)},
+			                   {"hidden", trophy.hidden},
+			                   {"unlocked", is_unlocked}};
+			if (is_unlocked) {
+				const auto found = unlocks.timestamps.find(id);
+				if (found != unlocks.timestamps.end()) {
+					entry["unlocked_at"] =
+					    QDateTime::fromMSecsSinceEpoch(
+					        static_cast<qint64>((found->second - Common::Trophies::UnixEpochTick) /
+					                            1000),
+					        QTimeZone::UTC)
+					        .toString(Qt::ISODate);
+				}
+			}
+			trophies.append(entry);
+		}
+	}
+	return {{"trophies", trophies}, {"unlocked", unlocked_count}, {"total", total}};
 }
 
 void HostApi::Enqueue(std::function<void()> job) {
