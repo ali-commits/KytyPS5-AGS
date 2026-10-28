@@ -401,6 +401,8 @@ bool StreamingBackend::WriteConfiguration() {
 	}
 	config += "kyty_socket = " + m_socket + '\n';
 	if (!m_api_socket.isEmpty()) config += "kyty_api_socket = " + m_api_socket + '\n';
+	// Phone pairing reads this file on each attempt; a missing file just disables password pairing.
+	config += "ags_pairing_verifier = " + profile.filePath("pairing-srp.json") + '\n';
 	config += "audio_sink = " + m_audio.Sink() + '\n';
 	if (!m_settings.adapter.isEmpty()) config += "adapter_name = " + m_settings.adapter + '\n';
 	for (const auto& item: QList<QPair<QString, QString>> {{"file_apps", "apps.json"},

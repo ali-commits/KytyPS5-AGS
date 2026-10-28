@@ -1,5 +1,6 @@
 #include "streamingWidget.h"
 
+#include "agsPairing.h"
 #include "hostControlClient.h"
 
 #include <QApplication>
@@ -8,6 +9,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -17,6 +19,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QNetworkInterface>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -225,6 +228,66 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_pair = new QPushButton(tr("Pair selected client"), pairing);
 	m_pair->setObjectName("streamPair");
 	pair_layout->addWidget(m_pair);
+
+	// AGS phone pairing: a password the phone enters instead of a PIN. The
+	// launcher stores only salt + verifier in an owner-only file the host reads.
+	auto* ags_line = new QFrame(pairing);
+	ags_line->setFrameShape(QFrame::HLine);
+	ags_line->setFrameShadow(QFrame::Sunken);
+	pair_layout->addWidget(ags_line);
+	auto* ags_title = new QLabel(tr("Phone pairing password"), pairing);
+	ags_title->setStyleSheet("font-weight: bold;");
+	pair_layout->addWidget(ags_title);
+	auto* ags_hint = new QLabel(
+	    tr("Set a password of at least %1 characters. AGS Phone pairs by entering it, with no "
+	       "action needed on this PC. Only a salted verifier is stored here, never the password.")
+	        .arg(AgsPairing::MINIMUM_PASSWORD_LENGTH),
+	    pairing);
+	ags_hint->setWordWrap(true);
+	pair_layout->addWidget(ags_hint);
+	auto* ags_row  = new QHBoxLayout;
+	m_ags_password = new QLineEdit(pairing);
+	m_ags_password->setObjectName("streamAgsPassword");
+	m_ags_password->setEchoMode(QLineEdit::Password);
+	m_ags_password->setMaxLength(128);
+	m_ags_password->setPlaceholderText(tr("New password"));
+	ags_row->addWidget(m_ags_password, 1);
+	m_ags_set = new QPushButton(tr("Set password"), pairing);
+	m_ags_set->setObjectName("streamAgsSet");
+	ags_row->addWidget(m_ags_set);
+	m_ags_remove = new QPushButton(tr("Remove"), pairing);
+	m_ags_remove->setObjectName("streamAgsRemove");
+	ags_row->addWidget(m_ags_remove);
+	pair_layout->addLayout(ags_row);
+	m_ags_status = new QLabel(pairing);
+	m_ags_status->setObjectName("streamAgsStatus");
+	m_ags_status->setWordWrap(true);
+	m_ags_status->setTextFormat(Qt::PlainText);
+	pair_layout->addWidget(m_ags_status);
+
+	m_ags_set->setEnabled(false);
+	connect(m_ags_password, &QLineEdit::textChanged, this, [this](const QString& text) {
+		m_ags_set->setEnabled(text.size() >= AgsPairing::MINIMUM_PASSWORD_LENGTH);
+	});
+	connect(m_ags_set, &QPushButton::clicked, this, [this] {
+		QString error;
+		if (AgsPairing::SetPassword(AgsPairing::VerifierFilePath(), m_ags_password->text(),
+		                            &error)) {
+			m_ags_password->clear();
+		} else {
+			QMessageBox::warning(this, tr("Phone pairing password"), error);
+		}
+		UpdateAgsPairingStatus();
+	});
+	connect(m_ags_remove, &QPushButton::clicked, this, [this] {
+		QString error;
+		if (!AgsPairing::RemovePassword(AgsPairing::VerifierFilePath(), &error)) {
+			QMessageBox::warning(this, tr("Phone pairing password"), error);
+		}
+		UpdateAgsPairingStatus();
+	});
+	UpdateAgsPairingStatus();
+
 	devices->addWidget(pairing, 1);
 	auto* clients        = new QGroupBox(tr("Paired clients"), content);
 	auto* clients_layout = new QVBoxLayout(clients);
@@ -379,6 +442,13 @@ void StreamingWidget::ScheduleApply() {
 	// Before the daemon's stored values arrive, an edit would overwrite them with defaults.
 	if (m_loading_prefs || !m_prefs_loaded) return;
 	m_autosave->start();
+}
+void StreamingWidget::UpdateAgsPairingStatus() {
+	const bool set = AgsPairing::VerifierExists(AgsPairing::VerifierFilePath());
+	m_ags_status->setText(set ? tr("A phone pairing password is set.")
+	                          : tr("No phone pairing password is set."));
+	m_ags_remove->setEnabled(set);
+	m_ags_set->setText(set ? tr("Change password") : tr("Set password"));
 }
 void StreamingWidget::OnStatus(const QJsonObject& status) {
 	m_host_status = status;

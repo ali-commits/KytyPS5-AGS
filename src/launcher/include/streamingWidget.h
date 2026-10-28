@@ -31,6 +31,7 @@ private:
 	void               ApplyPreferences(const QJsonObject& preferences);
 	bool               Apply();
 	void               ScheduleApply();
+	void               UpdateAgsPairingStatus();
 	HostControlClient* m_host;
 	QJsonObject        m_host_status;
 	QString            m_daemon_error;
@@ -69,6 +70,10 @@ private:
 	QListWidget*       m_clients;
 	QLineEdit*         m_pin;
 	QLineEdit*         m_name;
+	QLineEdit*         m_ags_password;
+	QPushButton*       m_ags_set;
+	QPushButton*       m_ags_remove;
+	QLabel*            m_ags_status;
 	QPlainTextEdit*    m_logs;
 	QGroupBox*         m_quality;
 };

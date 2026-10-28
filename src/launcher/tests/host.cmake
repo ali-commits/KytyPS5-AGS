@@ -3,6 +3,8 @@
 get_filename_component(host_launcher "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 get_filename_component(host_root "${host_launcher}/../.." ABSOLUTE)
 find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets Test)
+# AGS phone pairing verifier math links OpenSSL (agsPairing.cpp).
+find_package(OpenSSL REQUIRED)
 file(GLOB host_sources "${host_launcher}/src/*.cpp" "${host_launcher}/include/*.h")
 list(REMOVE_ITEM host_sources "${host_launcher}/src/main.cpp")
 add_executable(launcher_host_tests
@@ -12,7 +14,7 @@ set_target_properties(launcher_host_tests PROPERTIES AUTOMOC ON AUTOUIC ON AUTOR
     AUTOUIC_SEARCH_PATHS "${host_launcher}/forms")
 target_include_directories(launcher_host_tests PRIVATE
     "${host_launcher}/include" "${host_launcher}/src" "${host_root}/src")
-target_link_libraries(launcher_host_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static)
+target_link_libraries(launcher_host_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static OpenSSL::Crypto)
 if(TARGET common)
     target_link_libraries(launcher_host_tests PRIVATE common kyty_git_version Vulkan::Headers
         LibAtrac9 FFmpeg::ffmpeg)

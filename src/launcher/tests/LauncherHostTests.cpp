@@ -1,3 +1,4 @@
+#include "agsPairing.h"
 #include "cheatFile.h"
 #include "gameLibrary.h"
 #include "hostApi.h"
@@ -692,6 +693,72 @@ private slots:
 		QCOMPARE(body["total"].toInt(), 0);
 		QCOMPARE(body["unlocked"].toInt(), 0);
 		QCOMPARE(body["trophies"].toArray().size(), 0);
+	}
+
+	// Shared cross-repo vector: this exact (salt, password) -> verifier must match
+	// the host's own test (kyty-streaming-sunshine/tests/unit/test_ags_pairing.cpp,
+	// AgsSrpSharedVector). If either side's SRP math drifts, both tests break.
+	void agsVerifierMatchesSharedVector() {
+		QByteArray       salt     = QByteArray::fromHex("000102030405060708090a0b0c0d0e0f");
+		const QString    password = "ags-shared-vector-pw";
+		const QByteArray expected =
+		    "f7fa4eb192fd7e68ba3dcaad41d73f293e5257503498011a9efb162e17f584a6"
+		    "69f1b6bb3b5dfb2957feeb6a61f084f02deec7c194cc3072f4e9d1ec2c1ff136"
+		    "4382f0d3a7aa64fcee8ee0e7e123daffed2f8dcb394f21ea1761063b99062b2b"
+		    "28685c9d0c5507e582995c7404b1d9870be575496a683e602cf4030bf3a20dcf"
+		    "3a581ce8ea1944156fee27f697be7f38cbc4c7604a677036710e339b23656d37"
+		    "e37d13eae5b2d1fc182bc2fe1a62db640255b8b22c6b23617aa3f41868854c3e"
+		    "f5bc5c17b672a1e5d87faca84123df25f704cf6a59571e63d9087ef8153e732d"
+		    "815797b0be4d0de79d9aa6697bc6eae0b007f751c1fd16f342c2addbc01a7230"
+		    "d168637738b21b21044023377f93e365280aeaca91c08c175520513b06633f2b"
+		    "60e3d00c0b801eb2cf59ae6458d7b4e7da1cbac41b870efc2afd59e06ec1d260"
+		    "6bca0ea46159de6ea9e972db0c2a4e012a958140821526a8fa2100cd8e1221b1"
+		    "b6c67fd860cd4a54fdf9731d27c8d25edd3ff7010dfe00a7377c14ad487afe92";
+		QCOMPARE(AgsPairing::ComputeVerifierHex(salt, password), expected);
+	}
+
+	// Setting a password writes an owner-only JSON record; removing it deletes the file.
+	void agsSetPasswordWritesPrivateFile() {
+		QTemporaryDir dir;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", dir.path().toUtf8());
+		const QString path = AgsPairing::VerifierFilePath();
+		QVERIFY(!AgsPairing::VerifierExists(path));
+
+		QString error;
+		QVERIFY2(AgsPairing::SetPassword(path, "longenough8", &error), qPrintable(error));
+		QVERIFY(AgsPairing::VerifierExists(path));
+
+		// Owner-only permissions (0600).
+		auto perms = QFile::permissions(path);
+		QCOMPARE(perms &
+		             (QFile::ReadGroup | QFile::WriteGroup | QFile::ReadOther | QFile::WriteOther),
+		         QFile::Permissions {});
+		QVERIFY(perms & QFile::ReadOwner);
+		QVERIFY(perms & QFile::WriteOwner);
+
+		// The record carries the production group/hash/identity and hex salt + verifier.
+		auto record = QJsonDocument::fromJson(ReadFile(path)).object();
+		QCOMPARE(record["group"].toString(), QStringLiteral("rfc5054-3072"));
+		QCOMPARE(record["hash"].toString(), QStringLiteral("sha256"));
+		QCOMPARE(record["identity"].toString(), QStringLiteral("ags"));
+		QCOMPARE(record["salt"].toString().size(), 32);      // 16 bytes hex
+		QCOMPARE(record["verifier"].toString().size(), 768); // 384 bytes hex (N width)
+
+		QVERIFY(AgsPairing::RemovePassword(path, &error));
+		QVERIFY(!AgsPairing::VerifierExists(path));
+		qunsetenv("KYTY_STREAMING_CONFIG_DIR");
+	}
+
+	// A too-short password is refused and writes nothing.
+	void agsShortPasswordRejected() {
+		QTemporaryDir dir;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", dir.path().toUtf8());
+		const QString path = AgsPairing::VerifierFilePath();
+		QString       error;
+		QVERIFY(!AgsPairing::SetPassword(path, "short", &error));
+		QVERIFY(!error.isEmpty());
+		QVERIFY(!AgsPairing::VerifierExists(path));
+		qunsetenv("KYTY_STREAMING_CONFIG_DIR");
 	}
 };
 
