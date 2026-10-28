@@ -228,7 +228,7 @@ bool HostDaemon::Start(QString* error) {
 	if (m_lock_fd < 0 || ::flock(m_lock_fd, LOCK_EX | LOCK_NB) != 0) {
 		if (error != nullptr) {
 			*error = (m_lock_fd >= 0 && errno == EWOULDBLOCK)
-			             ? QStringLiteral("Kyty host is already running")
+			             ? QStringLiteral("AGS host is already running")
 			             : QStringLiteral("Cannot lock %1/daemon.lock.").arg(directory);
 		}
 		if (m_lock_fd >= 0) ::close(m_lock_fd);

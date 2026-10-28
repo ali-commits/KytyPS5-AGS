@@ -384,8 +384,8 @@ bool StreamingBackend::WriteConfiguration() {
 	m_apps_reload_pending = false;
 	QString config = "capture = kyty\nencoder = nvenc\nkyty_private_audio = true\nkyty_input = "
 	                 "true\nmanagement_bind_address = 127.0.0.1\nupnp = disabled\nsystem_tray = "
-	                 "disabled\norigin_web_ui_allowed = pc\nsunshine_name = Kyty PS5 "
-	                 "Streaming\nstream_audio = enabled\nav1_mode = 1\n";
+	                 "disabled\norigin_web_ui_allowed = pc\nsunshine_name = Ali's Game Station"
+	                 "\nstream_audio = enabled\nav1_mode = 1\n";
 	config += QStringLiteral("port = %1\nmax_bitrate = %2\nhevc_mode = %3\n")
 	              .arg(m_settings.port)
 	              .arg(150000)
@@ -426,7 +426,7 @@ void StreamingBackend::StartProcess() {
 	m_host.setProcessEnvironment(environment);
 	m_host.start(m_settings.backend, {QDir(m_profile).filePath("host.conf")});
 	m_poll.start();
-	Log("Starting private Kyty host. Waiting for authenticated loopback management readiness.");
+	Log("Starting private AGS host. Waiting for authenticated loopback management readiness.");
 }
 void StreamingBackend::Fail(const QString& error) {
 	m_error  = error;
