@@ -197,7 +197,7 @@ QJsonArray HostApi::SettingsSchema(const Configuration& info) {
 
 void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> done) {
 	static const QRegularExpression ROUTE(QStringLiteral(
-	    R"(\A/kyty/v1/(?:(library)|art/([0-9a-f]{64})/(icon|background)|games/([0-9a-f]{64})/)"
+	    R"(\A/kyty/v1/(?:(library)|(host/metrics)|art/([0-9a-f]{64})/(icon|background)|games/([0-9a-f]{64})/)"
 	    R"((settings|settings/reset|trophies|trophies/icon/[0-9]{1,3}-[0-9]{1,4}|cheats|cheats/remote|)"
 	    R"(cheats/remote/fetch))\z)"));
 
@@ -226,13 +226,15 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	}
 
 	const bool    is_library     = !match.captured(1).isEmpty();
-	const bool    is_art         = !match.captured(2).isEmpty();
-	const QString sub            = match.captured(5);
+	const bool    is_metrics     = !match.captured(2).isEmpty();
+	const bool    is_art         = !match.captured(3).isEmpty();
+	const QString sub            = match.captured(6);
 	const bool    is_trophy_icon = sub.startsWith(QLatin1String("trophies/icon/"));
-	const bool    reads          = is_library || is_art || sub == QLatin1String("cheats/remote") ||
-	                               sub == QLatin1String("trophies") || is_trophy_icon;
-	const bool    writes = sub == QLatin1String("settings") || sub == QLatin1String("cheats");
-	const bool    posts =
+	const bool reads  = is_library || is_metrics || is_art ||
+	                    sub == QLatin1String("cheats/remote") || sub == QLatin1String("trophies") ||
+	                    is_trophy_icon;
+	const bool writes = sub == QLatin1String("settings") || sub == QLatin1String("cheats");
+	const bool posts =
 	    sub == QLatin1String("cheats/remote/fetch") || sub == QLatin1String("settings/reset");
 	if (!((method == QLatin1String("GET") && (reads || writes)) ||
 	      (method == QLatin1String("PUT") && writes) ||
@@ -242,11 +244,14 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	if (is_library) {
 		return Library(client, done);
 	}
+	if (is_metrics) {
+		return Metrics(done);
+	}
 	if (is_art) {
-		return Art(match.captured(2), match.captured(3),
+		return Art(match.captured(3), match.captured(4),
 		           request.value(QStringLiteral("if_none_match")).toString(), done);
 	}
-	const auto* game = m_library->Find(match.captured(4));
+	const auto* game = m_library->Find(match.captured(5));
 	if (game == nullptr) {
 		return done(Error(404, QStringLiteral("unknown-game")));
 	}
@@ -371,6 +376,19 @@ void HostApi::Library(const Client& client, const std::function<void(HostReply)>
 		reply["profile"] = QStringLiteral("device");
 	}
 	done(Json(200, reply));
+}
+
+void HostApi::Metrics(const std::function<void(HostReply)>& done) {
+	const auto  status = m_status();
+	QJsonObject game;
+	if (!status.running_id.isEmpty()) {
+		if (const auto* entry = m_library->Find(status.running_id); entry != nullptr) {
+			game = QJsonObject {{"title_id", entry->info->title_id},
+			                    {"name", entry->info->name},
+			                    {"running", true}};
+		}
+	}
+	done(Json(200, m_metrics.Build(game)));
 }
 
 void HostApi::Art(const QString& id, const QString& kind, const QString& if_none_match,
