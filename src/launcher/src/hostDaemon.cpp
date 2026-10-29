@@ -72,7 +72,8 @@ StreamingSettings ReadSettings() {
 bool Same(const StreamingSettings& a, const StreamingSettings& b) {
 	return a.port == b.port && a.resolution == b.resolution && a.fps == b.fps &&
 	       a.bitrate == b.bitrate && a.codec == b.codec && a.adapter == b.adapter &&
-	       a.local_audio == b.local_audio && a.show_local == b.show_local;
+	       a.local_audio == b.local_audio && a.show_local == b.show_local &&
+	       a.disconnect_grace == b.disconnect_grace && a.host_name == b.host_name;
 }
 
 } // namespace
@@ -353,7 +354,9 @@ QJsonObject HostDaemon::PreferencesObject() const {
 	        {"codec", s.codec},
 	        {"adapter", s.adapter},
 	        {"local_audio", s.local_audio},
-	        {"show_local", s.show_local}};
+	        {"show_local", s.show_local},
+	        {"disconnect_grace", s.disconnect_grace},
+	        {"host_name", s.host_name}};
 }
 
 QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
@@ -383,7 +386,9 @@ QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
 	if (!(number("port", &next.port) && text("resolution", &next.resolution) &&
 	      number("fps", &next.fps) && number("bitrate", &next.bitrate) &&
 	      text("codec", &next.codec) && text("adapter", &next.adapter) &&
-	      flag("local_audio", &next.local_audio) && flag("show_local", &next.show_local))) {
+	      flag("local_audio", &next.local_audio) && flag("show_local", &next.show_local) &&
+	      number("disconnect_grace", &next.disconnect_grace) &&
+	      text("host_name", &next.host_name))) {
 		return Fail(QStringLiteral("Invalid preference type."));
 	}
 	if (const auto problem = next.Validate(); !problem.isEmpty()) return Fail(problem);

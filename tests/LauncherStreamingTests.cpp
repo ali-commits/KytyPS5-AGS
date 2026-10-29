@@ -2238,6 +2238,109 @@ while :; do sleep 0.05; done
 		QCOMPARE(run("99999999-9999-9999-9999-999999999999"), QByteArray("PC"));
 #endif
 	}
+	void hostConfigWritesHostNameAndDisconnectGrace() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}\n"));
+		FixtureEnvironment environment(dir.path());
+		const auto         profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend          = dir.filePath("host");
+		settings.port             = FreeBasePort();
+		settings.host_name        = "Living room rig";
+		settings.disconnect_grace = 45;
+		StreamingBackend backend(profile);
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(QDir(profile).filePath("host.conf"));
+		QVERIFY(config.contains("sunshine_name = Living room rig\n"));
+		QVERIFY(!config.contains("Ali's Game Station")); // the hardcoded name is gone
+		QVERIFY(config.contains("kyty_disconnect_grace = 45\n"));
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+	void hostConfigFallsBackToMachineHostNameWhenBlank() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}\n"));
+		FixtureEnvironment environment(dir.path());
+		const auto         profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		settings.host_name.clear(); // blank -> machine hostname
+		StreamingBackend backend(profile);
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(QDir(profile).filePath("host.conf"));
+		const auto expected =
+		    "sunshine_name = " + StreamingSettings::DefaultHostName().toUtf8() + "\n";
+		QVERIFY2(config.contains(expected), expected.constData());
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+	void hostNameAndGraceValidation() {
+		StreamingSettings s;
+		QVERIFY(s.Validate().isEmpty()); // defaults: blank name, grace 20
+		s.host_name = "  Trimmed name  ";
+		QVERIFY(s.Validate().isEmpty());
+		QCOMPARE(s.EffectiveHostName(), QString("Trimmed name"));
+		s.host_name = QString(41, 'x'); // one over the 40-char ceiling
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name = "bad=name";
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name = "line\nbreak";
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name.clear();
+		QCOMPARE(s.EffectiveHostName(), StreamingSettings::DefaultHostName());
+		QVERIFY(s.Validate().isEmpty());
+		s.disconnect_grace = 4; // below the 5s floor and not 0
+		QVERIFY(!s.Validate().isEmpty());
+		s.disconnect_grace = 601;
+		QVERIFY(!s.Validate().isEmpty());
+		s.disconnect_grace = 0; // immediate is allowed at the config level
+		QVERIFY(s.Validate().isEmpty());
+		s.disconnect_grace = 600;
+		QVERIFY(s.Validate().isEmpty());
+	}
+	void hostNameAndGraceRoundTripThroughDaemonPreferences() {
+		QTemporaryDir     dir;
+		FakeHostDaemon    fake(dir.path());
+		fake.preferences  = FakeHostDaemon::DefaultPreferences();
+		fake.preferences.insert("disconnect_grace", 30);
+		fake.preferences.insert("host_name", "Studio");
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           grace = widget.findChild<QSpinBox*>("streamDisconnectGrace");
+		auto*           name  = widget.findChild<QLineEdit*>("streamHostName");
+		QVERIFY(grace);
+		QVERIFY(name);
+		QTRY_COMPARE(grace->value(), 30);
+		QTRY_COMPARE(name->text(), QString("Studio"));
+		grace->setValue(90);
+		name->setText("Den");
+		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		QTRY_VERIFY(fake.preferences.value("disconnect_grace").toInt() == 90 &&
+		            fake.preferences.value("host_name").toString() == "Den");
+		const auto last = fake.Requests("set-preferences").last();
+		QCOMPARE(last.value("disconnect_grace").toInt(), 90);
+		QCOMPARE(last.value("host_name").toString(), QString("Den"));
+	}
 };
 QTEST_MAIN(LauncherStreamingTests)
 #include "LauncherStreamingTests.moc"
