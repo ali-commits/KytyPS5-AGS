@@ -84,6 +84,30 @@ int main() {
 		      "stretch is full-to-full");
 	}
 
+	// The exact case the host negotiates for an OPPO-class phone: a 16:9 game frame onto a
+	// 2412x1080 (Native) stream surface. Fit/Fill/Stretch MUST differ here, which is why the
+	// user's picture-fit choice is only visible at a non-16:9 stream size.
+	{
+		const auto fit     = ComputeBlitRect(1920, 1080, 2412, 1080, AspectMode::Fit);
+		const auto fill    = ComputeBlitRect(1920, 1080, 2412, 1080, AspectMode::Fill);
+		const auto stretch = ComputeBlitRect(1920, 1080, 2412, 1080, AspectMode::Stretch);
+		// Fit pillarboxes (surface wider than 16:9): narrower dst, background cleared.
+		Check(fit.clear_background, "fit 2412 pillarboxes");
+		Check(DstW(fit) < 2412, "fit 2412 does not cover full width");
+		Check(SrcW(fit) == 1920 && SrcH(fit) == 1080, "fit 2412 shows the whole frame");
+		// Fill and Stretch both cover the whole surface, so their dst differs from Fit's.
+		Check(DstW(fill) == 2412 && DstH(fill) == 1080, "fill 2412 covers surface");
+		Check(DstW(stretch) == 2412 && DstH(stretch) == 1080, "stretch 2412 covers surface");
+		Check(DstW(fill) != DstW(fit), "fill dst differs from fit at 2412");
+		Check(DstW(stretch) != DstW(fit), "stretch dst differs from fit at 2412");
+		// Fill crops the source height to cover; Stretch keeps the whole source and distorts.
+		Check(SrcH(fill) < 1080 && !fill.clear_background, "fill 2412 crops src, no bars");
+		Check(SrcW(stretch) == 1920 && SrcH(stretch) == 1080 && !stretch.clear_background,
+		      "stretch 2412 uses whole src, no bars");
+		// Fill vs Stretch: same dst, but Fill crops src height while Stretch does not -> differ.
+		Check(SrcH(fill) != SrcH(stretch), "fill and stretch differ in src at 2412");
+	}
+
 	// Tall surface (portrait phone 1080x2400) from a 16:9 frame.
 	// Fit here fits WIDTH -> letterbox top/bottom.
 	{

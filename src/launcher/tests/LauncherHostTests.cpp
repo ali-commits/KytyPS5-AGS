@@ -613,6 +613,55 @@ private slots:
 		QCOMPARE(SettingsValue(got, "vblank_frequency"), QString("90"));
 	}
 
+	void clientPictureFitReachesLaunchArguments() {
+		// The phone's per-device picture-fit (stream_aspect_mode) must travel through the device
+		// PUT into the launch.json arguments the emulator is started with.
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+
+		const auto aspect_arg = [&] {
+			const auto catalog = library.ClientCatalog(QStringLiteral("/opt/kyty/kyty_emulator"));
+			const auto entries = catalog.value(uuid);
+			for (const auto& e: entries) {
+				if (e.id != id) continue;
+				const auto i = e.arguments.indexOf(QStringLiteral("--stream-aspect"));
+				return i >= 0 && i + 1 < e.arguments.size() ? e.arguments.at(i + 1) : QString {};
+			}
+			return QString {};
+		};
+
+		// Seed the device profile and set picture-fit to "fill" the way the phone does.
+		const auto rev = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body)
+		                     .object()["revision"]
+		                     .toString();
+		const auto put = Call(
+		    api,
+		    ClientReq("PUT", path, uuid,
+		              {{"revision", rev},
+		               {"values", QJsonObject {{"stream_aspect_mode", QStringLiteral("fill")}}}}));
+		QCOMPARE(put.status, 200);
+		// It must be stored...
+		auto got = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(SettingsValue(got, "stream_aspect_mode"), QString("fill"));
+		// ...and it must reach the launch arguments the emulator actually receives.
+		QCOMPARE(aspect_arg(), QString("fill"));
+
+		// Changing it again flows through just as well (stretch), proving the value is not pinned.
+		const auto rev2 = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body)
+		                      .object()["revision"]
+		                      .toString();
+		QCOMPARE(Call(api, ClientReq("PUT", path, uuid,
+		                             {{"revision", rev2},
+		                              {"values", QJsonObject {{"stream_aspect_mode",
+		                                                       QStringLiteral("stretch")}}}}))
+		             .status,
+		         200);
+		QCOMPARE(aspect_arg(), QString("stretch"));
+	}
+
 	void twoClientsAreIsolated() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
