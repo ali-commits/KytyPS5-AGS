@@ -460,6 +460,18 @@ void HostApi::PutSettings(const GameEntry& game, const Client& client, const QJs
 			return done(Error(400, QStringLiteral("read-only-setting")));
 		}
 	}
+	// Settings are stored as text; clients may send typed JSON (true, 5). Normalise scalars here.
+	for (auto it = changes.begin(); it != changes.end(); ++it) {
+		const auto v = it.value();
+		if (v.isBool()) {
+			it.value() = v.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+		} else if (v.isDouble()) {
+			const double d = v.toDouble();
+			it.value()     = d == static_cast<double>(static_cast<qint64>(d))
+			                     ? QString::number(static_cast<qint64>(d))
+			                     : QString::number(d);
+		}
+	}
 	// Both scopes speak choice text for enums; store the raw ("R1280X720") form.
 	for (const auto& f: FIELDS) {
 		const auto key = QString::fromLatin1(f.key);

@@ -590,6 +590,29 @@ private slots:
 		QVERIFY(QFileInfo::exists(config.filePath("clients/" + uuid + "/games/" + id + ".json")));
 	}
 
+	void clientPutAcceptsTypedJsonValues() {
+		// The phone sends ints and bools as JSON types, not text; they must not be rejected.
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString a    = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+		const auto    rev  = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, a)).body)
+		                         .object()["revision"]
+		                         .toString();
+		const auto    put =
+		    Call(api, ClientReq("PUT", path, a,
+		                        {{"revision", rev},
+		                         {"values", QJsonObject {{"trophy_duration_seconds", 5},
+		                                                 {"perf_overlay_enabled", true},
+		                                                 {"vblank_frequency", 90}}}}));
+		QCOMPARE(put.status, 200);
+		auto got = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, a)).body).object();
+		QCOMPARE(SettingsValue(got, "trophy_duration_seconds"), QString("5"));
+		QCOMPARE(SettingsValue(got, "perf_overlay_enabled"), QString("true"));
+		QCOMPARE(SettingsValue(got, "vblank_frequency"), QString("90"));
+	}
+
 	void twoClientsAreIsolated() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
