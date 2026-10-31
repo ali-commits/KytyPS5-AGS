@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Controller-only Kyty client. Private identity is read only from --config."""
+import argparse
+import hashlib
+import hmac
+import http.client
+import json
+import os
+import stat
+from pathlib import Path
+import queue
+import ssl
+import threading
+import time
+from controller import Controller, Feedback
+
+class Transport:
+
+    def __init__(self, config):
+        self.pin = config['server_sha256'].replace(':', '').lower()
+        if len(self.pin) != 64 or any((c not in '0123456789abcdef' for c in self.pin)):
+            raise ValueError('server_sha256 must be the SHA256 of the server DER certificate')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # Exact DER pin below replaces CA/hostname authentication.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(config['cert'], config['key'])
+        self.connection = http.client.HTTPSConnection(config['host'], int(config.get('port', 47984)), timeout=0.15, context=context)
+
+    def post(self, payload):
+        try:
+            if self.connection.sock is None:
+                self.connection.connect()
+            actual = hashlib.sha256(self.connection.sock.getpeercert(binary_form=True)).hexdigest()
+            if not hmac.compare_digest(self.pin, actual):
+                raise ValueError('Server certificate pin mismatch; check the trusted host fingerprint')
+            self.connection.request('POST', '/kyty/v1/relay', json.dumps(payload, allow_nan=False), {'Content-Type': 'application/json'})
+            response = self.connection.getresponse()
+            raw = response.read(16385)
+            if len(raw) > 16384:
+                raise ValueError('Host response exceeds size limit')
+            if response.status != 200:
+                detail = ''
+                try:
+                    detail = json.loads(raw).get('error', '')
+                except (ValueError, AttributeError):
+                    pass
+                if response.status == 409:
+                    raise RuntimeError('Start the Kyty game and TV stream, or disconnect the other laptop. ' + str(detail))
+                raise RuntimeError(f'Host returned HTTP {response.status}: {detail}')
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get('ok') is not True:
+                raise ValueError('Host rejected relay request')
+            return data
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        self.connection.close()
+
+class Network:
+    """One daemon owns TLS; SDL remains responsive during DNS/TLS/read delays."""
+
+    def __init__(self, config):
+        self.requests = queue.Queue()
+        self.results = queue.Queue()
+        self.config = config
+        self.thread = threading.Thread(target=self.run, daemon=True, name='kyty-tls')
+        self.thread.start()
+
+    def run(self):
+        transport = None
+        try:
+            transport = Transport(self.config)
+            while True:
+                item = self.requests.get()
+                if item is None:
+                    break
+                tag, payload = item
+                try:
+                    self.results.put((tag, transport.post(payload), None, time.monotonic()))
+                except Exception as e:
+                    self.results.put((tag, None, str(e), time.monotonic()))
+        except Exception as e:
+            self.results.put(('init', None, str(e), time.monotonic()))
+        finally:
+            if transport:
+                transport.close()
+
+    def send(self, tag, payload):
+        self.requests.put((tag, payload))
+
+    def close(self):
+        self.requests.put(None)
+
+class ControllerAudio:
+    """Bind one raw writer to the existing input relay and its PCM receiver."""
+    def __init__(self, controller, config, *, sink_factory=None, client_factory=None):
+        if sink_factory is None:
+            from native_audio import NativeAudio
+            sink_factory = NativeAudio
+        if client_factory is None:
+            from audio_client import AudioClient
+            client_factory = AudioClient
+        self.controller = controller
+        self.config = config
+        self.sink = sink_factory(serial=getattr(controller, 'serial', None))
+        self.client_factory = client_factory
+        self.client = None
+        self.attached = False
+
+    def start(self):
+        try:
+            self.controller.attach_output(self.sink)
+            self.attached = True
+            self.client = self.client_factory(self.config, self.sink)
+            self.client.start()
+        except Exception:
+            self.close()
+            raise
+
+    @property
+    def status(self):
+        return f'{self.client.status if self.client else "off"} · {self.sink.status}'
+
+    def close(self):
+        try:
+            if self.client is not None:
+                self.client.close()
+                self.client = None
+        finally:
+            if self.attached:
+                self.controller.detach_output()
+                self.attached = False
+            else:
+                self.sink.shutdown()
+
+
+class Worker:
+
+    def __init__(self, config):
+        self.config = config
+        self.commands = queue.Queue()
+        self.status = queue.Queue(maxsize=1)
+        self.relay_active = False
+        self.testing = False
+        self.thread = threading.Thread(target=self.run, daemon=True, name='kyty-sdl')
+        self.thread.start()
+
+    def publish(self, message):
+        try:
+            self.status.get_nowait()
+        except queue.Empty:
+            pass
+        self.status.put_nowait(message)
+
+    def run(self):
+        controller = None
+        network = None
+        feedback = None
+        session = None
+        pending = None
+        wanted = False
+        closing = False
+        sequence = 0
+        sent = 0
+        message = 'Ready. Connect when the game and TV stream are running.'
+        latency = 0
+        last_publish = 0
+        started = 0
+        audio = None
+        audio_attempted = False
+        audio_error = ''
+
+        def stop_audio():
+            nonlocal audio
+            if audio is not None:
+                audio.close()
+                audio = None
+        try:
+            controller = Controller()
+            feedback = Feedback(controller)
+            network = Network(self.config)
+            while True:
+                now = time.monotonic()
+                feedback.expire(now)
+                try:
+                    while True:
+                        command = self.commands.get_nowait()
+                        if command in ('test-speaker', 'test-haptics'):
+                            if session or wanted or pending:
+                                message = 'Disconnect the controller relay before running a test.'
+                                continue
+                            from reference_check import run_reference
+                            deferred = []
+
+                            def canceled():
+                                try:
+                                    while True:
+                                        deferred.append(self.commands.get_nowait())
+                                except queue.Empty:
+                                    return bool(deferred)
+
+                            self.testing = True
+                            kind = 2 if command == 'test-speaker' else 1
+                            self.publish('Running two-second controller test…\nDisconnect or close to stop.')
+                            try:
+                                result = run_reference(controller, kind, canceled=canceled)
+                                message = ('Test stopped.' if result['canceled'] else
+                                           f"{result['kind'].capitalize()} test finished · {result['reports_accepted']} reports accepted.")
+                            except Exception as exc:
+                                message = 'Controller test failed: ' + str(exc)
+                            finally:
+                                self.testing = False
+                                for item in deferred:
+                                    self.commands.put(item)
+                            continue
+                        elif command == 'connect':
+                            wanted = True
+                        else:
+                            wanted = False
+                            feedback.stop()
+                            stop_audio()
+                            if command == 'close':
+                                closing = True
+                except queue.Empty:
+                    pass
+                snapshot = controller.snapshot()
+                if not snapshot['connected']:
+                    feedback.stop()
+                    stop_audio()
+                    audio_attempted = False
+                try:
+                    tag, data, error, finished = network.results.get_nowait()
+                    latency = (finished - started) * 1000
+                    pending = None
+                    if error:
+                        feedback.stop()
+                        stop_audio()
+                        session = None
+                        wanted = False
+                        message = error
+                    elif tag == 'connect':
+                        session = data.get('session')
+                        if not isinstance(session, str) or not session:
+                            raise ValueError('Host omitted session')
+                        sequence = 0
+                        audio_attempted = False
+                        audio_error = ''
+                        message = 'Connected'
+                    elif tag == 'input' and session:
+                        if data.get('session') != session:
+                            raise ValueError('Host returned a different session')
+                        # Do not let a late reply restart expired feedback.
+                        if wanted and snapshot['connected'] and (now - started < 0.2):
+                            if self.config.get('native_audio', True) and not audio_attempted:
+                                audio_attempted = True
+                                try:
+                                    audio = ControllerAudio(controller, self.config)
+                                    audio.start()
+                                except Exception as exc:
+                                    audio = None
+                                    audio_error = str(exc)
+                            feedback.apply(data, started)
+                            feedback.expire(now)
+                        else:
+                            feedback.stop()
+                    elif tag == 'disconnect':
+                        session = None
+                        stop_audio()
+                        message = 'Disconnected'
+                except queue.Empty:
+                    pass
+                # One request in flight; no stale snapshot queue.
+                if pending is None:
+                    if session and (not wanted):
+                        pending = 'disconnect'
+                        payload = {'action': 'disconnect', 'session': session}
+                    elif session and wanted:
+                        sequence += 1
+                        sent += 1
+                        pending = 'input'
+                        payload = dict(snapshot, action='input', session=session, sequence=sequence)
+                    elif wanted:
+                        pending = 'connect'
+                        payload = {'action': 'connect'}
+                        message = 'Connecting…'
+                    else:
+                        payload = None
+                    if payload is not None:
+                        started = time.monotonic()
+                        network.send(pending, payload)
+                if pending and now - started >= 0.2:
+                    feedback.stop()
+                    stop_audio()
+                    wanted = False
+                    message = 'Host timed out; effects stopped. Reconnect after checking the host.'
+                if closing and (session is None and pending is None or now - started > 0.4):
+                    break
+                self.relay_active = bool(session or wanted or pending)
+                if now - last_publish >= 0.1:
+                    audio_status = audio.status if audio is not None else (audio_error or 'off')
+                    self.publish(f"{message}\nController battery: {controller.battery}\nInput snapshots: {sent} · Last response: {latency:.1f} ms\nFeedback: {('connected' if feedback.deadline else 'off')}\nController audio: {audio_status}")
+                    last_publish = now
+                time.sleep(0.01)
+        except Exception as e:
+            self.publish(str(e))
+        finally:
+            try:
+                stop_audio()
+            finally:
+                try:
+                    if controller:
+                        controller.close()
+                finally:
+                    if network:
+                        network.close()
+
+def load_config(path):
+    path = Path(path).expanduser()
+    if path.stat().st_mode & 0o077:
+        raise ValueError(f'Config must be private: chmod 600 {path}')
+    config = json.loads(path.read_text())
+    for field in ('host', 'cert', 'key', 'server_sha256'):
+        if not isinstance(config.get(field), str) or not config[field]:
+            raise ValueError(f'Missing config field: {field}')
+    for field in ('cert', 'key'):
+        value = Path(config[field]).expanduser()
+        if not value.is_absolute():
+            value = path.parent / value
+        config[field] = str(value)
+    if Path(config['key']).stat().st_mode & 0o077:
+        raise ValueError('Client key must be private (chmod 600)')
+    return config
+
+def acquire_app_lock(config_path):
+    """Keep another app instance from initializing a competing SDL writer."""
+    import fcntl
+    path = Path(config_path).expanduser().parent / 'app.lock'
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise RuntimeError('Controller app lock must be an owner-only regular file')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Kyty Controller is already running; use its existing window') from None
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True, help='Private JSON identity/config file')
+    parser.add_argument('--connect', action='store_true',
+                        help='Connect the controller relay without launching a game')
+    args = parser.parse_args()
+    import tkinter as tk
+    from tkinter import ttk
+    root = tk.Tk()
+    root.title('Kyty Controller')
+    root.geometry('680x360')
+    state = tk.StringVar(value='Loading configuration…')
+    ttk.Label(root, text='Kyty · Laptop controller', font=('', 16, 'bold')).pack(pady=12)
+    ttk.Label(root, textvariable=state, wraplength=645, justify='left').pack(fill='x', padx=16)
+    worker = None
+    instance_lock = None
+    try:
+        config = load_config(args.config)
+        instance_lock = acquire_app_lock(args.config)
+        worker = Worker(config)
+        if args.connect:
+            worker.commands.put('connect')
+    except Exception as e:
+        state.set(str(e))
+    row = ttk.Frame(root)
+    row.pack(pady=16)
+
+    def command(value):
+        if worker:
+            worker.commands.put(value)
+    ttk.Button(row, text='Connect', command=lambda: command('connect')).pack(side='left', padx=6)
+    ttk.Button(row, text='Disconnect', command=lambda: command('disconnect')).pack(side='left', padx=6)
+    tests = ttk.Frame(root)
+    tests.pack(pady=6)
+    speaker_test = ttk.Button(tests, text='Test speaker (2 seconds)', command=lambda: command('test-speaker'))
+    speaker_test.pack(side='left', padx=6)
+    haptics_test = ttk.Button(tests, text='Test haptics (2 seconds)', command=lambda: command('test-haptics'))
+    haptics_test.pack(side='left', padx=6)
+
+    def poll():
+        if worker:
+            testing_enabled = not worker.relay_active and not worker.testing
+            for button in (speaker_test, haptics_test):
+                button.configure(state='normal' if testing_enabled else 'disabled')
+            try:
+                state.set(worker.status.get_nowait())
+            except queue.Empty:
+                pass
+        root.after(50, poll)
+
+    def close():
+        command('close')
+
+        def finish():
+            if worker and worker.thread.is_alive():
+                root.after(50, finish)
+            else:
+                root.destroy()
+        finish()
+    root.protocol('WM_DELETE_WINDOW', close)
+    import signal
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, lambda *_: close())
+    poll()
+    root.mainloop()
+    if instance_lock is not None:
+        os.close(instance_lock)
+if __name__ == '__main__':
+    main()
