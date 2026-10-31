@@ -12496,6 +12496,52 @@ void TestWave32MaskProjection() {
   }
 }
 
+void TestNarrowConversionRoundTrips() {
+  using namespace ShaderRecompiler::IR;
+  struct Case {
+    uint32_t source;
+    uint32_t low16;
+    uint32_t low8;
+    uint32_t packed16;
+    uint32_t packed8;
+  };
+  constexpr Case cases[] = {
+      {0x80010001u, 1u, 1u, 0xa5c30001u, 0xa5c3d201u},
+      {0xdeadbeefu, 0xbeefu, 0xefu, 0xa5c3beefu, 0xa5c3d2efu},
+      {0x00010003u, 3u, 3u, 0xa5c30003u, 0xa5c3d203u},
+      {0x00000100u, 0x100u, 0u, 0xa5c30100u, 0xa5c3d200u},
+      {0xffffffffu, 0xffffu, 0xffu, 0xa5c3ffffu, 0xa5c3d2ffu},
+      {0u, 0u, 0u, 0xa5c30000u, 0xa5c3d200u},
+  };
+  for (const auto &test : cases) {
+    Program program;
+    program.block_storage.push_back(std::make_unique<Block>());
+    program.blocks.push_back(program.block_storage.back().get());
+    IREmitter ir(program.blocks.front());
+    const auto source = ir.GetUserData(static_cast<ScalarReg>(0));
+    const auto low16 = ir.Emit(ValueOpcode::ConvertU32U16,
+                               {ir.Emit(ValueOpcode::ConvertU16U32, {source})});
+    const auto low8 = ir.Emit(ValueOpcode::ConvertU32U8,
+                              {ir.Emit(ValueOpcode::ConvertU8U32, {source})});
+    const auto packed16 = ir.Emit(ValueOpcode::BitwiseOr32, {low16, Value(0xa5c30000u)});
+    const auto packed8 = ir.Emit(ValueOpcode::BitwiseOr32, {low8, Value(0xa5c3d200u)});
+
+    // First optimize an unknown U32, then supply its runtime value. Eliminating
+    // the narrowing round trip would retain that value's upper bits.
+    ConstantPropagationPass(program.blocks);
+    source.Instruction()->ReplaceUsesWith(Value(test.source));
+    ConstantPropagationPass(program.blocks);
+    for (const auto &[value, expected] :
+         {std::pair{low16, test.low16}, std::pair{low8, test.low8},
+          std::pair{packed16, test.packed16}, std::pair{packed8, test.packed8}}) {
+      const auto actual = value.Resolve();
+      Check(actual.IsImmediate() && actual.GetType() == Type::U32 &&
+                actual.U32() == expected,
+            "narrowing round trip retained upper bits or corrupted adjacent packed fields");
+    }
+  }
+}
+
 void TestU64ShiftConstantPropagation() {
   using namespace ShaderRecompiler::IR;
 
@@ -15776,6 +15822,11 @@ int main(int argc, char **argv) {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  if (argc == 2 && std::strcmp(argv[1], "--narrow-conversions-only") == 0) {
+    TestNarrowConversionRoundTrips();
+    std::puts("shader_cfg --narrow-conversions-only: ok");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--unused-pixel-inputs-only") == 0) {
     const uint32_t code[] = {0xbf810000u};
     ShaderPixelInputInfo pixel{};
@@ -16007,6 +16058,7 @@ int main(int argc, char **argv) {
 #endif
   TestValuePhiValidation();
   TestWave32MaskProjection();
+  TestNarrowConversionRoundTrips();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS

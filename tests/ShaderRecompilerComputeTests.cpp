@@ -72,6 +72,7 @@
 #include "graphics/shader/recompiler/ir/ProgramCodec.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
+#include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
@@ -34258,6 +34259,76 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
   std::printf("[compute] %-32s ok\n", test.name);
 }
 
+void CheckNarrowConversionRoundTrips(VulkanHarness &vulkan) {
+  using namespace ShaderRecompiler::IR;
+  TestCase test;
+  test.name = "NarrowConversionRoundTrips";
+  constexpr u32 OutputBase = 8;
+  constexpr std::array<u32, 6> inputs{
+      0x80010001u, 0xdeadbeefu, 0x00010003u, 0x00000100u, 0xffffffffu, 0u};
+  constexpr std::array<std::array<u32, 4>, 6> outputs{{
+      {1u, 1u, 0xa5c30001u, 0xa5c3d201u},
+      {0xbeefu, 0xefu, 0xa5c3beefu, 0xa5c3d2efu},
+      {3u, 3u, 0xa5c30003u, 0xa5c3d203u},
+      {0x100u, 0u, 0xa5c30100u, 0xa5c3d200u},
+      {0xffffu, 0xffu, 0xa5c3ffffu, 0xa5c3d2ffu},
+      {0u, 0u, 0xa5c30000u, 0xa5c3d200u},
+  }};
+  test.initial.assign(OutputBase + 4u * inputs.size() + 1u, 0x600dcafeu);
+  std::copy(inputs.begin(), inputs.end(), test.initial.begin());
+  test.expected = test.initial;
+  for (u32 index = 0; index < inputs.size(); ++index) {
+    AppendVMovU32(&test.code, 30, index * 4u);
+    AppendBufferLoadDword(&test.code, 0, 30);
+    for (u32 component = 0; component < 4u; ++component) {
+      const auto output = OutputBase + 4u * index + component;
+      AppendStoreVgpr(&test.code, 0, output);
+      test.expected[output] = outputs[index][component];
+    }
+  }
+  AppendEnd(&test.code);
+  auto compiled = CompileCase(test, vulkan.SubgroupSize());
+  // Add the exact IR round trips to buffer-loaded U32 values. Keeping the
+  // inputs on the GPU exercises the dynamic fold and emitted truncation.
+  u32 stores = 0;
+  for (auto *block : compiled.program.blocks) {
+    for (auto inst = block->begin(); inst != block->end(); ++inst) {
+      if (inst->GetOpcode() != ValueOpcode::StoreBufferU32) continue;
+      const auto component = stores++ % 4u;
+      const bool byte = (component & 1u) != 0;
+      const auto narrow = block->PrependNewInst(
+          inst, byte ? ValueOpcode::ConvertU8U32 : ValueOpcode::ConvertU16U32,
+          {inst->Arg(4)});
+      auto result = Value(&*block->PrependNewInst(
+          inst, byte ? ValueOpcode::ConvertU32U8 : ValueOpcode::ConvertU32U16,
+          {Value(&*narrow)}));
+      if (component >= 2u) {
+        result = Value(&*block->PrependNewInst(
+            inst, ValueOpcode::BitwiseOr32,
+            {result, Value(byte ? 0xa5c3d200u : 0xa5c30000u)}));
+      }
+      inst->SetArg(4, result);
+    }
+  }
+  Require(test.name, "round-trip fixture", stores == 4u * inputs.size(),
+          "the shader did not expose every expected dynamic store");
+  ConstantPropagationPass(compiled.program.blocks, compiled.program.wave_size);
+  ResolveControlFlowIdentities(compiled.program);
+  RemoveIdentities(compiled.program.blocks);
+  ValidateProgram(compiled.program, true);
+  auto compute = test.compute_info;
+  compute.host_subgroup_size = vulkan.SubgroupSize();
+  compiled.spirv = ShaderRecompiler::Spirv::EmitProgram(
+      compiled.program, {.compute = &compute});
+  ValidateSpirv(test.name, compiled.spirv);
+  auto buffer = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
+  vulkan.Dispatch(test, compiled, buffer);
+  const auto actual = vulkan.ReadBuffer(test.name, buffer, test.expected.size());
+  vulkan.DestroyBuffer(&buffer);
+  CompareWords(test, "dynamic truncation and adjacent packed fields", test.expected, actual);
+  std::printf("[compute] %-32s ok\n", test.name);
+}
+
 void RunGraphicsCase(VulkanHarness *vulkan, const GraphicsCase &test) {
   auto compiled = CompileFragmentCase(test);
   auto actual = vulkan->RenderFragment(test, compiled);
@@ -58145,6 +58216,11 @@ int main(int argc, char **argv) {
   }
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--narrow-conversions-only") == 0) {
+    VulkanHarness vulkan;
+    CheckNarrowConversionRoundTrips(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--split-labels-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckSplitLabelOverlay();
@@ -59745,6 +59821,7 @@ int main(int argc, char **argv) {
   CheckPixelParameterAliases();
   CheckRectListShaders();
   CheckComputeThreadDimensions(vulkan);
+  CheckNarrowConversionRoundTrips(vulkan);
   CheckIndirectImageKeySwitch(vulkan);
   CheckWave64WholeWaveResults();
   CheckPs5GameExampleImageClearRuntimeShape();

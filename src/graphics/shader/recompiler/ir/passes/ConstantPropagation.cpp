@@ -690,9 +690,6 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			const auto value = Arg(inst, 0);
 			if (IsImmediate(value, Type::U16)) {
 				Replace(inst, Value(static_cast<uint32_t>(value.U16())));
-			} else if (auto* producer = value.TryInstruction();
-			           producer != nullptr && producer->GetOpcode() == ValueOpcode::ConvertU16U32) {
-				Replace(inst, producer->Arg(0));
 			}
 			return;
 		}
@@ -707,9 +704,6 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			const auto value = Arg(inst, 0);
 			if (IsImmediate(value, Type::U8)) {
 				Replace(inst, Value(static_cast<uint32_t>(value.U8())));
-			} else if (auto* producer = value.TryInstruction();
-			           producer != nullptr && producer->GetOpcode() == ValueOpcode::ConvertU8U32) {
-				Replace(inst, producer->Arg(0));
 			}
 			return;
 		}

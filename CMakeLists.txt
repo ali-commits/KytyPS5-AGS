@@ -1230,6 +1230,10 @@ if(BUILD_TESTING)
 		ENVIRONMENT "KYTY_TEST_COMPARE_LINEAR_USES=1")
 	add_test(NAME upsync2_opcodes COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --new-opcodes-only)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
+	add_test(NAME shader_narrow_conversions COMMAND $<TARGET_FILE:shader_cfg_tests> --narrow-conversions-only)
+	add_test(NAME shader_narrow_conversions_gpu COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --narrow-conversions-only)
+	set_tests_properties(shader_narrow_conversions_gpu PROPERTIES
+		ENVIRONMENT "KYTY_UNIFORM_BUFFERS=1;KYTY_NATIVE_FMINMAX=0")
 	# KYTY_CB_SHADER_MASK_EXPORTS=1 (the preset's value): upstream 21a1346e2's compact export ordinals.
 	add_test(NAME shader_cfg_cb_shader_mask_exports COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	set_tests_properties(shader_cfg_cb_shader_mask_exports PROPERTIES ENVIRONMENT "KYTY_CB_SHADER_MASK_EXPORTS=1")
