@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QHostInfo>
 #include <QSettings>
 #include <QStandardPaths>
 
@@ -22,6 +23,17 @@ QString StreamingSettings::Validate() const {
 	if (resolution != "Native" && resolution != "1080p" && resolution != "1440p")
 		return QStringLiteral("Choose Native, 1080p or 1440p capture.");
 	if (codec != "HEVC" && codec != "H264") return QStringLiteral("Choose HEVC or H264.");
+	if (disconnect_grace != 0 && (disconnect_grace < 5 || disconnect_grace > 600))
+		return QStringLiteral("Close game after disconnect must be 0, or between 5 and 600 "
+		                      "seconds.");
+	// host_name empty is valid: it falls back to the machine hostname. A set name is trimmed to
+	// 1-40 characters with no line break or '=' that would corrupt the generated config file.
+	if (!host_name.trimmed().isEmpty()) {
+		const auto trimmed = host_name.trimmed();
+		if (trimmed.size() > 40) return QStringLiteral("Host name must be 1-40 characters.");
+		if (trimmed.contains('\n') || trimmed.contains('\r') || trimmed.contains('='))
+			return QStringLiteral("Host name cannot contain line breaks or '='.");
+	}
 	if (backend.contains('\n') || backend.contains('\r') || adapter.contains('\n') ||
 	    adapter.contains('\r'))
 		return QStringLiteral("Settings cannot contain line breaks.");
@@ -44,6 +56,8 @@ StreamingSettings StreamingSettings::Read(QSettings& file) {
 	s.show_local            = file.value("display/show_local", false).toBool();
 	s.controller_audio      = file.value("controller_audio/enabled", false).toBool();
 	s.controller_audio_port = file.value("controller_audio/port", 0).toInt();
+	s.disconnect_grace      = file.value("host/disconnect_grace", s.disconnect_grace).toInt();
+	s.host_name             = file.value("host/name").toString();
 	return s;
 }
 void StreamingSettings::Write(QSettings& file) const {
@@ -58,6 +72,20 @@ void StreamingSettings::Write(QSettings& file) const {
 	file.setValue("display/show_local", show_local);
 	file.setValue("controller_audio/enabled", controller_audio);
 	file.setValue("controller_audio/port", controller_audio_port);
+	file.setValue("host/disconnect_grace", disconnect_grace);
+	file.setValue("host/name", host_name);
+}
+QString StreamingSettings::DefaultHostName() {
+	// Prefer the pretty hostname (/etc/hostname is the static one; QHostInfo gives the resolved
+	// name). Fall back to a generic label so the config line is never empty.
+	auto name = QHostInfo::localHostName().trimmed();
+	if (name.isEmpty()) name = QStringLiteral("Kyty Game Station");
+	// Clamp to the same 40-character ceiling the field validates against.
+	return name.left(40);
+}
+QString StreamingSettings::EffectiveHostName() const {
+	const auto trimmed = host_name.trimmed();
+	return trimmed.isEmpty() ? DefaultHostName() : trimmed;
 }
 QString StreamingSettings::ProfileDirectory() {
 	const auto override = qEnvironmentVariable("KYTY_STREAMING_CONFIG_DIR");

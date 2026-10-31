@@ -561,7 +561,8 @@ int main(int argc, char **argv) {
        {vk::Extent2D{1920, 1080}, vk::Extent2D{2560, 1440}}) {
     auto pool =
         GpuPool::Create(fixture.physical, fixture.device, fixture.family,
-                        extent.width, extent.height, 1, error);
+                        extent.width, extent.height, 1, error,
+                        AspectMode::Stretch);
     Check(pool != nullptr, error.c_str());
     Cuda cuda;
     cuda.Init(pool->Descriptor());

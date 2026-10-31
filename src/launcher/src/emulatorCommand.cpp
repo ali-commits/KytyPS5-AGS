@@ -44,6 +44,9 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 		args << "--gpu-occlusion" << "on";
 	}
 	args << "--present-mode" << EnumToText(info.present_mode);
+	if (!info.stream_aspect_mode.isEmpty()) {
+		args << "--stream-aspect" << info.stream_aspect_mode;
+	}
 	if (info.gpu_index >= 0) {
 		args << "--gpu" << QString::number(info.gpu_index);
 	}

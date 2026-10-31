@@ -3,6 +3,7 @@
 
 #include "cheatRepository.h"
 #include "gameLibrary.h"
+#include "hostMetrics.h"
 #include "hostSocket.h"
 
 #include <QHash>
@@ -65,6 +66,7 @@ signals:
 
 private:
 	void Library(const Client& client, const std::function<void(HostReply)>& done) const;
+	void Metrics(const std::function<void(HostReply)>& done);
 	void Art(const QString& id, const QString& kind, const QString& if_none_match,
 	         const std::function<void(HostReply)>& done) const;
 	void GetSettings(const GameEntry& game, const Client& client,
@@ -88,6 +90,8 @@ private:
 
 	GameLibrary*            m_library;
 	std::function<Status()> m_status;
+
+	HostMetrics::Sampler m_metrics;
 
 	Cheats::CheatRepository                                 m_repository;
 	QHash<QString, QList<Cheats::RemoteFile>>               m_remote;

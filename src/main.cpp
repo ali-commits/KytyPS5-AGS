@@ -139,6 +139,9 @@ static void PrintUsage() {
 	::printf(
 	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
 	::printf(
+	    "  --stream-aspect <value>              Non-16:9 stream present: fit, fill, or stretch. "
+	    "Default: fit.\n");
+	::printf(
 	    "  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
 	::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
 	::printf("  --hdr                                Enable HDR10 output when supported.\n");
@@ -557,6 +560,18 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			_putenv_s("KYTY_GPU_OCCLUSION", on ? "1" : "0");
 #else
 			setenv("KYTY_GPU_OCCLUSION", on ? "1" : "0", 1);
+#endif
+		} else if (arg == "--stream-aspect") {
+			// Streaming present mode for a non-16:9 client. The native capture path reads
+			// KYTY_STREAM_ASPECT when it creates the GPU pool; unknown values fall back to "fit".
+			if (value != "fit" && value != "fill" && value != "stretch") {
+				::printf("invalid stream aspect: %s\n", value.c_str());
+				return false;
+			}
+#ifdef _WIN32
+			_putenv_s("KYTY_STREAM_ASPECT", value.c_str());
+#else
+			setenv("KYTY_STREAM_ASPECT", value.c_str(), 1);
 #endif
 		} else if (arg == "--network-connected") {
 			if (!ParseBool(value, options.config.network_connected)) {

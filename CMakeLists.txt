@@ -1042,6 +1042,9 @@ add_executable(clear_register_decode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/C
 target_link_libraries(clear_register_decode_tests common fmt::fmt Vulkan::Headers)
 target_include_directories(clear_register_decode_tests PRIVATE ${inc_headers})
 
+add_executable(aspect_mode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AspectModeTests.cpp")
+target_include_directories(aspect_mode_tests PRIVATE "${KYTY_SOURCE_DIR}")
+
 if(LINUX)
 	add_executable(streaming_presentation_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/StreamingPresentationTests.cpp")
 	target_include_directories(streaming_presentation_tests PRIVATE "${KYTY_SOURCE_DIR}")
@@ -1271,6 +1274,8 @@ if(BUILD_TESTING)
 		add_test(NAME streaming_gpu COMMAND $<TARGET_FILE:streaming_gpu_tests>)
 		set_tests_properties(streaming_gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)
 	endif()
+	add_test(NAME aspect_mode COMMAND $<TARGET_FILE:aspect_mode_tests>)
+	set_tests_properties(aspect_mode PROPERTIES TIMEOUT 30)
 	add_test(NAME repeat_trace COMMAND $<TARGET_FILE:repeat_trace_tests>)
 	add_test(NAME binding_path COMMAND $<TARGET_FILE:binding_path_tests>)
 	add_test(NAME cp_recorder COMMAND $<TARGET_FILE:cp_recorder_tests>)

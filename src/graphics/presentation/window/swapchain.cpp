@@ -367,7 +367,11 @@ public:
 			m_system_overlay = std::make_unique<SystemOverlay>(graphics);
 			SetSystemOverlayRemoteInputEnabled(true);
 		}
-		m_interval  = std::chrono::nanoseconds(1000000000 / (fps == 0 ? 60 : fps));
+		m_interval = std::chrono::nanoseconds(1000000000 / (fps == 0 ? 60 : fps));
+		if (const char* aspect = std::getenv("KYTY_STREAM_ASPECT");
+		    aspect != nullptr && *aspect != '\0') {
+			m_aspect = Streaming::ParseAspectMode(aspect);
+		}
 		m_transport = std::make_unique<Streaming::Transport>(
 		    socket,
 		    [stream_only](const Streaming::Input* input) {
@@ -428,7 +432,7 @@ public:
 			std::string error;
 			m_pool = Streaming::GpuPool::Create(m_graphics.physical_device, m_graphics.device,
 			                                    m_graphics.queue_family, width, height, ++m_epoch,
-			                                    error);
+			                                    error, m_aspect);
 			if (m_pool == nullptr) {
 				LOGF("Streaming disabled: %s\n", error.c_str());
 				m_transport.reset();
@@ -521,6 +525,7 @@ private:
 	bool                                             m_stream_only = false;
 	uint64_t                                         m_generation = 0, m_epoch = 0, m_last_tick = 0;
 	uint32_t                                         m_width = 0, m_height = 0;
+	Streaming::AspectMode                            m_aspect = Streaming::AspectMode::Fit;
 	std::chrono::nanoseconds                         m_interval {};
 	std::chrono::steady_clock::time_point            m_last_capture {};
 };

@@ -159,6 +159,29 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_port->setRange(1024, 65514);
 	m_port->setValue(settings.port);
 	quality_form->addRow(tr("GameStream base port"), m_port);
+	m_host_name = new QLineEdit(settings.host_name, m_quality);
+	m_host_name->setObjectName("streamHostName");
+	m_host_name->setMaxLength(40);
+	m_host_name->setPlaceholderText(StreamingSettings::DefaultHostName());
+	quality_form->addRow(tr("Host name"), m_host_name);
+	auto* host_name_hint =
+	    new QLabel(tr("The name Moonlight and AGS Phone show for this host. Leave blank to use the "
+	                  "machine name."),
+	               m_quality);
+	host_name_hint->setWordWrap(true);
+	quality_form->addRow(host_name_hint);
+	m_disconnect_grace = new QSpinBox(m_quality);
+	m_disconnect_grace->setObjectName("streamDisconnectGrace");
+	m_disconnect_grace->setRange(5, 600);
+	m_disconnect_grace->setValue(settings.disconnect_grace < 5 ? 20 : settings.disconnect_grace);
+	m_disconnect_grace->setSuffix(tr(" s"));
+	quality_form->addRow(tr("Close game after disconnect"), m_disconnect_grace);
+	auto* grace_hint = new QLabel(
+	    tr("Keep the game running this long after the stream drops so the same client can "
+	       "reconnect and resume the running game."),
+	    m_quality);
+	grace_hint->setWordWrap(true);
+	quality_form->addRow(grace_hint);
 	m_monitor = new QCheckBox(tr("Also play game audio on this host"), m_quality);
 	m_monitor->setObjectName("streamLocalAudio");
 	m_monitor->setChecked(settings.local_audio);
@@ -375,6 +398,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 		connect(box, &QComboBox::currentIndexChanged, this, &StreamingWidget::ScheduleApply);
 	for (auto* spin: {m_port, m_bitrate})
 		connect(spin, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
+	connect(m_disconnect_grace, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
+	connect(m_host_name, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
 	for (auto* check: {m_monitor, m_show_local})
 		connect(check, &QCheckBox::toggled, this, &StreamingWidget::ScheduleApply);
 	connect(m_adapter, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
@@ -406,6 +431,8 @@ StreamingSettings StreamingWidget::Settings() const {
 	s.adapter               = m_adapter->text();
 	s.local_audio           = m_monitor->isChecked();
 	s.show_local            = m_show_local->isChecked();
+	s.disconnect_grace      = m_disconnect_grace->value();
+	s.host_name             = m_host_name->text();
 	s.controller_audio      = m_controller_audio->isChecked();
 	s.controller_audio_port = m_controller_audio_port->value();
 	return s;
@@ -435,6 +462,11 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	if (p.contains("adapter")) m_adapter->setText(p.value("adapter").toString());
 	if (p.contains("local_audio")) m_monitor->setChecked(p.value("local_audio").toBool());
 	if (p.contains("show_local")) m_show_local->setChecked(p.value("show_local").toBool());
+	if (p.contains("disconnect_grace")) {
+		const int grace = p.value("disconnect_grace").toInt();
+		m_disconnect_grace->setValue(grace < 5 ? 20 : grace);
+	}
+	if (p.contains("host_name")) m_host_name->setText(p.value("host_name").toString());
 	m_loading_prefs = false;
 	Update();
 }
@@ -472,7 +504,9 @@ bool StreamingWidget::Apply() {
 	                 {"codec", settings.codec},
 	                 {"adapter", settings.adapter},
 	                 {"local_audio", settings.local_audio},
-	                 {"show_local", settings.show_local}},
+	                 {"show_local", settings.show_local},
+	                 {"disconnect_grace", settings.disconnect_grace},
+	                 {"host_name", settings.host_name}},
 	                [self = QPointer(this)](QJsonObject reply, QString failure) {
 		                if (!self) return;
 		                if (failure.isEmpty() && !reply.value("ok").toBool())

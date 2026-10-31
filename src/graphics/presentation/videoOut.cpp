@@ -6,6 +6,7 @@
 #include "common/cpuPlacement.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/fpsStats.h"
 #include "common/hangTrace.h"
 #include "common/liveSwitch.h"
 #include "common/logging/log.h"
@@ -627,6 +628,7 @@ VideoOutDriver& VideoOutInit(uint32_t width, uint32_t height, Graphics::Presente
 
 void VideoOutShutdown() {
 	g_video_out_driver.reset();
+	Common::FpsStatsShutdown();
 }
 
 VideoOutDriver::Impl::~Impl() {
@@ -1430,6 +1432,9 @@ bool FlipQueue::Flip(uint32_t micros) {
 		}
 		if (due && requests[0].cfg->bus == 0) {
 			Graphics::PerformanceOverlayRecordFlip(requests[0].cfg->width, requests[0].cfg->height);
+			// Always-on, overlay or not: feeds the launcher host-metrics FPS channel. One atomic
+			// exchange and one increment on the present thread, no lock or allocation.
+			Common::FpsStatsRecordFlip();
 		}
 	}
 

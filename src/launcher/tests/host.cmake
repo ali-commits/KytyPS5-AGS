@@ -29,6 +29,9 @@ else()
     if(EXISTS "${host_root}/src/common/additionalContent.cpp")
         target_sources(launcher_host_tests PRIVATE "${host_root}/src/common/additionalContent.cpp")
     endif()
+    # fpsStats.cpp is newer than a warm libcommon.a, so compile it directly for the host-metrics
+    # FPS-window tests; a warm build predating it would otherwise miss the symbols at link time.
+    target_sources(launcher_host_tests PRIVATE "${host_root}/src/common/fpsStats.cpp")
     target_link_libraries(launcher_host_tests PRIVATE
         "${KYTY_LAUNCHER_WARM_BUILD}/common/libcommon.a"
         "${KYTY_LAUNCHER_WARM_BUILD}/3rdparty/tracy/libTracyClient.a"

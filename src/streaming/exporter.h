@@ -1,5 +1,6 @@
 #pragma once
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "streaming/aspectMode.h"
 #include "streaming/protocol.h"
 
 #include <functional>
@@ -18,7 +19,8 @@ public:
 	static constexpr vk::Format     CompositeFormat = vk::Format::eB8G8R8A8Unorm;
 	static std::unique_ptr<GpuPool> Create(vk::PhysicalDevice physical, vk::Device device,
 	                                       uint32_t family, uint32_t width, uint32_t height,
-	                                       uint64_t epoch, std::string& error);
+	                                       uint64_t epoch, std::string& error,
+	                                       AspectMode aspect = AspectMode::Fit);
 	~GpuPool();
 	GpuPool(const GpuPool&)            = delete;
 	GpuPool& operator=(const GpuPool&) = delete;
@@ -30,7 +32,8 @@ public:
 	vk::Semaphore             Done(uint32_t slot) const { return m_slots[slot].done; }
 
 private:
-	GpuPool(vk::Device device, uint32_t family): m_device(device), m_family(family) {
+	GpuPool(vk::Device device, uint32_t family, AspectMode aspect)
+	    : m_device(device), m_family(family), m_aspect(aspect) {
 		m_fds.fill(-1);
 	}
 	bool Initialize(vk::PhysicalDevice physical, uint32_t width, uint32_t height, uint64_t epoch,
@@ -43,6 +46,7 @@ private:
 	};
 	vk::Device              m_device;
 	uint32_t                m_family;
+	AspectMode              m_aspect = AspectMode::Fit;
 	PoolDescriptor          m_descriptor;
 	std::array<Slot, 3>     m_slots {};
 	std::array<int, 9>      m_fds;

@@ -1,8 +1,10 @@
 #include "agsPairing.h"
 #include "cheatFile.h"
+#include "common/fpsStats.h"
 #include "gameLibrary.h"
 #include "hostApi.h"
 #include "hostDaemon.h"
+#include "hostMetrics.h"
 #include "hostSocket.h"
 
 #include <QDir>
@@ -590,6 +592,78 @@ private slots:
 		QVERIFY(QFileInfo::exists(config.filePath("clients/" + uuid + "/games/" + id + ".json")));
 	}
 
+	void clientPutAcceptsTypedJsonValues() {
+		// The phone sends ints and bools as JSON types, not text; they must not be rejected.
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString a    = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+		const auto    rev  = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, a)).body)
+		                         .object()["revision"]
+		                         .toString();
+		const auto    put =
+		    Call(api, ClientReq("PUT", path, a,
+		                        {{"revision", rev},
+		                         {"values", QJsonObject {{"trophy_duration_seconds", 5},
+		                                                 {"perf_overlay_enabled", true},
+		                                                 {"vblank_frequency", 90}}}}));
+		QCOMPARE(put.status, 200);
+		auto got = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, a)).body).object();
+		QCOMPARE(SettingsValue(got, "trophy_duration_seconds"), QString("5"));
+		QCOMPARE(SettingsValue(got, "perf_overlay_enabled"), QString("true"));
+		QCOMPARE(SettingsValue(got, "vblank_frequency"), QString("90"));
+	}
+
+	void clientPictureFitReachesLaunchArguments() {
+		// The phone's per-device picture-fit (stream_aspect_mode) must travel through the device
+		// PUT into the launch.json arguments the emulator is started with.
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/settings";
+
+		const auto aspect_arg = [&] {
+			const auto catalog = library.ClientCatalog(QStringLiteral("/opt/kyty/kyty_emulator"));
+			const auto entries = catalog.value(uuid);
+			for (const auto& e: entries) {
+				if (e.id != id) continue;
+				const auto i = e.arguments.indexOf(QStringLiteral("--stream-aspect"));
+				return i >= 0 && i + 1 < e.arguments.size() ? e.arguments.at(i + 1) : QString {};
+			}
+			return QString {};
+		};
+
+		// Seed the device profile and set picture-fit to "fill" the way the phone does.
+		const auto rev = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body)
+		                     .object()["revision"]
+		                     .toString();
+		const auto put = Call(
+		    api,
+		    ClientReq("PUT", path, uuid,
+		              {{"revision", rev},
+		               {"values", QJsonObject {{"stream_aspect_mode", QStringLiteral("fill")}}}}));
+		QCOMPARE(put.status, 200);
+		// It must be stored...
+		auto got = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+		QCOMPARE(SettingsValue(got, "stream_aspect_mode"), QString("fill"));
+		// ...and it must reach the launch arguments the emulator actually receives.
+		QCOMPARE(aspect_arg(), QString("fill"));
+
+		// Changing it again flows through just as well (stretch), proving the value is not pinned.
+		const auto rev2 = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body)
+		                      .object()["revision"]
+		                      .toString();
+		QCOMPARE(Call(api, ClientReq("PUT", path, uuid,
+		                             {{"revision", rev2},
+		                              {"values", QJsonObject {{"stream_aspect_mode",
+		                                                       QStringLiteral("stretch")}}}}))
+		             .status,
+		         200);
+		QCOMPARE(aspect_arg(), QString("stretch"));
+	}
+
 	void twoClientsAreIsolated() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
@@ -793,6 +867,97 @@ private slots:
 		QVERIFY(!error.isEmpty());
 		QVERIFY(!AgsPairing::VerifierExists(path));
 		qunsetenv("KYTY_STREAMING_CONFIG_DIR");
+	}
+
+	// --- host metrics -------------------------------------------------------
+
+	void metricsParsesProcStat() {
+		// Window 1: total 1000 (busy 200, idle 800). Window 2: total 1800 (busy 600, idle 1200).
+		// Delta total 800, delta idle 400 -> busy = (800-400)/800 = 50%.
+		const auto a = HostMetrics::ParseProcStat("cpu  100 0 100 800 0 0 0 0\ncpu0 1 2 3 4\n");
+		const auto b = HostMetrics::ParseProcStat("cpu  300 0 300 1200 0 0 0 0\n");
+		QVERIFY(a.ok && b.ok);
+		QCOMPARE(a.total, 1000ull);
+		QCOMPARE(a.idle, 800ull);
+		const auto usage = HostMetrics::CpuUsagePercent(a, b);
+		QVERIFY(usage.has_value());
+		QCOMPARE(qRound(*usage), 50);
+		// Garbage and a first-reading (equal totals) yield nothing.
+		QVERIFY(!HostMetrics::ParseProcStat("nonsense").ok);
+		QVERIFY(!HostMetrics::CpuUsagePercent(a, a).has_value());
+	}
+
+	void metricsCpuNameAndMem() {
+		QCOMPARE(HostMetrics::ParseCpuName("processor\t: 0\nmodel name\t: AMD Ryzen 9 5900X\n"),
+		         QString("AMD Ryzen 9 5900X"));
+		QVERIFY(HostMetrics::ParseCpuName("vendor_id\t: x").isEmpty());
+		const auto mem = HostMetrics::ParseMemInfo(
+		    "MemTotal:       32768000 kB\nMemFree: 1 kB\nMemAvailable:   20480000 kB\n");
+		QVERIFY(mem.ok);
+		QCOMPARE(mem.total_mb, 32000ull);
+		QCOMPARE(mem.used_mb, 12000ull);                           // (32768000-20480000)/1024
+		QVERIFY(!HostMetrics::ParseMemInfo("MemTotal: 10 kB").ok); // no MemAvailable
+	}
+
+	void metricsPicksCpuTemp() {
+		// k10temp Tctl wins over a coretemp Package and a bare chip reading.
+		const QList<HostMetrics::TempReading> amd {
+		    {"other", 40000}, {"Package id 0", 55000}, {"Tctl", 61500}};
+		QCOMPARE(qRound(*HostMetrics::PickCpuTemp(amd)), 62);
+		const QList<HostMetrics::TempReading> intel {{"Core 0", 50000}, {"Package id 0", 58000}};
+		QCOMPARE(qRound(*HostMetrics::PickCpuTemp(intel)), 58);
+		QVERIFY(!HostMetrics::PickCpuTemp({}).has_value());
+	}
+
+	void metricsFpsWindowAndFile() {
+		const std::array<uint32_t, 10> per_second {60, 48, 59, 60, 60};
+		const auto                     w = Common::FpsStatsAggregate(per_second, 5, 16.7);
+		QVERIFY(w.has_samples);
+		QCOMPARE(w.current, 60.0); // last entry
+		QCOMPARE(w.min, 48.0);
+		QCOMPARE(w.max, 60.0);
+		QCOMPARE(w.window_s, 10u);
+		QVERIFY(qAbs(w.frame_ms - 16.7) < 1e-6);
+		QVERIFY(qAbs(w.avg - (60 + 48 + 59 + 60 + 60) / 5.0) < 1e-6);
+
+		// Round-trips through the file encoding (shape), then staleness via an explicit ts.
+		const auto body = Common::FpsStatsEncode(w);
+		QVERIFY(body.find("\"current\":60") != std::string::npos);
+		QVERIFY(body.find("\"window_s\":10") != std::string::npos);
+		const auto fresh = Common::FpsStatsParse(
+		    R"({"ts":100,"current":60,"avg":57,"min":48,"max":60,"frame_ms":16.7,"window_s":10})",
+		    /*now=*/101, /*max_age=*/3);
+		QVERIFY(fresh.has_value());
+		QCOMPARE(fresh->current, 60.0);
+		QVERIFY(qAbs(fresh->frame_ms - 16.7) < 1e-6);
+		const auto stale = Common::FpsStatsParse(R"({"ts":100,"current":60})", /*now=*/200, 3);
+		QVERIFY(!stale.has_value());
+		QVERIFY(!Common::FpsStatsParse(R"({"ts":100})", 100, 3).has_value()); // ts-only, no samples
+		QVERIFY(!Common::FpsStatsParse("garbage", 100, 3).has_value());
+	}
+
+	void metricsRouteShape() {
+		GameLibrary lib;
+		{
+			QString error;
+			QVERIFY2(lib.Load(nullptr, &error), qPrintable(error));
+		}
+		const auto running = lib.Games().first().id;
+		HostApi    local {&lib, [running] { return HostApi::Status {false, running}; }};
+		auto       r = Call(local, {{"method", "GET"}, {"path", "/kyty/v1/host/metrics"}});
+		QCOMPARE(r.status, 200);
+		QCOMPARE(r.content_type, QByteArray("application/json"));
+		const auto doc = QJsonDocument::fromJson(r.body).object();
+		QVERIFY(doc.contains("ts"));
+		// The game section carries the running title id and name from the library.
+		const auto game = doc["game"].toObject();
+		QVERIFY(game["running"].toBool());
+		QCOMPARE(game["title_id"].toString(), QString("PPSA00001"));
+		QVERIFY(!game["name"].toString().isEmpty());
+		// RAM always reads on Linux CI; cpu/gpu/fps may be absent, which the contract allows.
+		QVERIFY(doc.contains("ram"));
+		// Only GET is allowed.
+		QCOMPARE(Call(local, {{"method", "PUT"}, {"path", "/kyty/v1/host/metrics"}}).status, 405);
 	}
 };
 

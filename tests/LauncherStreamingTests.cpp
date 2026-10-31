@@ -350,10 +350,13 @@ private slots:
 	}
 	void unifiedProfileRejectsInvalidOrMissingModeWithoutMutation() {
 		for (const auto &mode : QList<QStringList>{{},
-																							 {"1920", "1440", "60"},
-																							 {"0", "0", "60"},
-																							 {"1920", "1080", "999"},
-																							 {"1920bad", "1080", "60"}}) {
+		                                           {"1921", "1080", "60"},  // odd width
+		                                           {"1920", "1081", "60"},  // odd height
+		                                           {"0", "0", "60"},        // zero
+		                                           {"640", "358", "60"},    // below min height
+		                                           {"3842", "1080", "60"},  // above max width
+		                                           {"1920", "1080", "999"}, // unsupported fps
+		                                           {"1920bad", "1080", "60"}}) {
 			QProcessEnvironment client;
 			if (mode.size() == 3) {
 				client.insert("SUNSHINE_CLIENT_WIDTH", mode[0]);
@@ -375,6 +378,34 @@ private slots:
 		QVERIFY(StreamingProfile::Apply(false, {}, &args, &untouched, &error));
 		QCOMPARE(args.at(1), QString("2560"));
 		QVERIFY(untouched.isEmpty());
+	}
+	void unifiedProfileAcceptsNonSixteenNineAndCarriesAspect() {
+		// A 20:9 phone panel (2412 is odd, so the host negotiates the even 2412->2412? keep even):
+		// verify a genuinely non-16:9 even mode is accepted and the aspect mode is propagated.
+		struct Case { const char* w; const char* h; const char* in; const char* out; };
+		const Case cases[] = {
+		    {"2412", "1080", "", "fit"},        // default when unset
+		    {"2412", "1080", "fill", "fill"},   // explicit fill
+		    {"2560", "1080", "stretch", "stretch"},
+		    {"1080", "1920", "bogus", "fit"},   // portrait (within bounds), unknown -> fit
+		};
+		for (const auto& c : cases) {
+			QProcessEnvironment client;
+			client.insert("SUNSHINE_CLIENT_WIDTH", c.w);
+			client.insert("SUNSHINE_CLIENT_HEIGHT", c.h);
+			client.insert("SUNSHINE_CLIENT_FPS", "60");
+			QStringList args;
+			QProcessEnvironment output;
+			if (*c.in) output.insert("KYTY_STREAM_ASPECT", c.in);
+			QString error;
+			QVERIFY2(StreamingProfile::Apply(true, client, &args, &output, &error),
+			         qPrintable(error));
+			QCOMPARE(output.value("KYTY_STREAM_WIDTH"), QString(c.w));
+			QCOMPARE(output.value("KYTY_STREAM_HEIGHT"), QString(c.h));
+			QCOMPARE(output.value("KYTY_STREAM_ASPECT"), QString(c.out));
+			QCOMPARE(args.at(args.indexOf("--screen-width") + 1), QString(c.w));
+			QCOMPARE(args.at(args.indexOf("--screen-height") + 1), QString(c.h));
+		}
 	}
 	void tvHostingEnablesLaptopControllerAudio() {
 		QTemporaryDir dir;
@@ -2206,6 +2237,109 @@ while :; do sleep 0.05; done
 		QCOMPARE(run(QString()), QByteArray("PC"));
 		QCOMPARE(run("99999999-9999-9999-9999-999999999999"), QByteArray("PC"));
 #endif
+	}
+	void hostConfigWritesHostNameAndDisconnectGrace() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}\n"));
+		FixtureEnvironment environment(dir.path());
+		const auto         profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend          = dir.filePath("host");
+		settings.port             = FreeBasePort();
+		settings.host_name        = "Living room rig";
+		settings.disconnect_grace = 45;
+		StreamingBackend backend(profile);
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(QDir(profile).filePath("host.conf"));
+		QVERIFY(config.contains("sunshine_name = Living room rig\n"));
+		QVERIFY(!config.contains("Ali's Game Station")); // the hardcoded name is gone
+		QVERIFY(config.contains("kyty_disconnect_grace = 45\n"));
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+	void hostConfigFallsBackToMachineHostNameWhenBlank() {
+		QTemporaryDir dir;
+		QVERIFY(GenerateCertificate(dir.path()));
+		const auto fixture = Read(QStringLiteral(KYTY_LAUNCHER_FIXTURE));
+		for (const auto& name: {"pactl", "host"}) {
+			QVERIFY(Put(dir.filePath(name), fixture));
+			QVERIFY(QFile::setPermissions(dir.filePath(name),
+			                              QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		}
+		QVERIFY(Put(dir.filePath("controller-audio.json"), "{\"receivers\": []}\n"));
+		FixtureEnvironment environment(dir.path());
+		const auto         profile = dir.filePath("profile");
+		QVERIFY(QDir().mkpath(profile));
+		StreamingSettings settings;
+		settings.backend = dir.filePath("host");
+		settings.port    = FreeBasePort();
+		settings.host_name.clear(); // blank -> machine hostname
+		StreamingBackend backend(profile);
+		backend.Start(settings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		const auto config = Read(QDir(profile).filePath("host.conf"));
+		const auto expected =
+		    "sunshine_name = " + StreamingSettings::DefaultHostName().toUtf8() + "\n";
+		QVERIFY2(config.contains(expected), expected.constData());
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 7000);
+	}
+	void hostNameAndGraceValidation() {
+		StreamingSettings s;
+		QVERIFY(s.Validate().isEmpty()); // defaults: blank name, grace 20
+		s.host_name = "  Trimmed name  ";
+		QVERIFY(s.Validate().isEmpty());
+		QCOMPARE(s.EffectiveHostName(), QString("Trimmed name"));
+		s.host_name = QString(41, 'x'); // one over the 40-char ceiling
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name = "bad=name";
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name = "line\nbreak";
+		QVERIFY(!s.Validate().isEmpty());
+		s.host_name.clear();
+		QCOMPARE(s.EffectiveHostName(), StreamingSettings::DefaultHostName());
+		QVERIFY(s.Validate().isEmpty());
+		s.disconnect_grace = 4; // below the 5s floor and not 0
+		QVERIFY(!s.Validate().isEmpty());
+		s.disconnect_grace = 601;
+		QVERIFY(!s.Validate().isEmpty());
+		s.disconnect_grace = 0; // immediate is allowed at the config level
+		QVERIFY(s.Validate().isEmpty());
+		s.disconnect_grace = 600;
+		QVERIFY(s.Validate().isEmpty());
+	}
+	void hostNameAndGraceRoundTripThroughDaemonPreferences() {
+		QTemporaryDir     dir;
+		FakeHostDaemon    fake(dir.path());
+		fake.preferences  = FakeHostDaemon::DefaultPreferences();
+		fake.preferences.insert("disconnect_grace", 30);
+		fake.preferences.insert("host_name", "Studio");
+		HostControlClient client(fake.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto*           grace = widget.findChild<QSpinBox*>("streamDisconnectGrace");
+		auto*           name  = widget.findChild<QLineEdit*>("streamHostName");
+		QVERIFY(grace);
+		QVERIFY(name);
+		QTRY_COMPARE(grace->value(), 30);
+		QTRY_COMPARE(name->text(), QString("Studio"));
+		grace->setValue(90);
+		name->setText("Den");
+		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		QTRY_VERIFY(fake.preferences.value("disconnect_grace").toInt() == 90 &&
+		            fake.preferences.value("host_name").toString() == "Den");
+		const auto last = fake.Requests("set-preferences").last();
+		QCOMPARE(last.value("disconnect_grace").toInt(), 90);
+		QCOMPARE(last.value("host_name").toString(), QString("Den"));
 	}
 };
 QTEST_MAIN(LauncherStreamingTests)

@@ -49,6 +49,8 @@ private:
 	QLineEdit*         m_adapter;
 	QCheckBox*         m_monitor;
 	QCheckBox*         m_show_local;
+	QSpinBox*          m_disconnect_grace;
+	QLineEdit*         m_host_name;
 	QCheckBox*         m_controller_audio;
 	QSpinBox*          m_controller_audio_port;
 	QLabel*            m_status;

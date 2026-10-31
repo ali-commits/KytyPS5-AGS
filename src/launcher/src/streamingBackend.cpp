@@ -384,8 +384,13 @@ bool StreamingBackend::WriteConfiguration() {
 	m_apps_reload_pending = false;
 	QString config = "capture = kyty\nencoder = nvenc\nkyty_private_audio = true\nkyty_input = "
 	                 "true\nmanagement_bind_address = 127.0.0.1\nupnp = disabled\nsystem_tray = "
-	                 "disabled\norigin_web_ui_allowed = pc\nsunshine_name = Ali's Game Station"
+	                 "disabled\norigin_web_ui_allowed = pc"
 	                 "\nstream_audio = enabled\nav1_mode = 1\naddress_family = both\n";
+	// Host name the phone shows and mDNS advertises; EffectiveHostName falls back to the machine
+	// hostname and is already validated (1-40 chars, no newline or '='), so the line is safe.
+	config += "sunshine_name = " + m_settings.EffectiveHostName() + '\n';
+	// Keep the game alive this many seconds after the stream drops so the same client can resume.
+	config += QStringLiteral("kyty_disconnect_grace = %1\n").arg(m_settings.disconnect_grace);
 	config += QStringLiteral("port = %1\nmax_bitrate = %2\nhevc_mode = %3\n")
 	              .arg(m_settings.port)
 	              .arg(150000)
