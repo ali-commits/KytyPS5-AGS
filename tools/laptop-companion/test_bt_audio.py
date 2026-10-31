@@ -55,7 +55,7 @@ class Packets(unittest.TestCase):
         self.assertEqual(p[24], 5)
 
     def test_existing_java_oracle(self):
-        root = Path(__file__).resolve().parents[2].parent / 'kyty-moonlight-android/tools/tv-hid-test-app'
+        root = Path(__file__).resolve().parents[4] / 'clients/android/tools/tv-hid-test-app'
         if not (root / 'tests/AdvancedMediaDump.java').exists() or not shutil.which('javac'):
             self.skipTest('Independent sibling Java packet fixtures unavailable')
         fixture = json.loads((root / 'tests/fixtures/native-media-opus.json').read_text())

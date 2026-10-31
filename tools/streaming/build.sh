@@ -3,7 +3,7 @@
 set -eu
 kyty_source=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 kyty_build=${KYTY_STREAM_BUILD_DIR:-"$kyty_source/_Build/streaming-release"}
-host_source=${KYTY_STREAM_HOST_SOURCE:-"/home/ali/projects/kyty-streaming-sunshine"}
+host_source=${KYTY_STREAM_HOST_SOURCE:-"$kyty_source/../../streaming/sunshine"}
 host_build=${KYTY_STREAM_HOST_BUILD:-"$host_source/cmake-build-kyty"}
 kyty_jobs=${KYTY_BUILD_JOBS:-6}
 kyty_stage=${KYTY_STREAM_STAGE:-"$kyty_build/streaming-stage"}
