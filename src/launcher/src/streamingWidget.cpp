@@ -1,6 +1,7 @@
 #include "streamingWidget.h"
 
 #include "agsPairing.h"
+#include "agsRustStreamingDialog.h"
 #include "hostControlClient.h"
 
 #include <QApplication>
@@ -50,9 +51,16 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	font.setBold(true);
 	title->setFont(font);
 	layout->addWidget(title);
+	auto* rustControls = new QPushButton(tr("AGS Rust streaming — test controls…"), content);
+	rustControls->setObjectName("agsRustStreamingControls");
+	layout->addWidget(rustControls);
+	connect(rustControls, &QPushButton::clicked, this, [this] {
+		AgsRustStreamingDialog dialog(this, m_rust_catalog);
+		dialog.exec();
+	});
 	auto* description = new QLabel(
 	    tr("Start hosting here, then choose this host and a game on a client. Video comes from "
-	       "the game before local window scaling; only private game audio is captured."),
+		   "the game before local window scaling; only private game audio is captured."),
 	    content);
 	description->setWordWrap(true);
 	layout->addWidget(description);
@@ -133,8 +141,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->setRowVisible(profile_row, false);
 	auto* hint = new QLabel(
 	    tr("Choose resolution, frame rate, quality and bitrate on the client. "
-	       "The negotiated TV profile controls host capture and emulator streaming output. "
-	       "Local Library game settings stay separate. Streaming is headless."),
+		   "The negotiated TV profile controls host capture and emulator streaming output. "
+		   "Local Library game settings stay separate. Streaming is headless."),
 	    m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
@@ -145,8 +153,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->setRowVisible(m_show_local, false);
 	auto* display_hint =
 	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
-	                  "The host still runs and renders the game."),
-	               m_quality);
+		              "The host still runs and renders the game."),
+		           m_quality);
 	display_hint->setWordWrap(true);
 	quality_form->addRow(display_hint);
 	quality_form->setRowVisible(display_hint, false);
@@ -166,8 +174,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->addRow(tr("Host name"), m_host_name);
 	auto* host_name_hint =
 	    new QLabel(tr("The name Moonlight and AGS Phone show for this host. Leave blank to use the "
-	                  "machine name."),
-	               m_quality);
+		              "machine name."),
+		           m_quality);
 	host_name_hint->setWordWrap(true);
 	quality_form->addRow(host_name_hint);
 	m_disconnect_grace = new QSpinBox(m_quality);
@@ -178,7 +186,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->addRow(tr("Close game after disconnect"), m_disconnect_grace);
 	auto* grace_hint = new QLabel(
 	    tr("Keep the game running this long after the stream drops so the same client can "
-	       "reconnect and resume the running game."),
+		   "reconnect and resume the running game."),
 	    m_quality);
 	grace_hint->setWordWrap(true);
 	quality_form->addRow(grace_hint);
@@ -194,8 +202,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	quality_form->setRowVisible(m_controller_audio, false); // not a daemon preference
 	auto* controller_hint =
 	    new QLabel(tr("Send native haptic and controller-speaker audio to a registered client "
-	                  "companion while video and game audio remain on Kyty TV."),
-	               m_quality);
+		              "companion while video and game audio remain on Kyty TV."),
+		           m_quality);
 	controller_hint->setWordWrap(true);
 	quality_form->addRow(controller_hint);
 	quality_form->setRowVisible(controller_hint, false);
@@ -263,7 +271,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	pair_layout->addWidget(ags_title);
 	auto* ags_hint = new QLabel(
 	    tr("Set a password of at least %1 characters. AGS Phone pairs by entering it, with no "
-	       "action needed on this PC. Only a salted verifier is stored here, never the password.")
+		   "action needed on this PC. Only a salted verifier is stored here, never the password.")
 	        .arg(AgsPairing::MINIMUM_PASSWORD_LENGTH),
 	    pairing);
 	ags_hint->setWordWrap(true);
@@ -355,8 +363,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	logs_layout->addWidget(m_logs);
 	auto* private_path =
 	    new QLabel(tr("Private profile: %1\nManagement: HTTPS on 127.0.0.1 only (base port + 1)")
-	                   .arg(StreamingSettings::ProfileDirectory()),
-	               logs);
+		               .arg(StreamingSettings::ProfileDirectory()),
+		           logs);
 	private_path->setWordWrap(true);
 	private_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	logs_layout->addWidget(private_path);

@@ -150,6 +150,8 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_tabs->addTab(m_ui->widget, tr("Library"));
 	m_host             = new HostControlClient(QString(), this);
 	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
+	m_streaming_widget->SetRustCatalogProvider(
+	    [this] { return m_ui->widget->CreateStreamingCatalog(m_interpreter); });
 	m_tabs->addTab(m_streaming_widget, tr("Streaming"));
 	if (QApplication::arguments().contains("--start-streaming-host"))
 		m_tabs->setCurrentWidget(m_streaming_widget);
@@ -554,7 +556,7 @@ void MainDialogPrivate::Update() {
 	m_controller_preview.SetSuspended(busy);
 	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget && item != nullptr
 	                           ? item->GetInfo().basedir
-	                           : QString {});
+							   : QString {});
 	bool run_enabled = !busy && item != nullptr;
 
 	if (run_enabled) {
