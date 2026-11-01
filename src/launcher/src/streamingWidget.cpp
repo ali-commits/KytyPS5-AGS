@@ -56,6 +56,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	connect(rustControls, &QPushButton::clicked, this, [this] {
 		AgsRustStreamingDialog dialog(this, m_rust_catalog, m_host);
 		dialog.exec();
+		LoadPreferences();
 	});
 	auto* description = new QLabel(
 	    tr("Start hosting here, then choose this host and a game on a client. Video comes from "
@@ -422,15 +423,32 @@ void StreamingWidget::StartHosting() {
 		m_host->RestartDaemon();
 }
 void StreamingWidget::LoadPreferences() {
+	const auto observed       = PreferenceValues();
+	const auto accepted       = m_preference_values;
+	const bool preserve_edits = m_prefs_loaded;
 	m_host->Request({{"type", "get-preferences"}},
-	                [self = QPointer(this)](QJsonObject reply, QString error) {
-		                if (self && error.isEmpty()) self->ApplyPreferences(reply);
+	                [self = QPointer(this), observed, accepted, preserve_edits](QJsonObject reply,
+	                                                                            QString     error) {
+		                if (!self || !error.isEmpty()) return;
+		                if (preserve_edits) {
+			                const auto current = self->PreferenceValues();
+			                // A slow refresh must not replace edits or newer acknowledgements
+			                // made before or while this request was in flight.
+			                for (const auto& key: reply.keys()) {
+				                if (current.value(key) != observed.value(key) ||
+								    observed.value(key) != accepted.value(key) ||
+								    self->m_preference_values.value(key) != accepted.value(key))
+					                reply.remove(key);
+			                }
+		                }
+		                self->ApplyPreferences(reply);
 	                });
 }
 void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	if (p.isEmpty()) return;
-	m_prefs_loaded  = true;
-	m_loading_prefs = true; // values from the daemon are not user edits
+	const bool initial = !m_prefs_loaded;
+	m_prefs_loaded     = true;
+	m_loading_prefs    = true; // values from the daemon are not user edits
 	if (p.contains("port")) m_port->setValue(p.value("port").toInt());
 	if (p.contains("resolution")) m_resolution->setCurrentText(p.value("resolution").toString());
 	if (p.contains("fps")) m_fps->setCurrentIndex(m_fps->findData(p.value("fps").toInt()));
@@ -450,7 +468,13 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 		m_disconnect_grace->setValue(grace);
 	}
 	if (p.contains("host_name")) m_host_name->setText(p.value("host_name").toString());
-	m_loading_prefs = false;
+	m_loading_prefs   = false;
+	const auto values = PreferenceValues();
+	if (initial)
+		m_preference_values = values;
+	else
+		for (const auto& key: p.keys())
+			if (values.contains(key)) m_preference_values.insert(key, values.value(key));
 	Update();
 }
 void StreamingWidget::ScheduleApply() {
@@ -464,6 +488,23 @@ void StreamingWidget::OnStatus(const QJsonObject& status) {
 	if (!status.isEmpty() && !m_prefs_loaded) LoadPreferences();
 	Update();
 }
+QJsonObject StreamingWidget::PreferenceValues() const {
+	const auto settings = Settings();
+	return {{"port", settings.port},
+	        {"resolution", settings.resolution},
+	        {"fps", settings.fps},
+	        {"bitrate", settings.bitrate},
+	        {"codec", settings.codec},
+	        {"adapter", settings.adapter},
+	        {"encoder", settings.encoder},
+	        {"audio_codec", settings.audio_codec},
+	        {"fec_enabled", settings.fec_enabled},
+	        {"local_audio_sink", settings.local_audio_sink},
+	        {"local_audio", settings.local_audio},
+	        {"show_local", settings.show_local},
+	        {"disconnect_grace", settings.disconnect_grace},
+	        {"host_name", settings.host_name}};
+}
 bool StreamingWidget::Apply() {
 	const auto settings = Settings();
 	const auto error    = settings.Validate();
@@ -472,34 +513,30 @@ bool StreamingWidget::Apply() {
 		m_error->show();
 		return false;
 	}
-	m_host->Request({{"type", "set-preferences"},
-	                 {"port", settings.port},
-	                 {"resolution", settings.resolution},
-	                 {"fps", settings.fps},
-	                 {"bitrate", settings.bitrate},
-	                 {"codec", settings.codec},
-	                 {"adapter", settings.adapter},
-	                 {"encoder", settings.encoder},
-	                 {"audio_codec", settings.audio_codec},
-	                 {"fec_enabled", settings.fec_enabled},
-	                 {"local_audio_sink", settings.local_audio_sink},
-	                 {"local_audio", settings.local_audio},
-	                 {"show_local", settings.show_local},
-	                 {"disconnect_grace", settings.disconnect_grace},
-	                 {"host_name", settings.host_name}},
-	                [self = QPointer(this)](QJsonObject reply, QString failure) {
-		                if (!self) return;
-		                if (failure.isEmpty() && !reply.value("ok").toBool())
-			                failure = reply.value("error").toString(tr("Cannot save preferences."));
-		                if (failure.isEmpty() && reply.value("deferred").toBool()) {
-			                self->m_error->setText(tr(
-			                    "Accepted for next launch; endpoint changes require host restart"));
-			                self->m_error->show();
-			                return;
-		                }
-		                self->m_error->setText(failure);
-		                self->m_error->setVisible(!failure.isEmpty());
-	                });
+	// Shared owner preferences may have changed in diagnostics or another view.
+	// Send this form's edits only, never its stale untouched fields.
+	QJsonObject request {{"type", "set-preferences"}};
+	const auto  values = PreferenceValues();
+	for (auto it = values.begin(); it != values.end(); ++it)
+		if (it.value() != m_preference_values.value(it.key())) request.insert(it.key(), it.value());
+	if (request.size() == 1) return true;
+	m_host->Request(request, [self = QPointer(this), request](QJsonObject reply, QString failure) {
+		if (!self) return;
+		if (failure.isEmpty() && !reply.value("ok").toBool())
+			failure = reply.value("error").toString(tr("Cannot save preferences."));
+		if (failure.isEmpty()) {
+			for (auto it = request.begin(); it != request.end(); ++it)
+				if (it.key() != "type") self->m_preference_values.insert(it.key(), it.value());
+		}
+		if (failure.isEmpty() && reply.value("deferred").toBool()) {
+			self->m_error->setText(
+			    tr("Accepted for next launch; endpoint changes require host restart"));
+			self->m_error->show();
+			return;
+		}
+		self->m_error->setText(failure);
+		self->m_error->setVisible(!failure.isEmpty());
+	});
 	return true;
 }
 void StreamingWidget::Update() {

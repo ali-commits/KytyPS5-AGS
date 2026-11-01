@@ -1,4 +1,5 @@
 #include "hostControlClient.h"
+#include "agsRustStreamingDialog.h"
 #include "hostSocket.h"
 #include "streamingApi.h"
 #include "streamingAudio.h"
@@ -126,9 +127,16 @@ public:
 			      reply = status;
 		      } else if (type == "get-preferences") {
 			      reply = preferences;
+			      if (preference_reply_delay_ms > 0) {
+				      QTimer::singleShot(preference_reply_delay_ms, &m_server, [reply, done] {
+					      done({200, "application/json", QJsonDocument(reply).toJson(QJsonDocument::Compact), {}});
+				      });
+				      return;
+			      }
 		      } else if (type == "set-preferences") {
 			      for (auto it = request.begin(); it != request.end(); ++it)
 				      if (it.key() != "type") preferences.insert(it.key(), it.value());
+			      if (apply_preferences) { apply_preferences(preferences, std::move(done)); return; }
 		      }
 		      done({200, "application/json", QJsonDocument(reply).toJson(QJsonDocument::Compact),
 		            {}});
@@ -165,6 +173,8 @@ public:
 	QJsonObject        status      = ReadyStatus();
 	QJsonObject        preferences = DefaultPreferences();
 	QList<QJsonObject> requests;
+	int preference_reply_delay_ms = 0;
+	std::function<void(const QJsonObject&, std::function<void(HostReply)>)> apply_preferences;
 
 private:
 	QString          m_path;
@@ -634,6 +644,90 @@ private slots:
 		                               "1080p", 60, widget.Settings().show_local);
 		QVERIFY(!local_display.value("environment").toObject().contains("KYTY_STREAM_ONLY"));
 	}
+	void diagnosticChangesSurviveImmediateMainTabEdit() {
+		const auto binary = qEnvironmentVariable("AGS_TEST_HOST_BINARY");
+		if (binary.isEmpty()) QSKIP("Set AGS_TEST_HOST_BINARY to check the native configured DTO.");
+		QTemporaryDir dir;
+		StreamingBackend backend(dir.filePath("profile"));
+		backend.SetApiSocket(dir.filePath("api.sock"));
+		StreamingSettings nativeSettings;
+		nativeSettings.backend = binary;
+		nativeSettings.port = FreeBasePort();
+		backend.Start(nativeSettings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		FakeHostDaemon daemon(dir.path());
+		daemon.preferences["port"] = nativeSettings.port;
+		daemon.preferences["show_local"] = false;
+		daemon.preferences["fec_enabled"] = false;
+		daemon.apply_preferences = [&](const QJsonObject& preferences, std::function<void(HostReply)> done) {
+			nativeSettings.show_local = preferences.value("show_local").toBool();
+			nativeSettings.fec_enabled = preferences.value("fec_enabled").toBool();
+			nativeSettings.bitrate = preferences.value("bitrate").toInt();
+			backend.ReloadSettings(nativeSettings, [done](QJsonObject reply, QString error) {
+				if (!error.isEmpty()) reply = {{"ok", false}, {"error", error}};
+				done({200, "application/json", QJsonDocument(reply).toJson(QJsonDocument::Compact), {}});
+			});
+		};
+		HostControlClient client(daemon.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto* bitrate = widget.findChild<QSpinBox*>("streamBitrate");
+		QTRY_COMPARE(widget.findChild<QSpinBox*>("streamPort")->value(), nativeSettings.port);
+		QVERIFY(!widget.findChild<QCheckBox*>("streamShowLocal")->isChecked());
+		QVERIFY(!widget.findChild<QCheckBox*>("streamFec")->isChecked());
+		// No routine status poll may repair stale main-tab state for this regression.
+		for (auto* timer: client.findChildren<QTimer*>()) timer->stop();
+		QTimer interaction;
+		QElapsedTimer deadline;
+		deadline.start();
+		int stage = 0;
+		bool accepted = false;
+		connect(&interaction, &QTimer::timeout, &widget, [&] {
+			auto* dialog = widget.findChild<QDialog*>();
+			if (!dialog) return;
+			if (deadline.elapsed() > 5000) { dialog->reject(); return; }
+			auto* save = dialog->findChild<QPushButton*>("rustSaveSettings");
+			if (stage == 0 && save->isEnabled()) {
+				dialog->findChild<QComboBox*>("rustPresentation")->setCurrentIndex(1);
+				dialog->findChild<QCheckBox*>("rustFec")->setChecked(true);
+				save->click();
+				stage = 1;
+			} else if (stage == 1 && save->isEnabled()) {
+				accepted = dialog->findChild<QLabel*>("rustStatus")->text().contains("Settings accepted");
+				// Make a return-triggered refresh slower than the 600 ms autosave.
+				// Its old bitrate reply must not undo the user's immediate next edit.
+				daemon.preference_reply_delay_ms = 1100;
+				dialog->accept();
+			}
+		});
+		interaction.start(10);
+		widget.findChild<QPushButton*>("agsRustStreamingControls")->click();
+		interaction.stop();
+		QVERIFY(accepted);
+		QVERIFY(daemon.preferences.value("show_local").toBool());
+		QVERIFY(daemon.preferences.value("fec_enabled").toBool());
+		// Synchronous edit immediately after modal return, before any refresh can finish.
+		bitrate->setValue(61);
+		QTRY_COMPARE(daemon.Requests("set-preferences").size(), 2);
+		QTRY_COMPARE(backend.NativeStatus().value("configured").toObject().value("video").toObject().value("bitrate_kbps").toInt(), 61000);
+		QVERIFY(daemon.preferences.value("show_local").toBool());
+		QVERIFY(daemon.preferences.value("fec_enabled").toBool());
+		const auto configured = backend.NativeStatus().value("configured").toObject();
+		QCOMPARE(configured.value("presentation").toString(), "mirrored");
+		QVERIFY(configured.value("fec_enabled").toBool());
+		const auto mainSave = daemon.Requests("set-preferences").last();
+		QVERIFY(!mainSave.contains("show_local"));
+		QVERIFY(!mainSave.contains("fec_enabled"));
+		QTRY_VERIFY(widget.findChild<QCheckBox*>("streamShowLocal")->isChecked());
+		QTRY_VERIFY(widget.findChild<QCheckBox*>("streamFec")->isChecked());
+		QCOMPARE(bitrate->value(), 61);
+		QTest::qWait(700); // applying the refresh must not schedule another autosave
+		QCOMPARE(daemon.Requests("set-preferences").size(), 2);
+		QCOMPARE(bitrate->value(), 61);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 10000);
+	}
+
 	void widgetPreferencesLoadEditAndApplyThroughDaemon() {
 		QTemporaryDir  dir;
 		FakeHostDaemon fake(dir.path());
@@ -664,13 +758,17 @@ private slots:
 		QCOMPARE(fake.Requests("set-preferences").size(), 1);
 		const auto sent = fake.Requests("set-preferences").last();
 		QCOMPARE(sent.value("port").toInt(), 48400);
-		QCOMPARE(sent.value("resolution").toString(), QString("1080p"));
-		QCOMPARE(sent.value("fps").toInt(), 30);
+		QVERIFY(!sent.contains("resolution"));
+		QVERIFY(!sent.contains("fps"));
+		QCOMPARE(fake.preferences.value("resolution").toString(), QString("1080p"));
+		QCOMPARE(fake.preferences.value("fps").toInt(), 30);
 		QCOMPARE(sent.value("bitrate").toInt(), 60);
 		QCOMPARE(sent.value("codec").toString(), QString("HEVC"));
-		QCOMPARE(sent.value("adapter").toString(), QString("RTX 3090"));
+		QVERIFY(!sent.contains("adapter"));
+		QCOMPARE(fake.preferences.value("adapter").toString(), QString("RTX 3090"));
 		QVERIFY(sent.value("local_audio").toBool());
-		QVERIFY(!sent.value("show_local").toBool());
+		QVERIFY(!sent.contains("show_local"));
+		QVERIFY(!fake.preferences.value("show_local").toBool());
 		HostControlClient restored_client(fake.Path());
 		restored_client.SetSystemctl(MakeFakeSystemctl(dir.path()));
 		StreamingWidget restored(&restored_client);
