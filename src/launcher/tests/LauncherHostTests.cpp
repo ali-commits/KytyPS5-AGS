@@ -1,5 +1,6 @@
 #include "agsPairing.h"
 #include "cheatFile.h"
+#include "clientProfiles.h"
 #include "common/fpsStats.h"
 #include "common/trophies.h"
 #include "gameLibrary.h"
@@ -59,6 +60,28 @@ static QJsonObject RuntimeBody(const QString& game, const QString& client, const
 	        {"owner_pid", pid}, {"owner_start", start}, {"state", "starting"}};
 }
 
+static void WriteTrophyFixture(const QString& path) {
+	const QMap<QByteArray, QByteArray> files {
+	    {"tropconf.json", R"({"defaultLanguage":"en-US","trophies":[{"id":"0","grade":"B","hidden":true},{"id":"1","grade":"B","hidden":true}]})"},
+	    {"tropmeta_en-US.json", R"({"metadata":{"titleMetadata":{"name":"Fixture"},"trophyMetadata":[]}})"},
+	    {"trop0000.png", "ICON0"}, {"trop0001.png", "ICON1"}};
+	qsizetype offset = 0x40 + files.size() * 0x40;
+	qsizetype size = offset; for (const auto& bytes: files) size += bytes.size();
+	QByteArray bytes(size, '\0');
+	const auto number = [&](qsizetype at, quint64 value, int count) {
+		for (int i = count - 1; i >= 0; --i) { bytes[at + i] = char(value & 255); value >>= 8; }
+	};
+	number(0, 0xb228c60a, 4); number(4, 1, 4); number(8, size, 8); number(0x10, files.size(), 4); number(0x14, 0x20, 4);
+	qsizetype entry = 0x40;
+	for (auto file = files.cbegin(); file != files.cend(); ++file) {
+		std::copy(file.key().begin(), file.key().end(), bytes.begin() + entry);
+		number(entry + 0x20, offset, 8); number(entry + 0x28, file.value().size(), 8);
+		std::copy(file.value().begin(), file.value().end(), bytes.begin() + offset);
+		offset += file.value().size(); entry += 0x40;
+	}
+	WriteFile(path, bytes);
+}
+
 class LauncherHostTests: public QObject {
 	Q_OBJECT
 	QTemporaryDir m_dir;
@@ -87,6 +110,121 @@ private slots:
 		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
 	}
 	void cleanup() { QDir::setCurrent(m_old_cwd); }
+	void isolatedDiagnosticTraversalCannotTouchExternalSentinels() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto id = library.Games().first().id;
+		auto* info = library.Find(id)->info.get();
+		QString error;
+		QVERIFY(info->SetGameSettings({{"printf_direction", "File"}, {"printf_output_file", "../normal/printf.log"},
+		    {"shader_log_direction", "File"}, {"shader_log_folder", "../normal/shaders"},
+		    {"command_buffer_dump_enabled", "true"}, {"command_buffer_dump_folder", "../normal/commands"}}, error));
+		const auto outside = config.filePath("normal");
+		for (const auto& name: {"printf.log", "shaders/sentinel", "commands/sentinel"}) WriteFile(QDir(outside).filePath(name), "unchanged");
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", config.filePath("emulator.lock"), config.path());
+		const auto reply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}}));
+		QCOMPARE(reply.status, 200);
+		const auto game = QJsonDocument::fromJson(reply.body).object();
+		const auto args = game["args"].toArray();
+		const auto cwd = game["cwd"].toString();
+		for (const auto& flag: {"--printf-output-file", "--shader-log-folder", "--command-buffer-dump-folder"}) {
+			const auto at = std::find(args.begin(), args.end(), QJsonValue(flag));
+			QVERIFY(at != args.end());
+			auto target = QDir(cwd).absoluteFilePath((at + 1)->toString());
+			if (QString(flag) != "--printf-output-file") target = QDir(target).filePath("sentinel");
+			WriteFile(target, "fixture diagnostic output");
+		}
+		for (const auto& name: {"printf.log", "shaders/sentinel", "commands/sentinel"})
+			QCOMPARE(ReadFile(QDir(outside).filePath(name)), QByteArray("unchanged"));
+	}
+
+	void isolatedDiagnosticSymlinksReject_data() {
+		QTest::addColumn<QString>("target");
+		QTest::newRow("shader directory") << "_ShaderLogs";
+		QTest::newRow("command buffer directory") << "_CommandBuffers";
+		QTest::newRow("printf existing target") << "_TempData/printf.log";
+		QTest::newRow("nested diagnostic ancestor") << "_ShaderLogs/nested";
+	}
+	void isolatedDiagnosticSymlinksReject() {
+		QFETCH(QString, target);
+		QTemporaryDir config, outside;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto id = library.Games().first().id;
+		const auto cwd = config.filePath(id);
+		QDir().mkpath(QDir(cwd).filePath("_TempData"));
+		WriteFile(outside.filePath("sentinel"), "unchanged");
+		QDir().mkpath(QFileInfo(QDir(cwd).filePath(target)).absolutePath());
+		QVERIFY(QFile::link(target.endsWith(".log") ? outside.filePath("sentinel") : outside.path(), QDir(cwd).filePath(target)));
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", config.filePath("emulator.lock"), config.path());
+		const auto reply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}}));
+		QCOMPARE(reply.status, 404);
+		QCOMPARE(ReadFile(outside.filePath("sentinel")), QByteArray("unchanged"));
+	}
+
+	void nativeTrophiesUseResolvedDeviceSnapshot_data() {
+		QTest::addColumn<bool>("icons");
+		QTest::newRow("progress") << false;
+		QTest::newRow("hidden icons") << true;
+	}
+	void nativeTrophiesUseResolvedDeviceSnapshot() {
+		QFETCH(bool, icons);
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const QString other = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+		const auto id = library.Games().first().id;
+		auto* info = library.Find(id)->info.get(); info->user_id = 1;
+		const auto package = QDir(info->basedir).filePath("sce_sys/trophy2/trophy00.ucp");
+		WriteTrophyFixture(package);
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", config.filePath("emulator.lock"), config.path());
+		const auto settingsPath = "/kyty/v1/games/" + id + "/settings";
+		auto get = QJsonDocument::fromJson(Call(resolver, ClientReq("GET", settingsPath, uuid)).body).object();
+		QCOMPARE(Call(resolver, ClientReq("PUT", settingsPath, uuid, {{"revision", get["revision"]}, {"values", QJsonObject {{"user_id", "2"}}}})).status, 200);
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 200);
+		const auto runtime = config.filePath(id);
+		const auto user1 = Common::Trophies::UnlocksPath(runtime.toStdString(), info->title_id.toStdString(), 1, 0);
+		const auto user2 = Common::Trophies::UnlocksPath(runtime.toStdString(), info->title_id.toStdString(), 2, 0);
+		QVERIFY(Common::Trophies::SaveUnlockData(user1, {{0}, {}}));
+		QVERIFY(Common::Trophies::SaveUnlockData(user2, {{1}, {}}));
+		const auto user1Before = ReadFile(QString::fromStdString(user1.string()));
+		const auto trophiesPath = "/kyty/v1/games/" + id + "/trophies";
+		const auto assertUser = [&](int user) {
+			if (icons) {
+				QCOMPARE(Call(resolver, ClientReq("GET", trophiesPath + "/icon/0-0", uuid)).status, user == 1 ? 200 : 404);
+				QCOMPARE(Call(resolver, ClientReq("GET", trophiesPath + "/icon/0-1", uuid)).status, user == 2 ? 200 : 404);
+			} else {
+				const auto reply = Call(resolver, ClientReq("GET", trophiesPath, uuid)); QCOMPARE(reply.status, 200);
+				const auto trophies = QJsonDocument::fromJson(reply.body).object()["trophies"].toArray();
+				QCOMPARE(trophies.size(), 2);
+				QCOMPARE(trophies[0].toObject()["unlocked"].toBool(), user == 1);
+				QCOMPARE(trophies[1].toObject()["unlocked"].toBool(), user == 2);
+			}
+		};
+		assertUser(2); // pre-launch reads use the trusted device's current profile
+		// An external owner edit between resolve and prepare must not change the launch snapshot.
+		bool seeded = false; auto profile = ClientProfiles::ReadGame(uuid, id, &seeded); QVERIFY(seeded);
+		auto values = profile["settings"].toObject(); values["user_id"] = "1"; profile["settings"] = values;
+		QCOMPARE(ClientProfiles::WriteGame(uuid, id, profile), QString());
+		auto body = RuntimeBody(id, uuid, runtime);
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		assertUser(2); // admitted launch is pinned to the resolved user, including hidden icons
+		QCOMPARE(Call(resolver, ClientReq("GET", trophiesPath, other)).status, 409);
+		get = QJsonDocument::fromJson(Call(resolver, ClientReq("GET", settingsPath, uuid)).body).object();
+		QVERIFY(get["running"].toBool());
+		QCOMPARE(Call(resolver, ClientReq("PUT", settingsPath, uuid, {{"revision", get["revision"]}, {"values", QJsonObject {{"user_id", "3"}}}})).status, 409);
+		QCOMPARE(Call(resolver, ClientReq("POST", settingsPath + "/reset", uuid, {})).status, 409);
+		body["state"] = "closed";
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		assertUser(1); // next-launch profile takes effect only after the previous runtime closes
+		QCOMPARE(ReadFile(QString::fromStdString(user1.string())), user1Before);
+		QFile::remove(package);
+	}
+
 	void nativeResolverPreservesCompleteDeviceArguments() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());

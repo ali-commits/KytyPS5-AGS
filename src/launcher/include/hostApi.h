@@ -75,6 +75,13 @@ private:
 	[[nodiscard]] QString RuntimeDirectory(const QString& game_id) const;
 	void ClearRuntime();
 	void ReapRuntime();
+	[[nodiscard]] bool GameRunning(const QString& game_id) const;
+	[[nodiscard]] std::unique_ptr<Configuration> TrophyConfiguration(const GameEntry& game, const Client& client) const;
+	struct ResolvedLaunch {
+		QString client_id;
+		QJsonObject game;
+		std::unique_ptr<Configuration> trophy_config;
+	} m_resolved;
 	QString m_interpreter, m_local_lock, m_runtime_root;
 	struct RuntimeContext {
 		QString session_id, game, client_id, directory, owner_start, token;
@@ -82,6 +89,7 @@ private:
 		bool claimed = false;
 		bool acquired = false;
 		qint64 deadline_ms = 0;
+		std::unique_ptr<Configuration> trophy_config;
 	} m_runtime;
 	int m_reservation_fd = -1;
 	QTimer m_runtime_watch;
@@ -95,7 +103,7 @@ private:
 	                 const std::function<void(HostReply)>& done);
 	void ResetSettings(const GameEntry& game, const Client& client,
 	                   const std::function<void(HostReply)>& done);
-	void GetTrophies(const GameEntry& game, const std::function<void(HostReply)>& done) const;
+	void GetTrophies(const GameEntry& game, const Client& client, const std::function<void(HostReply)>& done) const;
 	void GetCheats(const GameEntry& game, const Client& client,
 	               const std::function<void(HostReply)>& done) const;
 	void PutCheats(const GameEntry& game, const Client& client, const QJsonObject& body,
