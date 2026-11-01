@@ -425,24 +425,26 @@ void StreamingWidget::StartHosting() {
 void StreamingWidget::LoadPreferences() {
 	const auto observed       = PreferenceValues();
 	const auto accepted       = m_preference_values;
+	const auto pending        = m_pending_preferences;
 	const bool preserve_edits = m_prefs_loaded;
-	m_host->Request({{"type", "get-preferences"}},
-	                [self = QPointer(this), observed, accepted, preserve_edits](QJsonObject reply,
-	                                                                            QString     error) {
-		                if (!self || !error.isEmpty()) return;
-		                if (preserve_edits) {
-			                const auto current = self->PreferenceValues();
-			                // A slow refresh must not replace edits or newer acknowledgements
-			                // made before or while this request was in flight.
-			                for (const auto& key: reply.keys()) {
-				                if (current.value(key) != observed.value(key) ||
-								    observed.value(key) != accepted.value(key) ||
-								    self->m_preference_values.value(key) != accepted.value(key))
-					                reply.remove(key);
-			                }
-		                }
-		                self->ApplyPreferences(reply);
-	                });
+	m_host->Request(
+	    {{"type", "get-preferences"}}, [self = QPointer(this), observed, accepted, pending,
+		                                preserve_edits](QJsonObject reply, QString error) {
+		    if (!self || !error.isEmpty()) return;
+		    if (preserve_edits) {
+			    const auto current = self->PreferenceValues();
+			    // A slow refresh must not replace edits or newer acknowledgements
+			    // made before or while this request was in flight.
+			    for (const auto& key: reply.keys()) {
+				    if (pending.contains(key) || self->m_pending_preferences.contains(key) ||
+					    current.value(key) != observed.value(key) ||
+					    observed.value(key) != accepted.value(key) ||
+					    self->m_preference_values.value(key) != accepted.value(key))
+					    reply.remove(key);
+			    }
+		    }
+		    self->ApplyPreferences(reply);
+	    });
 }
 void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	if (p.isEmpty()) return;
@@ -480,6 +482,7 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 void StreamingWidget::ScheduleApply() {
 	// Before the daemon's stored values arrive, an edit would overwrite them with defaults.
 	if (m_loading_prefs || !m_prefs_loaded) return;
+	if (!m_pending_preferences.isEmpty()) m_preferences_edited_during_save = true;
 	m_autosave->start();
 }
 void StreamingWidget::OnStatus(const QJsonObject& status) {
@@ -506,6 +509,9 @@ QJsonObject StreamingWidget::PreferenceValues() const {
 	        {"host_name", settings.host_name}};
 }
 bool StreamingWidget::Apply() {
+	// Keep one outstanding write. The controls retain the latest desired values,
+	// including a revert to the old acknowledged value while a save is pending.
+	if (!m_pending_preferences.isEmpty()) return true;
 	const auto settings = Settings();
 	const auto error    = settings.Validate();
 	if (!error.isEmpty()) {
@@ -520,6 +526,8 @@ bool StreamingWidget::Apply() {
 	for (auto it = values.begin(); it != values.end(); ++it)
 		if (it.value() != m_preference_values.value(it.key())) request.insert(it.key(), it.value());
 	if (request.size() == 1) return true;
+	m_pending_preferences            = request;
+	m_preferences_edited_during_save = false;
 	m_host->Request(request, [self = QPointer(this), request](QJsonObject reply, QString failure) {
 		if (!self) return;
 		if (failure.isEmpty() && !reply.value("ok").toBool())
@@ -527,7 +535,18 @@ bool StreamingWidget::Apply() {
 		if (failure.isEmpty()) {
 			for (auto it = request.begin(); it != request.end(); ++it)
 				if (it.key() != "type") self->m_preference_values.insert(it.key(), it.value());
+		} else {
+			// The owner may have persisted preferences before a reload/reply failed.
+			// Treat submitted fields as uncertain so a queued revert is sent explicitly.
+			for (auto it = request.begin(); it != request.end(); ++it)
+				if (it.key() != "type") self->m_preference_values.remove(it.key());
 		}
+		self->m_pending_preferences = {};
+		// Only user edits during this write trigger reconciliation. An unchanged
+		// failure stays visible and never schedules its own unbounded retry loop.
+		if (self->m_preferences_edited_during_save && !self->m_autosave->isActive())
+			self->m_autosave->start();
+		self->m_preferences_edited_during_save = false;
 		if (failure.isEmpty() && reply.value("deferred").toBool()) {
 			self->m_error->setText(
 			    tr("Accepted for next launch; endpoint changes require host restart"));

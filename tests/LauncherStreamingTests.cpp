@@ -644,6 +644,80 @@ private slots:
 		                               "1080p", 60, widget.Settings().show_local);
 		QVERIFY(!local_display.value("environment").toObject().contains("KYTY_STREAM_ONLY"));
 	}
+	void mainTabReconcilesEditsDuringSave_data() {
+		QTest::addColumn<int>("first_result"); // 0 success, 1 rejected reload, 2 failed reply after apply
+		QTest::addColumn<bool>("revert");
+		QTest::newRow("successful-save-revert") << 0 << true;
+		QTest::newRow("rejected-reload-revert") << 1 << true;
+		QTest::newRow("failed-reply-after-apply-revert") << 2 << true;
+		QTest::newRow("unchanged-failure-no-retry-loop") << 2 << false;
+	}
+	void mainTabReconcilesEditsDuringSave() {
+		QFETCH(int, first_result);
+		QFETCH(bool, revert);
+		const auto binary = qEnvironmentVariable("AGS_TEST_HOST_BINARY");
+		if (binary.isEmpty()) QSKIP("Set AGS_TEST_HOST_BINARY to check the native configured DTO.");
+		QTemporaryDir dir;
+		StreamingBackend backend(dir.filePath("profile"));
+		backend.SetApiSocket(dir.filePath("api.sock"));
+		StreamingSettings nativeSettings;
+		nativeSettings.backend = binary;
+		nativeSettings.port = FreeBasePort();
+		backend.Start(nativeSettings);
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 10000);
+		FakeHostDaemon daemon(dir.path());
+		daemon.preferences["port"] = nativeSettings.port;
+		std::function<void()> releaseFirst;
+		int writes = 0;
+		daemon.apply_preferences = [&](const QJsonObject& preferences, std::function<void(HostReply)> done) {
+			const bool first = ++writes == 1;
+			const auto finish = [&, first, done](QJsonObject reply, QString error) {
+				if (!error.isEmpty()) reply = {{"ok", false}, {"error", error}};
+				if (first && first_result != 0) reply = {{"ok", false}, {"error", "fixture preference failure"}};
+				auto respond = [done, reply] { done({200, "application/json", QJsonDocument(reply).toJson(QJsonDocument::Compact), {}}); };
+				if (first) releaseFirst = std::move(respond); else respond();
+			};
+			if (first && first_result == 1) { finish({}, {}); return; }
+			nativeSettings.bitrate = preferences.value("bitrate").toInt();
+			backend.ReloadSettings(nativeSettings, finish);
+		};
+		HostControlClient client(daemon.Path());
+		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		StreamingWidget widget(&client);
+		auto* bitrate = widget.findChild<QSpinBox*>("streamBitrate");
+		QTRY_COMPARE(widget.findChild<QSpinBox*>("streamPort")->value(), nativeSettings.port);
+		for (auto* timer: client.findChildren<QTimer*>()) timer->stop();
+		QCOMPARE(bitrate->value(), 30);
+		bitrate->setValue(60);
+		QTRY_VERIFY(bool(releaseFirst));
+		QCOMPARE(daemon.Requests("set-preferences").size(), 1);
+		QCOMPARE(daemon.preferences.value("bitrate").toInt(), 60);
+		QCOMPARE(backend.NativeStatus().value("configured").toObject().value("video").toObject().value("bitrate_kbps").toInt(), first_result == 1 ? 30000 : 60000);
+		if (revert) bitrate->setValue(30);
+		QTest::qWait(750); // second debounce expires while acknowledgement is still withheld
+		QCOMPARE(daemon.Requests("set-preferences").size(), 1);
+		releaseFirst();
+		releaseFirst = {};
+		if (revert) {
+			QTRY_COMPARE(daemon.Requests("set-preferences").size(), 2);
+			QTRY_COMPARE(daemon.preferences.value("bitrate").toInt(), 30);
+			QTRY_COMPARE(backend.NativeStatus().value("configured").toObject().value("video").toObject().value("bitrate_kbps").toInt(), 30000);
+			QCOMPARE(bitrate->value(), 30);
+			QTest::qWait(750);
+			QCOMPARE(daemon.Requests("set-preferences").size(), 2);
+		} else {
+			QTRY_VERIFY(widget.findChild<QLabel*>("streamError")->text().contains("fixture preference failure"));
+			QTest::qWait(1400); // a failed write with no newer edits must not retry itself
+			QCOMPARE(daemon.Requests("set-preferences").size(), 1);
+			QCOMPARE(bitrate->value(), 60);
+			bitrate->setValue(45); // a later explicit edit may try again
+			QTRY_COMPARE(daemon.Requests("set-preferences").size(), 2);
+			QTRY_COMPARE(backend.NativeStatus().value("configured").toObject().value("video").toObject().value("bitrate_kbps").toInt(), 45000);
+		}
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 10000);
+	}
+
 	void diagnosticChangesSurviveImmediateMainTabEdit() {
 		const auto binary = qEnvironmentVariable("AGS_TEST_HOST_BINARY");
 		if (binary.isEmpty()) QSKIP("Set AGS_TEST_HOST_BINARY to check the native configured DTO.");

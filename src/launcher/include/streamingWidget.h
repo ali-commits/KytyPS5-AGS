@@ -42,6 +42,8 @@ private:
 	HostControlClient*                           m_host;
 	QJsonObject                                  m_host_status;
 	QJsonObject                                  m_preference_values;
+	QJsonObject                                  m_pending_preferences;
+	bool                                         m_preferences_edited_during_save = false;
 	QString                                      m_daemon_error;
 	bool                                         m_prefs_loaded      = false;
 	bool                                         m_autostart_touched = false;
