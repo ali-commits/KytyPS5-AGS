@@ -32,7 +32,7 @@ public:
 	[[nodiscard]] int        RetryIntervalMs() const { return m_retry.interval(); }
 
 	[[nodiscard]] bool Start(QString* error);
-	// Stops hosting, then emits Finished() once the backend is Stopped or Error (20 s at most).
+	// Stops hosting, then emits Finished() once the backend is Stopped or Error (bounded native shutdown plus cleanup).
 	void Shutdown();
 
 	// True while an emulator holds the shared lock $XDG_RUNTIME_DIR/kytyps5/emulator.lock.

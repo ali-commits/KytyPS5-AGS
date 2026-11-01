@@ -1,6 +1,5 @@
 #include "streamingWidget.h"
 
-#include "agsPairing.h"
 #include "agsRustStreamingDialog.h"
 #include "hostControlClient.h"
 
@@ -51,11 +50,11 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	font.setBold(true);
 	title->setFont(font);
 	layout->addWidget(title);
-	auto* rustControls = new QPushButton(tr("AGS Rust streaming — test controls…"), content);
+	auto* rustControls = new QPushButton(tr("Native AGS diagnostics…"), content);
 	rustControls->setObjectName("agsRustStreamingControls");
 	layout->addWidget(rustControls);
 	connect(rustControls, &QPushButton::clicked, this, [this] {
-		AgsRustStreamingDialog dialog(this, m_rust_catalog);
+		AgsRustStreamingDialog dialog(this, m_rust_catalog, m_host);
 		dialog.exec();
 	});
 	auto* description = new QLabel(
@@ -78,7 +77,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	host_form->addRow(tr("Streaming helper"), path_row);
 	// The daemon owns the helper path, so the control is read-only (and hidden).
 	host_form->setRowVisible(path_row, false);
-	m_version = new QLabel(tr("Version checked when hosting starts"), host);
+	m_version = new QLabel(tr("Native AGS · owner management handshake"), host);
 	m_version->setWordWrap(true);
 	host_form->addRow(tr("Backend"), m_version);
 	auto* address_row = new QHBoxLayout;
@@ -88,18 +87,21 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	address_row->addWidget(m_address, 1);
 	auto* copy = new QPushButton(tr("Copy address"), host);
 	address_row->addWidget(copy);
-	host_form->addRow(tr("Moonlight address"), address_row);
+	host_form->addRow(tr("AGS address"), address_row);
 	auto* actions = new QHBoxLayout;
 	m_start       = new QPushButton(tr("Start hosting"), host);
 	m_start->setObjectName("streamStart");
 	m_start->setDefault(false);
 	m_stop = new QPushButton(tr("Stop hosting"), host);
 	m_stop->setObjectName("streamStop");
+	m_restart = new QPushButton(tr("Restart hosting"), host);
+	m_restart->setObjectName("streamRestart");
 	m_status = new QLabel(host);
 	m_status->setObjectName("streamStatus");
 	m_status->setWordWrap(true);
 	actions->addWidget(m_start);
 	actions->addWidget(m_stop);
+	actions->addWidget(m_restart);
 	actions->addWidget(m_status, 1);
 	host_form->addRow(actions);
 	m_autostart = new QCheckBox(tr("Start at login"), host);
@@ -112,7 +114,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_error->hide();
 	host_form->addRow(m_error);
 	layout->addWidget(host);
-	m_quality          = new QGroupBox(tr("Streaming host connection"), content);
+	m_quality          = new QGroupBox(tr("Next game preferences"), content);
 	auto* quality_form = new QFormLayout(m_quality);
 	auto* profile_row  = new QHBoxLayout;
 	m_resolution       = new QComboBox(m_quality);
@@ -124,25 +126,27 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_fps->setObjectName("streamFps");
 	m_fps->addItem("30 FPS", 30);
 	m_fps->addItem("60 FPS", 60);
+	m_fps->addItem("90 FPS", 90);
+	m_fps->addItem("120 FPS", 120);
 	m_fps->setCurrentIndex(settings.fps == 30 ? 0 : 1);
 	profile_row->addWidget(m_fps);
 	m_bitrate = new QSpinBox(m_quality);
 	m_bitrate->setObjectName("streamBitrate");
-	m_bitrate->setRange(5, 100);
+	m_bitrate->setRange(1, 150);
 	m_bitrate->setSuffix(" Mbps");
 	m_bitrate->setValue(settings.bitrate);
 	profile_row->addWidget(m_bitrate);
 	m_codec = new QComboBox(m_quality);
 	m_codec->setObjectName("streamCodec");
-	m_codec->addItems({"HEVC", "H264"});
+	m_codec->addItems({"HEVC", "H264", "AV1"});
 	m_codec->setCurrentText(settings.codec);
 	profile_row->addWidget(m_codec);
 	quality_form->addRow(tr("Preferred output"), profile_row);
-	quality_form->setRowVisible(profile_row, false);
+	quality_form->setRowVisible(profile_row, true);
 	auto* hint = new QLabel(
-	    tr("Choose resolution, frame rate, quality and bitrate on the client. "
-		   "The negotiated TV profile controls host capture and emulator streaming output. "
-		   "Local Library game settings stay separate. Streaming is headless."),
+	    tr("These are host output preferences. The active negotiated codec and input capabilities "
+		   "appear in diagnostics. Hardware-dependent modes report errors when unavailable. Native "
+		   "currently uses a 1080p host default; client negotiation can select another size."),
 	    m_quality);
 	hint->setWordWrap(true);
 	quality_form->addRow(hint);
@@ -150,38 +154,54 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_show_local->setObjectName("streamShowLocal");
 	m_show_local->setChecked(settings.show_local);
 	quality_form->addRow(m_show_local);
-	quality_form->setRowVisible(m_show_local, false);
+	quality_form->setRowVisible(m_show_local, true);
 	auto* display_hint =
-	    new QLabel(tr("Turn this off to show the game and system dialogs only in Moonlight. "
+	    new QLabel(tr("Private/headless hides the game window. Mirrored shows it locally. "
 		              "The host still runs and renders the game."),
 		           m_quality);
 	display_hint->setWordWrap(true);
 	quality_form->addRow(display_hint);
-	quality_form->setRowVisible(display_hint, false);
+	quality_form->setRowVisible(display_hint, true);
 	m_adapter = new QLineEdit(settings.adapter, m_quality);
 	m_adapter->setObjectName("streamAdapter");
-	m_adapter->setPlaceholderText(tr("Automatic NVIDIA device (RTX 3090)"));
-	quality_form->addRow(tr("NVENC adapter name"), m_adapter);
+	m_adapter->setPlaceholderText(tr("/dev/dri/renderD128 (VAAPI only)"));
+	quality_form->addRow(tr("VAAPI device"), m_adapter);
+	m_encoder = new QComboBox(m_quality);
+	m_encoder->setObjectName("streamEncoder");
+	m_encoder->addItems({"auto", "nvenc", "vaapi", "software"});
+	quality_form->addRow(tr("Encoder"), m_encoder);
+	m_audio_codec = new QComboBox(m_quality);
+	m_audio_codec->setObjectName("streamAudioCodec");
+	m_audio_codec->addItem(tr("Opus"), "opus");
+	m_audio_codec->addItem(tr("PCM"), "raw_pcm");
+	quality_form->addRow(tr("Audio codec"), m_audio_codec);
+	m_fec = new QCheckBox(tr("Forward error correction"), m_quality);
+	m_fec->setObjectName("streamFec");
+	quality_form->addRow(m_fec);
+	m_local_sink = new QLineEdit(m_quality);
+	m_local_sink->setObjectName("streamLocalAudioSink");
+	m_local_sink->setPlaceholderText(tr("Default output"));
+	quality_form->addRow(tr("Local audio sink"), m_local_sink);
 	m_port = new QSpinBox(m_quality);
 	m_port->setObjectName("streamPort");
-	m_port->setRange(1024, 65514);
+	m_port->setRange(1024, 65535);
 	m_port->setValue(settings.port);
-	quality_form->addRow(tr("GameStream base port"), m_port);
+	quality_form->addRow(tr("QUIC port"), m_port);
 	m_host_name = new QLineEdit(settings.host_name, m_quality);
 	m_host_name->setObjectName("streamHostName");
 	m_host_name->setMaxLength(40);
 	m_host_name->setPlaceholderText(StreamingSettings::DefaultHostName());
 	quality_form->addRow(tr("Host name"), m_host_name);
 	auto* host_name_hint =
-	    new QLabel(tr("The name Moonlight and AGS Phone show for this host. Leave blank to use the "
+	    new QLabel(tr("The name AGS clients show for this host. Leave blank to use the "
 		              "machine name."),
 		           m_quality);
 	host_name_hint->setWordWrap(true);
 	quality_form->addRow(host_name_hint);
 	m_disconnect_grace = new QSpinBox(m_quality);
 	m_disconnect_grace->setObjectName("streamDisconnectGrace");
-	m_disconnect_grace->setRange(5, 600);
-	m_disconnect_grace->setValue(settings.disconnect_grace < 5 ? 20 : settings.disconnect_grace);
+	m_disconnect_grace->setRange(0, 600);
+	m_disconnect_grace->setValue(settings.disconnect_grace);
 	m_disconnect_grace->setSuffix(tr(" s"));
 	quality_form->addRow(tr("Close game after disconnect"), m_disconnect_grace);
 	auto* grace_hint = new QLabel(
@@ -231,94 +251,23 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	session_layout->addWidget(m_close);
 	layout->addWidget(sessions);
 	auto* devices     = new QHBoxLayout;
-	auto* pairing     = new QGroupBox(tr("Pending pairing requests"), content);
+	auto* pairing     = new QGroupBox(tr("Native pairing"), content);
 	auto* pair_layout = new QVBoxLayout(pairing);
-	m_pending         = new QListWidget(pairing);
-	m_pending->setObjectName("streamPending");
-	m_pending->setMaximumHeight(110);
-	pair_layout->addWidget(m_pending);
-	auto* pairing_hint = new QLabel(tr("Add this host in Moonlight, select the request, then enter "
-	                                   "the PIN shown by that client."),
-	                                pairing);
+	auto* pairing_hint =
+	    new QLabel(tr("Export a pinned, one-use pairing bundle and transfer it through a trusted "
+		              "channel. Import it in AGS within 120 seconds."),
+		           pairing);
 	pairing_hint->setWordWrap(true);
 	pair_layout->addWidget(pairing_hint);
-	auto* pair_form = new QFormLayout;
-	m_pin           = new QLineEdit(pairing);
-	m_pin->setObjectName("streamPin");
-	m_pin->setMaxLength(4);
-	m_pin->setEchoMode(QLineEdit::Password);
-	m_pin->setValidator(new QIntValidator(0, 9999, m_pin));
-	m_pin->setPlaceholderText("0000");
-	pair_form->addRow(tr("PIN"), m_pin);
-	m_name = new QLineEdit(pairing);
-	m_name->setObjectName("streamClientName");
-	m_name->setMaxLength(128);
-	m_name->setPlaceholderText(tr("Living-room TV"));
-	pair_form->addRow(tr("Client name"), m_name);
-	pair_layout->addLayout(pair_form);
-	m_pair = new QPushButton(tr("Pair selected client"), pairing);
+	m_pair = new QPushButton(tr("Export pairing bundle…"), pairing);
 	m_pair->setObjectName("streamPair");
 	pair_layout->addWidget(m_pair);
-
-	// AGS phone pairing: a password the phone enters instead of a PIN. The
-	// launcher stores only salt + verifier in an owner-only file the host reads.
-	auto* ags_line = new QFrame(pairing);
-	ags_line->setFrameShape(QFrame::HLine);
-	ags_line->setFrameShadow(QFrame::Sunken);
-	pair_layout->addWidget(ags_line);
-	auto* ags_title = new QLabel(tr("Phone pairing password"), pairing);
-	ags_title->setStyleSheet("font-weight: bold;");
-	pair_layout->addWidget(ags_title);
-	auto* ags_hint = new QLabel(
-	    tr("Set a password of at least %1 characters. AGS Phone pairs by entering it, with no "
-		   "action needed on this PC. Only a salted verifier is stored here, never the password.")
-	        .arg(AgsPairing::MINIMUM_PASSWORD_LENGTH),
-	    pairing);
-	ags_hint->setWordWrap(true);
-	pair_layout->addWidget(ags_hint);
-	auto* ags_row  = new QHBoxLayout;
-	m_ags_password = new QLineEdit(pairing);
-	m_ags_password->setObjectName("streamAgsPassword");
-	m_ags_password->setEchoMode(QLineEdit::Password);
-	m_ags_password->setMaxLength(128);
-	m_ags_password->setPlaceholderText(tr("New password"));
-	ags_row->addWidget(m_ags_password, 1);
-	m_ags_set = new QPushButton(tr("Set password"), pairing);
-	m_ags_set->setObjectName("streamAgsSet");
-	ags_row->addWidget(m_ags_set);
-	m_ags_remove = new QPushButton(tr("Remove"), pairing);
-	m_ags_remove->setObjectName("streamAgsRemove");
-	ags_row->addWidget(m_ags_remove);
-	pair_layout->addLayout(ags_row);
-	m_ags_status = new QLabel(pairing);
-	m_ags_status->setObjectName("streamAgsStatus");
-	m_ags_status->setWordWrap(true);
-	m_ags_status->setTextFormat(Qt::PlainText);
-	pair_layout->addWidget(m_ags_status);
-
-	m_ags_set->setEnabled(false);
-	connect(m_ags_password, &QLineEdit::textChanged, this, [this](const QString& text) {
-		m_ags_set->setEnabled(text.size() >= AgsPairing::MINIMUM_PASSWORD_LENGTH);
-	});
-	connect(m_ags_set, &QPushButton::clicked, this, [this] {
-		QString error;
-		if (AgsPairing::SetPassword(AgsPairing::VerifierFilePath(), m_ags_password->text(),
-		                            &error)) {
-			m_ags_password->clear();
-		} else {
-			QMessageBox::warning(this, tr("Phone pairing password"), error);
-		}
-		UpdateAgsPairingStatus();
-	});
-	connect(m_ags_remove, &QPushButton::clicked, this, [this] {
-		QString error;
-		if (!AgsPairing::RemovePassword(AgsPairing::VerifierFilePath(), &error)) {
-			QMessageBox::warning(this, tr("Phone pairing password"), error);
-		}
-		UpdateAgsPairingStatus();
-	});
-	UpdateAgsPairingStatus();
-
+	m_pairing_path = new QLabel(pairing);
+	m_pairing_path->setObjectName("streamPairingPath");
+	m_pairing_path->setTextFormat(Qt::PlainText);
+	m_pairing_path->setWordWrap(true);
+	m_pairing_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	pair_layout->addWidget(m_pairing_path);
 	devices->addWidget(pairing, 1);
 	auto* clients        = new QGroupBox(tr("Paired clients"), content);
 	auto* clients_layout = new QVBoxLayout(clients);
@@ -362,7 +311,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_logs->setMaximumHeight(170);
 	logs_layout->addWidget(m_logs);
 	auto* private_path =
-	    new QLabel(tr("Private profile: %1\nManagement: HTTPS on 127.0.0.1 only (base port + 1)")
+	    new QLabel(tr("Private native profile: %1/native\nManagement: owner-only local socket")
 		               .arg(StreamingSettings::ProfileDirectory()),
 		           logs);
 	private_path->setWordWrap(true);
@@ -373,44 +322,60 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	        [this] { QApplication::clipboard()->setText(m_address->currentText()); });
 	connect(m_start, &QPushButton::clicked, this, &StreamingWidget::StartHosting);
 	connect(m_stop, &QPushButton::clicked, m_host, &HostControlClient::StopDaemon);
-	connect(m_close, &QPushButton::clicked, this,
-	        [this] { m_host->Request({{"type", "stop-game"}}, [](QJsonObject, QString) {}); });
+	connect(m_restart, &QPushButton::clicked, m_host, &HostControlClient::RestartDaemon);
+	connect(m_close, &QPushButton::clicked, this, [this] {
+		m_host->Request({{"type", "stop-game"}},
+		                [self = QPointer(this)](QJsonObject reply, QString error) {
+			                if (!self) return;
+			                if (error.isEmpty() && !reply.value("ok").toBool())
+				                error = reply.value("error").toString();
+			                if (!error.isEmpty()) {
+				                self->m_error->setText(tr("Close failed: %1").arg(error));
+				                self->m_error->show();
+			                }
+		                });
+	});
 	connect(m_pair, &QPushButton::clicked, this, [this] {
-		if (auto* item = m_pending->currentItem()) {
-			m_host->Request({{"type", "pairing-pin"},
-			                 {"id", item->data(Qt::UserRole).toString()},
-			                 {"pin", m_pin->text()},
-			                 {"name", m_name->text()}},
-			                [self = QPointer(this)](QJsonObject reply, QString error) {
-				                if (!self) return;
-				                if (error.isEmpty() && !reply.value("ok").toBool())
-					                error = reply.value("error").toString(tr("Pairing failed."));
-				                self->m_error->setText(error);
-				                self->m_error->setVisible(!error.isEmpty());
-			                });
-			m_pin->clear();
-		}
+		m_pair->setEnabled(false);
+		m_host->Request({{"type", "pair-ticket"}}, [self = QPointer(this)](QJsonObject reply,
+		                                                                   QString     error) {
+			if (!self) return;
+			if (error.isEmpty() && !reply.value("ok").toBool())
+				error = reply.value("error").toString(tr("Pairing export failed."));
+			self->m_pairing_path->setText(error.isEmpty()
+			                                  ? tr("Owner-only bundle: %1\nExpires in 120 seconds.")
+			                                        .arg(reply.value("path").toString())
+											  : error);
+			self->m_pair->setEnabled(self->m_host_status.value("state") == "Ready");
+		});
 	});
 	connect(m_forget, &QPushButton::clicked, this, [this] {
 		if (auto* item = m_clients->currentItem())
 			m_host->Request({{"type", "unpair"}, {"uuid", item->data(Qt::UserRole).toString()}},
-			                [](QJsonObject, QString) {});
+			                [self = QPointer(this)](QJsonObject reply, QString error) {
+				                if (!self) return;
+				                if (error.isEmpty() && !reply.value("ok").toBool())
+					                error = reply.value("error").toString();
+				                if (!error.isEmpty()) {
+					                self->m_error->setText(tr("Revoke failed: %1").arg(error));
+					                self->m_error->show();
+				                }
+			                });
 	});
 	const auto ready = [this] { return m_host_status.value("state").toString() == "Ready"; };
-	connect(m_pending, &QListWidget::currentRowChanged, this,
-	        [this, ready] { m_pair->setEnabled(ready() && m_pending->currentItem()); });
 	connect(m_clients, &QListWidget::currentRowChanged, this,
 	        [this, ready] { m_forget->setEnabled(ready() && m_clients->currentItem()); });
 	connect(m_port, &QSpinBox::valueChanged, this, [this] { Update(); });
-	for (auto* box: {m_resolution, m_fps, m_codec})
+	for (auto* box: {m_resolution, m_fps, m_codec, m_encoder, m_audio_codec})
 		connect(box, &QComboBox::currentIndexChanged, this, &StreamingWidget::ScheduleApply);
 	for (auto* spin: {m_port, m_bitrate})
 		connect(spin, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
 	connect(m_disconnect_grace, &QSpinBox::valueChanged, this, &StreamingWidget::ScheduleApply);
 	connect(m_host_name, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
-	for (auto* check: {m_monitor, m_show_local})
+	for (auto* check: {m_monitor, m_show_local, m_fec})
 		connect(check, &QCheckBox::toggled, this, &StreamingWidget::ScheduleApply);
 	connect(m_adapter, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
+	connect(m_local_sink, &QLineEdit::textChanged, this, &StreamingWidget::ScheduleApply);
 	connect(m_autostart, &QCheckBox::toggled, this, [this](bool on) {
 		m_autostart_touched = true;
 		m_host->SetAutostart(on);
@@ -437,6 +402,10 @@ StreamingSettings StreamingWidget::Settings() const {
 	s.bitrate               = m_bitrate->value();
 	s.codec                 = m_codec->currentText();
 	s.adapter               = m_adapter->text();
+	s.encoder               = m_encoder->currentText();
+	s.audio_codec           = m_audio_codec->currentData().toString();
+	s.local_audio_sink      = m_local_sink->text();
+	s.fec_enabled           = m_fec->isChecked();
 	s.local_audio           = m_monitor->isChecked();
 	s.show_local            = m_show_local->isChecked();
 	s.disconnect_grace      = m_disconnect_grace->value();
@@ -464,15 +433,21 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	m_loading_prefs = true; // values from the daemon are not user edits
 	if (p.contains("port")) m_port->setValue(p.value("port").toInt());
 	if (p.contains("resolution")) m_resolution->setCurrentText(p.value("resolution").toString());
-	if (p.contains("fps")) m_fps->setCurrentIndex(p.value("fps").toInt() == 30 ? 0 : 1);
+	if (p.contains("fps")) m_fps->setCurrentIndex(m_fps->findData(p.value("fps").toInt()));
 	if (p.contains("bitrate")) m_bitrate->setValue(p.value("bitrate").toInt());
 	if (p.contains("codec")) m_codec->setCurrentText(p.value("codec").toString());
+	if (p.contains("audio_codec"))
+		m_audio_codec->setCurrentIndex(m_audio_codec->findData(p.value("audio_codec").toString()));
+	if (p.contains("encoder")) m_encoder->setCurrentText(p.value("encoder").toString());
+	if (p.contains("fec_enabled")) m_fec->setChecked(p.value("fec_enabled").toBool());
+	if (p.contains("local_audio_sink"))
+		m_local_sink->setText(p.value("local_audio_sink").toString());
 	if (p.contains("adapter")) m_adapter->setText(p.value("adapter").toString());
 	if (p.contains("local_audio")) m_monitor->setChecked(p.value("local_audio").toBool());
 	if (p.contains("show_local")) m_show_local->setChecked(p.value("show_local").toBool());
 	if (p.contains("disconnect_grace")) {
 		const int grace = p.value("disconnect_grace").toInt();
-		m_disconnect_grace->setValue(grace < 5 ? 20 : grace);
+		m_disconnect_grace->setValue(grace);
 	}
 	if (p.contains("host_name")) m_host_name->setText(p.value("host_name").toString());
 	m_loading_prefs = false;
@@ -482,13 +457,6 @@ void StreamingWidget::ScheduleApply() {
 	// Before the daemon's stored values arrive, an edit would overwrite them with defaults.
 	if (m_loading_prefs || !m_prefs_loaded) return;
 	m_autosave->start();
-}
-void StreamingWidget::UpdateAgsPairingStatus() {
-	const bool set = AgsPairing::VerifierExists(AgsPairing::VerifierFilePath());
-	m_ags_status->setText(set ? tr("A phone pairing password is set.")
-	                          : tr("No phone pairing password is set."));
-	m_ags_remove->setEnabled(set);
-	m_ags_set->setText(set ? tr("Change password") : tr("Set password"));
 }
 void StreamingWidget::OnStatus(const QJsonObject& status) {
 	m_host_status = status;
@@ -511,6 +479,10 @@ bool StreamingWidget::Apply() {
 	                 {"bitrate", settings.bitrate},
 	                 {"codec", settings.codec},
 	                 {"adapter", settings.adapter},
+	                 {"encoder", settings.encoder},
+	                 {"audio_codec", settings.audio_codec},
+	                 {"fec_enabled", settings.fec_enabled},
+	                 {"local_audio_sink", settings.local_audio_sink},
 	                 {"local_audio", settings.local_audio},
 	                 {"show_local", settings.show_local},
 	                 {"disconnect_grace", settings.disconnect_grace},
@@ -520,7 +492,8 @@ bool StreamingWidget::Apply() {
 		                if (failure.isEmpty() && !reply.value("ok").toBool())
 			                failure = reply.value("error").toString(tr("Cannot save preferences."));
 		                if (failure.isEmpty() && reply.value("deferred").toBool()) {
-			                self->m_error->setText(tr("Applies after the current game"));
+			                self->m_error->setText(tr(
+			                    "Accepted for next launch; endpoint changes require host restart"));
 			                self->m_error->show();
 			                return;
 		                }
@@ -536,14 +509,15 @@ void StreamingWidget::Update() {
 	const bool stopped   = !reachable || state == "Stopped" || state == "Error";
 	m_start->setEnabled(stopped);
 	m_stop->setEnabled(reachable && state != "Stopping");
+	m_restart->setEnabled(ready);
 	if (!reachable) {
 		m_status->setText(tr("Host daemon is not running"));
 	} else if (state == "Starting") {
-		m_status->setText(tr("Starting · checking host and private audio…"));
+		m_status->setText(tr("Starting · waiting for native owner readiness…"));
 	} else if (state == "Ready") {
 		m_status->setText(tr("Hosting ready · choose a game on a client"));
 	} else if (state == "Stopping") {
-		m_status->setText(tr("Stopping host and owned audio routes…"));
+		m_status->setText(tr("Stopping native host and draining its game…"));
 	} else if (state == "Error") {
 		m_status->setText(tr("Host stopped after an error"));
 	} else {
@@ -562,6 +536,15 @@ void StreamingWidget::Update() {
 		}
 		m_daemon_error = error;
 	}
+	m_version->setText(m_host_status.value("backend").toString(tr("Native AGS")));
+	const auto native = m_host_status.value("native").toObject();
+	const auto video  = native.value("video").toObject();
+	if (!video.isEmpty())
+		m_version->setText(tr("Native AGS · %1×%2 · %3 FPS · %4")
+		                       .arg(video.value("width").toInt())
+		                       .arg(video.value("height").toInt())
+		                       .arg(video.value("fps").toInt())
+		                       .arg(video.value("codec").toString()));
 	const auto session = m_host_status.value("session").toString();
 	m_session->setText(ready ? session : tr("No managed stream session"));
 	m_close->setEnabled(ready && m_host_status.value("stream_game_running").toBool());
@@ -606,12 +589,9 @@ void StreamingWidget::Update() {
 			if (id == selected) list->setCurrentItem(item);
 		}
 	};
-	refresh_list(m_pending, m_host_status.value("pairings").toArray(), false);
 	refresh_list(m_clients, m_host_status.value("clients").toArray(), true);
-	m_pair->setEnabled(ready && m_pending->currentItem());
+	m_pair->setEnabled(ready);
 	m_forget->setEnabled(ready && m_clients->currentItem());
-	m_pin->setEnabled(ready);
-	m_name->setEnabled(ready);
 	const auto log = error.isEmpty()
 	                     ? tr("Logs: journalctl --user -u kyty-host.service")
 	                     : error + "\n" + tr("Logs: journalctl --user -u kyty-host.service");

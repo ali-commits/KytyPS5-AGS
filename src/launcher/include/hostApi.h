@@ -32,6 +32,8 @@ public:
 	void ConfigureNativeLaunch(const QString& interpreter, const QString& lock_path,
 	                           const QString& runtime_root = {});
 
+	[[nodiscard]] QString NativeRuntimeGameId() const { return m_runtime.game; }
+
 	// request: {"method":"GET|PUT|POST","path":"/kyty/v1/...","body":{...}?,"if_none_match":"..."?,
 	//           "client":{"id":"<uuid>","name":"<pair name>"}?}
 	// When "client" is present and valid the request is scoped to that device's own profile;

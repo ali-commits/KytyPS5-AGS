@@ -31,6 +31,8 @@ class PackageTests(unittest.TestCase):
             (runtime/'_SaveData'/'progress').write_bytes(b'latest normal save')
             backend = root/'host'
             backend.write_bytes(b'backend')
+            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+                (root/name).write_bytes(b'helper')
             link_map = root/'emulator.map'
             link_map.write_bytes(b'exact matching map')
             prefix, config = root/'experimental', root/'settings'
@@ -44,14 +46,17 @@ class PackageTests(unittest.TestCase):
             self.assertEqual((runtime/'_SaveData'/'progress').read_bytes(), b'latest normal save')
             self.assertEqual((base/'Kyty.ini').read_text(), '[Launcher]\ngame_dirs=/example/game\n')
             self.assertEqual((config/'Kyty.ini').read_text(), (base/'Kyty.ini').read_text())
-            self.assertEqual((prefix/'libexec'/'kyty_stream_host').read_bytes(), b'backend')
+            self.assertEqual((prefix/'libexec'/'ags-host').read_bytes(), b'backend')
+            self.assertFalse((prefix/'libexec'/'kyty_stream_host').exists())
+            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+                self.assertEqual((prefix/'libexec'/name).read_bytes(), b'helper')
             self.assertTrue((prefix/'kyty_emulator').stat().st_mode & 0o100)
             for name in ('runtime_resources.py', 'hang_stacks.py'):
                 self.assertTrue((prefix/'libexec'/name).is_file())
             self.assertEqual((prefix/'kyty_emulator_clang_lld.map').read_bytes(), b'exact matching map')
             provenance = json.loads((prefix/'installation-provenance.json').read_text())
-            self.assertEqual((prefix/'bin'/'controller-audio-receiver').read_bytes(), b'companion')
-            self.assertEqual(provenance['companion_sha256'], 'c989edf18246e9c8cdd647369a4835f7dd9a0f47b8e755d37b16431fc5035981')
+            self.assertFalse((prefix/'bin'/'controller-audio-receiver').exists())
+            self.assertNotIn('companion_sha256', provenance)
             self.assertEqual(provenance['runtime_policy'], 'independent copy; no writeback')
             again = subprocess.run(args, capture_output=True, text=True)
             self.assertNotEqual(again.returncode, 0)
@@ -69,6 +74,8 @@ class PackageTests(unittest.TestCase):
         (base/'u59-preset.json').write_text('{}\n')
         (runtime/'_SaveData').mkdir()
         (root/'host').write_bytes(b'backend')
+        for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+            (root/name).write_bytes(b'helper')
         (root/'emulator.map').write_bytes(b'map')
         return ['--stage', str(stage), '--backend', str(root/'host'), '--backend-source', str(root),
                 '--base-install', str(base), '--runtime', str(runtime), '--map', str(root/'emulator.map'),

@@ -1,3 +1,32 @@
+# Native AGS host integration
+
+The active launcher backend is the independent `streaming/ags` native host.
+`tools/streaming/build.sh` builds the launcher and Rust binaries; `package.py`
+installs `ags-host`, `ags-guardian`, `ags-hid-guard`, and `ags-capture-worker`
+together under `libexec`. It also carries the separately licensed clocked
+compositor bundle when present. The old streaming-host HTTP and capability probe
+are not used by the launcher.
+
+The existing daemon entrypoint and `kyty-host.service` remain. Preserve the user's
+existing start-at-login setting. Startup initializes a dedicated `native` directory
+under the existing streaming preference profile, submits complete configuration
+through `ags-host configure`, runs `serve`, and waits for owner management status.
+Live settings use management `reload`; the native owner preserves its latest
+pairing registry. Pending endpoint changes are displayed until an explicit restart.
+Native pairing uses one-use pinned bundle exports and stable UUID revocation.
+
+A complete installation keeps the GPL Python emulator guard at the root
+`kyty_emulator` entrypoint, the rebuilt native engine at `libexec/kyty_emulator`,
+matching map and diagnostic helpers, plus the native host helper siblings. The
+rebuilt engine supplies the selected-session FPS channel. Installing only a new
+launcher does not satisfy these runtime requirements. Local Library play retains
+its existing guard and does not require a running native host.
+
+The records below describe the retired experiment and historical measurements;
+they are not instructions for the active native backend.
+
+---
+
 # Kyty native streaming experiment
 
 This Linux/RTX 3090 edition sends Kyty's composed guest game image to a separate

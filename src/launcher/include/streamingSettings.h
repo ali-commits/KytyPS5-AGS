@@ -10,6 +10,10 @@ struct StreamingSettings {
 	int     bitrate    = 30;
 	QString codec      = "HEVC";
 	QString adapter;
+	QString encoder = "auto";
+	QString audio_codec = "opus";
+	QString local_audio_sink;
+	bool fec_enabled = false;
 	bool    local_audio           = false;
 	bool    show_local            = false;
 	bool    controller_audio      = false;

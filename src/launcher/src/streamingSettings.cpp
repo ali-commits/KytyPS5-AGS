@@ -2,30 +2,28 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QHostInfo>
 #include <QSettings>
 #include <QStandardPaths>
 
 QString StreamingSettings::Validate() const {
-	if (port < 1024 || port > 65514)
-		return QStringLiteral("Base port must be between 1024 and 65514.");
-	if (controller_audio) {
-		const int audio_port = ControllerAudioPort();
-		if (audio_port < 1024 || audio_port > 65535)
-			return QStringLiteral("Controller audio port must be between 1024 and 65535.");
-		for (int offset: {-5, 0, 1, 9, 10, 11, 21})
-			if (audio_port == port + offset)
-				return QStringLiteral("Controller audio needs a port separate from GameStream.");
-	}
-	if (fps != 30 && fps != 60) return QStringLiteral("Frame rate must be 30 or 60 FPS.");
-	if (bitrate < 5 || bitrate > 100)
-		return QStringLiteral("Bitrate must be between 5 and 100 Mbps.");
+	if (port < 1024 || port > 65535)
+		return QStringLiteral("QUIC port must be between 1024 and 65535.");
+	if (fps != 30 && fps != 60 && fps != 90 && fps != 120)
+		return QStringLiteral("Frame rate must be 30, 60, 90 or 120 FPS.");
+	if (bitrate < 1 || bitrate > 150)
+		return QStringLiteral("Bitrate must be between 1 and 150 Mbps.");
 	if (resolution != "Native" && resolution != "1080p" && resolution != "1440p")
 		return QStringLiteral("Choose Native, 1080p or 1440p capture.");
-	if (codec != "HEVC" && codec != "H264") return QStringLiteral("Choose HEVC or H264.");
-	if (disconnect_grace != 0 && (disconnect_grace < 5 || disconnect_grace > 600))
-		return QStringLiteral("Close game after disconnect must be 0, or between 5 and 600 "
-		                      "seconds.");
+	if (codec != "HEVC" && codec != "H264" && codec != "AV1")
+		return QStringLiteral("Choose HEVC, H264 or AV1.");
+	if (encoder != "auto" && encoder != "nvenc" && encoder != "vaapi" && encoder != "software")
+		return QStringLiteral("Choose an available native encoder.");
+	if (audio_codec != "opus" && audio_codec != "raw_pcm")
+		return QStringLiteral("Choose Opus or PCM audio.");
+	if (disconnect_grace < 0 || disconnect_grace > 600)
+		return QStringLiteral("Close game after disconnect must be between 0 and 600 seconds.");
 	// host_name empty is valid: it falls back to the machine hostname. A set name is trimmed to
 	// 1-40 characters with no line break or '=' that would corrupt the generated config file.
 	if (!host_name.trimmed().isEmpty()) {
@@ -41,11 +39,17 @@ QString StreamingSettings::Validate() const {
 }
 StreamingSettings StreamingSettings::Read(QSettings& file) {
 	StreamingSettings s;
+	s.audio_codec = file.value("audio/codec", s.audio_codec).toString();
 	s.backend =
-	    file.value(
-	            "host/backend",
-	            QDir(QCoreApplication::applicationDirPath()).filePath("libexec/kyty_stream_host"))
+	    file.value("host/backend",
+		           QDir(QCoreApplication::applicationDirPath()).filePath("libexec/ags-host"))
 	        .toString();
+	// Existing installs retain preferences but the old executable is never invoked.
+	if (QFileInfo(s.backend).fileName() == "kyty_stream_host")
+		s.backend = QDir(QCoreApplication::applicationDirPath()).filePath("libexec/ags-host");
+	s.encoder               = file.value("quality/encoder", s.encoder).toString();
+	s.local_audio_sink      = file.value("audio/local_sink").toString();
+	s.fec_enabled           = file.value("quality/fec", false).toBool();
 	s.port                  = file.value("host/port", s.port).toInt();
 	s.resolution            = file.value("quality/resolution", s.resolution).toString();
 	s.fps                   = file.value("quality/fps", s.fps).toInt();
@@ -62,6 +66,10 @@ StreamingSettings StreamingSettings::Read(QSettings& file) {
 }
 void StreamingSettings::Write(QSettings& file) const {
 	file.setValue("host/backend", backend);
+	file.setValue("quality/encoder", encoder);
+	file.setValue("audio/codec", audio_codec);
+	file.setValue("audio/local_sink", local_audio_sink);
+	file.setValue("quality/fec", fec_enabled);
 	file.setValue("host/port", port);
 	file.setValue("quality/resolution", resolution);
 	file.setValue("quality/fps", fps);
@@ -92,5 +100,5 @@ QString StreamingSettings::ProfileDirectory() {
 	return override.isEmpty()
 	           ? QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
 	                 .filePath("KytyPS5/streaming")
-	           : QDir(override).absolutePath();
+			   : QDir(override).absolutePath();
 }

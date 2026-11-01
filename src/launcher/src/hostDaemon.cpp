@@ -2,7 +2,6 @@
 
 #include "common/u59Preset.h"
 #include "emulatorCommand.h"
-#include "streamingApi.h"
 #include "streamingSettings.h"
 
 #include <QCoreApplication>
@@ -30,7 +29,7 @@
 
 namespace {
 
-constexpr int SHUTDOWN_CAP_MS = 20000;
+constexpr int SHUTDOWN_CAP_MS = 102000;
 constexpr int RETRY_FIRST_MS  = 5000;
 constexpr int RETRY_MAX_MS    = 60000;
 
@@ -40,11 +39,6 @@ HostReply Json(const QJsonObject& object) {
 
 QJsonObject Fail(const QString& error) {
 	return {{"ok", false}, {"error", error}};
-}
-
-bool Active(StreamingBackend::State state) {
-	return state == StreamingBackend::State::Starting || state == StreamingBackend::State::Ready ||
-	       state == StreamingBackend::State::Stopping;
 }
 
 bool Idle(StreamingBackend::State state) {
@@ -73,7 +67,9 @@ bool Same(const StreamingSettings& a, const StreamingSettings& b) {
 	return a.port == b.port && a.resolution == b.resolution && a.fps == b.fps &&
 	       a.bitrate == b.bitrate && a.codec == b.codec && a.adapter == b.adapter &&
 	       a.local_audio == b.local_audio && a.show_local == b.show_local &&
-	       a.disconnect_grace == b.disconnect_grace && a.host_name == b.host_name;
+	       a.disconnect_grace == b.disconnect_grace && a.host_name == b.host_name &&
+	       a.audio_codec == b.audio_codec && a.encoder == b.encoder &&
+	       a.local_audio_sink == b.local_audio_sink && a.fec_enabled == b.fec_enabled;
 }
 
 } // namespace
@@ -112,21 +108,21 @@ HostDaemon::HostDaemon(QObject* parent)
     : QObject(parent), m_compat(QCoreApplication::arguments().contains(QStringLiteral("--local"))),
       m_backend(StreamingSettings::ProfileDirectory()),
       m_api(&m_library,
-            [this] { return HostApi::Status {LocalGameRunning(), m_backend.RunningGameId()}; }),
+	        [this] { return HostApi::Status {LocalGameRunning(), m_backend.RunningGameId()}; }),
       m_control([this](const QJsonObject& request, std::function<void(HostReply)> done) {
 	      Control(request, std::move(done));
       }),
       m_api_server([this](const QJsonObject& request, std::function<void(HostReply)> done) {
 	      m_api.Handle(request, std::move(done));
       }) {
-	const auto run = qEnvironmentVariable("XDG_RUNTIME_DIR");
+	const auto run      = qEnvironmentVariable("XDG_RUNTIME_DIR");
 	const auto lock_dir = QDir(run).filePath("kytyps5");
 	if (!run.isEmpty() && !QFileInfo::exists(lock_dir)) {
 		QDir().mkpath(lock_dir);
 		QFile::setPermissions(lock_dir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
 	}
 	m_api.ConfigureNativeLaunch(Interpreter(), QDir(lock_dir).filePath("emulator.lock"),
-	                           qEnvironmentVariable("AGS_SESSION_RUNTIME_ROOT"));
+	                            qEnvironmentVariable("AGS_SESSION_RUNTIME_ROOT"));
 	m_reload.setSingleShot(true);
 	m_reload.setInterval(500);
 	m_refresh.setInterval(1000);
@@ -149,7 +145,7 @@ HostDaemon::HostDaemon(QObject* parent)
 		    m_backend.GetState() != StreamingBackend::State::Error) {
 			return;
 		}
-		if (LocalGameRunning()) { // Moonlight launches from the shared library: wait for the game
+		if (LocalGameRunning()) { // Local play keeps exclusive ownership until it exits
 			ArmRetry();
 			return;
 		}
@@ -166,13 +162,11 @@ HostDaemon::HostDaemon(QObject* parent)
 		WatchSettings();
 	});
 	connect(&m_backend, &StreamingBackend::Changed, this, &HostDaemon::OnBackendChanged);
-	// A device profile write only changes launch.json's client_games: regenerate and republish it
-	// without reloading the whole library.
+	// The native owner resolves current per-device launch inputs on each Play.
+	// Reload its next-launch settings without touching the captured active session.
 	connect(&m_api, &HostApi::ClientProfileChanged, this, [this] {
 		m_backend.SetClientCatalog(m_library.ClientCatalog(Interpreter()));
-		if (m_backend.GetState() == StreamingBackend::State::Ready &&
-		    !m_backend.StreamGameRunning())
-			m_backend.PublishCatalog();
+		if (m_backend.GetState() == StreamingBackend::State::Ready) m_backend.PublishCatalog();
 	});
 }
 
@@ -210,7 +204,8 @@ bool HostDaemon::LocalEmulatorRunning() {
 }
 
 bool HostDaemon::LocalGameRunning() const {
-	return LocalEmulatorRunning() && !m_backend.StreamGameRunning();
+	return LocalEmulatorRunning() && !m_backend.StreamGameRunning() &&
+	       m_api.NativeRuntimeGameId().isEmpty();
 }
 
 QString HostDaemon::Interpreter() {
@@ -286,7 +281,7 @@ void HostDaemon::ReloadLibrary() {
 	}
 	m_backend.SetCatalog(m_library.Catalog(Interpreter()));
 	m_backend.SetClientCatalog(m_library.ClientCatalog(Interpreter()));
-	if (!m_backend.StreamGameRunning()) m_backend.PublishCatalog();
+	m_backend.PublishCatalog();
 }
 
 void HostDaemon::OnBackendChanged() {
@@ -305,7 +300,7 @@ void HostDaemon::OnBackendChanged() {
 		emit Finished();
 		return;
 	}
-	// Sunshine died, a local game blocked the start or a restart was refused: keep trying.
+	// Retry a failed worker or a start blocked by local play.
 	if (state == StreamingBackend::State::Error && !m_shutting_down && !m_retry.isActive() &&
 	    !qEnvironmentVariableIsSet("KYTY_HOST_NO_AUTOSTART")) {
 		ArmRetry();
@@ -344,9 +339,15 @@ QJsonObject HostDaemon::StatusObject() const {
 	return {{"state", QString::fromLatin1(name)},
 	        {"error", m_backend.Error()},
 	        {"address", LanAddress()},
-	        {"port", ReadSettings().port},
-	        {"session", m_backend.Session()},
-	        {"stream_game_running", m_backend.StreamGameRunning()},
+	        {"port", m_backend.NativeStatus().value("address").toString().section(':', -1).toInt()},
+	        {"native", m_backend.NativeStatus()},
+	        {"backend", m_backend.Version()},
+	        {"session", !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
+	                            !m_backend.ClosingSession()
+	                        ? QStringLiteral("Starting game…")
+							: m_backend.Session()},
+	        {"stream_game_running",
+	         m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty()},
 	        {"local_game_running", LocalGameRunning()},
 	        {"pairings", pairings},
 	        {"clients", clients},
@@ -361,6 +362,10 @@ QJsonObject HostDaemon::PreferencesObject() const {
 	        {"bitrate", s.bitrate},
 	        {"codec", s.codec},
 	        {"adapter", s.adapter},
+	        {"encoder", s.encoder},
+	        {"audio_codec", s.audio_codec},
+	        {"local_audio_sink", s.local_audio_sink},
+	        {"fec_enabled", s.fec_enabled},
 	        {"local_audio", s.local_audio},
 	        {"show_local", s.show_local},
 	        {"disconnect_grace", s.disconnect_grace},
@@ -394,7 +399,10 @@ QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
 	if (!(number("port", &next.port) && text("resolution", &next.resolution) &&
 	      number("fps", &next.fps) && number("bitrate", &next.bitrate) &&
 	      text("codec", &next.codec) && text("adapter", &next.adapter) &&
-	      flag("local_audio", &next.local_audio) && flag("show_local", &next.show_local) &&
+	      text("audio_codec", &next.audio_codec) && text("encoder", &next.encoder) &&
+	      text("local_audio_sink", &next.local_audio_sink) &&
+	      flag("fec_enabled", &next.fec_enabled) && flag("local_audio", &next.local_audio) &&
+	      flag("show_local", &next.show_local) &&
 	      number("disconnect_grace", &next.disconnect_grace) &&
 	      text("host_name", &next.host_name))) {
 		return Fail(QStringLiteral("Invalid preference type."));
@@ -416,21 +424,10 @@ QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
 			return Fail(QStringLiteral("Cannot save streaming preferences."));
 		}
 	}
-	const bool autostart = !qEnvironmentVariableIsSet("KYTY_HOST_NO_AUTOSTART");
-	if (!Same(current, next) && !m_shutting_down && (Active(m_backend.GetState()) || autostart)) {
-		m_restart_pending  = true;
-		m_restart_settings = next;
-		m_retry.stop();
-		const auto state = m_backend.GetState();
-		const auto step  = PlanRestart(state, m_backend.StreamGameRunning());
-		if (step == RestartStep::StartNow) {
-			OnBackendChanged();
-		} else if (step == RestartStep::StopNow) {
-			m_backend.Stop();
-		} else if (state != StreamingBackend::State::Stopping) {
-			return {{"ok", true}, {"deferred", true}}; // the refresh tick stops after the game
-		}
-	}
+	if (!Same(current, next) && !m_shutting_down && Idle(m_backend.GetState()) &&
+	    !qEnvironmentVariableIsSet("KYTY_HOST_NO_AUTOSTART"))
+		StartHosting(next);
+
 	return {{"ok", true}};
 }
 
@@ -438,31 +435,49 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 	const auto type = request.value("type").toString();
 	if (type == "status") return done(Json(StatusObject()));
 	if (type == "get-preferences") return done(Json(PreferencesObject()));
-	if (type == "set-preferences") return done(Json(SetPreferences(request)));
+	if (type == "set-preferences") {
+		const auto result = SetPreferences(request);
+		if (!result.value("ok").toBool() ||
+		    (m_backend.GetState() != StreamingBackend::State::Ready &&
+		     m_backend.GetState() != StreamingBackend::State::Starting))
+			return done(Json(result));
+		m_backend.ReloadSettings(ReadSettings(), [done](QJsonObject reply, QString error) {
+			done(Json(error.isEmpty()
+			              ? QJsonObject {{"ok", true},
+						                 {"deferred", true},
+						                 {"restart_required", reply.value("restart_required")}}
+						  : Fail(error)));
+		});
+		return;
+	}
 	if (type == "reload-library") {
 		m_reload.start();
 		return done(Json({{"ok", true}}));
 	}
+	const auto complete = [done](QJsonObject reply, QString error) {
+		done(Json(error.isEmpty() ? reply : Fail(error)));
+	};
+	if (type == "native-status") return done(Json(m_backend.NativeStatus()));
 	if (type == "stop-game") {
-		m_backend.CloseSession();
-		return done(Json({{"ok", true}}));
+		m_backend.CloseSession(complete);
+		return;
 	}
-	if (type == "pairing-pin") {
-		const auto id = request.value("id").toString(), pin = request.value("pin").toString(),
-		           name = request.value("name").toString();
-		if (const auto problem = StreamingApi::ValidatePin(id, pin, name); !problem.isEmpty())
-			return done(Json(Fail(problem)));
-		if (m_backend.GetState() != StreamingBackend::State::Ready)
-			return done(Json(Fail(QStringLiteral("Hosting is not ready."))));
-		m_backend.Pair(id, pin, name);
-		return done(Json({{"ok", true}}));
+	if (type == "pair-ticket") {
+		const auto native  = m_backend.NativeStatus();
+		const auto port    = native.value("address").toString().section(':', -1);
+		const auto address = LanAddress();
+		if (address.isEmpty())
+			return done(Json(Fail(QStringLiteral("No reachable LAN address is available."))));
+		m_backend.ExportPairing(address + ':' + port, complete);
+		return;
 	}
 	if (type == "unpair") {
-		const auto uuid = request.value("uuid").toString();
-		const bool ok   = m_backend.GetState() == StreamingBackend::State::Ready && !uuid.isEmpty();
-		if (ok) m_backend.Unpair(uuid);
-		return done(Json({{"ok", ok}}));
+		m_backend.Unpair(request.value("uuid").toString(), complete);
+		return;
 	}
+	if (type == "pairing-pin")
+		return done(Json(Fail(QStringLiteral("Native AGS requires a one-use pairing bundle."))));
+
 	done(Json(Fail(QStringLiteral("unknown-request"))));
 }
 

@@ -9,7 +9,7 @@ ExecStart=@COMMAND@ --host
 Restart=on-failure
 RestartSec=3
 KillMode=mixed
-TimeoutStopSec=25
+TimeoutStopSec=110
 
 [Install]
 WantedBy=graphical-session.target

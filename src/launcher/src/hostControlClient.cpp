@@ -23,7 +23,12 @@ struct CallResult {
 
 CallResult Call(const QString& socket, const QJsonObject& request) {
 	CallResult result;
-	const auto reply = HostSocketCall(socket, request, REQUEST_TIMEOUT_MS, &result.error);
+	const auto type    = request.value("type").toString();
+	const int  timeout = type == "stop-game" || type == "set-preferences" || type == "unpair" ||
+	                             type == "pair-ticket"
+	                         ? 95000
+	                         : REQUEST_TIMEOUT_MS;
+	const auto reply   = HostSocketCall(socket, request, timeout, &result.error);
 	if (!reply) return result;
 	const auto doc = QJsonDocument::fromJson(reply->body);
 	if (!doc.isObject()) {

@@ -868,6 +868,38 @@ private slots:
 		t.join();
 		return reply.has_value() ? QJsonDocument::fromJson(reply->body).object() : QJsonObject {};
 	}
+	void pendingNativeRuntimeIsNotReportedAsLocalPlay() {
+		QTemporaryDir run, profile;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		HostDaemon daemon;
+		QString error; QVERIFY2(daemon.Start(&error), qPrintable(error));
+		const auto control = run.filePath("kyty-host/control.sock");
+		const auto apiSocket = run.filePath("kyty-host/api.sock");
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto game = library.Games().first().id;
+		const auto launch = Control(apiSocket, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", game}}));
+		QVERIFY2(launch.contains("cwd"), QJsonDocument(launch).toJson().constData());
+		auto body = RuntimeBody(game, uuid, launch.value("cwd").toString());
+		QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).value("ok").toBool());
+		auto status = Control(control, {{"type", "status"}});
+		QVERIFY(status.value("stream_game_running").toBool());
+		QVERIFY(!status.value("local_game_running").toBool());
+		QCOMPARE(status.value("session").toString(), "Starting game…");
+		const auto lockPath = run.filePath("kytyps5/emulator.lock");
+		const int lock = ::open(QFile::encodeName(lockPath).constData(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		QVERIFY(lock >= 0); QCOMPARE(::flock(lock, LOCK_EX | LOCK_NB), 0);
+		status = Control(control, {{"type", "status"}});
+		const bool falselyLocal = status.value("local_game_running").toBool();
+		::close(lock);
+		QVERIFY(!falselyLocal);
+		body["state"] = "closed";
+		QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).value("ok").toBool());
+		QVERIFY(!Control(control, {{"type", "status"}}).value("stream_game_running").toBool());
+		daemon.Shutdown();
+	}
+
 	void controlSocketStatusAndPreferences() {
 		QTemporaryDir run, profile;
 		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());

@@ -240,13 +240,11 @@ include_what_you_use_with_mappings(launcher "${inc_headers}" "${iwyu_maps}")
 
 clang_tidy_check(launcher "" "${tidy_dirs}" "${inc_headers}")
 
-# The launch wrapper is a process boundary; it links QtCore, never the streaming host.
+# Historical wrapper fixtures remain buildable; the native owner uses its own launch guard.
 if(LINUX)
     add_executable(kyty_stream_launch tools/streamLaunch.cpp)
-    add_dependencies(launcher kyty_stream_launch)
     target_link_libraries(kyty_stream_launch PRIVATE Qt6::Core)
     set_target_properties(kyty_stream_launch PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/libexec")
-    install(TARGETS kyty_stream_launch RUNTIME DESTINATION libexec)
 endif()
 
 if(BUILD_TESTING)
@@ -255,7 +253,7 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/LauncherStreamingTests.cpp"
         src/streamingSettings.cpp src/streamingCatalog.cpp src/streamingAudio.cpp
         src/streamingApi.cpp src/streamingBackend.cpp src/streamingWidget.cpp
-        src/agsPairing.cpp
+        src/agsPairing.cpp src/agsRustStreamingDialog.cpp
         src/hostControlClient.cpp src/hostSocket.cpp
         include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h
         include/agsPairing.h

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the private streaming experiment without replacing normal Kyty/Sunshine."""
+"""Package the native AGS launcher without replacing an existing installation."""
 import argparse
 import datetime
 import hashlib
@@ -49,7 +49,9 @@ def install_unit(args, command, config, unit_path, old_unit):
 def package(args):
     stage, backend, base, runtime, prefix, config, link_map = [path.expanduser().resolve() for path in
         (args.stage, args.backend, args.base_install, args.runtime, args.prefix, args.config, args.map)]
-    for path in (stage/'launcher', stage/'kyty_emulator', backend, base/'Kyty.ini', base/'u59-preset.json', link_map):
+    for path in (stage/'launcher', stage/'kyty_emulator', backend, backend.parent/'ags-guardian',
+                 backend.parent/'ags-hid-guard', backend.parent/'ags-capture-worker',
+                 base/'Kyty.ini', base/'u59-preset.json', link_map):
         if not path.is_file():
             raise SystemExit(f'Missing package input: {path}')
     if not (runtime/'_SaveData').is_dir():
@@ -87,8 +89,20 @@ def package(args):
     (prefix/'kyty_emulator').chmod(0o755)
     for name in ('runtime_resources.py', 'hang_stacks.py'):
         shutil.copy2(TOOLS.parent/'diagnostics'/name, prefix/'libexec'/name)
-    shutil.copy2(backend, prefix/'libexec'/'kyty_stream_host')
-    (prefix/'libexec'/'kyty_stream_host').chmod(0o755)
+    shutil.copy2(backend, prefix/'libexec'/'ags-host')
+    (prefix/'libexec'/'ags-host').chmod(0o755)
+    for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+        shutil.copy2(backend.parent/name, prefix/'libexec'/name)
+        (prefix/'libexec'/name).chmod(0o755)
+    compositor = args.backend_source.expanduser().resolve()/'local/runtime/gamescope-pts'
+    if (compositor/'bin/gamescope-ags').is_file():
+        boundary = compositor.resolve()
+        for path in compositor.rglob('*'):
+            if path.is_symlink() and not path.resolve().is_relative_to(boundary):
+                raise SystemExit('Bundled compositor contains an external symlink')
+        if not (compositor/'UPSTREAM_LICENSE').is_file():
+            raise SystemExit('Bundled compositor license is missing')
+        shutil.copytree(compositor, prefix/'libexec/gamescope-pts')
     shutil.copy2(link_map, prefix/'kyty_emulator_clang_lld.map')
     for name in ('lib', 'assets', '3rdparty'):
         if (prefix/name).exists() and not (prefix/'libexec'/name).exists():
@@ -110,12 +124,7 @@ def package(args):
     shutil.copy2(SOURCE/'LICENSE', prefix/'LICENSE')
     shutil.copy2(SOURCE/'docs'/'streaming'/'README.md', prefix/'STREAMING-README.md')
     backend_source = args.backend_source.expanduser().resolve()
-    assets = backend_source/'src_assets'/'common'/'assets'/'box.png'
-    if assets.is_file():
-        destination = prefix/'share'/'kyty-stream-host'
-        destination.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(assets, destination/'box.png')
-    licenses = prefix/'licenses'/'kyty-stream-host'
+    licenses = prefix/'licenses'/'ags-native'
     licenses.mkdir(parents=True, exist_ok=True)
     for name in ('LICENSE', 'NOTICE', 'THIRD-PARTY-LICENSES'):
         if (backend_source/name).is_file():
@@ -125,12 +134,13 @@ def package(args):
         'runtime_policy': 'independent copy; no writeback', 'kyty': revision(SOURCE),
         'stream_host': revision(backend_source), 'native_sha256': sha256(prefix/'libexec'/'kyty_emulator'),
         'map_sha256': sha256(prefix/'kyty_emulator_clang_lld.map'),
-        'launcher_sha256': sha256(prefix/'launcher'), 'host_sha256': sha256(prefix/'libexec'/'kyty_stream_host'),
+        'launcher_sha256': sha256(prefix/'launcher'), 'host_sha256': sha256(prefix/'libexec'/'ags-host'),
         'base_config_sha256': base_hash, 'crash_capture': True}
+    # Retired companion service is not a native receiver capability. A reused
+    # staging directory must not accidentally publish its old executable.
     companion = prefix/'bin'/'controller-audio-receiver'
     if companion.is_file():
-        result['companion_sha256'] = sha256(companion)
-        shutil.copy2(SOURCE/'tools'/'controller-audio'/'README.md', prefix/'CONTROLLER-AUDIO-README.md')
+        companion.unlink()
     (prefix/'installation-provenance.json').write_text(json.dumps(result, indent=2)+'\n')
     if sha256(base/'Kyty.ini') != base_hash:
         raise SystemExit('Working configuration changed during package creation; inspect before testing')
