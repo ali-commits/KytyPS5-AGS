@@ -110,6 +110,7 @@ void FpsStatsShutdown() noexcept {
 }
 
 std::string FpsStatsFilePath() {
+	if (const char* path = std::getenv("AGS_SESSION_FPS_FILE"); path != nullptr && path[0] == '/') return path;
 	const char*       runtime = std::getenv("XDG_RUNTIME_DIR");
 	const std::string base =
 	    runtime != nullptr && runtime[0] != '\0' ? std::string(runtime) + "/kyty-host" : "/tmp";

@@ -57,7 +57,7 @@ struct GpuInfo {
 // repeated polls stay cheap. game is merged in verbatim (the daemon owns running title id/name).
 class Sampler {
 public:
-	[[nodiscard]] QJsonObject Build(const QJsonObject& game);
+	[[nodiscard]] QJsonObject Build(const QJsonObject& game, const QString& fps_file = {});
 
 private:
 	CpuTimes m_prev_cpu;

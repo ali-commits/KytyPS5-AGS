@@ -12,6 +12,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -21,6 +22,11 @@
 #include <QTimeZone>
 
 #include <algorithm>
+#include <chrono>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <memory>
 #include <utility>
 
@@ -141,6 +147,9 @@ QString CheatRevision(const QByteArray& bytes) {
 
 HostApi::HostApi(GameLibrary* library, std::function<Status()> status, QObject* parent)
     : QObject(parent), m_library(library), m_status(std::move(status)), m_repository(this) {
+	m_runtime_watch.setInterval(250);
+	connect(&m_runtime_watch, &QTimer::timeout, this, [this] { ReapRuntime(); });
+	m_runtime_watch.start();
 	connect(&m_repository, &Cheats::CheatRepository::CatalogLoaded, this,
 	        [this](QList<Cheats::RemoteFile> files, const QString& error) {
 		        if (auto callback = std::exchange(m_on_catalog, nullptr)) {
@@ -153,6 +162,202 @@ HostApi::HostApi(GameLibrary* library, std::function<Status()> status, QObject* 
 			        callback(data, error);
 		        }
 	        });
+}
+
+namespace {
+bool SafeDirectory(const QString& path) {
+	if (!QDir::isAbsolutePath(path) || path.split('/').contains("..")) return false;
+	QString current;
+	for (const auto& part: path.split('/', Qt::SkipEmptyParts)) {
+		current += '/' + part;
+		const QFileInfo info(current);
+		if (!info.isDir() || info.isSymLink()) return false;
+	}
+	return true;
+}
+bool SafeRuntime(const QString& path) {
+	if (!SafeDirectory(path)) return false;
+	for (const auto& name: {"_SaveData", "_Trophies", "_Cache", "_CrashCapture", "_HangTrace", "_TempData"}) {
+		const auto child = QDir(path).filePath(name);
+		if ((QFileInfo::exists(child) || QFileInfo(child).isSymLink()) && !SafeDirectory(child)) return false;
+		if (QString(name) == "_SaveData" || QString(name) == "_Trophies") {
+			QDirIterator entries(child, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+			while (entries.hasNext()) { entries.next(); if (entries.fileInfo().isSymLink()) return false; }
+		}
+	}
+	return true;
+}
+QString ProcessStart(qint64 pid) {
+	if (pid <= 0) return {};
+	QFile file(QStringLiteral("/proc/%1/stat").arg(pid));
+	if (!file.open(QIODevice::ReadOnly)) return {};
+	const auto data = file.readAll();
+	const auto fields = data.mid(data.lastIndexOf(')') + 2).split(' ');
+	if (fields.value(0) == "Z") return {};
+	return QString::fromLatin1(fields.value(19));
+}
+qint64 MonotonicMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+	    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+int OpenLock(const QString& path) {
+	if (!QDir::isAbsolutePath(path) || path.split('/').contains("..")) return -1;
+	const auto parent = QFileInfo(path).absolutePath();
+	if (!SafeDirectory(parent)) return -1;
+	struct stat st {};
+	if (::stat(QFile::encodeName(parent), &st) != 0 || st.st_uid != ::geteuid() || (st.st_mode & 0077)) return -1;
+	const int fd = ::open(QFile::encodeName(path), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (fd < 0) return -1;
+	if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != ::geteuid() || (st.st_mode & 0077)) {
+		::close(fd); return -1;
+	}
+	return fd;
+}
+bool LegacyEmulatorRunning() {
+	const QDir proc("/proc");
+	for (const auto& name: proc.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+		bool number = false; name.toLongLong(&number);
+		if (!number) continue;
+		const QFileInfo process(proc.filePath(name));
+		if (process.ownerId() != ::geteuid()) continue;
+		QFile comm(proc.filePath(name + "/comm"));
+		if (comm.open(QIODevice::ReadOnly) && comm.readAll().trimmed() == "kyty_emulator") return true;
+	}
+	return false;
+}
+bool LifetimeHeld(const QString& path) {
+	const int fd = OpenLock(path);
+	if (fd < 0) return true; // unsafe/missing lock directories fail closed
+	const int result = ::flock(fd, LOCK_EX | LOCK_NB);
+	if (result == 0) ::flock(fd, LOCK_UN);
+	::close(fd);
+	return result != 0;
+}
+}
+
+HostApi::~HostApi() { ClearRuntime(); }
+void HostApi::ConfigureNativeLaunch(const QString& interpreter, const QString& lock_path,
+                                    const QString& runtime_root) {
+	m_interpreter = interpreter;
+	m_local_lock = lock_path;
+	m_runtime_root = runtime_root;
+}
+void HostApi::ReapRuntime() {
+	if (!m_runtime.session_id.isEmpty() &&
+	    (ProcessStart(m_runtime.owner_pid) != m_runtime.owner_start ||
+	     (!m_runtime.acquired && MonotonicMs() >= m_runtime.deadline_ms) ||
+	     (m_runtime.acquired && !LifetimeHeld(m_local_lock)))) ClearRuntime();
+}
+void HostApi::ClearRuntime() {
+	if (m_reservation_fd >= 0) { ::close(m_reservation_fd); m_reservation_fd = -1; }
+	m_runtime = {};
+}
+QString HostApi::RuntimeDirectory(const QString& game_id) const {
+	if (!m_runtime.game.isEmpty()) {
+		// Never fall back into the normal tree while an isolated launch is pending/running.
+		return m_runtime.game == game_id ? m_runtime.directory : QString {};
+	}
+	if (!m_runtime_root.isEmpty()) return QDir(m_runtime_root).filePath(game_id);
+	return m_interpreter.isEmpty() ? QCoreApplication::applicationDirPath() : QFileInfo(m_interpreter).absolutePath();
+}
+QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game_id) const {
+	const auto entry = m_library->ResolveLaunch(m_interpreter, client_id, game_id);
+	if (!entry || !QDir::isAbsolutePath(entry->program) || !QFileInfo(entry->program).isExecutable()) return {};
+	auto cwd = entry->working_directory;
+	QJsonObject env;
+	if (!m_runtime_root.isEmpty()) {
+		if (!SafeDirectory(m_runtime_root)) return {};
+		struct stat root {};
+		if (::stat(QFile::encodeName(m_runtime_root), &root) != 0 || root.st_uid != ::geteuid() || (root.st_mode & 0077)) return {};
+		cwd = QDir(m_runtime_root).filePath(game_id);
+		if (QFileInfo(cwd).isSymLink() || !QDir().mkpath(cwd) || !SafeRuntime(cwd)) return {};
+		for (const auto& name: {"_SaveData", "_Trophies", "_Cache", "_CrashCapture", "_HangTrace", "_TempData"}) {
+			if (!QDir().mkpath(QDir(cwd).filePath(name))) return {};
+		}
+		env["XDG_CACHE_HOME"] = QDir(cwd).filePath("_Cache");
+		env["__GL_SHADER_DISK_CACHE_PATH"] = QDir(cwd).filePath("_Cache");
+		env["MESA_SHADER_CACHE_DIR"] = QDir(cwd).filePath("_Cache");
+	}
+	if (!SafeRuntime(cwd)) return {};
+	auto args = entry->arguments;
+	for (qsizetype i = 0; i < args.size(); ++i) {
+		const auto arg = args[i];
+		if (arg.contains(QChar('\0')) || arg == "--streaming-only" || arg.startsWith("--streaming-only=") ||
+		    arg == "--streaming-socket" || arg.startsWith("--streaming-socket=")) return {};
+		if (!m_runtime_root.isEmpty() && (arg == "--shader-log-folder" || arg == "--command-buffer-dump-folder" || arg == "--printf-output-file")) {
+			if (i + 1 >= args.size()) return {};
+			// Preserve every option, relocating only mutable diagnostic destinations for
+			// the explicitly isolated runtime. The stored PC/device settings are unchanged.
+			if (QDir::isAbsolutePath(args[i + 1])) {
+				args[i + 1] = QDir(cwd).filePath(arg == "--shader-log-folder" ? "_ShaderLogs" :
+				    arg == "--command-buffer-dump-folder" ? "_CommandBuffers" : "_TempData/printf.log");
+			}
+		}
+		if (arg == "--game" || arg == "--game-patch" || arg == "--addcont-dir") {
+			if (i + 1 >= args.size()) return {};
+			if (QDir::isRelativePath(args[i + 1])) args[i + 1] = QDir(entry->working_directory).absoluteFilePath(args[i + 1]);
+		}
+	}
+	return {{"id", entry->id}, {"name", entry->name}, {"executable", entry->program},
+	        {"args", QJsonArray::fromStringList(args)}, {"cwd", cwd}, {"env", env}};
+}
+void HostApi::Internal(const QJsonObject& request, const std::function<void(HostReply)>& done) {
+	ReapRuntime();
+	if (m_interpreter.isEmpty() || m_local_lock.isEmpty()) return done(Error(503, "native-launch-unconfigured"));
+	if (request["method"] != "POST") return done(Error(405, "method-not-allowed"));
+	const auto client = request["client"].toObject();
+	const auto client_id = client["id"].toString();
+	if (!ClientProfiles::IsValidClientId(client_id)) return done(Error(400, "bad-client"));
+	if (!request["body"].isObject()) return done(Error(400, "bad-body"));
+	const auto body = request["body"].toObject();
+	if (QJsonDocument(body).toJson(QJsonDocument::Compact).size() > MAX_BODY) return done(Error(413, "body-too-large"));
+	const auto game_id = body["game"].toString();
+	if (request["path"] == "/ags/internal/resolve-launch") {
+		if (body.size() != 1) return done(Error(400, "bad-body"));
+		const auto launch = ResolveNative(client_id, game_id);
+		return done(launch.isEmpty() ? Error(404, "invalid-launch") : Json(200, launch));
+	}
+	if (request["path"] != "/ags/internal/session-runtime") return done(Error(404, "not-found"));
+	const auto state = body["state"].toString();
+	const auto session = body["session_id"].toString();
+	const auto token = body["reservation_token"].toString();
+	const auto runtime = body["runtime_directory"].toString();
+	static const QRegularExpression TOKEN("\\A[0-9a-f]{64}\\z");
+	if (!TOKEN.match(session).hasMatch() || !TOKEN.match(token).hasMatch() || body["client_id"] != client_id)
+		return done(Error(400, "invalid-runtime"));
+	if (state == "closed" && m_runtime.session_id.isEmpty()) return done(Json(200, {{"ok", true}}));
+	if (state == "starting") {
+		if (!m_runtime.session_id.isEmpty()) return done(Error(409, "host-busy"));
+		const auto launch = ResolveNative(client_id, game_id);
+		const auto pid = body["owner_pid"].toInteger();
+		const auto start = body["owner_start"].toString();
+		if (launch.isEmpty() || runtime != launch["cwd"].toString() || !SafeRuntime(runtime) ||
+		    start.isEmpty() || ProcessStart(pid) != start) return done(Error(400, "invalid-runtime"));
+		const int admission = OpenLock(m_local_lock + ".launch");
+		if (admission < 0 || ::flock(admission, LOCK_EX | LOCK_NB) != 0) {
+			if (admission >= 0) ::close(admission);
+			return done(Error(409, "host-busy"));
+		}
+		if (LifetimeHeld(m_local_lock) || LegacyEmulatorRunning()) { ::close(admission); return done(Error(409, "host-busy")); }
+		m_reservation_fd = admission;
+		m_runtime = {session, game_id, client_id, runtime, start, token, pid, false, false, MonotonicMs() + 30000};
+		return done(Json(200, {{"ok", true}}));
+	}
+	if (session != m_runtime.session_id || token != m_runtime.token || client_id != m_runtime.client_id ||
+	    game_id != m_runtime.game || runtime != m_runtime.directory || m_runtime.owner_start.isEmpty() ||
+	    ProcessStart(m_runtime.owner_pid) != m_runtime.owner_start) return done(Error(409, "runtime-mismatch"));
+	if (state == "ready") return done(Json(200, {{"acquired", m_runtime.acquired}}));
+	if (state == "closed") { ClearRuntime(); return done(Json(200, {{"ok", true}})); }
+	if (state == "claim" && !m_runtime.claimed && !m_runtime.acquired && MonotonicMs() < m_runtime.deadline_ms) {
+		m_runtime.claimed = true;
+		return done(Json(200, {{"ok", true}, {"local_game_lock", m_local_lock}}));
+	}
+	if (state == "acquired" && m_runtime.claimed && !m_runtime.acquired && LifetimeHeld(m_local_lock)) {
+		m_runtime.acquired = true;
+		if (m_reservation_fd >= 0) { ::close(m_reservation_fd); m_reservation_fd = -1; }
+		return done(Json(200, {{"ok", true}}));
+	}
+	return done(Error(409, "invalid-runtime-transition"));
 }
 
 QString HostApi::SettingsRevision(const Configuration& info) {
@@ -196,6 +401,7 @@ QJsonArray HostApi::SettingsSchema(const Configuration& info) {
 }
 
 void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> done) {
+	if (request["path"].toString().startsWith("/ags/internal/")) return Internal(request, done);
 	static const QRegularExpression ROUTE(QStringLiteral(
 	    R"(\A/kyty/v1/(?:(library)|(host/metrics)|art/([0-9a-f]{64})/(icon|background)|games/([0-9a-f]{64})/)"
 	    R"((settings|settings/reset|trophies|trophies/icon/[0-9]{1,3}-[0-9]{1,4}|cheats|cheats/remote|)"
@@ -273,12 +479,14 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	if (sub == QLatin1String("settings/reset")) {
 		return ResetSettings(*game, client, done);
 	}
+	if ((sub == QLatin1String("trophies") || is_trophy_icon) && !SafeRuntime(RuntimeDirectory(game->id)))
+		return done(Error(409, "runtime-unavailable"));
 	if (sub == QLatin1String("trophies")) {
 		return GetTrophies(*game, done);
 	}
 	if (is_trophy_icon) {
 		const auto key = sub.mid(QStringLiteral("trophies/icon/").size()).split(QLatin1Char('-'));
-		return done(TrophyIcon(*game->info, QCoreApplication::applicationDirPath(),
+		return done(TrophyIcon(*game->info, RuntimeDirectory(game->id),
 		                       key.value(0).toInt(), key.value(1).toInt(),
 		                       request.value(QStringLiteral("if_none_match")).toString()));
 	}
@@ -355,7 +563,8 @@ QString SaveClientProfile(const HostApi::Client& client, const GameEntry& game,
 } // namespace
 
 void HostApi::Library(const Client& client, const std::function<void(HostReply)>& done) const {
-	const auto status = m_status();
+	auto status = m_status();
+	if (!m_runtime.game.isEmpty()) { status.running_id = m_runtime.game; status.pc_busy = true; }
 	QJsonArray games;
 	for (const auto& game: m_library->Games()) {
 		const auto& info = *game.info;
@@ -379,7 +588,8 @@ void HostApi::Library(const Client& client, const std::function<void(HostReply)>
 }
 
 void HostApi::Metrics(const std::function<void(HostReply)>& done) {
-	const auto  status = m_status();
+	auto status = m_status();
+	if (!m_runtime.game.isEmpty()) status.running_id = m_runtime.game;
 	QJsonObject game;
 	if (!status.running_id.isEmpty()) {
 		if (const auto* entry = m_library->Find(status.running_id); entry != nullptr) {
@@ -388,7 +598,8 @@ void HostApi::Metrics(const std::function<void(HostReply)>& done) {
 			                    {"running", true}};
 		}
 	}
-	done(Json(200, m_metrics.Build(game)));
+	done(Json(200, m_metrics.Build(game, m_runtime.game.isEmpty() ? QString {} :
+	    QDir(m_runtime.directory).filePath("_TempData/metrics-fps.json"))));
 }
 
 void HostApi::Art(const QString& id, const QString& kind, const QString& if_none_match,
@@ -538,7 +749,7 @@ void HostApi::ResetSettings(const GameEntry& game, const Client& client,
 }
 
 void HostApi::GetTrophies(const GameEntry& game, const std::function<void(HostReply)>& done) const {
-	done(Json(200, Trophies(*game.info, QCoreApplication::applicationDirPath())));
+	done(Json(200, Trophies(*game.info, RuntimeDirectory(game.id))));
 }
 
 void HostApi::GetCheats(const GameEntry& game, const Client& client,

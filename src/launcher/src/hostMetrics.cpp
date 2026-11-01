@@ -185,8 +185,8 @@ QList<TempReading> ReadTemps() {
 	return readings;
 }
 
-QJsonObject SampleFps(double* frame_time_ms) {
-	const auto body = ReadWhole(QString::fromStdString(Common::FpsStatsFilePath()));
+QJsonObject SampleFps(double* frame_time_ms, const QString& fps_file) {
+	const auto body = ReadWhole(fps_file.isEmpty() ? QString::fromStdString(Common::FpsStatsFilePath()) : fps_file);
 	if (body.isEmpty()) {
 		return {};
 	}
@@ -271,7 +271,7 @@ GpuInfo SampleGpu() {
 	return info;
 }
 
-QJsonObject Sampler::Build(const QJsonObject& game) {
+QJsonObject Sampler::Build(const QJsonObject& game, const QString& fps_file) {
 	QJsonObject metrics {{"ts", static_cast<double>(NowUnixS())}};
 
 	// CPU. Usage needs two /proc/stat readings a moment apart; we keep the previous one and use
@@ -326,7 +326,7 @@ QJsonObject Sampler::Build(const QJsonObject& game) {
 		QJsonObject merged = game;
 		if (game.value(QStringLiteral("running")).toBool()) {
 			double     frame_time_ms = 0.0;
-			const auto fps           = SampleFps(&frame_time_ms);
+			const auto fps           = SampleFps(&frame_time_ms, fps_file);
 			if (!fps.isEmpty()) {
 				merged["fps"] = fps;
 				if (frame_time_ms > 0.0) {

@@ -13,6 +13,7 @@
 #include <QVariant>
 
 #include <memory>
+#include <optional>
 
 class CompatibilityDatabase;
 
@@ -76,6 +77,8 @@ public:
 	// per-client cheat plan), keyed by client UUID, for launch.json's client_games.
 	[[nodiscard]] QHash<QString, QList<StreamingLaunchEntry>>
 	ClientCatalog(const QString& interpreter) const;
+	[[nodiscard]] std::optional<StreamingLaunchEntry> ResolveLaunch(
+	    const QString& interpreter, const QString& client_id, const QString& game_id) const;
 	// Validates through Configuration::SetGameSettings, stores as a custom entry, rewrites
 	// Kyty.ini.
 	[[nodiscard]] QString SaveGameSettings(const QString& id, const QJsonObject& settings);

@@ -12,6 +12,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 #include <functional>
 #include <memory>
@@ -26,6 +27,10 @@ public:
 	};
 
 	HostApi(GameLibrary* library, std::function<Status()> status, QObject* parent = nullptr);
+	~HostApi() override;
+	// Owner configuration only: no network request may choose these paths.
+	void ConfigureNativeLaunch(const QString& interpreter, const QString& lock_path,
+	                           const QString& runtime_root = {});
 
 	// request: {"method":"GET|PUT|POST","path":"/kyty/v1/...","body":{...}?,"if_none_match":"..."?,
 	//           "client":{"id":"<uuid>","name":"<pair name>"}?}
@@ -65,6 +70,21 @@ signals:
 	void ClientProfileChanged();
 
 private:
+	void Internal(const QJsonObject& request, const std::function<void(HostReply)>& done);
+	[[nodiscard]] QJsonObject ResolveNative(const QString& client_id, const QString& game_id) const;
+	[[nodiscard]] QString RuntimeDirectory(const QString& game_id) const;
+	void ClearRuntime();
+	void ReapRuntime();
+	QString m_interpreter, m_local_lock, m_runtime_root;
+	struct RuntimeContext {
+		QString session_id, game, client_id, directory, owner_start, token;
+		qint64 owner_pid = 0;
+		bool claimed = false;
+		bool acquired = false;
+		qint64 deadline_ms = 0;
+	} m_runtime;
+	int m_reservation_fd = -1;
+	QTimer m_runtime_watch;
 	void Library(const Client& client, const std::function<void(HostReply)>& done) const;
 	void Metrics(const std::function<void(HostReply)>& done);
 	void Art(const QString& id, const QString& kind, const QString& if_none_match,

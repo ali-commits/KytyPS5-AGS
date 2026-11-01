@@ -119,6 +119,14 @@ HostDaemon::HostDaemon(QObject* parent)
       m_api_server([this](const QJsonObject& request, std::function<void(HostReply)> done) {
 	      m_api.Handle(request, std::move(done));
       }) {
+	const auto run = qEnvironmentVariable("XDG_RUNTIME_DIR");
+	const auto lock_dir = QDir(run).filePath("kytyps5");
+	if (!run.isEmpty() && !QFileInfo::exists(lock_dir)) {
+		QDir().mkpath(lock_dir);
+		QFile::setPermissions(lock_dir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+	}
+	m_api.ConfigureNativeLaunch(Interpreter(), QDir(lock_dir).filePath("emulator.lock"),
+	                           qEnvironmentVariable("AGS_SESSION_RUNTIME_ROOT"));
 	m_reload.setSingleShot(true);
 	m_reload.setInterval(500);
 	m_refresh.setInterval(1000);

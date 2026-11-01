@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import sys
 
 
@@ -63,7 +64,8 @@ def capture(native, args, lock_fd):
 
     prefix = Path(__file__).resolve().parent
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-    output = prefix/'_CrashCapture'/stamp
+    mutable = Path(os.environ.get('AGS_SESSION_RUNTIME', str(prefix)))
+    output = mutable/'_CrashCapture'/stamp
     output.mkdir(parents=True)
     metadata = {'started_at_utc': stamp, 'command': [str(native), *args],
                 'native_sha256': hashlib.sha256(native.read_bytes()).hexdigest(),
@@ -100,6 +102,23 @@ def capture(native, args, lock_fd):
         metadata['runtime_env'] = runtime_settings(prefix, options.setdefault('env', dict(os.environ)))
     except Exception as error:
         diagnostic_error('runtime-env', error)
+    if 'AGS_SESSION_RUNTIME' in os.environ:
+        # Session ownership wins over inherited or installation-level diagnostic paths.
+        options.setdefault('env', dict(os.environ))['KYTY_HANG_TRACE_DIR'] = str(output/'hang')
+        options['env']['KYTY_FRAME_TIMES_LOG'] = str(output/'frame-times.csv')
+    if 'AGS_EMULATOR_LOCK_FD' in os.environ:
+        # If the native AGS supervisor is killed abruptly it kills this wrapper via
+        # PDEATHSIG; propagate that lifetime to the wrapped native child as well.
+        import ctypes
+        previous_preexec = options.get('preexec_fn')
+        wrapper_pid = os.getpid()
+        def owned_preexec():
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != wrapper_pid:
+                os._exit(127)
+            if previous_preexec is not None:
+                previous_preexec()
+        options['preexec_fn'] = owned_preexec
     # What the native program actually receives (KYTY_FAULT_MAP is read at its static init).
     metadata['effective_settings'] = settings_of(options.get('env', os.environ))
     child = subprocess.Popen([str(native), *args], stdout=subprocess.PIPE,
@@ -175,7 +194,7 @@ def capture(native, args, lock_fd):
     metadata['exit_code'] = status
     metadata['ended_at_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     (output/'manifest.json').write_text(json.dumps(metadata, indent=2)+'\n')
-    (prefix/'_CrashCapture'/'last-run.txt').write_text(str(output)+'\n')
+    (mutable/'_CrashCapture'/'last-run.txt').write_text(str(output)+'\n')
     print('Saved crash capture:', output, 'exit', status, flush=True)
     return status if status >= 0 else 128-status
 
@@ -186,20 +205,71 @@ def main():
     # Version/help probes made by the GUI must work while a game is running.
     if not any(a == '--game' or a.startswith('--game=') for a in args):
         os.execv(native, [str(native), *args])
-    state = Path(os.environ.get('XDG_RUNTIME_DIR', str(Path.home()/'.cache')))/'kytyps5'
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (state/'emulator.lock').open('a') as lock:
+    try:
+        inherited = os.environ.get('AGS_EMULATOR_LOCK_FD')
+        if inherited is not None:
+            # Native AGS has already claimed the one-use owner reservation and acquired
+            # the lifetime lock. Never reopen that lock as a competing owner.
+            fd = int(inherited)
+            path = Path(os.environ['AGS_EMULATOR_LOCK_PATH'])
+            expected = path.lstat()
+            actual = os.fstat(fd)
+            if (not path.is_absolute() or not stat.S_ISREG(expected.st_mode)
+                    or expected.st_uid != os.geteuid() or expected.st_mode & 0o077
+                    or (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino)):
+                raise ValueError('invalid inherited lifetime lock')
+            with private_lock(path) as probe:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise ValueError('inherited lifetime lock is not held')
+            return capture(native, args, fd)
+        state = Path(os.environ.get('XDG_RUNTIME_DIR', str(Path.home()/'.cache')))/'kytyps5'
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with private_lock(state/'emulator.lock.launch') as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with private_lock(state/'emulator.lock') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if legacy_emulator_running():
+                    raise ValueError('another emulator is running')
+                # The child now owns exclusion; release admission without ever closing or
+                # unlocking the lifetime descriptor inherited by the intended child only.
+                fcntl.flock(admission, fcntl.LOCK_UN)
+                return capture(native, args, lock.fileno())
+    except (OSError, ValueError, KeyError):
+        print('host-busy: emulator launch reservation unavailable', file=sys.stderr)
+        return 1
+
+
+def private_lock(path):
+    parent = path.parent
+    if not path.is_absolute() or any(part.is_symlink() for part in [parent, *parent.parents]):
+        raise ValueError('unsafe lock parent')
+    info = parent.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError('unsafe lock directory')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        os.close(fd)
+        raise ValueError('unsafe lock file')
+    return os.fdopen(fd, 'a')
+
+
+def legacy_emulator_running():
+    # Advisory detection for an already running legacy direct ELF. Atomic exclusion
+    # requires every ordinary launcher to install/use this guard.
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit() or int(process.name) == os.getpid():
+            continue
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print('An emulator is already running. Close it before launching another.', file=sys.stderr)
-            return 1
-        check = subprocess.run(['pgrep', '-x', 'kyty_emulator'], capture_output=True, text=True)
-        if check.returncode != 1:
-            print('Another emulator is running, or its process count could not be checked.', file=sys.stderr)
-            return 1
-        os.set_inheritable(lock.fileno(), True)
-        return capture(native, args, lock.fileno())
+            if process.stat().st_uid == os.geteuid() and (process/'comm').read_text().strip() == 'kyty_emulator':
+                return True
+        except (OSError, ProcessLookupError):
+            pass
+    return False
 
 
 if __name__ == '__main__':

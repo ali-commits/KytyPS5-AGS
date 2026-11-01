@@ -448,6 +448,19 @@ GameLibrary::ClientCatalog(const QString& interpreter) const {
 	return out;
 }
 
+std::optional<StreamingLaunchEntry> GameLibrary::ResolveLaunch(
+    const QString& interpreter, const QString& client_id, const QString& game_id) const {
+	if (!ClientProfiles::IsValidClientId(client_id) || Find(game_id) == nullptr) return std::nullopt;
+	const auto clients = ClientCatalog(interpreter);
+	for (const auto& entry: clients.value(client_id)) {
+		if (entry.id == game_id) return entry;
+	}
+	for (const auto& entry: Catalog(interpreter)) {
+		if (entry.id == game_id) return entry;
+	}
+	return std::nullopt;
+}
+
 QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& settings) {
 	const auto* game = Find(id);
 	if (game == nullptr) {

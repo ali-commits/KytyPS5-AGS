@@ -1,6 +1,7 @@
 #include "agsPairing.h"
 #include "cheatFile.h"
 #include "common/fpsStats.h"
+#include "common/trophies.h"
 #include "gameLibrary.h"
 #include "hostApi.h"
 #include "hostDaemon.h"
@@ -49,6 +50,15 @@ static HostReply Call(HostApi& api, const QJsonObject& request) {
 	return *reply;
 }
 
+static QJsonObject RuntimeBody(const QString& game, const QString& client, const QString& directory,
+                               qint64 pid = ::getpid()) {
+	const auto stat = ReadFile(QStringLiteral("/proc/%1/stat").arg(pid));
+	const auto start = QString::fromLatin1(stat.mid(stat.lastIndexOf(')') + 2).split(' ').value(19));
+	return {{"session_id", QString(64, '1')}, {"reservation_token", QString(64, '2')},
+	        {"game", game}, {"client_id", client}, {"runtime_directory", directory},
+	        {"owner_pid", pid}, {"owner_start", start}, {"state", "starting"}};
+}
+
 class LauncherHostTests: public QObject {
 	Q_OBJECT
 	QTemporaryDir m_dir;
@@ -77,6 +87,214 @@ private slots:
 		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
 	}
 	void cleanup() { QDir::setCurrent(m_old_cwd); }
+	void nativeResolverPreservesCompleteDeviceArguments() {
+		QTemporaryDir config;
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const QString a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const QString b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+		const auto id = library.Games().first().id;
+		const auto path = "/kyty/v1/games/" + id + "/settings";
+		const auto pcBefore = ReadFile(m_dir.filePath("Kyty.ini"));
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", config.filePath("emulator.lock"), config.path());
+		for (const auto& uuid: {a, b}) {
+			const auto settings = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
+			QCOMPARE(Call(api, ClientReq("PUT", path, uuid, {{"revision", settings["revision"]},
+			    {"values", QJsonObject {{"vblank_frequency", uuid == a ? "90" : "120"}, {"user_name", "Fixture Player"}}}})).status, 200);
+		}
+		const auto first = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", a, {{"game", id}}));
+		QCOMPARE(first.status, 200);
+		const auto second = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", b, {{"game", id}}));
+		QCOMPARE(second.status, 200);
+		const auto aa = QJsonDocument::fromJson(first.body).object()["args"].toArray();
+		const auto bb = QJsonDocument::fromJson(second.body).object()["args"].toArray();
+		QCOMPARE(std::count(aa.begin(), aa.end(), QJsonValue("--game")), 1);
+		QVERIFY(aa != bb);
+		QVERIFY(aa.contains(QStringLiteral("Fixture Player")));
+		QCOMPARE(ReadFile(m_dir.filePath("Kyty.ini")), pcBefore);
+	}
+	void nativeReservationExcludesLocalAndRemoteAndRejectsReplay() {
+		QTemporaryDir config;
+		QFile::setPermissions(config.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		const auto lockPath = config.filePath("emulator.lock");
+		resolver.ConfigureNativeLaunch("/usr/bin/true", lockPath, config.path());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto id = library.Games().first().id;
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 200);
+		auto body = RuntimeBody(id, uuid, config.filePath(id));
+		const auto send = [&](const char* state) {
+			body["state"] = state;
+			return Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body));
+		};
+		const int local = ::open(QFile::encodeName(lockPath), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		QVERIFY(local >= 0);
+		QVERIFY(::flock(local, LOCK_EX | LOCK_NB) == 0);
+		QCOMPARE(send("starting").status, 409);
+		::flock(local, LOCK_UN);
+		QCOMPARE(send("starting").status, 200);
+		QCOMPARE(send("starting").status, 409);
+		const int admission = ::open(QFile::encodeName(lockPath + ".launch"), O_RDWR | O_CLOEXEC);
+		QVERIFY(admission >= 0);
+		QVERIFY(::flock(admission, LOCK_EX | LOCK_NB) != 0);
+		// The daemon reserves admission only: the intended child can acquire lifetime ownership.
+		QCOMPARE(send("claim").status, 200);
+		QCOMPARE(send("claim").status, 409);
+		QVERIFY(::flock(local, LOCK_EX | LOCK_NB) == 0);
+		QCOMPARE(send("acquired").status, 200);
+		QVERIFY(::flock(admission, LOCK_EX | LOCK_NB) == 0);
+		::flock(admission, LOCK_UN);
+		QCOMPARE(send("claim").status, 409);
+		QCOMPARE(send("closed").status, 200);
+		::close(local); ::close(admission);
+	}
+
+	void nativeOwnerDeathClearsReservationAndUnsafeRootsFailClosed() {
+		QTemporaryDir config;
+		QFile::setPermissions(config.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		const auto lockPath = config.filePath("emulator.lock");
+		resolver.ConfigureNativeLaunch("/usr/bin/true", lockPath, config.path());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto id = library.Games().first().id;
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 200);
+		QProcess owner; owner.start("/usr/bin/sleep", {"60"}); QVERIFY(owner.waitForStarted());
+		auto body = RuntimeBody(id, uuid, config.filePath(id), owner.processId());
+		body["runtime_directory"] = "/tmp";
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 400);
+		body["runtime_directory"] = config.filePath(id);
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		owner.kill(); QVERIFY(owner.waitForFinished());
+		QTest::qWait(350);
+		const int admission = ::open(QFile::encodeName(lockPath + ".launch"), O_RDWR | O_CLOEXEC);
+		QVERIFY(admission >= 0); QVERIFY(::flock(admission, LOCK_EX | LOCK_NB) == 0); ::close(admission);
+		QVERIFY(QDir(config.filePath(id + "/_SaveData")).removeRecursively());
+		QVERIFY(QFile::link(config.path(), config.filePath(id + "/_SaveData")));
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 404);
+	}
+
+	void isolatedTrophyGetMigratesOnlySelectedRuntimeBeforeChildStarts() {
+		QTemporaryDir config;
+		QTemporaryDir normal;
+		QFile::setPermissions(config.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const auto interpreter = normal.filePath("fixture-executable");
+		QVERIFY(QFile::copy("/usr/bin/true", interpreter));
+		QVERIFY(QFile::setPermissions(interpreter, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch(interpreter, config.filePath("emulator.lock"), config.path());
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto* entry = &library.Games().first();
+		const auto id = entry->id;
+		const auto info = entry->info.get();
+		const auto title = info->title_id.toStdString();
+		const auto normalLegacy = Common::Trophies::LegacyUnlocksPath(normal.path().toStdString(), title, info->user_id, 0);
+		const auto normalTrophy = Common::Trophies::UnlocksPath(normal.path().toStdString(), title, info->user_id, 0);
+		QVERIFY(Common::Trophies::SaveUnlockData(normalLegacy, {{1}, {}}));
+		const auto normalBefore = ReadFile(QString::fromStdString(normalLegacy.string()));
+		// Even an empty package exercises the GET migration code, independently of rendering.
+		WriteFile(QDir(info->basedir).filePath("sce_sys/trophy2/trophy00.ucp"), "fixture");
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 200);
+		const auto runtime = config.filePath(id);
+		const auto isolatedLegacy = Common::Trophies::LegacyUnlocksPath(runtime.toStdString(), title, info->user_id, 0);
+		const auto isolatedTrophy = Common::Trophies::UnlocksPath(runtime.toStdString(), title, info->user_id, 0);
+		QVERIFY(Common::Trophies::SaveUnlockData(isolatedLegacy, {{2}, {}}));
+		// The isolated daemon setting also governs reads before launch and after Close.
+		const auto trophiesPath = "/kyty/v1/games/" + id + "/trophies";
+		QCOMPARE(Call(resolver, ClientReq("GET", trophiesPath, uuid)).status, 200);
+		QVERIFY(QFileInfo::exists(QString::fromStdString(isolatedTrophy.string())));
+		QVERIFY(!QFileInfo::exists(QString::fromStdString(normalTrophy.string())));
+		QVERIFY(QFile::remove(QString::fromStdString(isolatedTrophy.string())));
+		auto body = RuntimeBody(id, uuid, runtime);
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		QCOMPARE(Call(resolver, ClientReq("GET", "/kyty/v1/games/" + id + "/trophies", uuid)).status, 200);
+		QVERIFY(QFileInfo::exists(QString::fromStdString(isolatedTrophy.string())));
+		QVERIFY(!QFileInfo::exists(QString::fromStdString(normalTrophy.string())));
+		QCOMPARE(ReadFile(QString::fromStdString(normalLegacy.string())), normalBefore);
+		const auto fpsPath = QDir(runtime).filePath("_TempData/metrics-fps.json");
+		WriteFile(fpsPath, QJsonDocument(QJsonObject {{"ts", QDateTime::currentSecsSinceEpoch()},
+		    {"current", 25}, {"avg", 25}, {"min", 25}, {"max", 25}, {"window_s", 10}, {"frame_ms", 40}}).toJson());
+		const auto metrics = QJsonDocument::fromJson(Call(resolver, ClientReq("GET", "/kyty/v1/host/metrics", uuid)).body).object();
+		QCOMPARE(metrics["game"].toObject()["fps"].toObject()["current"].toInt(), 25);
+		body["state"] = "closed";
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		QVERIFY(QFile::remove(QString::fromStdString(isolatedTrophy.string())));
+		QCOMPARE(Call(resolver, ClientReq("GET", trophiesPath, uuid)).status, 200);
+		QVERIFY(QFileInfo::exists(QString::fromStdString(isolatedTrophy.string())));
+		QVERIFY(!QFileInfo::exists(QString::fromStdString(normalTrophy.string())));
+		QCOMPARE(ReadFile(QString::fromStdString(normalLegacy.string())), normalBefore);
+		QFile::remove(QDir(info->basedir).filePath("sce_sys/trophy2/trophy00.ucp"));
+	}
+
+	void nativeGuardIntegrationUsesOwnerReservation() {
+		const auto binary = qEnvironmentVariable("AGS_TEST_HOST_BINARY");
+		if (binary.isEmpty()) QSKIP("Set AGS_TEST_HOST_BINARY to the built native host for the IPC integration fixture");
+		QVERIFY(QFileInfo(binary).isExecutable());
+		QTemporaryDir config;
+		QTemporaryDir prefix;
+		QFile::setPermissions(config.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+		const auto interpreter = prefix.filePath("fixture-native");
+		WriteFile(interpreter, "#!/usr/bin/python3\nimport json,sys,time\nfrom pathlib import Path\nPath('args.json').write_text(json.dumps(sys.argv[1:]))\ntime.sleep(20)\n");
+		QVERIFY(QFile::setPermissions(interpreter, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		const auto id = library.Games().first().id;
+		QDir().mkpath(config.filePath("kytyps5"));
+		QFile::setPermissions(config.filePath("kytyps5"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+		const auto lockPath = config.filePath("kytyps5/emulator.lock");
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch(interpreter, lockPath, config.path());
+		HostSocketServer server([&](const QJsonObject& request, auto done) { resolver.Handle(request, done); });
+		QString error;
+		const auto socket = config.filePath("api.sock");
+		QVERIFY2(server.Listen(socket, &error), qPrintable(error));
+		const auto launch = QJsonDocument::fromJson(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).body).object();
+		QVERIFY(!launch.isEmpty());
+		auto body = RuntimeBody(id, uuid, launch["cwd"].toString());
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 200);
+		QJsonObject context = body;
+		context.remove("state"); context.remove("client_id");
+		context["api_socket"] = socket; context["local_game_lock"] = lockPath;
+		context["client"] = QJsonObject {{"id", uuid}, {"name", "Fixture"}};
+		const auto bytes = QJsonDocument(QJsonObject {{"context", context}, {"game", launch}}).toJson(QJsonDocument::Compact);
+		const auto request = config.filePath("launch.json");
+		const auto replay = config.filePath("replay.json");
+		WriteFile(request, bytes); WriteFile(replay, bytes);
+		QFile::setPermissions(request, QFile::ReadOwner | QFile::WriteOwner);
+		QFile::setPermissions(replay, QFile::ReadOwner | QFile::WriteOwner);
+		// A simultaneous ordinary local guard must lose admission before it launches any child.
+		const auto guardSource = QStringLiteral(AGS_TEST_GUARD_SOURCE);
+		const auto localGuard = prefix.filePath("kyty_emulator");
+		QVERIFY(QFile::copy(guardSource, localGuard));
+		QDir().mkpath(prefix.filePath("libexec"));
+		QVERIFY(QFile::copy(interpreter, prefix.filePath("libexec/kyty_emulator")));
+		QProcess local;
+		auto environment = QProcessEnvironment::systemEnvironment();
+		environment.insert("XDG_RUNTIME_DIR", config.path());
+		local.setProcessEnvironment(environment); local.setWorkingDirectory(prefix.path());
+		local.start("/usr/bin/python3", {localGuard, "--game", "fixture with spaces"});
+		QVERIFY(local.waitForFinished(5000)); QVERIFY(local.exitCode() != 0);
+		QVERIFY(!QFileInfo::exists(prefix.filePath("args.json")));
+		QProcess remote; remote.start(binary, {"launch-guard", request});
+		QVERIFY(remote.waitForStarted());
+		const auto arguments = QDir(launch["cwd"].toString()).filePath("args.json");
+		QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(arguments), 5000);
+		QCOMPARE(QJsonDocument::fromJson(ReadFile(arguments)).array(), launch["args"].toArray());
+		QVERIFY(!QFileInfo::exists(request));
+		QProcess repeat; repeat.start(binary, {"launch-guard", replay});
+		QTRY_VERIFY_WITH_TIMEOUT(repeat.state() == QProcess::NotRunning, 5000);
+		QVERIFY(repeat.exitCode() != 0);
+		local.start("/usr/bin/python3", {localGuard, "--game", "fixture with spaces"});
+		QVERIFY(local.waitForFinished(5000)); QVERIFY(local.exitCode() != 0);
+		QVERIFY(!QFileInfo::exists(prefix.filePath("args.json")));
+		remote.terminate();
+		QTRY_VERIFY_WITH_TIMEOUT(remote.state() == QProcess::NotRunning, 5000);
+		const int lock = ::open(QFile::encodeName(lockPath), O_RDWR | O_CLOEXEC);
+		QVERIFY(lock >= 0); QVERIFY(::flock(lock, LOCK_EX | LOCK_NB) == 0); ::close(lock);
+	}
+
 	void loadsNestedGamesWithStableIds() {
 		GameLibrary library;
 		QString     error;
