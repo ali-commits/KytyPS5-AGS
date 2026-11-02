@@ -65,7 +65,7 @@ bool ApplicationLifetime::eventFilter(QObject* object, QEvent* event) {
 		else {
 			auto* box =
 			    new QMessageBox(QMessageBox::Question, tr("Exit AGS"),
-				                tr("No system tray is available. Exit AGS and stop hosting?"),
+				                tr("No system tray is available. Exit AGS, stop hosting, and close any remote game?"),
 				                QMessageBox::Yes | QMessageBox::No, m_window);
 			box->setAttribute(Qt::WA_DeleteOnClose);
 			connect(box, &QMessageBox::finished, this, [this](int result) {
@@ -102,7 +102,7 @@ void ApplicationLifetime::Stopped(const QString& error) {
 	emit ExitCompleted(error);
 	m_exiting = false;
 	m_window->showNormal();
-	auto* box = new QMessageBox(QMessageBox::Critical, tr("AGS host shutdown failed"), error,
+	auto* box = new QMessageBox(QMessageBox::Critical, tr("AGS shutdown failed"), error,
 	                            QMessageBox::Ok, m_window);
 	box->setAttribute(Qt::WA_DeleteOnClose);
 	box->open();

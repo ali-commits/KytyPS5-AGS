@@ -845,7 +845,7 @@ private slots:
         for (auto* tabs: dialog.findChildren<QTabWidget*>())
             for (int i = 0; i < tabs->count(); ++i) {
                 library_tab |= tabs->tabText(i) == "Library";
-                stream_tab |= tabs->tabText(i) == "Streaming";
+                stream_tab |= tabs->tabText(i) == "Host streaming";
             }
         QVERIFY(library_tab && stream_tab);
         if (!qEnvironmentVariableIsEmpty("KYTY_PRESERVATION_SCREENSHOT")) {

@@ -52,7 +52,10 @@ add_custom_target(stage_updater
 		$<TARGET_FILE_DIR:launcher>/$<TARGET_FILE_NAME:kyty_updater>
 	DEPENDS kyty_updater
 	VERBATIM)
-add_dependencies(launcher kyty_emulator stage_updater)
+add_dependencies(launcher stage_updater)
+if(KYTY_LAUNCHER_BUILD_EMULATOR)
+    add_dependencies(launcher kyty_emulator)
+endif()
 
 if(KYTY_CLANG_CL)
 	add_custom_command(TARGET launcher POST_BUILD
@@ -272,4 +275,5 @@ if(BUILD_TESTING)
     include(tests/lifetime.cmake)
     include(tests/gui-instance.cmake)
     include(tests/artwork.cmake)
+    include(tests/remote.cmake)
 endif()

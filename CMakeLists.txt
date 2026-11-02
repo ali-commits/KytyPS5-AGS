@@ -190,6 +190,7 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
 endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
+option(KYTY_LAUNCHER_BUILD_EMULATOR "Build the PS5 emulator with the launcher" ON)
 option(KYTY_BUILD_CONTROLLER_AUDIO_RECEIVER "Build the independent Linux controller audio companion" OFF)
 
 config_compiler_and_linker()
@@ -336,7 +337,13 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/loader/*.h"
 )
 
-find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
+if(KYTY_BUILD_LAUNCHER AND NOT KYTY_LAUNCHER_BUILD_EMULATOR AND NOT BUILD_TESTING)
+    # Explicit launcher-only target builds do not consume emulator shaders.
+    # Normal emulator/test configurations retain the required tool check.
+    find_program(KYTY_GLSLANG_VALIDATOR glslangValidator)
+else()
+    find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
+endif()
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
 set(gpu_tiler_generated_dir "${PROJECT_BINARY_DIR}/gpu_tiler_shaders")
 set(gpu_tiler_shader_names

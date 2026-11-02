@@ -18,6 +18,12 @@
 #include <QVBoxLayout>
 
 namespace {
+QString SourceLabel(const LibraryCard& game) {
+    if (game.source == "steam") return QObject::tr("Steam");
+    if (game.source == "ps5") return QObject::tr("PS5");
+    if (game.source == "remote") return QObject::tr("Remote · %1 · Source unknown").arg(game.sourceId);
+    return QObject::tr("Unknown source");
+}
 QPixmap Cover(const LibraryCard& game) {
 	QPixmap cover;
 	if (!game.artwork.isEmpty()) cover.loadFromData(game.artwork);
@@ -51,7 +57,11 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	logo->setAccessibleName(tr("AGS"));
 	header->addWidget(logo);
 	header->addStretch();
-	auto* settings = new QPushButton(tr("Settings"), this);
+	auto* remote = new QPushButton(tr("Remote hosts"), this);
+    remote->setObjectName("libraryRemoteHosts");
+    header->addWidget(remote);
+    connect(remote, &QPushButton::clicked, this, &LibraryPage::RemoteHostsRequested);
+    auto* settings = new QPushButton(tr("Settings"), this);
 	settings->setObjectName("librarySettings");
 	header->addWidget(settings);
 	connect(settings, &QPushButton::clicked, this, &LibraryPage::SettingsRequested);
@@ -94,7 +104,7 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 		menu.exec(m_list->viewport()->mapToGlobal(point));
 	});
 	browseLayout->addWidget(m_list);
-	m_empty = new QLabel(tr("No games found. Open Settings to add game directories. Steam roots "
+	m_empty = new QLabel(tr("No games found. Connect a PC in Remote hosts, or add local games in Settings. Steam roots "
 	                        "and owned launch recipes are configured in Kyty.ini."),
 	                     browse);
 	m_empty->setWordWrap(true);
@@ -145,12 +155,12 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	connect(m_play, &QPushButton::clicked, this, [this] {
 		int row = m_list->currentRow();
 		if (row < 0 || row >= m_games.size() || !m_games[row].ready || !m_launchEnabled) return;
-		emit GameActionRequested(m_games[row].id, m_games[row].source);
-		if (m_games[row].source == "steam") {
-            SetLaunchEnabled(false);
-			emit LocalPlayRequested(m_games[row].id);
-        } else
-			emit PlayRequested(m_games[row].gamePath);
+        const auto game = m_games[row];
+        if (game.source != "ps5" && game.source != "steam" && game.source != "remote") return;
+        if (game.source == "steam" || game.source == "remote") SetLaunchEnabled(false);
+        emit GameActionRequested(game.id, game.source);
+        if (game.source == "steam") emit LocalPlayRequested(game.id);
+        else if (game.source == "ps5") emit PlayRequested(game.gamePath);
 	});
 	m_pages->addWidget(detail);
 	auto* escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
@@ -171,9 +181,8 @@ void LibraryPage::SetGames(const QList<LibraryCard>& games) {
 	for (int i = 0; i < games.size(); ++i) {
 		const auto& game = games[i];
 		auto*       item = new QListWidgetItem(
-		    game.name + "\n" + (game.source == "steam" ? tr("Steam") : tr("PS5")) +
-		        (game.ready ? (game.source == "steam" ? tr(" · Ready") : tr(" · Ready"))
-				            : tr(" · Setup required")),
+		    game.name + "\n" + SourceLabel(game) +
+                (game.ready ? tr(" · Ready") : game.source == "remote" ? tr(" · Host offline") : tr(" · Setup required")),
 		    m_list);
 		item->setIcon(QIcon(Cover(game)));
 		item->setTextAlignment(Qt::AlignLeft);
@@ -196,18 +205,24 @@ void LibraryPage::SetGames(const QList<LibraryCard>& games) {
 		else
 			Back();
 	}
-	m_list->setToolTip(games.isEmpty() ? tr("No games found. Open Settings to add game "
+	m_list->setToolTip(games.isEmpty() ? tr("No games found. Connect a PC in Remote hosts, or open Settings to add game "
 	                                        "directories. Steam roots are configured in Kyty.ini.")
 	                                   : QString());
 }
 void LibraryPage::SetLaunchEnabled(bool enabled) {
 	m_launchEnabled = enabled;
 	const int row   = m_list->currentRow();
-	m_play->setEnabled(enabled && row >= 0 && row < m_games.size() && m_games[row].ready);
+	m_play->setEnabled(enabled && row >= 0 && row < m_games.size() && m_games[row].ready &&
+        (m_games[row].source == "ps5" || m_games[row].source == "steam" || m_games[row].source == "remote"));
 }
 void LibraryPage::SetLaunchError(const QString& error) {
     if (m_launchError == error) return;
     m_launchError = error;
+    if (m_pages->currentIndex() == 1) ShowDetails();
+}
+void LibraryPage::SetRemoteError(const QString& error) {
+    if (m_remoteError == error) return;
+    m_remoteError = error;
     if (m_pages->currentIndex() == 1) ShowDetails();
 }
 void LibraryPage::ShowDetails() {
@@ -217,8 +232,8 @@ void LibraryPage::ShowDetails() {
 	m_title->setText(game.name);
 	m_artwork->setPixmap(
 	    Cover(game).scaled(280, 150, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-	m_source->setText(game.source == "steam" ? tr("Steam · App %1").arg(game.sourceId) : tr("PS5"));
-    m_reason->setText(!m_launchError.isEmpty() ? m_launchError : game.ready ? tr("Ready to play on this computer.") : game.reason);
+	m_source->setText(game.source == "steam" ? tr("Steam · App %1").arg(game.sourceId) : SourceLabel(game));
+    m_reason->setText(game.source == "remote" ? (m_remoteError.isEmpty() ? game.reason : m_remoteError) : !m_launchError.isEmpty() ? m_launchError : game.ready ? tr("Ready to play on this computer.") : game.reason);
     m_play->setText(tr("Play"));
 	SetLaunchEnabled(m_launchEnabled);
 	m_pages->setCurrentIndex(1);
@@ -284,7 +299,7 @@ void LibraryPage::ApplyFilter() {
 	if (m_list->currentItem() && m_list->currentItem()->isHidden()) m_list->setCurrentRow(-1);
 	m_empty->setVisible(!anyVisible);
 	m_empty->setText(m_games.isEmpty()
-	                     ? tr("No games found. Open Settings to add game directories. Steam roots "
+	                     ? tr("No games found. Connect a PC in Remote hosts, or add local games in Settings. Steam roots "
 						      "and owned launch recipes are configured in Kyty.ini.")
 						 : tr("No games match your search."));
 }

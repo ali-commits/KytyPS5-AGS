@@ -34,3 +34,5 @@ add_test(NAME launcher_library_page COMMAND launcher_library_page_tests)
 set_tests_properties(launcher_library_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 include(artwork.cmake)
+
+include(remote.cmake)

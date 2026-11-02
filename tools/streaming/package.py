@@ -50,7 +50,7 @@ def package(args):
     stage, backend, base, runtime, prefix, config, link_map = [path.expanduser().resolve() for path in
         (args.stage, args.backend, args.base_install, args.runtime, args.prefix, args.config, args.map)]
     for path in (stage/'launcher', stage/'kyty_emulator', backend, backend.parent/'ags-guardian',
-                 backend.parent/'ags-hid-guard', backend.parent/'ags-capture-worker',
+                 backend.parent/'ags-hid-guard', backend.parent/'ags-capture-worker', backend.parent/'ags-client',
                  base/'Kyty.ini', base/'u59-preset.json', link_map):
         if not path.is_file():
             raise SystemExit(f'Missing package input: {path}')
@@ -91,7 +91,7 @@ def package(args):
         shutil.copy2(TOOLS.parent/'diagnostics'/name, prefix/'libexec'/name)
     shutil.copy2(backend, prefix/'libexec'/'ags-host')
     (prefix/'libexec'/'ags-host').chmod(0o755)
-    for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+    for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker', 'ags-client'):
         shutil.copy2(backend.parent/name, prefix/'libexec'/name)
         (prefix/'libexec'/name).chmod(0o755)
     compositor = args.backend_source.expanduser().resolve()/'local/runtime/gamescope-pts'
@@ -135,6 +135,7 @@ def package(args):
         'stream_host': revision(backend_source), 'native_sha256': sha256(prefix/'libexec'/'kyty_emulator'),
         'map_sha256': sha256(prefix/'kyty_emulator_clang_lld.map'),
         'launcher_sha256': sha256(prefix/'launcher'), 'host_sha256': sha256(prefix/'libexec'/'ags-host'),
+        'receiver_sha256': sha256(prefix/'libexec'/'ags-client'),
         'base_config_sha256': base_hash, 'crash_capture': True}
     # Retired companion service is not a native receiver capability. A reused
     # staging directory must not accidentally publish its old executable.

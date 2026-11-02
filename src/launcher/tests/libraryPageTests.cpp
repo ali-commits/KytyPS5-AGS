@@ -116,6 +116,25 @@ private slots:
 		page.findChild<QPushButton*>("librarySettings")->click();
 		QCOMPARE(settings.count(), 1);
 	}
+    void remoteAndUnknownSourcesNeverDispatchLocalPlay() {
+        LibraryPage page;
+        page.SetGames({{"remote:one:same", "Remote game", "remote", "/must-not-run", {}, true, "PC 日本"}});
+        QSignalSpy local(&page, &LibraryPage::LocalPlayRequested), ps5(&page, &LibraryPage::PlayRequested), action(&page, &LibraryPage::GameActionRequested);
+        page.findChild<QPushButton*>("libraryDetails")->click();
+        auto* play = page.findChild<QPushButton*>("libraryPlay");
+        play->click(); play->click(); QCOMPARE(action.size(), 1);
+        QCOMPARE(action[0][1].toString(), QString("remote")); QCOMPARE(local.size(), 0); QCOMPARE(ps5.size(), 0);
+        page.SetGames({{"unknown", "Untrusted", "unknown", "/must-not-run", {}, true}});
+        page.SetLaunchEnabled(true); play->click();
+        QCOMPARE(action.size(), 1); QCOMPARE(local.size(), 0); QCOMPARE(ps5.size(), 0);
+        const auto text = page.findChild<QListWidget*>("libraryGames")->item(0)->text();
+        QVERIFY(text.contains("Unknown source")); QVERIFY(!text.contains("PS5"));
+        page.SetGames({{"remote:one:same", "Remote game", "remote", {}, "Host offline", false, "PC 日本"}});
+        page.SetLaunchEnabled(true); QVERIFY(!play->isEnabled());
+        QCOMPARE(page.findChild<QLabel*>("libraryLaunchReason")->text(), QString("Host offline"));
+        QSignalSpy hosts(&page, &LibraryPage::RemoteHostsRequested);
+        page.findChild<QPushButton*>("libraryRemoteHosts")->click(); QCOMPARE(hosts.size(), 1);
+    }
 	void controllerEdges() {
 		LibraryPage page;
 		page.SetGames({{"one", "First", "ps5", "/one", {}, true},

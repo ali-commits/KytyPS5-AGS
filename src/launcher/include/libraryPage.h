@@ -24,6 +24,7 @@ public:
 	void    SetGames(const QList<LibraryCard>& games);
 	void    SetLaunchEnabled(bool enabled);
     void SetLaunchError(const QString& error);
+    void SetRemoteError(const QString& error);
 	QString SelectedId() const;
 	void    SelectId(const QString& id);
 	void    HandleController(const QSet<QString>& pressed);
@@ -33,6 +34,7 @@ signals:
     void LocalPlayRequested(QString gameId);
 	void GameActionRequested(QString stableId, QString source);
 	void StreamingRequested();
+    void RemoteHostsRequested();
 	void SettingsRequested();
 
 private:
@@ -46,7 +48,7 @@ private:
 	QLabel *           m_title, *m_source, *m_reason;
 	QPushButton*       m_play;
 	bool               m_launchEnabled = true;
-    QString m_launchError;
+    QString m_launchError, m_remoteError;
 	QSet<QString>      m_previousButtons;
 	QLabel*            m_empty;
 	QLabel*            m_artwork;

@@ -31,7 +31,7 @@ class PackageTests(unittest.TestCase):
             (runtime/'_SaveData'/'progress').write_bytes(b'latest normal save')
             backend = root/'host'
             backend.write_bytes(b'backend')
-            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker', 'ags-client'):
                 (root/name).write_bytes(b'helper')
             link_map = root/'emulator.map'
             link_map.write_bytes(b'exact matching map')
@@ -48,7 +48,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual((config/'Kyty.ini').read_text(), (base/'Kyty.ini').read_text())
             self.assertEqual((prefix/'libexec'/'ags-host').read_bytes(), b'backend')
             self.assertFalse((prefix/'libexec'/'kyty_stream_host').exists())
-            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+            for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker', 'ags-client'):
                 self.assertEqual((prefix/'libexec'/name).read_bytes(), b'helper')
             self.assertTrue((prefix/'kyty_emulator').stat().st_mode & 0o100)
             for name in ('runtime_resources.py', 'hang_stacks.py'):
@@ -74,7 +74,7 @@ class PackageTests(unittest.TestCase):
         (base/'u59-preset.json').write_text('{}\n')
         (runtime/'_SaveData').mkdir()
         (root/'host').write_bytes(b'backend')
-        for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker'):
+        for name in ('ags-guardian', 'ags-hid-guard', 'ags-capture-worker', 'ags-client'):
             (root/name).write_bytes(b'helper')
         (root/'emulator.map').write_bytes(b'map')
         return ['--stage', str(stage), '--backend', str(root/'host'), '--backend-source', str(root),

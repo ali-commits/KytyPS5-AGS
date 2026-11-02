@@ -4,10 +4,12 @@
 #include "hostDaemon.h"
 #include "launcherTheme.h"
 #include "mainDialog.h"
+#include "remoteClient.h"
 
 #include <QApplication>
 #include <QIcon>
 #include <QMessageBox>
+#include <QRegularExpression>
 #include <QSystemTrayIcon>
 #include <QTextStream>
 #include <QTimer>
@@ -59,15 +61,46 @@ int main(int argc, char* argv[]) {
 #ifdef Q_OS_LINUX
 	a.setQuitOnLastWindowClosed(false);
 	HostControlClient owner;
-	owner.SetLifetimeOwner();
-	ApplicationLifetime lifetime(&w, QSystemTrayIcon::isSystemTrayAvailable(),
-	                             [&] { owner.ExitOwnedHost(); });
+	const bool        clientOnly = a.arguments().contains("--client-only");
+	if (!clientOnly) owner.SetLifetimeOwner();
+	bool                exitPending = false, hostStopped = false, receiverStopped = false;
+	QString             hostStopError, receiverStopError;
+	ApplicationLifetime lifetime(&w, QSystemTrayIcon::isSystemTrayAvailable(), [&] {
+		exitPending     = true;
+		hostStopped     = false;
+		receiverStopped = false;
+		hostStopError.clear();
+		receiverStopError.clear();
+		w.setEnabled(false);
+		w.Remote()->StopForExit();
+		owner.ExitOwnedHost();
+	});
+	const auto          finishExit = [&] {
+		if (!exitPending || !hostStopped || !receiverStopped) return;
+		exitPending       = false;
+		const auto errors = QStringList {hostStopError, receiverStopError}
+		                        .filter(QRegularExpression(".+"))
+		                        .join("\n");
+		if (!errors.isEmpty()) w.setEnabled(true);
+		lifetime.Stopped(errors);
+	};
 	QObject::connect(&instance, &GuiInstance::ShowRequested, &lifetime, &ApplicationLifetime::Show);
 	QObject::connect(&instance, &GuiInstance::ExitRequested, &lifetime, &ApplicationLifetime::Exit);
 	QObject::connect(&lifetime, &ApplicationLifetime::ExitCompleted, &instance,
 	                 &GuiInstance::CompleteExit);
 	QObject::connect(&owner, &HostControlClient::OwnedHostStopped, &lifetime,
-	                 &ApplicationLifetime::Stopped);
+	                 [&](const QString& error) {
+		                 if (!exitPending) return;
+		                 hostStopped   = true;
+		                 hostStopError = error;
+		                 finishExit();
+	                 });
+	QObject::connect(w.Remote(), &RemoteClient::Stopped, &lifetime, [&](const QString& error) {
+		if (!exitPending) return;
+		receiverStopped   = true;
+		receiverStopError = error;
+		finishExit();
+	});
 	QObject::connect(&lifetime, &ApplicationLifetime::ReadyToQuit, &a, &QApplication::quit,
 	                 Qt::QueuedConnection);
 	QObject::connect(&owner, &HostControlClient::CommandFailed, &w, [&](const QString& error) {
@@ -79,7 +112,7 @@ int main(int argc, char* argv[]) {
 	QObject::connect(&owner, &HostControlClient::StatusChanged, &lifetime,
 	                 [&](const QJsonObject& status) { lifetime.SetStatus(status); });
 	lifetime.ShowInitial(a.arguments().contains("--start-minimized"));
-	QTimer::singleShot(0, &owner, &HostControlClient::StartDaemon);
+	if (!clientOnly) QTimer::singleShot(0, &owner, &HostControlClient::StartDaemon);
 #else
 	w.show();
 #endif

@@ -10,6 +10,7 @@ class MainDialogPrivate;
 class QSettings;
 class QResizeEvent;
 
+class RemoteClient;
 class Configuration;
 class MainDialog: public QDialog {
 	Q_OBJECT
@@ -23,6 +24,7 @@ public:
 	~MainDialog() override = default;
 
 	void RunInterpreter(QProcess* process, const Configuration& info);
+    RemoteClient* Remote() const;
 
 	// u59-preset.json was not applied: a warning line in the window, and a message box once the
 	// emulator was found.

@@ -47,6 +47,7 @@ public:
 
 	QList<StreamingLaunchEntry> CreateStreamingCatalog(const QString& interpreter) const;
 	bool                        EnsureGameDirectory();
+    bool HasConfiguredGameDirectories() const { return !m_game_dirs.isEmpty(); }
 	void                        ScanGameDirectory();
 	bool                        SelectGamePath(const QString& path);
 	void                        ViewTrophies();
