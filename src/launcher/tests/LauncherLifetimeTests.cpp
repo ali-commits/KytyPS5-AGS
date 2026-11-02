@@ -11,6 +11,7 @@
 #include <QProcess>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QSystemTrayIcon>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -151,6 +152,42 @@ private slots:
 		owner.StartDaemon();
 		QTRY_COMPARE(errors.count(), 1);
 		QVERIFY(!errors.at(0).at(0).toString().isEmpty());
+	}
+	void trayReflectsActualStatus() {
+		using State = ApplicationLifetime::TrayState;
+		QCOMPARE(ApplicationLifetime::StateForStatus({}), State::Unavailable);
+		QCOMPARE(ApplicationLifetime::StateForStatus({{"state", ""}}), State::Unavailable);
+		QCOMPARE(ApplicationLifetime::StateForStatus({{"unrelated", true}}), State::Unavailable);
+		QCOMPARE(ApplicationLifetime::StateForStatus({{"state", "Ready"}}), State::Idle);
+		QCOMPARE(ApplicationLifetime::StateForStatus({{"stream_game_running", true}}),
+		         State::GameRunning);
+		QCOMPARE(ApplicationLifetime::StateForStatus(
+		             {{"pairing_open", true}, {"stream_game_running", true}}),
+		         State::PairingOpen);
+		QVERIFY(!QIcon(":/brand/ags-app-icon.png").isNull());
+		QList<QImage> rendered;
+		for (auto state:
+		     {State::Unavailable, State::Idle, State::GameRunning, State::PairingOpen}) {
+			const auto icon = ApplicationLifetime::TrayIcon(state);
+			QVERIFY(!icon.isNull());
+			const auto image = icon.pixmap(22, 22).toImage();
+			QVERIFY(!image.isNull());
+			for (const auto& previous: rendered)
+				QVERIFY(image != previous);
+			rendered << image;
+		}
+		QWidget             window;
+		ApplicationLifetime life(&window, true, [] {});
+		auto*               tray = life.findChild<QSystemTrayIcon*>();
+		QVERIFY(tray);
+		QCOMPARE(tray->toolTip(), QString("AGS — Unavailable"));
+		life.SetStatus({{"state", "Ready"}, {"pairing_open", true}, {"stream_game_running", true}});
+		QCOMPARE(tray->toolTip(), QString("AGS — Game running · Pairing open"));
+		QCOMPARE(tray->icon().pixmap(22, 22).toImage(), rendered.last());
+		life.SetStatus({{"state", "Ready"}});
+		QCOMPARE(tray->toolTip(), QString("AGS — Ready"));
+		life.SetStatus({});
+		QCOMPARE(tray->toolTip(), QString("AGS — Unavailable"));
 	}
 	void closeAndExit() {
 		QWidget             window;

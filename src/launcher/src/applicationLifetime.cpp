@@ -8,6 +8,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
 #include <QSaveFile>
 #include <QSystemTrayIcon>
 #include <QTimer>
@@ -34,6 +35,7 @@ ApplicationLifetime::ApplicationLifetime(QWidget* window, bool available,
 					    reason == QSystemTrayIcon::DoubleClick)
 				        show();
 		        });
+		SetStatus({});
 		m_tray->show();
 		auto* timer = new QTimer(this);
 		connect(timer, &QTimer::timeout, this, [this] {
@@ -98,8 +100,55 @@ void ApplicationLifetime::Stopped(const QString& error) {
 	box->setAttribute(Qt::WA_DeleteOnClose);
 	box->open();
 }
-void ApplicationLifetime::SetStatus(const QString& status) {
-	if (m_tray) m_tray->setToolTip("AGS — " + status);
+ApplicationLifetime::TrayState ApplicationLifetime::StateForStatus(const QJsonObject& status) {
+	// Pairing is time-sensitive and takes visual priority; the tooltip retains both states.
+	if (status.value("pairing_open").toBool()) return TrayState::PairingOpen;
+	if (status.value("stream_game_running").toBool()) return TrayState::GameRunning;
+	if (status.value("state").toString().trimmed().isEmpty()) return TrayState::Unavailable;
+	return TrayState::Idle;
+}
+QIcon ApplicationLifetime::TrayIcon(TrayState state) {
+	const QIcon base(QStringLiteral(":/brand/ags-app-icon.png"));
+	QIcon       icon;
+	for (int size: {16, 22, 24, 32, 48, 64}) {
+		auto pixmap = base.pixmap(size, size);
+		if (pixmap.isNull()) continue;
+		QPainter painter(&pixmap);
+		painter.setRenderHint(QPainter::Antialiasing);
+		const qreal unit = size / 16.0;
+		painter.setPen(QPen(QColor("#151A21"), unit));
+		const QColor color = state == TrayState::PairingOpen   ? QColor("#FFBD59")
+		                     : state == TrayState::GameRunning ? QColor("#56D99B")
+		                     : state == TrayState::Idle        ? QColor("#A8B5C8")
+		                                                       : QColor("#E16B75");
+		painter.setBrush(color);
+		painter.drawEllipse(QRectF(9 * unit, 9 * unit, 6 * unit, 6 * unit));
+		painter.setPen(QPen(QColor("#151A21"), unit));
+		if (state == TrayState::GameRunning) {
+			painter.setBrush(QColor("#151A21"));
+			painter.drawPolygon(QPolygonF {QPointF(11 * unit, 10.5 * unit),
+			                               QPointF(13.5 * unit, 12 * unit),
+			                               QPointF(11 * unit, 13.5 * unit)});
+		} else if (state == TrayState::PairingOpen) {
+			painter.drawLine(QPointF(10.5 * unit, 12 * unit), QPointF(13.5 * unit, 12 * unit));
+			painter.drawLine(QPointF(12 * unit, 10.5 * unit), QPointF(12 * unit, 13.5 * unit));
+		}
+		painter.end();
+		icon.addPixmap(pixmap);
+	}
+	return icon;
+}
+void ApplicationLifetime::SetStatus(const QJsonObject& status) {
+	if (!m_tray) return;
+	QStringList details;
+	if (status.value("stream_game_running").toBool()) details << tr("Game running");
+	if (status.value("pairing_open").toBool()) details << tr("Pairing open");
+	if (details.isEmpty()) {
+		const auto hostState = status.value("state").toString().trimmed();
+		details << (hostState.isEmpty() ? tr("Unavailable") : hostState);
+	}
+	m_tray->setToolTip("AGS — " + details.join(" · "));
+	m_tray->setIcon(TrayIcon(StateForStatus(status)));
 }
 bool ApplicationLifetime::WriteAutostart(const QString& config, const QString& executable,
                                          bool enabled, QString* error) {

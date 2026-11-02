@@ -1,5 +1,7 @@
 #ifndef AGS_APPLICATION_LIFETIME_H
 #define AGS_APPLICATION_LIFETIME_H
+#include <QIcon>
+#include <QJsonObject>
 #include <QObject>
 #include <QString>
 
@@ -10,12 +12,15 @@ class ApplicationLifetime: public QObject {
 	Q_OBJECT
 public:
 	ApplicationLifetime(QWidget* window, bool trayAvailable, std::function<void()> stop);
-	void        ShowInitial(bool minimized);
-	void        Exit();
-	void        Stopped(const QString& error);
-	void        SetStatus(const QString& status);
-	static bool WriteAutostart(const QString& config, const QString& executable, bool enabled,
-	                           QString* error);
+	void ShowInitial(bool minimized);
+	void Exit();
+	void Stopped(const QString& error);
+	enum class TrayState { Unavailable, Idle, GameRunning, PairingOpen };
+	void             SetStatus(const QJsonObject& status);
+	static TrayState StateForStatus(const QJsonObject& status);
+	static QIcon     TrayIcon(TrayState state);
+	static bool      WriteAutostart(const QString& config, const QString& executable, bool enabled,
+	                                QString* error);
 signals:
 	void ReadyToQuit();
 
