@@ -36,6 +36,31 @@ private slots:
 		QVERIFY(style.open(QIODevice::ReadOnly));
 		qApp->setStyleSheet(QString::fromUtf8(style.readAll()));
 	}
+    void unselectedCardKeepsIvoryTextOnLightPalette() {
+        LibraryPage page;
+        auto palette = page.palette();
+        palette.setColor(QPalette::Window, QColor("#f6f6f6"));
+        palette.setColor(QPalette::WindowText, QColor("#202124"));
+        palette.setColor(QPalette::Text, QColor("#202124"));
+        page.setPalette(palette);
+        page.SetGames({{"a", "Selected title", "ps5", "/a", {}, true},
+                       {"b", "Unselected title", "steam", "/b", {}, true}});
+        page.resize(960, 540); page.show();
+        auto* list = page.findChild<QListWidget*>("libraryGames");
+        list->setCurrentRow(0);
+        QApplication::processEvents();
+        const auto image = list->viewport()->grab().toImage();
+        const auto rect = list->visualItemRect(list->item(1)).intersected(image.rect());
+        QVERIFY(!rect.isEmpty());
+        int ivory = 0;
+        for (int y = rect.top() + 118; y <= rect.bottom(); ++y)
+            for (int x = rect.left(); x <= rect.right(); ++x)
+                {
+                    const auto pixel = image.pixelColor(x, y);
+                    ivory += pixel.red() > 170 && pixel.green() > 170 && pixel.blue() > 170;
+                }
+        QVERIFY2(ivory > 20, "Unselected dark card must render readable Ivory text even on a Light shell");
+    }
     void shellNavigationUsesRealFocusAndVisibleTabs() {
         QTabWidget tabs;
         auto* library = new LibraryPage;

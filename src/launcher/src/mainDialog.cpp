@@ -1,5 +1,6 @@
 #include "steamArtwork.h"
 #include "shellNavigation.h"
+#include "launcherTheme.h"
 #include <QTabBar>
 #include "mainDialog.h"
 #include "libraryPage.h"
@@ -111,13 +112,7 @@ private:
     static QString g_library_selection;
 
 	static void ApplyTheme(int theme) {
-		auto scheme = Qt::ColorScheme::Unknown;
-		switch (theme) {
-			case 1: scheme = Qt::ColorScheme::Dark; break;
-			case 2: scheme = Qt::ColorScheme::Light; break;
-			default: break;
-		}
-		QApplication::styleHints()->setColorScheme(scheme);
+        LauncherTheme::Apply(*qApp, theme);
 	}
 
 	Ui::MainDialog*   m_ui             = {nullptr};
@@ -187,7 +182,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
     brand->setAccessibleName(tr("AGS"));
     brand->setContentsMargins(8, 0, 12, 0);
     auto updateBrand = [brand] {
-        const bool light = brand->palette().color(QPalette::Window).lightness() > 128;
+        const bool light = qApp->palette().color(QPalette::Window).lightness() > 128;
         brand->setPixmap(QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png").scaledToWidth(100, Qt::SmoothTransformation));
     };
     updateBrand();

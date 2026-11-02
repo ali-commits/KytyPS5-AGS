@@ -142,8 +142,8 @@ QWidget#libraryPage QPushButton:focus, QWidget#libraryPage QLineEdit:focus {
 }
 QWidget#libraryPage QPushButton:disabled { color: #9399a6; background: #22252b; }
 QListWidget#libraryGames { background: palette(window); color: palette(window-text); border: 2px solid #454c59; border-radius: 12px; padding: 8px; }
-QListWidget#libraryGames::item { background: #292d35; padding: 12px; border: 2px solid transparent; border-radius: 10px; }
-QListWidget#libraryGames::item:selected { background: #354b70; border: 2px solid #91baff; }
+QListWidget#libraryGames::item { background: #292d35; color: #f2f3f7; padding: 12px; border: 2px solid transparent; border-radius: 10px; }
+QListWidget#libraryGames::item:selected { background: #354b70; color: #f2f3f7; border: 2px solid #91baff; }
 QListWidget#libraryGames:focus { border: 2px solid #91baff; }
 QPushButton#libraryPlay { background: #315f9f; font-weight: 600; }
 

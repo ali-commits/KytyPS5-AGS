@@ -165,6 +165,34 @@ void SetLevels(Configuration& info) {
 class LauncherPreservationTests: public QObject {
     Q_OBJECT
 private slots:
+    void requestedThemeOwnsPaletteRegardlessOfNativeScheme() {
+        const auto original = qApp->palette();
+        auto light = original;
+        light.setColor(QPalette::Window, QColor("#f6f6f6"));
+        light.setColor(QPalette::WindowText, QColor("#202124"));
+        qApp->setPalette(light);
+        LauncherTheme::Initialize(*qApp);
+        LauncherTheme::Apply(*qApp, 1);
+        QApplication::processEvents();
+        QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#17191e"));
+        QCOMPARE(qApp->palette().color(QPalette::WindowText), QColor("#f2f3f7"));
+        QCOMPARE(qApp->palette().color(QPalette::Text), QColor("#f2f3f7"));
+        LauncherTheme::Apply(*qApp, 2);
+        QApplication::processEvents();
+        QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#f6f6f6"));
+        QCOMPARE(qApp->palette().color(QPalette::Text), QColor("#202124"));
+        LauncherTheme::Apply(*qApp, 0);
+        QApplication::processEvents();
+        const auto system = qApp->palette();
+        QVERIFY(qAbs(system.color(QPalette::Window).lightness() - system.color(QPalette::WindowText).lightness()) > 80);
+        // Several event-loop turns must remain stable, with no self-triggered palette loop.
+        QSignalSpy changes(qApp, &QApplication::paletteChanged);
+        QTest::qWait(30);
+        QCOMPARE(qApp->palette(), system);
+        QCOMPARE(changes.count(), 0);
+        qApp->setPalette(original);
+        QApplication::processEvents();
+    }
     void fullShellResizesWithScrollableSecondaryPages_data() {
         QTest::addColumn<int>("theme");
         QTest::newRow("auto") << 0;
@@ -175,29 +203,27 @@ private slots:
         QFETCH(int, theme);
         const auto oldPalette = qApp->palette();
         const auto restorePalette = qScopeGuard([&] { qApp->setPalette(oldPalette); });
-        // Offscreen plugins do not implement OS color-scheme changes. Exercise both
-        // real application palettes so the stylesheet is still rendered in both modes.
-        auto palette = oldPalette;
-        const bool dark = theme == 1;
-        palette.setColor(QPalette::Window, dark ? QColor("#17191e") : QColor("#f6f6f6"));
-        palette.setColor(QPalette::WindowText, dark ? QColor("#f2f3f7") : QColor("#202124"));
-        palette.setColor(QPalette::Base, palette.color(QPalette::Window));
-        palette.setColor(QPalette::Button, palette.color(QPalette::Window));
-        palette.setColor(QPalette::Text, palette.color(QPalette::WindowText));
-        palette.setColor(QPalette::ButtonText, palette.color(QPalette::WindowText));
-        qApp->setPalette(palette);
         QTemporaryDir temp;
         WorkingDirectory cwd(temp.path());
-        QVERIFY(Write("Kyty.ini", QByteArray("[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\ntheme=") + QByteArray::number(theme) + "\n"));
+        QVERIFY(Write("Kyty.ini", QByteArray("[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n[MainDialog]\ntheme=") + QByteArray::number(theme) + "\n"));
         QVERIFY(Write("compatibility_db.json", "{}"));
         LauncherTheme::Initialize(*qApp);
+        QSettings shellSettings("Kyty.ini", QSettings::IniFormat);
+        MainDialog::ReadSettings(shellSettings);
         MainDialog dialog;
         dialog.findChild<ControllerPreview*>("controllerPreview")->SetSuspended(true);
         dialog.show();
         auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
         QVERIFY(tabs);
         QVERIFY(tabs->tabBar()->sizeHint().height() >= 44);
-        QVERIFY(tabs->cornerWidget(Qt::TopLeftCorner));
+        auto* brand = qobject_cast<QLabel*>(tabs->cornerWidget(Qt::TopLeftCorner));
+        QVERIFY(brand);
+        const bool light = qApp->palette().color(QPalette::Window).lightness() > 128;
+        const auto expectedLogo = QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png")
+                                      .scaledToWidth(100, Qt::SmoothTransformation);
+        QCOMPARE(brand->pixmap().toImage(), expectedLogo.toImage());
+        if (theme == 1) QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#17191e"));
+        if (theme == 2) QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#f6f6f6"));
         for (const QSize size: {QSize(960, 540), QSize(520, 480)}) {
             tabs->setCurrentIndex(0);
             dialog.resize(size);
