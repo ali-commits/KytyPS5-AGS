@@ -10,6 +10,8 @@
 #include "updateChecker.h"
 #include "emulatorCommand.h"
 #include "mainDialog.h"
+#include "applicationLifetime.h"
+#include "launcherTheme.h"
 #include "hostSocket.h"
 #include "hostControlClient.h"
 #include "hostDaemon.h"
@@ -160,6 +162,66 @@ void SetLevels(Configuration& info) {
 class LauncherPreservationTests: public QObject {
     Q_OBJECT
 private slots:
+    void realShellPaintsAfterInitialShow_data() {
+        QTest::addColumn<bool>("coldHidden");
+        QTest::newRow("normal-show") << false;
+        QTest::newRow("cold-hidden-tray-show") << true;
+    }
+
+    void realShellPaintsAfterInitialShow() {
+        QFETCH(bool, coldHidden);
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(Write("Kyty.ini", "[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n"));
+        QVERIFY(Write("compatibility_db.json", "{}"));
+        const auto oldStyle = qApp->styleSheet();
+        const auto restoreStyle = qScopeGuard([&] { qApp->setStyleSheet(oldStyle); });
+        LauncherTheme::Initialize(*qApp);
+        QVERIFY(!qApp->styleSheet().isEmpty());
+        MainDialog dialog;
+        auto* preview = dialog.findChild<ControllerPreview*>("controllerPreview");
+        QVERIFY(preview);
+        preview->SetSuspended(true); // No Start(), emulator probe, or controller polling.
+        ApplicationLifetime lifetime(&dialog, true, [] {});
+        lifetime.ShowInitial(coldHidden);
+        if (coldHidden) {
+            QVERIFY(!dialog.isVisible());
+            QAction* show = nullptr;
+            for (auto* action: dialog.findChildren<QAction*>())
+                if (action->text() == "Show AGS") show = action;
+            QVERIFY(show);
+            show->trigger(); // Exercise the production tray menu connection.
+        }
+        QTRY_VERIFY(dialog.isVisible());
+        auto* library = dialog.findChild<QWidget*>("libraryPage");
+        QVERIFY(library);
+        QTRY_VERIFY(library->isVisible());
+        QVERIFY(dialog.updatesEnabled());
+        QVERIFY(library->updatesEnabled());
+        QVERIFY(library->width() > 0 && library->height() > 0);
+        QLabel* heading = nullptr;
+        for (auto* label: library->findChildren<QLabel*>("libraryHeading"))
+            if (label->text() == "Your library") heading = label;
+        QVERIFY(heading);
+        QTRY_VERIFY(heading->isVisible());
+        QVERIFY(heading->width() > 0 && heading->height() > 0);
+        // Always inspect actual rendering; Capture() alone is optional and also calls show().
+        const auto rendered = dialog.grab().toImage().convertToFormat(QImage::Format_RGB32);
+        QVERIFY(!rendered.isNull());
+        const auto headingRect = QRect(heading->mapTo(&dialog, QPoint()), heading->size());
+        const auto pixels = rendered.copy(headingRect);
+        QVERIFY(!pixels.isNull());
+        int different = 0;
+        const auto background = pixels.pixel(0, 0);
+        for (int y = 0; y < pixels.height(); ++y)
+            for (int x = 0; x < pixels.width(); ++x)
+                different += pixels.pixel(x, y) != background;
+        QVERIFY2(different > 30, "The visible library heading must render text, not a uniform black surface");
+        qInfo() << "shell paint" << coldHidden << dialog.size() << library->geometry()
+                << "heading pixels differing from background" << different;
+    }
+
     void headlessStartupSelectsStreamingBeforePreviewAndStartsOnlyHost() {
 #if defined(__linux__)
         QTemporaryDir temp; QVERIFY(temp.isValid());
