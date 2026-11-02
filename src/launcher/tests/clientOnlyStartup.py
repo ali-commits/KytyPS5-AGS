@@ -2,6 +2,7 @@
 """Offscreen installed-layout fixture. Run with a private /dev (e.g. bwrap).
 Never selects a real host/profile or launches a game.
 """
+import configparser
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,8 @@ import time
 if Path("/dev/input").exists() or any(Path("/dev").glob("hidraw*")):
     raise SystemExit("Run this fixture with a private /dev (for example bwrap --dev /dev).")
 
+preset_present = "--with-preset" in sys.argv[2:]
+
 with tempfile.TemporaryDirectory(prefix="ags-client-only-") as directory:
     root = Path(directory)
     binary = root / "launcher"
@@ -22,6 +25,10 @@ with tempfile.TemporaryDirectory(prefix="ags-client-only-") as directory:
     # Even explicitly configured local PS5 folders must not force emulator probing
     # in client-only mode. The executable would leave a marker if invoked.
     (root / "Kyty.ini").write_text("[Launcher]\ngame_dirs=/nonexistent-fixture-game\nsteam_roots=/nonexistent-fixture-steam\n")
+
+    if preset_present:
+        (root / "u59-preset.json").write_text(
+            '{"KYTY_GPU_OCCLUSION":"client-only-fixture-marker"}\n')
     emulator = root / "kyty_emulator"
     emulator.write_text("#!/bin/sh\ntouch '" + str(root / "unexpected-emulator") + "'\nexit 1\n")
     emulator.chmod(0o700)
@@ -44,7 +51,13 @@ with tempfile.TemporaryDirectory(prefix="ags-client-only-") as directory:
         assert process.returncode == 0, f"launcher exit {process.returncode}"
         assert not (root / "host-profile").exists(), "receiver mode initialized a local host profile"
         assert not list((root / "runtime").rglob("control.sock")), "receiver mode started the local host daemon"
-        print("client-only startup and --quit passed without emulator/host setup")
+        preferences = configparser.ConfigParser(interpolation=None)
+        preferences.read(root / "Kyty.ini")
+        assert preferences["Launcher"]["game_dirs"] == "/nonexistent-fixture-game"
+        assert preferences["Launcher"]["steam_roots"] == "/nonexistent-fixture-steam"
+        log.flush()
+        assert "u59-preset.json" not in (root / "launcher.log").read_text(errors="replace"), "receiver mode warned about an emulator preset"
+        print("client-only startup and --quit passed without emulator/host setup or preset warnings")
     except BaseException:
         log.flush()
         print((root / "launcher.log").read_text(errors="replace"), file=sys.stderr)

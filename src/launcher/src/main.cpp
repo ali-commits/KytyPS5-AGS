@@ -48,7 +48,8 @@ int main(int argc, char* argv[]) {
 	}
 #endif
 	QApplication::setWindowIcon(QIcon(QStringLiteral(":/brand/ags-app-icon.png")));
-	const QString preset_warning = ApplyBundledPreset();
+	const bool    clientOnly     = a.arguments().contains("--client-only");
+	const QString preset_warning = clientOnly ? QString {} : ApplyBundledPreset();
 	LauncherTheme::Initialize(a);
 
 	MainDialog w;
@@ -61,7 +62,6 @@ int main(int argc, char* argv[]) {
 #ifdef Q_OS_LINUX
 	a.setQuitOnLastWindowClosed(false);
 	HostControlClient owner;
-	const bool        clientOnly = a.arguments().contains("--client-only");
 	if (!clientOnly) owner.SetLifetimeOwner();
 	bool                exitPending = false, hostStopped = false, receiverStopped = false;
 	QString             hostStopError, receiverStopError;
