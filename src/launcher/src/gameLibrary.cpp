@@ -6,6 +6,7 @@
 #include "emulatorCommand.h"
 #include "gameContent.h"
 #include "hostApi.h"
+#include "steamSource.h"
 #include "streamingSettings.h"
 
 #include <QCryptographicHash>
@@ -370,8 +371,29 @@ bool GameLibrary::Load(const CompatibilityDatabase* compatibility, QString* erro
 		}
 		m_games.append({CatalogId(game->game_path), game, custom != nullptr});
 	}
+	s->beginGroup(CONF_LAUNCHER);
+	auto roots = SettingsStringList(s->value("steam_roots"));
+	if (roots.isEmpty())
+		roots = {QDir::homePath() + "/.local/share/Steam", QDir::homePath() + "/.steam/steam"};
+	const auto recipePath = s->value("steam_recipes").toString();
+	s->endGroup();
+	const auto recipes = QDir::isAbsolutePath(recipePath)
+	                         ? QJsonDocument::fromJson(SteamSource::Read(recipePath)).object()
+	                         : QJsonObject {};
+	for (const auto& r: SteamSource::Discover(roots, recipes)) {
+		GameEntry g;
+		g.id               = r.id;
+		g.source           = "steam";
+		g.source_id        = r.app_id;
+		g.name             = r.name;
+		g.installed        = r.installed;
+		g.readiness_reason = r.reason;
+		g.owned_launch     = r.launch;
+		m_games.append(g);
+	}
 	std::sort(m_games.begin(), m_games.end(), [](const GameEntry& a, const GameEntry& b) {
-		return QString::localeAwareCompare(a.info->name, b.info->name) < 0;
+		return QString::localeAwareCompare(a.info ? a.info->name : a.name,
+		                                   b.info ? b.info->name : b.name) < 0;
 	});
 	return true;
 }
@@ -388,6 +410,10 @@ const GameEntry* GameLibrary::Find(const QString& id) const {
 QList<StreamingLaunchEntry> GameLibrary::Catalog(const QString& interpreter) const {
 	QList<StreamingLaunchEntry> out;
 	for (const auto& g: m_games) {
+		if (!g.info) {
+			if (g.owned_launch) out.append(*g.owned_launch);
+			continue;
+		}
 		auto arguments = BuildEmulatorArgs(*g.info);
 		if (arguments.isEmpty()) {
 			continue;
@@ -414,6 +440,7 @@ GameLibrary::ClientCatalog(const QString& interpreter) const {
 		}
 		QList<StreamingLaunchEntry> entries;
 		for (const auto& g: m_games) {
+			if (!g.info) continue;
 			bool       seeded  = false;
 			const auto profile = ClientProfiles::ReadGame(uuid, g.id, &seeded);
 			if (!seeded) {
@@ -466,6 +493,7 @@ QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& sett
 	if (game == nullptr) {
 		return QStringLiteral("unknown-game");
 	}
+	if (!game->info) return QStringLiteral("unsupported-source-action");
 	// SetGameSettings starts from the candidate's current values, so seed it with the game's.
 	auto    candidate = std::make_unique<Configuration>();
 	QString error;

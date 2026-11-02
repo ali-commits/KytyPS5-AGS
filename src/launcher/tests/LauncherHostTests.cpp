@@ -8,6 +8,7 @@
 #include "hostDaemon.h"
 #include "hostMetrics.h"
 #include "hostSocket.h"
+#include "steamSource.h"
 
 #include <QDir>
 #include <QFile>
@@ -103,19 +104,93 @@ private slots:
 		m_old_cwd = QDir::currentPath();
 		QDir::setCurrent(m_dir.path());
 		WriteFile(m_dir.filePath("Kyty.ini"),
-		          "[Launcher]\ngame_dirs=" + m_dir.filePath("games").toUtf8() + "\n");
+		          "[Launcher]\ngame_dirs=" + m_dir.filePath("games").toUtf8() + "\nsteam_roots=" + m_dir.filePath("no-steam").toUtf8() + "\n");
 		MakeGame("A", "PPSA00001");
 		MakeGame("nested/B", "PPSA00002");
 		QString error;
 		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
 	}
 	void cleanup() { QDir::setCurrent(m_old_cwd); }
+	void steamDiscoveryAndOwnedAdmission() {
+		QTemporaryDir fixture;
+		const auto    root = fixture.filePath("steam"), second = fixture.filePath("second");
+		const auto    manifest = [](const char* id, const char* name, const char* dir,
+		                            const char* state = "4") {
+			return QByteArray("\"AppState\" { \"appid\" \"") + id + "\" \"name\" \"" + name +
+			       "\" \"installdir\" \"" + dir + "\" \"StateFlags\" \"" + state + "\" }";
+		};
+		WriteFile(root + "/steamapps/libraryfolders.vdf",
+		          "\"libraryfolders\" { \"0\" { \"path\" \"" + second.toUtf8() + "\" } }");
+		WriteFile(root + "/steamapps/appmanifest_620.acf",
+		          manifest("620", "Native Fixture", "native"));
+		WriteFile(second + "/steamapps/appmanifest_268910.acf",
+		          manifest("268910", "Windows Fixture", "windows"));
+		WriteFile(root + "/steamapps/appmanifest_99.acf",
+		          manifest("99", "Steam Linux Runtime 3.0", "runtime"));
+		WriteFile(root + "/steamapps/appmanifest_88.acf",
+		          manifest("88", "Incomplete", "pending", "2"));
+		WriteFile(root + "/steamapps/appmanifest_77.acf", "\"AppState\" { \"appid\" \"77\"");
+		QDir().mkpath(root + "/steamapps/common/native");
+		QDir().mkpath(second + "/steamapps/common/windows");
+		const auto        cwd = QFileInfo(fixture.path()).canonicalFilePath();
+		const QJsonObject recipe {{"executable", "/usr/bin/true"},
+		                          {"args", QJsonArray {"literal ; $ text"}},
+		                          {"cwd", cwd},
+		                          {"env", QJsonObject {{"SteamAppId", "620"}}}};
+		QVERIFY(SteamSource::Parse("\"broken\" { \"key\" \"value\"").isEmpty());
+		QVERIFY(SteamSource::Parse("\"key\" \"a\" \"key\" \"b\"").isEmpty());
+		auto records = SteamSource::Discover({root, root}, {{"620", recipe}});
+		QCOMPARE(records.size(), 3);
+		QCOMPARE(SteamSource::Discover({second}, {}).first().id, SteamSource::Id("268910"));
+		auto found =
+		    std::find_if(records.begin(), records.end(), [](auto r) { return r.app_id == "620"; });
+		QVERIFY(found != records.end());
+		QVERIFY(found->installed);
+		QVERIFY(found->launch);
+		QCOMPARE(found->id, SteamSource::Id("620"));
+		auto bad   = recipe;
+		bad["env"] = QJsonObject {{"DISPLAY", ":0"}};
+		QVERIFY(!SteamSource::Discover({root}, {{"620", bad}}).first().launch);
+		auto incomplete =
+		    std::find_if(records.begin(), records.end(), [](auto r) { return r.app_id == "88"; });
+		QVERIFY(!incomplete->installed);
+		const auto recipePath = fixture.filePath("recipes.json");
+		WriteFile(recipePath, QJsonDocument(QJsonObject {{"620", recipe}}).toJson());
+		auto settings = GameLibraryFiles::OpenSettings();
+		settings->setValue("Launcher/steam_roots", root);
+		settings->setValue("Launcher/steam_recipes", recipePath);
+		settings->sync();
+		QString error;
+		QVERIFY(library.Load(nullptr, &error));
+		const auto id = SteamSource::Id("620");
+		QVERIFY(!library.Find(id)->info);
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", fixture.filePath("emulator.lock"));
+		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		auto          reply =
+		    Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}}));
+		QCOMPARE(reply.status, 200);
+		QCOMPARE(
+		    QJsonDocument::fromJson(reply.body).object()["env"].toObject()["SteamAppId"].toString(),
+		    QString("620"));
+		auto body = RuntimeBody(id, uuid, cwd);
+		QCOMPARE(
+		    Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status,
+		    200);
+		body["state"] = "closed";
+		QCOMPARE(
+		    Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status,
+		    200);
+		QCOMPARE(
+		    Call(resolver, ClientReq("GET", "/kyty/v1/games/" + id + "/settings", uuid)).status,
+		    409);
+	}
 	void isolatedDiagnosticTraversalCannotTouchExternalSentinels() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
 		const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-		const auto id = library.Games().first().id;
-		auto* info = library.Find(id)->info.get();
+		const auto    id   = library.Games().first().id;
+		auto*         info = library.Find(id)->info.get();
 		QString error;
 		QVERIFY(info->SetGameSettings({{"printf_direction", "File"}, {"printf_output_file", "../normal/printf.log"},
 		    {"shader_log_direction", "File"}, {"shader_log_folder", "../normal/shaders"},

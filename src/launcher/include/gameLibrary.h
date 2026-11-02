@@ -36,6 +36,10 @@ struct GameEntry {
 	QString                        id;
 	std::shared_ptr<Configuration> info;
 	bool                           custom = false;
+	QString source = "ps5";
+	QString source_id, name, readiness_reason;
+	bool installed = true;
+	std::optional<StreamingLaunchEntry> owned_launch;
 };
 
 namespace GameLibraryFiles {

@@ -10,6 +10,7 @@ struct StreamingLaunchEntry {
 	QStringList arguments;
 	QString     working_directory;
 	QString     image_path;
+	QJsonObject environment;
 	bool        operator==(const StreamingLaunchEntry&) const = default;
 };
 namespace StreamingCatalog {

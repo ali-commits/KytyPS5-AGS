@@ -264,7 +264,19 @@ QString HostApi::RuntimeDirectory(const QString& game_id) const {
 QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game_id) const {
 	const auto entry = m_library->ResolveLaunch(m_interpreter, client_id, game_id);
 	if (!entry || !QDir::isAbsolutePath(entry->program) || !QFileInfo(entry->program).isExecutable()) return {};
-	auto cwd = entry->working_directory;
+	const bool ps5 = m_library->Find(game_id)->info != nullptr;
+	if (!ps5) {
+		if (!QDir::isAbsolutePath(entry->working_directory) ||
+		    !QFileInfo(entry->working_directory).isDir())
+			return {};
+		return {{"id", entry->id},
+		        {"name", entry->name},
+		        {"executable", entry->program},
+		        {"args", QJsonArray::fromStringList(entry->arguments)},
+		        {"cwd", entry->working_directory},
+		        {"env", entry->environment}};
+	}
+	auto        cwd = entry->working_directory;
 	QJsonObject env;
 	if (!m_runtime_root.isEmpty()) {
 		if (!SafeDirectory(m_runtime_root)) return {};
@@ -316,6 +328,10 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 		m_resolved = {};
 		const auto launch = ResolveNative(client_id, game_id);
 		if (launch.isEmpty()) return done(Error(404, "invalid-launch"));
+		if (!m_library->Find(game_id)->info) {
+			m_resolved = {client_id, launch, {}};
+			return done(Json(200, launch));
+		}
 		auto snapshot = ClientConfig(*m_library->Find(game_id)->info, {});
 		if (!snapshot) return done(Error(404, "invalid-launch"));
 		// These values come from the exact selected argv, not a second profile read
@@ -349,7 +365,7 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 		const auto pid = body["owner_pid"].toInteger();
 		const auto start = body["owner_start"].toString();
 		if (launch.isEmpty() || m_resolved.client_id != client_id || launch["id"] != game_id ||
-		    !m_resolved.trophy_config || !m_library->Find(game_id) || runtime != launch["cwd"].toString() || !SafeRuntime(runtime) ||
+		    (!m_resolved.trophy_config && m_library->Find(game_id) && m_library->Find(game_id)->info) || !m_library->Find(game_id) || runtime != launch["cwd"].toString() || !(m_library->Find(game_id)->info ? SafeRuntime(runtime) : QFileInfo(runtime).isDir()) ||
 		    start.isEmpty() || ProcessStart(pid) != start) return done(Error(400, "invalid-runtime"));
 		const int admission = OpenLock(m_local_lock + ".launch");
 		if (admission < 0 || ::flock(admission, LOCK_EX | LOCK_NB) != 0) {
@@ -481,6 +497,7 @@ void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> 
 	if (game == nullptr) {
 		return done(Error(404, QStringLiteral("unknown-game")));
 	}
+	if (!game->info) return done(Error(409, "unsupported-source-action"));
 	QJsonObject body;
 	if (method != QLatin1String("GET")) {
 		const auto value = request.value(QStringLiteral("body"));
@@ -601,9 +618,28 @@ void HostApi::Library(const Client& client, const std::function<void(HostReply)>
 	if (!m_runtime.game.isEmpty()) { status.running_id = m_runtime.game; status.pc_busy = true; }
 	QJsonArray games;
 	for (const auto& game: m_library->Games()) {
+		if (!game.info) {
+			games.append(QJsonObject {{"id", game.id},
+			                          {"title_id", game.source_id},
+			                          {"name", game.name},
+			                          {"source", game.source},
+			                          {"source_id", game.source_id},
+			                          {"installed", game.installed},
+			                          {"launch_ready", game.owned_launch.has_value()},
+			                          {"readiness_reason", game.readiness_reason},
+			                          {"capabilities", QJsonArray {}},
+			                          {"has_cheats", false},
+			                          {"running", status.running_id == game.id}});
+			continue;
+		}
 		const auto& info = *game.info;
 		games.append(QJsonObject {
 		    {"id", game.id},
+		    {"source", "ps5"},
+		    {"source_id", info.title_id},
+		    {"installed", true},
+		    {"launch_ready", true},
+		    {"capabilities", QJsonArray {"settings", "cheats", "trophies"}},
 		    {"title_id", info.title_id},
 		    {"name", info.name},
 		    {"version", info.gameVersion},
@@ -627,8 +663,8 @@ void HostApi::Metrics(const std::function<void(HostReply)>& done) {
 	QJsonObject game;
 	if (!status.running_id.isEmpty()) {
 		if (const auto* entry = m_library->Find(status.running_id); entry != nullptr) {
-			game = QJsonObject {{"title_id", entry->info->title_id},
-			                    {"name", entry->info->name},
+			game = QJsonObject {{"title_id", entry->info ? entry->info->title_id : entry->source_id},
+			                    {"name", entry->info ? entry->info->name : entry->name},
 			                    {"running", true}};
 		}
 	}
@@ -642,6 +678,7 @@ void HostApi::Art(const QString& id, const QString& kind, const QString& if_none
 	if (game == nullptr) {
 		return done(Error(404, QStringLiteral("unknown-game")));
 	}
+	if (!game->info) return done(Error(404, "no-art"));
 	const QStringList names =
 	    kind == QLatin1String("icon")
 	        ? QStringList {QStringLiteral("sce_sys/icon0.png")}
