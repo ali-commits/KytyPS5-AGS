@@ -13,6 +13,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QSystemTrayIcon>
 
 class RemoteClientTests: public QObject {
 	Q_OBJECT
@@ -27,7 +28,32 @@ class RemoteClientTests: public QObject {
 		                            (executable ? QFile::ExeOwner : QFile::Permissions {})));
 	}
 private slots:
-	void init() {
+	void receiverActivitySurvivesHostPolls() {
+        RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+        QWidget window;
+        ApplicationLifetime life(&window, true, [] {});
+        auto update = [&] { life.SetReceiverActivity(client.Activity(), true); };
+        connect(&client, &RemoteClient::Changed, &life, update);
+        update();
+        auto* tray = life.findChild<QSystemTrayIcon*>();
+        QVERIFY(tray);
+        QCOMPARE(tray->toolTip(), QString("AGS — Receiver ready"));
+        auto id = client.AddProfile("fixture", "127.0.0.1:4444", profile);
+        client.Refresh(id);
+        QTRY_VERIFY(client.Cards().size() == 1 && client.Cards().first().ready);
+        QVERIFY(client.Play(client.Cards().first().id));
+        QTRY_COMPARE(client.Activity(), QString("playing"));
+        QCOMPARE(tray->toolTip(), QString("AGS — Receiving remote game"));
+        life.SetStatus({{"state", "Ready"}});
+        QCOMPARE(tray->toolTip(), QString("AGS — Receiving remote game"));
+        client.StopForExit();
+        QTRY_COMPARE(client.Activity(), QString("idle"));
+        QCOMPARE(tray->toolTip(), QString("AGS — Receiver ready"));
+        life.SetReceiverActivity("unconfirmed", true);
+        QCOMPARE(ApplicationLifetime::StateForStatus(ApplicationLifetime::MergeReceiverStatus({}, "unconfirmed", true)), ApplicationLifetime::TrayState::Unavailable);
+        QVERIFY(tray->toolTip().contains("unconfirmed"));
+    }
+    void init() {
 		QVERIFY(temp.isValid());
 		const auto root = temp.path() + "/" + QString::number(QDateTime::currentMSecsSinceEpoch());
 		QVERIFY(QDir().mkpath(root));
@@ -237,6 +263,7 @@ elif command=='close':
 		QVERIFY(client.Play(client.Cards()[0].id));
 		QTRY_VERIFY(errors.size() >= 2);
 		QVERIFY(client.Busy()); // unconfirmed remote ownership stays visible
+        QCOMPARE(client.Activity(), QString("unconfirmed"));
 		write(script + ".mode", "ok");
 		QSignalSpy stopped(&client, &RemoteClient::Stopped);
 		client.StopForExit();

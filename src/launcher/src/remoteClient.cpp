@@ -151,6 +151,7 @@ RemoteClient::RemoteClient(const TestOptions& options, QObject* parent)
 	});
 	connect(&m_receiver, &QProcess::started, this, [this] {
 		if (m_stopping) InterruptReceiver();
+        emit Changed();
 	});
 	connect(&m_receiver, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
 		if (m_stopping) {
@@ -489,6 +490,12 @@ bool RemoteClient::Play(const QString& id) {
 			return true;
 		}
 	return false;
+}
+QString RemoteClient::Activity() const {
+    if (m_stopping) return "stopping";
+    if (m_receiver.state() == QProcess::Starting) return "connecting";
+    if (m_receiver.state() == QProcess::Running) return "playing";
+    return m_ownedProfile.isEmpty() ? "idle" : "unconfirmed";
 }
 void RemoteClient::StopForExit() {
 	if (m_stopping) return;

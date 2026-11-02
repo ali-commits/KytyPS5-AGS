@@ -18,6 +18,8 @@ public:
 	void Stopped(const QString& error);
 	enum class TrayState { Unavailable, Idle, GameRunning, PairingOpen };
 	void             SetStatus(const QJsonObject& status);
+    void SetReceiverActivity(const QString& activity, bool clientOnly = false);
+    static QJsonObject MergeReceiverStatus(QJsonObject status, const QString& activity, bool clientOnly);
 	static TrayState StateForStatus(const QJsonObject& status);
 	static QIcon     TrayIcon(TrayState state);
 	static bool      WriteAutostart(const QString& config, const QString& executable, bool enabled,
@@ -30,6 +32,10 @@ protected:
 	bool eventFilter(QObject*, QEvent*) override;
 
 private:
+	QJsonObject m_hostStatus;
+    QString m_receiverActivity;
+    bool m_clientOnly = false;
+    void UpdateTray();
 	QWidget*              m_window;
 	QSystemTrayIcon*      m_tray = nullptr;
 	bool                  m_available;

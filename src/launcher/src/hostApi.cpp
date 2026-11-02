@@ -655,7 +655,7 @@ std::unique_ptr<Configuration> HostApi::TrophyConfiguration(const GameEntry& gam
 void HostApi::Library(const Client& client, const std::function<void(HostReply)>& done) const {
 	auto status = m_status();
     if (NativeOwnershipBlocked()) status.pc_busy = true;
-	if (!m_runtime.game.isEmpty()) { status.running_id = m_runtime.game; status.pc_busy = true; }
+	if (!m_runtime.game.isEmpty()) { status.running_id = NativeRuntimeIsLocal() ? QString {} : m_runtime.game; status.pc_busy = true; }
 	QJsonArray games;
 	for (const auto& game: m_library->Games()) {
 		if (!game.info) {
@@ -669,7 +669,8 @@ void HostApi::Library(const Client& client, const std::function<void(HostReply)>
 			                          {"readiness_reason", game.readiness_reason},
 			                          {"capabilities", QJsonArray {}},
 			                          {"has_cheats", false},
-			                          {"running", status.running_id == game.id}});
+			                          {"local_running", NativeRuntimeIsLocal() && m_runtime.game == game.id},
+		                          {"running", status.running_id == game.id}});
 			continue;
 		}
 		const auto& info = *game.info;

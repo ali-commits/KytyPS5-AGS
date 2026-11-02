@@ -52,6 +52,7 @@ public:
 	QList<Controller>  Controllers() const;
 	bool               SetController(const QString& path);
 	QString            ControllerSelection() const { return m_controllerSelection; }
+	QString            Activity() const;
 	bool               Busy() const { return !m_ownedProfile.isEmpty() || m_stopping; }
 	QList<Profile>     Profiles() const { return m_profiles.values(); }
 	QList<LibraryCard> Cards() const;

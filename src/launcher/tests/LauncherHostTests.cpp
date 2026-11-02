@@ -229,6 +229,15 @@ private slots:
 		QCOMPARE(
 		    Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status,
 		    200);
+        bool foundStream = false;
+        for (const auto value : QJsonDocument::fromJson(Call(resolver, {{"method", "GET"}, {"path", "/kyty/v1/library"}}).body).object()["games"].toArray()) {
+            const auto game = value.toObject();
+            if (game["id"].toString() != id) continue;
+            foundStream = true;
+            QVERIFY(game["running"].toBool());
+            QVERIFY(!game["local_running"].toBool());
+        }
+        QVERIFY(foundStream);
 		body["state"] = "closed";
 		QCOMPARE(
 		    Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status,
@@ -262,11 +271,26 @@ private slots:
         QCOMPARE(spawned.count(), 0);
         QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
         QCOMPARE(spawned.count(), 1);
+        const auto localListing = QJsonDocument::fromJson(Call(resolver, {{"method", "GET"}, {"path", "/kyty/v1/library"}}).body).object();
+        QVERIFY(localListing["pc_busy"].toBool());
+        bool foundLocal = false;
+        for (const auto value : localListing["games"].toArray()) {
+            const auto game = value.toObject();
+            if (game["id"].toString() != id) continue;
+            foundLocal = true;
+            QVERIFY(game["local_running"].toBool());
+            QVERIFY(!game["running"].toBool());
+        }
+        QVERIFY(foundLocal);
         QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 409);
         ::close(localLock);
         localBody["state"] = "closed";
         QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
         QVERIFY(!resolver.NativeRuntimeIsLocal());
+        for (const auto value : QJsonDocument::fromJson(Call(resolver, {{"method", "GET"}, {"path", "/kyty/v1/library"}}).body).object()["games"].toArray()) {
+            QVERIFY(!value.toObject()["local_running"].toBool());
+            QVERIFY(!value.toObject()["running"].toBool());
+        }
 
 	}
 	void isolatedDiagnosticTraversalCannotTouchExternalSentinels() {

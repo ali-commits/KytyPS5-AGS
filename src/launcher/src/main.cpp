@@ -111,6 +111,10 @@ int main(int argc, char* argv[]) {
 	});
 	QObject::connect(&owner, &HostControlClient::StatusChanged, &lifetime,
 	                 [&](const QJsonObject& status) { lifetime.SetStatus(status); });
+	QObject::connect(w.Remote(), &RemoteClient::Changed, &lifetime, [&] {
+        lifetime.SetReceiverActivity(w.Remote()->Activity(), clientOnly);
+    });
+    lifetime.SetReceiverActivity(w.Remote()->Activity(), clientOnly);
 	lifetime.ShowInitial(a.arguments().contains("--start-minimized"));
 	if (!clientOnly) QTimer::singleShot(0, &owner, &HostControlClient::StartDaemon);
 #else

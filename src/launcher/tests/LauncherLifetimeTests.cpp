@@ -164,7 +164,18 @@ private slots:
 		QTRY_COMPARE(errors.count(), 1);
 		QVERIFY(!errors.at(0).at(0).toString().isEmpty());
 	}
-	void trayReflectsActualStatus() {
+	void receiverMergeRetainsLocalPriority() {
+        using State = ApplicationLifetime::TrayState;
+        auto merge = ApplicationLifetime::MergeReceiverStatus;
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({}, "idle", true)), State::Idle);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({}, "connecting", true)), State::Idle);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({}, "stopping", true)), State::Idle);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({{"state", "Ready"}}, "playing", false)), State::GameRunning);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({{"local_game_running", true}}, "unconfirmed", false)), State::GameRunning);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({{"pairing_open", true}}, "playing", false)), State::PairingOpen);
+        QCOMPARE(ApplicationLifetime::StateForStatus(merge({{"state", "Error"}}, "idle", false)), State::Unavailable);
+    }
+    void trayReflectsActualStatus() {
 		using State = ApplicationLifetime::TrayState;
 		QCOMPARE(ApplicationLifetime::StateForStatus({}), State::Unavailable);
 		QCOMPARE(ApplicationLifetime::StateForStatus({{"state", ""}}), State::Unavailable);

@@ -112,7 +112,9 @@ ApplicationLifetime::TrayState ApplicationLifetime::StateForStatus(const QJsonOb
 	if (status.value("pairing_open").toBool()) return TrayState::PairingOpen;
 	if (status.value("local_game_running").toBool() || status.value("stream_game_running").toBool())
 		return TrayState::GameRunning;
-	return status.value("state").toString() == "Ready" ? TrayState::Idle : TrayState::Unavailable;
+	if (status.value("receiver_activity").toString() == "playing") return TrayState::GameRunning;
+    if (status.value("receiver_activity").toString() == "unconfirmed") return TrayState::Unavailable;
+    return status.value("receiver_only").toBool() || status.value("state").toString() == "Ready" ? TrayState::Idle : TrayState::Unavailable;
 }
 QIcon ApplicationLifetime::TrayIcon(TrayState state) {
 	const QIcon base(QStringLiteral(":/brand/ags-app-icon.png"));
@@ -145,14 +147,35 @@ QIcon ApplicationLifetime::TrayIcon(TrayState state) {
 	}
 	return icon;
 }
+QJsonObject ApplicationLifetime::MergeReceiverStatus(QJsonObject status, const QString& activity, bool clientOnly) {
+    status["receiver_activity"] = activity;
+    status["receiver_only"] = clientOnly;
+    return status;
+}
+void ApplicationLifetime::SetReceiverActivity(const QString& activity, bool clientOnly) {
+    m_receiverActivity = activity;
+    m_clientOnly = clientOnly;
+    UpdateTray();
+}
 void ApplicationLifetime::SetStatus(const QJsonObject& status) {
+    m_hostStatus = status;
+    UpdateTray();
+}
+void ApplicationLifetime::UpdateTray() {
+    const auto status = MergeReceiverStatus(m_hostStatus, m_receiverActivity, m_clientOnly);
 	if (!m_tray) return;
 	QStringList details;
+    const auto activity = status.value("receiver_activity").toString();
+    if (activity == "playing") details << tr("Receiving remote game");
+    else if (activity == "connecting") details << tr("Connecting receiver");
+    else if (activity == "stopping") details << tr("Stopping receiver");
+    else if (activity == "unconfirmed") details << tr("Remote game closure unconfirmed");
+    else if (m_clientOnly) details << tr("Receiver ready");
 	if (status.value("local_game_running").toBool()) details << tr("Local game running");
 	if (status.value("stream_game_running").toBool()) details << tr("Remote game running");
 	if (status.value("pairing_open").toBool()) details << tr("Pairing open");
 	const auto hostState = status.value("state").toString().trimmed();
-	if (details.isEmpty() || (!hostState.isEmpty() && hostState != "Ready")) {
+	if (!m_clientOnly && (details.isEmpty() || (!hostState.isEmpty() && hostState != "Ready"))) {
 		details << (hostState.isEmpty() ? tr("Unavailable") : hostState);
 	}
 	m_tray->setToolTip("AGS — " + details.join(" · "));
