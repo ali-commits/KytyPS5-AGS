@@ -24,3 +24,10 @@ if(KYTY_LAUNCHER_WARM_BUILD)
 endif()
 
 include(lifetime.cmake)
+
+add_executable(launcher_library_page_tests libraryPageTests.cpp ../src/libraryPage.cpp ../include/libraryPage.h ../resources.qrc)
+set_target_properties(launcher_library_page_tests PROPERTIES AUTORCC ON)
+target_include_directories(launcher_library_page_tests PRIVATE ../include)
+target_link_libraries(launcher_library_page_tests PRIVATE Qt6::Widgets Qt6::Test)
+add_test(NAME launcher_library_page COMMAND launcher_library_page_tests)
+set_tests_properties(launcher_library_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -1,4 +1,7 @@
 #include "mainDialog.h"
+#include "libraryPage.h"
+#include "gameLibrary.h"
+#include <QVBoxLayout>
 
 #include "cheatFile.h"
 #include "configuration.h"
@@ -78,6 +81,7 @@ public:
 	/*slots:*/
 
 	void Update();
+	void ReloadLibrary();
 	void FindInterpreter();
 	void Run();
 	void SetPresetWarning(const QString& text);
@@ -94,6 +98,7 @@ private:
 	static QByteArray g_last_geometry;
 	static bool       g_check_updates_on_startup;
 	static int        g_theme;
+    static QString g_library_selection;
 
 	static void ApplyTheme(int theme) {
 		auto scheme = Qt::ColorScheme::Unknown;
@@ -119,12 +124,14 @@ private:
 	HostControlClient* m_host = nullptr;
 	QJsonObject        m_host_status;
 	StreamingWidget*   m_streaming_widget = nullptr;
+	LibraryPage*       m_library = nullptr;
 	QTabWidget*        m_tabs             = nullptr;
 
 	QPointer<ConfigurationItem> m_running_item;
 };
 
 QByteArray MainDialogPrivate::g_last_geometry;
+QString MainDialogPrivate::g_library_selection;
 bool       MainDialogPrivate::g_check_updates_on_startup = true;
 int        MainDialogPrivate::g_theme                    = 0;
 
@@ -147,7 +154,31 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->widget->SetControllerPreview(&m_controller_preview);
 	m_tabs = new QTabWidget(main_dialog);
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
-	m_tabs->addTab(m_ui->widget, tr("Library"));
+	m_library = new LibraryPage(m_tabs);
+    m_tabs->addTab(m_library, tr("Library"));
+    auto* settingsPage = new QWidget(m_tabs);
+    auto* settingsLayout = new QVBoxLayout(settingsPage);
+    settingsLayout->addWidget(m_ui->widget);
+    m_ui->verticalLayout_5->removeItem(m_ui->verticalLayout_4);
+    settingsLayout->addLayout(m_ui->verticalLayout_4);
+    m_tabs->addTab(settingsPage, tr("Settings"));
+    connect(m_library, &LibraryPage::SettingsRequested, this, [this, settingsPage] {
+        m_tabs->setCurrentWidget(settingsPage);
+    });
+    connect(m_library, &LibraryPage::PlayRequested, this, [this](const QString& path) {
+        if (m_ui->widget->SelectGamePath(path)) Run();
+    });
+    connect(m_library, &LibraryPage::StreamingRequested, this, [this] {
+        m_tabs->setCurrentWidget(m_streaming_widget);
+    });
+    ReloadLibrary();
+    m_library->SelectId(g_library_selection);
+    connect(m_library, &LibraryPage::SelectionChanged, this, [this](const QString& id) {
+        if (!id.isEmpty()) { g_library_selection = id; m_ui->widget->WriteSettings(); }
+    });
+    connect(&m_controller_preview, &ControllerPreview::StateChanged, m_library, [this] {
+        m_library->HandleController(m_controller_preview.RawPressed());
+    });
 	m_host             = new HostControlClient(QString(), this);
 	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
 	m_streaming_widget->SetRustCatalogProvider(
@@ -158,9 +189,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_tabs, &QTabWidget::currentChanged, this, [this] { Update(); });
 	m_ui->verticalLayout_3->addWidget(m_tabs);
 
-	main_dialog->setMinimumSize(700, 650);
+	main_dialog->setMinimumSize(520, 480);
 	main_dialog->resize(920, 860);
 	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
+		ReloadLibrary();
 		// Rescans after archive conversion can change the library without rewriting Kyty.ini.
 		m_host->Request({{"type", "reload-library"}}, {});
 	});
@@ -509,6 +541,7 @@ void MainDialogPrivate::WriteSettings(QSettings& s) {
 	}
 	s.setValue(SETTINGS_CHECK_UPDATES, g_check_updates_on_startup);
 	s.setValue(SETTINGS_THEME, g_theme);
+    s.setValue("library_selection", g_library_selection);
 
 	s.endGroup();
 }
@@ -519,6 +552,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 	g_last_geometry = s.value(SETTINGS_MAIN_LAST_GEOMETRY, g_last_geometry).toByteArray();
 	g_check_updates_on_startup = s.value(SETTINGS_CHECK_UPDATES, true).toBool();
 	g_theme                    = s.value(SETTINGS_THEME, 0).toInt();
+    g_library_selection = s.value("library_selection").toString();
 	if (g_theme < 0 || g_theme > 2) {
 		g_theme = 0;
 	}
@@ -527,7 +561,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 }
 
 void MainDialogPrivate::Run() {
-	if (m_update_checker->IsInstalling()) return;
+	if (m_update_checker->IsInstalling() || m_process.state() != QProcess::NotRunning) return;
 	if (StreamGameRunning()) return;
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
@@ -542,6 +576,23 @@ void MainDialogPrivate::Run() {
 	m_main_dialog->RunInterpreter(&m_process, *info);
 
 	Update();
+}
+
+void MainDialogPrivate::ReloadLibrary() {
+    GameLibrary library;
+    QString error;
+    QList<LibraryCard> cards;
+    if (library.Load(nullptr, &error)) {
+        for (const auto& game : library.Games()) {
+            const bool steam = game.source == "steam";
+            cards.append({game.id, steam ? game.name : game.info->name, game.source,
+                steam ? QString() : game.info->game_path,
+                steam ? game.readiness_reason : tr("Game files are unavailable."),
+                steam ? game.owned_launch.has_value() :
+                    (QDir(game.info->basedir).exists() || GameContent::IsArchive(game.info->basedir)), game.source_id});
+        }
+    }
+    m_library->SetGames(cards);
 }
 
 void MainDialogPrivate::Update() {
@@ -566,6 +617,7 @@ void MainDialogPrivate::Update() {
 	}
 
 	m_ui->widget->SetRunEnabled(run_enabled);
+	m_library->SetLaunchEnabled(!busy);
 	if (busy) return;
 	m_controller_preview.SetColor(m_ui->widget->GetGlobalControllerColor());
 }

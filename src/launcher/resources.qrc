@@ -1,4 +1,7 @@
 <RCC>
+ <qresource prefix="/brand">
+  <file alias="ags-horizontal.png">../../../../assets/brand/png/horizontal-white.png</file>
+ </qresource>
  <qresource prefix="/icons">
   <file alias="edit-configuration.svg">icons/edit-configuration.svg</file>
   <file alias="global-settings.svg">icons/global-settings.svg</file>

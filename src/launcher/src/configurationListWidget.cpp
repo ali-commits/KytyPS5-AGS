@@ -1194,3 +1194,15 @@ void ConfigurationListWidget::ShowContextMenu(QTreeWidgetItem* witem) {
 
 	menu.exec(QCursor::pos());
 }
+
+bool ConfigurationListWidget::SelectGamePath(const QString& path) {
+    for (int i = 0; i < m_ui->cfgs_list->topLevelItemCount(); ++i) {
+        auto* item = static_cast<ConfigurationItem*>(m_ui->cfgs_list->topLevelItem(i));
+        if (item->GetInfo().game_path == path) {
+            m_ui->cfgs_list->setCurrentItem(item);
+            SelectItem(item);
+            return true;
+        }
+    }
+    return false;
+}

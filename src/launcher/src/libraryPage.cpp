@@ -1,0 +1,222 @@
+#include "libraryPage.h"
+
+#include <QApplication>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
+#include <QPixmap>
+#include <QPushButton>
+#include <QShortcut>
+#include <QSignalBlocker>
+#include <QStackedWidget>
+#include <QVBoxLayout>
+
+LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
+	setObjectName("libraryPage");
+	auto* layout = new QVBoxLayout(this);
+	layout->setContentsMargins(24, 20, 24, 20);
+	layout->setSpacing(16);
+	auto* header = new QHBoxLayout;
+	auto* logo   = new QLabel(this);
+	logo->setPixmap(
+	    QPixmap(":/brand/ags-horizontal.png").scaledToWidth(150, Qt::SmoothTransformation));
+	logo->setAccessibleName(tr("AGS"));
+	header->addWidget(logo);
+	header->addStretch();
+	auto* settings = new QPushButton(tr("Settings"), this);
+	settings->setObjectName("librarySettings");
+	header->addWidget(settings);
+	connect(settings, &QPushButton::clicked, this, &LibraryPage::SettingsRequested);
+	layout->addLayout(header);
+	m_pages = new QStackedWidget(this);
+	layout->addWidget(m_pages);
+	auto* browse       = new QWidget(this);
+	auto* browseLayout = new QVBoxLayout(browse);
+	auto* heading      = new QLabel(tr("Your library"), browse);
+	heading->setObjectName("libraryHeading");
+	browseLayout->addWidget(heading);
+	auto* search = new QLineEdit(browse);
+	search->setPlaceholderText(tr("Search games"));
+	search->setClearButtonEnabled(true);
+	search->setAccessibleName(tr("Search games"));
+	browseLayout->addWidget(search);
+	m_list = new QListWidget(browse);
+	m_list->setObjectName("libraryGames");
+	m_list->setAccessibleName(tr("Games. Press Enter to view details."));
+	m_list->setWordWrap(true);
+	connect(m_list, &QListWidget::currentRowChanged, this,
+	        [this] { emit SelectionChanged(SelectedId()); });
+	m_list->setSpacing(6);
+	m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(m_list, &QListWidget::customContextMenuRequested, this, [this](const QPoint& point) {
+		auto* item = m_list->itemAt(point);
+		if (!item) return;
+		m_list->setCurrentItem(item);
+		QMenu menu(this);
+		menu.addAction(tr("View game"), this, &LibraryPage::ShowDetails);
+		menu.addAction(tr("Settings"), this, &LibraryPage::SettingsRequested);
+		menu.exec(m_list->viewport()->mapToGlobal(point));
+	});
+	browseLayout->addWidget(m_list);
+	m_empty = new QLabel(tr("No games found. Open Settings to add game directories. Steam roots "
+	                        "and owned launch recipes are configured in Kyty.ini."),
+	                     browse);
+	m_empty->setWordWrap(true);
+	browseLayout->addWidget(m_empty);
+	auto* details = new QPushButton(tr("View game"), browse);
+	details->setObjectName("libraryDetails");
+	browseLayout->addWidget(details);
+	connect(details, &QPushButton::clicked, this, &LibraryPage::ShowDetails);
+	connect(m_list, &QListWidget::itemActivated, this, [this] { ShowDetails(); });
+	connect(search, &QLineEdit::textChanged, this, [this](const QString& text) {
+		for (int i = 0; i < m_list->count(); ++i)
+			m_list->item(i)->setHidden(!m_games[i].name.contains(text, Qt::CaseInsensitive));
+		if (m_list->currentItem() && m_list->currentItem()->isHidden()) m_list->setCurrentRow(-1);
+	});
+	m_pages->addWidget(browse);
+	auto* detail       = new QWidget(this);
+	auto* detailLayout = new QVBoxLayout(detail);
+	auto* back         = new QPushButton(tr("← Library"), detail);
+	back->setObjectName("libraryBack");
+	detailLayout->addWidget(back, 0, Qt::AlignLeft);
+	connect(back, &QPushButton::clicked, this, &LibraryPage::Back);
+	m_title = new QLabel(detail);
+	m_title->setWordWrap(true);
+	m_title->setTextFormat(Qt::PlainText);
+	m_title->setObjectName("libraryHeading");
+	m_source = new QLabel(detail);
+	m_reason = new QLabel(detail);
+	m_reason->setWordWrap(true);
+	m_source->setTextFormat(Qt::PlainText);
+	m_reason->setTextFormat(Qt::PlainText);
+	detailLayout->addStretch();
+	detailLayout->addWidget(m_title);
+	detailLayout->addWidget(m_source);
+	detailLayout->addWidget(m_reason);
+	m_play = new QPushButton(detail);
+	m_play->setObjectName("libraryPlay");
+	detailLayout->addWidget(m_play);
+	detailLayout->addStretch();
+	connect(m_play, &QPushButton::clicked, this, [this] {
+		int row = m_list->currentRow();
+		if (row < 0 || row >= m_games.size() || !m_games[row].ready || !m_launchEnabled) return;
+		emit GameActionRequested(m_games[row].id, m_games[row].source);
+		if (m_games[row].source == "steam")
+			emit StreamingRequested();
+		else
+			emit PlayRequested(m_games[row].gamePath);
+	});
+	m_pages->addWidget(detail);
+	auto* escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+	escape->setContext(Qt::WidgetWithChildrenShortcut);
+	connect(escape, &QShortcut::activated, this, &LibraryPage::Back);
+}
+QString LibraryPage::SelectedId() const {
+	int row = m_list->currentRow();
+	return row >= 0 && row < m_games.size() ? m_games[row].id : QString();
+}
+void LibraryPage::SetGames(const QList<LibraryCard>& games) {
+	const auto           selected = SelectedId();
+	const QSignalBlocker blockSelection(m_list);
+	m_games = games;
+	m_empty->setVisible(games.isEmpty());
+	m_list->clear();
+	int selectedRow = -1;
+	for (int i = 0; i < games.size(); ++i) {
+		const auto& game = games[i];
+		auto*       item = new QListWidgetItem(
+		    game.name + "\n" + (game.source == "steam" ? tr("Steam") : tr("PS5")) +
+		        (game.ready ? tr(" · Ready") : tr(" · Setup required")),
+		    m_list);
+		item->setSizeHint(QSize(0, 78));
+		if (game.id == selected) selectedRow = i;
+	}
+	m_list->setCurrentRow(selectedRow >= 0 ? selectedRow : (games.isEmpty() ? -1 : 0));
+	if (m_pages->currentIndex() == 1) {
+		if (m_list->currentRow() >= 0)
+			ShowDetails();
+		else
+			Back();
+	}
+	m_list->setToolTip(games.isEmpty() ? tr("No games found. Open Settings to add game "
+	                                        "directories. Steam roots are configured in Kyty.ini.")
+	                                   : QString());
+}
+void LibraryPage::SetLaunchEnabled(bool enabled) {
+	m_launchEnabled = enabled;
+	const int row   = m_list->currentRow();
+	m_play->setEnabled(enabled && row >= 0 && row < m_games.size() && m_games[row].ready);
+}
+void LibraryPage::ShowDetails() {
+	int row = m_list->currentRow();
+	if (row < 0 || m_list->item(row)->isHidden()) return;
+	const auto& game = m_games[row];
+	m_title->setText(game.name);
+	m_source->setText(game.source == "steam" ? tr("Steam · App %1").arg(game.sourceId) : tr("PS5"));
+	m_reason->setText(
+	    game.source == "steam" && game.ready
+	        ? tr("Owned launch recipe configured. Start this game from the library on your paired "
+			     "device. Local Steam Play is not available in this build.")
+			: (game.ready ? tr("Ready to play on this computer.") : game.reason));
+	m_play->setText(game.source == "steam" ? tr("Open streaming") : tr("Play"));
+	SetLaunchEnabled(m_launchEnabled);
+	m_pages->setCurrentIndex(1);
+	(m_play->isEnabled() ? m_play : findChild<QPushButton*>("libraryBack"))->setFocus();
+}
+void LibraryPage::Back() {
+	m_pages->setCurrentIndex(0);
+	m_list->setFocus();
+}
+
+void LibraryPage::HandleController(const QSet<QString>& pressed) {
+	const auto edges  = pressed - m_previousButtons;
+	m_previousButtons = pressed;
+	if (!isVisible() || !window()->isActiveWindow()) return;
+	if (edges.contains("East")) {
+		Back();
+		return;
+	}
+	if (edges.contains("Start")) {
+		emit SettingsRequested();
+		return;
+	}
+	auto* focus = QApplication::focusWidget();
+	if (!focus || (focus != this && !isAncestorOf(focus))) {
+		m_list->setFocus();
+		focus = m_list;
+	}
+	if (edges.contains("South")) {
+		if (focus == m_list)
+			ShowDetails();
+		else if (auto* button = qobject_cast<QPushButton*>(focus))
+			button->click();
+		return;
+	}
+	int key = 0;
+	if (edges.contains("DpadUp")) key = Qt::Key_Up;
+	if (edges.contains("DpadDown")) key = Qt::Key_Down;
+	if (edges.contains("DpadLeft")) {
+		focusNextPrevChild(false);
+		return;
+	}
+	if (edges.contains("DpadRight")) {
+		focusNextPrevChild(true);
+		return;
+	}
+	if (key && focus == m_list) {
+		QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
+		QApplication::sendEvent(m_list, &event);
+	} else if (key)
+		focusNextPrevChild(key == Qt::Key_Down);
+}
+
+void LibraryPage::SelectId(const QString& id) {
+	for (int row = 0; row < m_games.size(); ++row)
+		if (m_games[row].id == id) {
+			m_list->setCurrentRow(row);
+			return;
+		}
+}
