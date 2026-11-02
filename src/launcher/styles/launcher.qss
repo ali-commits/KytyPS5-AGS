@@ -130,7 +130,7 @@ QLabel#game_status_indicator {
 /* One scalable library surface, shared by desktop and couch-sized windows. */
 QWidget#libraryPage { background: #17191e; color: #f2f3f7; }
 QWidget#libraryPage QLabel { color: #f2f3f7; background: transparent; }
-QLabel#libraryHeading { font-size: 28px; font-weight: 600; }
+QLabel#libraryHeading { font-size: 24px; font-weight: 600; }
 QWidget#libraryPage QPushButton, QWidget#libraryPage QLineEdit {
     background: #292d35; color: #f2f3f7; border: 2px solid #454c59;
     border-radius: 10px; padding: 12px 18px; min-height: 24px;
@@ -145,3 +145,5 @@ QListWidget#libraryGames::item { background: #292d35; padding: 12px; border: 2px
 QListWidget#libraryGames::item:selected { background: #354b70; border: 2px solid #91baff; }
 QListWidget#libraryGames:focus { border: 2px solid #91baff; }
 QPushButton#libraryPlay { background: #315f9f; font-weight: 600; }
+
+QWidget#libraryDetailBody, QWidget#libraryPage QScrollArea, QWidget#libraryPage QScrollArea > QWidget > QWidget { background: #17191e; }

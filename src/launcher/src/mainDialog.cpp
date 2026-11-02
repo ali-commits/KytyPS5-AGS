@@ -589,7 +589,8 @@ void MainDialogPrivate::ReloadLibrary() {
                 steam ? QString() : game.info->game_path,
                 steam ? game.readiness_reason : tr("Game files are unavailable."),
                 steam ? game.owned_launch.has_value() :
-                    (QDir(game.info->basedir).exists() || GameContent::IsArchive(game.info->basedir)), game.source_id});
+                    (QDir(game.info->basedir).exists() || GameContent::IsArchive(game.info->basedir)), game.source_id,
+                steam ? QByteArray() : GameContent::ReadFile(game.info->basedir, "sce_sys/icon0.png", GameContent::MaxImageSize)});
         }
     }
     m_library->SetGames(cards);
@@ -605,7 +606,7 @@ void MainDialogPrivate::Update() {
 	    hosting || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
 	m_update_checker->SetGameRunning(hosting || m_process.state() != QProcess::NotRunning);
 	m_controller_preview.SetSuspended(busy);
-	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget && item != nullptr
+	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget->parentWidget() && item != nullptr
 	                           ? item->GetInfo().basedir
 							   : QString {});
 	bool run_enabled = !busy && item != nullptr;

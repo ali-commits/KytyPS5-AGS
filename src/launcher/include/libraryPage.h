@@ -1,5 +1,6 @@
 #ifndef AGS_LIBRARY_PAGE_H
 #define AGS_LIBRARY_PAGE_H
+#include <QByteArray>
 #include <QList>
 #include <QSet>
 #include <QString>
@@ -9,9 +10,10 @@ class QStackedWidget;
 class QLabel;
 class QPushButton;
 struct LibraryCard {
-	QString id, name, source, gamePath, reason;
-	bool    ready = false;
-	QString sourceId;
+	QString    id, name, source, gamePath, reason;
+	bool       ready = false;
+	QString    sourceId;
+	QByteArray artwork;
 };
 // Presentation only: launch authority remains with the existing source-specific owner.
 class LibraryPage final: public QWidget {
@@ -41,5 +43,6 @@ private:
 	bool               m_launchEnabled = true;
 	QSet<QString>      m_previousButtons;
 	QLabel*            m_empty;
+	QLabel*            m_artwork;
 };
 #endif

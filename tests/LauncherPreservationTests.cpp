@@ -11,6 +11,7 @@
 #include "emulatorCommand.h"
 #include "mainDialog.h"
 #include "hostSocket.h"
+#include "hostControlClient.h"
 #include "hostDaemon.h"
 #include "gameContent.h"
 #include "gameLibrary.h"
@@ -131,6 +132,7 @@ bool CreateGridFixture(const QTemporaryDir& temp) {
     }
     QSettings settings(temp.filePath("Kyty.ini"),QSettings::IniFormat);
     settings.setValue("Launcher/game_dirs",QStringList{temp.filePath("games")});
+    settings.setValue("Launcher/steam_roots", QStringList{temp.filePath("absent-steam")});
     settings.sync();
     return Write(temp.filePath("compatibility_db.json"),"{}");
 }
@@ -181,10 +183,16 @@ private slots:
         QVERIFY2(child.exitCode()==0,child.readAllStandardError().constData());
         QVERIFY(!QFile::exists(temp.filePath("unexpected-game")));
         QVERIFY(!QFile::exists(profile+"/host-key.pem"));
-        QFile systemctl_log(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG"));
-        QVERIFY(systemctl_log.open(QIODevice::ReadOnly));
-        QVERIFY2(systemctl_log.readAll().contains("--user start kyty-host.service"),
-                 "--start-streaming-host must ask systemd to start the daemon");
+        QVERIFY(Read(temp.filePath("owned-host.log")).contains("--host"));
+        QVERIFY(!QFile::exists(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG")));
+        HostControlClient autostart;
+        autostart.SetAutostartDirectory(temp.path());
+        autostart.SetAutostart(true);
+        const auto desktop = Read(temp.filePath("autostart/ags.desktop"));
+        QVERIFY(desktop.contains("--start-minimized"));
+        QVERIFY(desktop.contains("Type=Application"));
+        autostart.SetAutostart(false);
+        QVERIFY(!QFile::exists(temp.filePath("autostart/ags.desktop")));
 #else
         QSKIP("The isolated executable fixture uses a Linux shell version stub");
 #endif
@@ -439,6 +447,10 @@ private slots:
         QVERIFY(streaming);
         auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
         QVERIFY(tabs);
+        auto* configuration = dialog.findChild<ConfigurationListWidget*>();
+        auto* settingsPage = configuration->parentWidget();
+        QVERIFY(tabs->indexOf(settingsPage) >= 0);
+        tabs->setCurrentWidget(settingsPage);
         auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
         tree->setCurrentItem(tree->topLevelItem(0));
         auto* toggle=dialog.findChild<QToolButton*>("grid_view_button");
@@ -450,14 +462,13 @@ private slots:
         QVERIFY(Capture(dialog,"-streaming-current-ui"));
         dialog.resize(1100,900);
         dialog.show();
-        QLabel* version=nullptr;
-        for(auto* label:streaming->findChildren<QLabel*>())
-            if(label->text()=="Version checked when hosting starts") version=label;
+        auto* version=streaming->findChild<QLabel*>("streamStatus");
         QVERIFY(version);
+        QVERIFY(!version->text().isEmpty());
         QApplication::processEvents();
         QVERIFY2(version->height()>=version->heightForWidth(version->width()),
                  "The native form field clips its wrapped backend status text");
-        tabs->setCurrentIndex(0);
+        tabs->setCurrentWidget(settingsPage);
         QVERIFY(!title->Title().isEmpty());
         // Local play is blocked only while the daemon reports a streamed game running.
         QVERIFY(!preview->Error().contains("paused"));
@@ -635,6 +646,7 @@ private slots:
         {
             QSettings file("Kyty.ini", QSettings::IniFormat);
             file.setValue("Launcher/game_dirs", QStringList {temp.filePath("games")});
+            file.setValue("Launcher/steam_roots", QStringList{temp.filePath("absent-steam")});
             file.setValue("Launcher/addons_dir", temp.filePath("Additional Content"));
             file.beginGroup("GlobalConfiguration");
             global.WriteSettings(&file);
@@ -759,7 +771,7 @@ private slots:
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
         WorkingDirectory cwd(temp.path());
-        QVERIFY(Write("Kyty.ini", "[Launcher]\ngame_dirs=\n"));
+        QVERIFY(Write("Kyty.ini", "[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n"));
         QVERIFY(Write("compatibility_db.json", "{}"));
         const auto previous = qgetenv("KYTY_STREAMING_CONFIG_DIR");
         qputenv("KYTY_STREAMING_CONFIG_DIR", temp.filePath("streaming").toUtf8());
@@ -782,7 +794,7 @@ private slots:
             tabs->setCurrentWidget(streaming);
             QVERIFY(Capture(dialog, "-streaming"));
         }
-        for (const auto* name: {"streamBackendPath", "streamStart", "streamStop", "streamPair", "streamPin",
+        for (const auto* name: {"streamBackendPath", "streamStart", "streamStop", "streamPair", "streamPairingPath", "streamAutostart", "streamStopGame",
                                "streamClients", "streamUnpair", "streamPort", "streamControllerAudio",
                                "streamControllerAudioPort", "streamControllerAudioReceivers", "streamLocalAudio"})
             QVERIFY2(streaming->findChild<QWidget*>(name), name);
@@ -918,6 +930,12 @@ int main(int argc, char** argv) {
         app.setPalette(palette);
     }
     if(headless_fixture) {
+        const auto ownedScript = QDir::current().filePath("owned-host-fixture");
+        const auto ownedLog = QDir::current().filePath("owned-host.log");
+        if (!Write(ownedScript, "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + ownedLog.toUtf8() + "'\n")) return 15;
+        QFile::setPermissions(ownedScript, QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+        HostControlClient owner;
+        owner.SetLifetimeOwner(ownedScript);
         MainDialog dialog;
         auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
         auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
@@ -926,13 +944,12 @@ int main(int argc, char** argv) {
         auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
         if(!tabs || tabs->currentWidget()!=streaming || !title->Title().isEmpty()) return 12;
         dialog.Start();
-        // --start-streaming-host only asks systemd for the daemon; the fake systemctl logs it.
+        // The GUI lifetime owner starts only its fixture --host child, never systemd.
         QElapsedTimer deadline; deadline.start();
         bool started=false;
         while(deadline.elapsed()<3000 && !started) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,20);
-            QFile log(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG"));
-            started=log.open(QIODevice::ReadOnly) && log.readAll().contains("--user start kyty-host.service");
+            started = Read(ownedLog).contains("--host");
         }
         return started && tabs->currentWidget()==streaming && title->Title().isEmpty() ? 0 : 13;
     }

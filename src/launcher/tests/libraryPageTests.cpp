@@ -1,8 +1,11 @@
 #include "libraryPage.h"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QFile>
+#include <QImage>
 #include <QListWidget>
+#include <QPainter>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QStackedWidget>
@@ -68,7 +71,7 @@ private slots:
 		QTest::qWait(20);
 		QVERIFY(page.isActiveWindow());
 		page.findChild<QListWidget*>("libraryGames")->setFocus();
-		page.HandleController({"DpadDown"});
+		page.HandleController({"DpadRight"});
 		QCOMPARE(page.SelectedId(), QString("two"));
 		page.HandleController({});
 		page.HandleController({"South"});
@@ -84,15 +87,37 @@ private slots:
 	}
 	void renderSizes() {
 		LibraryPage page;
+		QImage      art(360, 224, QImage::Format_RGB32);
+		art.fill(QColor("#2c5270"));
+		QPainter painter(&art);
+		painter.setPen(Qt::white);
+		auto font = painter.font();
+		font.setPixelSize(28);
+		painter.setFont(font);
+		painter.drawText(art.rect(), Qt::AlignCenter, "PS5 cover fixture");
+		painter.end();
+		QByteArray bytes;
+		QBuffer    buffer(&bytes);
+		buffer.open(QIODevice::WriteOnly);
+		QVERIFY(art.save(&buffer, "PNG"));
 		page.SetGames(
-		    {{"one", "A game with a long descriptive title", "ps5", {}, {}, true},
-			 {"two", "Installed Steam game", "steam", {}, "Missing owned launch recipe", false}});
+		    {{"one", "A game with a long descriptive title", "ps5", {}, {}, true, {}, bytes},
+			 {"two",
+			  "Installed Steam game",
+			  "steam",
+			  {},
+			  "Missing owned launch recipe",
+			  false,
+			  "620"}});
+
 		for (const QSize size: {QSize(520, 480), QSize(1280, 720)}) {
 			page.resize(size);
 			page.show();
 			QTest::qWait(20);
+			QCOMPARE(page.size(), size);
 			QVERIFY(page.grab().save(QString("/tmp/ags-library-%1.png").arg(size.width())));
 			page.findChild<QPushButton*>("libraryDetails")->click();
+			QCOMPARE(page.size(), size);
 			QVERIFY(page.grab().save(QString("/tmp/ags-details-%1.png").arg(size.width())));
 			page.findChild<QPushButton*>("libraryBack")->click();
 		}

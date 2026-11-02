@@ -5,20 +5,45 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLinearGradient>
 #include <QListWidget>
 #include <QMenu>
+#include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
+namespace {
+QPixmap Cover(const LibraryCard& game) {
+	QPixmap cover;
+	if (!game.artwork.isEmpty()) cover.loadFromData(game.artwork);
+	if (!cover.isNull())
+		return cover.scaled(360, 224, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+	cover = QPixmap(360, 224);
+	QPainter        painter(&cover);
+	QLinearGradient gradient(0, 0, 360, 224);
+	gradient.setColorAt(0, QColor("#315f9f"));
+	gradient.setColorAt(1, QColor("#252a36"));
+	painter.fillRect(cover.rect(), gradient);
+	painter.setPen(QColor("#e3edff"));
+	auto font = painter.font();
+	font.setPixelSize(68);
+	font.setBold(true);
+	painter.setFont(font);
+	painter.drawText(cover.rect(), Qt::AlignCenter, game.name.left(1).toUpper());
+	return cover;
+}
+} // namespace
+
 LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	setObjectName("libraryPage");
 	auto* layout = new QVBoxLayout(this);
-	layout->setContentsMargins(24, 20, 24, 20);
-	layout->setSpacing(16);
+	layout->setContentsMargins(16, 12, 16, 12);
+	layout->setSpacing(10);
 	auto* header = new QHBoxLayout;
 	auto* logo   = new QLabel(this);
 	logo->setPixmap(
@@ -47,6 +72,12 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	m_list->setObjectName("libraryGames");
 	m_list->setAccessibleName(tr("Games. Press Enter to view details."));
 	m_list->setWordWrap(true);
+	m_list->setViewMode(QListView::IconMode);
+	m_list->setResizeMode(QListView::Adjust);
+	m_list->setMovement(QListView::Static);
+	m_list->setIconSize(QSize(180, 100));
+	m_list->setGridSize(QSize(202, 188));
+	m_list->setUniformItemSizes(true);
 	connect(m_list, &QListWidget::currentRowChanged, this,
 	        [this] { emit SelectionChanged(SelectedId()); });
 	m_list->setSpacing(6);
@@ -92,14 +123,26 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	m_reason->setWordWrap(true);
 	m_source->setTextFormat(Qt::PlainText);
 	m_reason->setTextFormat(Qt::PlainText);
-	detailLayout->addStretch();
-	detailLayout->addWidget(m_title);
-	detailLayout->addWidget(m_source);
-	detailLayout->addWidget(m_reason);
+	auto* body = new QWidget(detail);
+	body->setObjectName("libraryDetailBody");
+	auto* bodyLayout = new QVBoxLayout(body);
+	auto* scroll     = new QScrollArea(detail);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setWidget(body);
+	detailLayout->addWidget(scroll, 1);
+	m_artwork = new QLabel(body);
+	m_artwork->setAlignment(Qt::AlignLeft);
+	m_artwork->setMinimumHeight(112);
+	bodyLayout->addWidget(m_artwork);
+	bodyLayout->addWidget(m_title);
+	bodyLayout->addWidget(m_source);
+	bodyLayout->addWidget(m_reason);
+	bodyLayout->addStretch();
 	m_play = new QPushButton(detail);
 	m_play->setObjectName("libraryPlay");
 	detailLayout->addWidget(m_play);
-	detailLayout->addStretch();
+
 	connect(m_play, &QPushButton::clicked, this, [this] {
 		int row = m_list->currentRow();
 		if (row < 0 || row >= m_games.size() || !m_games[row].ready || !m_launchEnabled) return;
@@ -129,9 +172,12 @@ void LibraryPage::SetGames(const QList<LibraryCard>& games) {
 		const auto& game = games[i];
 		auto*       item = new QListWidgetItem(
 		    game.name + "\n" + (game.source == "steam" ? tr("Steam") : tr("PS5")) +
-		        (game.ready ? tr(" · Ready") : tr(" · Setup required")),
+		        (game.ready ? (game.source == "steam" ? tr(" · Ready to stream") : tr(" · Ready"))
+				            : tr(" · Setup required")),
 		    m_list);
-		item->setSizeHint(QSize(0, 78));
+		item->setIcon(QIcon(Cover(game)));
+		item->setTextAlignment(Qt::AlignLeft);
+		item->setSizeHint(QSize(196, 184));
 		if (game.id == selected) selectedRow = i;
 	}
 	m_list->setCurrentRow(selectedRow >= 0 ? selectedRow : (games.isEmpty() ? -1 : 0));
@@ -155,6 +201,8 @@ void LibraryPage::ShowDetails() {
 	if (row < 0 || m_list->item(row)->isHidden()) return;
 	const auto& game = m_games[row];
 	m_title->setText(game.name);
+	m_artwork->setPixmap(
+	    Cover(game).scaled(280, 150, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 	m_source->setText(game.source == "steam" ? tr("Steam · App %1").arg(game.sourceId) : tr("PS5"));
 	m_reason->setText(
 	    game.source == "steam" && game.ready
@@ -198,19 +246,13 @@ void LibraryPage::HandleController(const QSet<QString>& pressed) {
 	int key = 0;
 	if (edges.contains("DpadUp")) key = Qt::Key_Up;
 	if (edges.contains("DpadDown")) key = Qt::Key_Down;
-	if (edges.contains("DpadLeft")) {
-		focusNextPrevChild(false);
-		return;
-	}
-	if (edges.contains("DpadRight")) {
-		focusNextPrevChild(true);
-		return;
-	}
+	if (edges.contains("DpadLeft")) key = Qt::Key_Left;
+	if (edges.contains("DpadRight")) key = Qt::Key_Right;
 	if (key && focus == m_list) {
 		QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
 		QApplication::sendEvent(m_list, &event);
 	} else if (key)
-		focusNextPrevChild(key == Qt::Key_Down);
+		focusNextPrevChild(key == Qt::Key_Down || key == Qt::Key_Right);
 }
 
 void LibraryPage::SelectId(const QString& id) {
