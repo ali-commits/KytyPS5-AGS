@@ -50,10 +50,17 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	auto* layout = new QVBoxLayout(this);
 	layout->setContentsMargins(16, 12, 16, 12);
 	layout->setSpacing(10);
-	auto* header = new QHBoxLayout;
+	m_header = new QWidget(this);
+	auto* header = new QHBoxLayout(m_header);
+	header->setContentsMargins(0, 0, 0, 0);
 	auto* logo   = new QLabel(this);
-	logo->setPixmap(
-	    QPixmap(":/brand/ags-horizontal.png").scaledToWidth(150, Qt::SmoothTransformation));
+	auto updateLogo = [logo] {
+        const bool light = logo->palette().color(QPalette::Window).lightness() > 128;
+        logo->setPixmap(QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png")
+                            .scaledToWidth(150, Qt::SmoothTransformation));
+    };
+    updateLogo();
+    connect(qApp, &QApplication::paletteChanged, logo, [updateLogo](const QPalette&) { updateLogo(); });
 	logo->setAccessibleName(tr("AGS"));
 	header->addWidget(logo);
 	header->addStretch();
@@ -65,7 +72,7 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	settings->setObjectName("librarySettings");
 	header->addWidget(settings);
 	connect(settings, &QPushButton::clicked, this, &LibraryPage::SettingsRequested);
-	layout->addLayout(header);
+	layout->addWidget(m_header);
 	m_pages = new QStackedWidget(this);
 	layout->addWidget(m_pages);
 	auto* browse       = new QWidget(this);
@@ -257,6 +264,8 @@ void LibraryPage::Back() {
 	m_pages->setCurrentIndex(0);
 	m_list->setFocus();
 }
+
+void LibraryPage::SetEmbeddedHeaderVisible(bool visible) { m_header->setVisible(visible); }
 
 void LibraryPage::ResetControllerNavigation() {
 	// Resume samples may contain a confirm held by the game we just left.

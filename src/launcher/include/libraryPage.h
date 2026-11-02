@@ -28,6 +28,7 @@ public:
 	QString SelectedId() const;
 	void    SelectId(const QString& id);
 	void    ResetControllerNavigation();
+    void SetEmbeddedHeaderVisible(bool visible);
 	void    HandleController(const QSet<QString>& pressed);
 signals:
 	void SelectionChanged(QString id);
@@ -43,6 +44,7 @@ private:
 	void               ShowDetails();
 	void               Back();
 	void               ApplyFilter();
+	QWidget* m_header;
 	QList<LibraryCard> m_games;
 	QListWidget*       m_list;
 	QLineEdit*         m_search;

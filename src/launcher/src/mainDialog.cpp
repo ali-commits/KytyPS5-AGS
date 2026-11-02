@@ -1,4 +1,6 @@
 #include "steamArtwork.h"
+#include "shellNavigation.h"
+#include <QTabBar>
 #include "mainDialog.h"
 #include "libraryPage.h"
 #include "remoteClient.h"
@@ -139,7 +141,15 @@ private:
     QWidget*           m_streaming_page = nullptr;
 	QTabWidget*        m_tabs             = nullptr;
 
-	QPointer<ConfigurationItem> m_running_item;
+	ShellNavigation m_navigation;
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::WindowActivate || event->type() == QEvent::WindowDeactivate) {
+            m_navigation.Reset();
+            if (m_library) m_library->ResetControllerNavigation();
+        }
+        return false;
+    }
+    QPointer<ConfigurationItem> m_running_item;
 };
 
 QByteArray MainDialogPrivate::g_last_geometry;
@@ -168,8 +178,24 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->widget->SetControllerPreview(&m_controller_preview);
 	m_tabs = new QTabWidget(main_dialog);
     m_tabs->setObjectName("launcherTabs");
+    main_dialog->installEventFilter(this);
+    m_tabs->tabBar()->setObjectName("launcherNavigation");
+    m_tabs->tabBar()->setExpanding(false);
+    m_tabs->tabBar()->setUsesScrollButtons(true);
+    m_tabs->setStyleSheet("QTabWidget#launcherTabs::pane { border: 0; } QTabBar#launcherNavigation::tab { min-height: 44px; padding: 0 16px; margin: 4px 3px; border: 1px solid palette(mid); border-radius: 12px; background: palette(button); color: palette(button-text); } QTabBar#launcherNavigation::tab:selected { background: palette(highlight); color: palette(highlighted-text); } QTabBar#launcherNavigation::tab:focus { border: 2px solid palette(highlight); }");
+    auto* brand = new QLabel(m_tabs);
+    brand->setAccessibleName(tr("AGS"));
+    brand->setContentsMargins(8, 0, 12, 0);
+    auto updateBrand = [brand] {
+        const bool light = brand->palette().color(QPalette::Window).lightness() > 128;
+        brand->setPixmap(QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png").scaledToWidth(100, Qt::SmoothTransformation));
+    };
+    updateBrand();
+    connect(qApp, &QApplication::paletteChanged, brand, [updateBrand](const QPalette&) { updateBrand(); });
+    m_tabs->setCornerWidget(brand, Qt::TopLeftCorner);
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
 	m_library = new LibraryPage(m_tabs);
+    m_library->SetEmbeddedHeaderVisible(false);
     m_tabs->addTab(m_library, tr("Library"));
     auto* settingsPage = new QWidget(m_tabs);
     auto* settingsLayout = new QVBoxLayout(settingsPage);
@@ -218,7 +244,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
         if (!id.isEmpty()) { g_library_selection = id; m_ui->widget->WriteSettings(); }
     });
     connect(&m_controller_preview, &ControllerPreview::StateChanged, m_library, [this] {
-        m_library->HandleController(m_controller_preview.RawPressed());
+        m_navigation.Handle(m_controller_preview.RawPressed(), m_tabs, m_library);
     });
 	m_host             = new HostControlClient(QString(), this);
     connect(m_library, &LibraryPage::LocalPlayRequested, this, [this](const QString& id) {
@@ -242,7 +268,13 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
     if (QApplication::arguments().contains("--client-only")) m_tabs->setTabVisible(m_tabs->indexOf(m_streaming_page), false);
 	if (!QApplication::arguments().contains("--client-only") && QApplication::arguments().contains("--start-streaming-host"))
 		m_tabs->setCurrentWidget(m_streaming_page);
-	connect(m_tabs, &QTabWidget::currentChanged, this, [this] { Update(); });
+	connect(m_tabs, &QTabWidget::currentChanged, this, [this] {
+        m_navigation.Reset();
+        m_library->ResetControllerNavigation();
+        if (m_tabs->currentWidget() == m_library) m_library->setFocus();
+        else m_tabs->currentWidget()->setFocus();
+        Update();
+    });
 	m_ui->verticalLayout_3->addWidget(m_tabs);
 
 	main_dialog->setMinimumSize(520, 480);
@@ -679,7 +711,7 @@ void MainDialogPrivate::Update() {
 	    hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
 	m_update_checker->SetGameRunning(hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning);
 	// SetSuspended(false) can synchronously publish the first held-button sample.
-	if (!busy && m_controller_preview.IsSuspended()) m_library->ResetControllerNavigation();
+	if (!busy && m_controller_preview.IsSuspended()) { m_library->ResetControllerNavigation(); m_navigation.Reset(); }
 	m_controller_preview.SetSuspended(busy);
 	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_settings_page && item != nullptr
 	                           ? item->GetInfo().basedir

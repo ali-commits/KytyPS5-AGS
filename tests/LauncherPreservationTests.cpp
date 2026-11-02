@@ -52,6 +52,7 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QtTest>
@@ -195,7 +196,9 @@ private slots:
         dialog.show();
         auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
         QVERIFY(tabs);
-        for (const QSize size: {QSize(960, 540), QSize(640, 480)}) {
+        QVERIFY(tabs->tabBar()->sizeHint().height() >= 44);
+        QVERIFY(tabs->cornerWidget(Qt::TopLeftCorner));
+        for (const QSize size: {QSize(960, 540), QSize(520, 480)}) {
             tabs->setCurrentIndex(0);
             dialog.resize(size);
             QTest::qWait(40);
@@ -215,8 +218,7 @@ private slots:
             QVERIFY2(qAbs(fg.lightness() - paintedBackground.lightness()) > 80, "Rendered heading background must contrast with text");
             for (const char* name: {"libraryRemoteHosts", "librarySettings"}) {
                 auto* action = library->findChild<QWidget*>(name);
-                QVERIFY(action && action->isVisible());
-                QVERIFY(dialog.rect().contains(QRect(action->mapTo(&dialog, QPoint()), action->size())));
+                QVERIFY(action && !action->isVisible());
             }
             for (const char* name: {"settingsScroll", "remoteHostsScroll", "streamingScroll"}) {
                 auto* scroll = dialog.findChild<QScrollArea*>(name);

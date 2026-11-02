@@ -1,4 +1,8 @@
 #include "libraryPage.h"
+#include "shellNavigation.h"
+#include <QVBoxLayout>
+#include <QDialog>
+#include <QCheckBox>
 
 #include <QApplication>
 #include <QBuffer>
@@ -32,6 +36,55 @@ private slots:
 		QVERIFY(style.open(QIODevice::ReadOnly));
 		qApp->setStyleSheet(QString::fromUtf8(style.readAll()));
 	}
+    void shellNavigationUsesRealFocusAndVisibleTabs() {
+        QTabWidget tabs;
+        auto* library = new LibraryPage;
+        library->SetEmbeddedHeaderVisible(false);
+        tabs.addTab(library, "Library");
+        auto* settings = new QWidget;
+        auto* layout = new QVBoxLayout(settings);
+        auto* button = new QPushButton("Action");
+        auto* combo = new QComboBox;
+        combo->addItems({"First", "Second", "Third"});
+        auto* check = new QCheckBox("Toggle");
+        layout->addWidget(button); layout->addWidget(combo); layout->addWidget(check);
+        tabs.addTab(settings, "Settings");
+        auto* remote = new QWidget;
+        tabs.addTab(remote, "Remote");
+        tabs.addTab(new QWidget, "Hidden host"); tabs.setTabVisible(3, false);
+        tabs.resize(520, 480); tabs.show(); tabs.activateWindow();
+        QTRY_VERIFY(tabs.isActiveWindow());
+        ShellNavigation router;
+        auto sample = [&](QSet<QString> pressed) { router.Handle(pressed, &tabs, library); QApplication::processEvents(); };
+        auto tap = [&](QString key) { sample({}); sample({key}); sample({}); };
+        sample({}); tap("RightShoulder"); QCOMPARE(tabs.currentIndex(), 1);
+        button->setFocus(); QTRY_COMPARE(QApplication::focusWidget(), button);
+        QSignalSpy clicks(button, &QPushButton::clicked);
+        sample({"South"}); sample({"South"}); QCOMPARE(clicks.count(), 1); sample({});
+        combo->setFocus(); tap("South"); QVERIFY(QApplication::activePopupWidget());
+        tap("DpadDown"); tap("South"); QCOMPARE(combo->currentIndex(), 1);
+        QVERIFY(!QApplication::activePopupWidget());
+        combo->setFocus(); tap("South"); QVERIFY(QApplication::activePopupWidget());
+        tap("East"); QVERIFY(!QApplication::activePopupWidget()); QCOMPARE(tabs.currentIndex(), 1);
+        check->setFocus(); tap("South"); QVERIFY(check->isChecked());
+        QDialog modal(&tabs); modal.setModal(true); modal.show(); modal.activateWindow();
+        QTRY_VERIFY(QApplication::activeModalWidget() == &modal);
+        tap("East"); QVERIFY(!modal.isVisible());
+        tabs.activateWindow(); QTRY_VERIFY(tabs.isActiveWindow());
+        tap("RightShoulder"); QCOMPARE(tabs.currentIndex(), 2);
+        tap("RightShoulder"); QCOMPARE(tabs.currentIndex(), 0);
+        tap("LeftShoulder"); QCOMPARE(tabs.currentIndex(), 2);
+        tap("East"); QCOMPARE(tabs.currentIndex(), 0);
+        tap("RightShoulder"); button->setFocus(); router.Reset();
+        sample({"South"}); sample({"South"}); QCOMPARE(clicks.count(), 1);
+        sample({}); tap("South"); QCOMPARE(clicks.count(), 2);
+        tabs.setEnabled(false); tap("South"); QCOMPARE(clicks.count(), 2);
+        tabs.setEnabled(true); sample({"South"}); QCOMPARE(clicks.count(), 2);
+        QWidget other; other.show(); other.activateWindow(); QTRY_VERIFY(other.isActiveWindow());
+        tap("South"); QCOMPARE(clicks.count(), 2);
+        tabs.activateWindow(); QTRY_VERIFY(tabs.isActiveWindow());
+        sample({"South"}); QCOMPARE(clicks.count(), 2);
+    }
     void pointerOpensDetailsBeforePlay_data() {
         QTest::addColumn<bool>("singleClick");
         QTest::newRow("double-click-desktop") << false;
