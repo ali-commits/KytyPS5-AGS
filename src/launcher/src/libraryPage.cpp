@@ -21,7 +21,7 @@ namespace {
 QString SourceLabel(const LibraryCard& game) {
     if (game.source == "steam") return QObject::tr("Steam");
     if (game.source == "ps5") return QObject::tr("PS5");
-    if (game.source == "remote") return QObject::tr("Remote · %1 · Source unknown").arg(game.sourceId);
+    if (game.source == "remote") return QObject::tr("Stream from %1").arg(game.sourceId);
     return QObject::tr("Unknown source");
 }
 QPixmap Cover(const LibraryCard& game) {

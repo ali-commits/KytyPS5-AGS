@@ -383,8 +383,7 @@ QList<LibraryCard> RemoteClient::Cards() const {
 			card.sourceId = p.name;
 			card.ready    = p.online;
 			card.reason =
-			    p.online ? tr("Stream from %1. Game source is reported by the host as unknown.")
-			                   .arg(p.name)
+			    p.online ? tr("Stream from %1.").arg(p.name)
 				         : tr("Host offline. Refresh the connection to try again.");
 			result.append(card);
 		}
