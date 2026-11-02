@@ -3,6 +3,8 @@
 #include "common/u59Preset.h"
 #include "emulatorCommand.h"
 #include "streamingSettings.h"
+#include "pairingAvailability.h"
+#include <QDateTime>
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -151,7 +153,11 @@ HostDaemon::HostDaemon(QObject* parent)
 		}
 		StartHosting(ReadSettings());
 	});
-	connect(&m_shutdown_cap, &QTimer::timeout, this, &HostDaemon::Finished);
+	connect(&m_shutdown_cap, &QTimer::timeout, this, [this] {
+		m_shutdown_failed = true;
+		qWarning() << "AGS host shutdown exceeded its deadline";
+		emit Finished();
+	});
 	connect(&m_compat, &CompatibilityDatabase::Updated, &m_reload, qOverload<>(&QTimer::start));
 	connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] {
 		m_reload.start();
@@ -296,6 +302,8 @@ void HostDaemon::OnBackendChanged() {
 		return;
 	}
 	if (m_shutting_down && Idle(state)) {
+		m_shutdown_failed = state == StreamingBackend::State::Error;
+		if (m_shutdown_failed) qWarning().noquote() << m_backend.Error();
 		m_shutdown_cap.stop();
 		emit Finished();
 		return;
@@ -341,6 +349,8 @@ QJsonObject HostDaemon::StatusObject() const {
 	        {"address", LanAddress()},
 	        {"port", m_backend.NativeStatus().value("address").toString().section(':', -1).toInt()},
 	        {"native", m_backend.NativeStatus()},
+	        {"pairing_open", state == StreamingBackend::State::Ready &&
+	                             PairingEnrollmentOpen(m_backend.NativeProfile(), QDateTime::currentMSecsSinceEpoch())},
 	        {"backend", m_backend.Version()},
 	        {"session", !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
 	                            !m_backend.ClosingSession()
@@ -506,5 +516,6 @@ int RunHostDaemon(int argc, char** argv) {
 		daemon.Shutdown();
 	});
 	QObject::connect(&daemon, &HostDaemon::Finished, &app, &QCoreApplication::quit);
-	return app.exec();
+	app.exec();
+	return daemon.ShutdownExitCode();
 }

@@ -553,7 +553,7 @@ private slots:
 	void nativeProfileControlsAreAvailable() {
 		QTemporaryDir      dir;
 		HostControlClient  client(dir.filePath("none/control.sock"));
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		QVERIFY(!widget.findChild<QComboBox*>("streamResolution")->isHidden());
 		QVERIFY(!widget.findChild<QComboBox*>("streamFps")->isHidden());
@@ -616,7 +616,7 @@ private slots:
 		QTemporaryDir dir;
 		FakeHostDaemon fake(dir.path());
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto* local = widget.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY2(local, "Streaming-only needs an explicit local-display control.");
@@ -628,7 +628,7 @@ private slots:
 		QVERIFY(!fake.Requests("set-preferences").last().value("show_local").toBool());
 		QVERIFY(!fake.preferences.value("show_local").toBool());
 		HostControlClient restored_client(fake.Path());
-		restored_client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		restored_client.SetAutostartDirectory(dir.path());
 		StreamingWidget restored(&restored_client);
 		auto*           restored_local = restored.findChild<QCheckBox*>("streamShowLocal");
 		QVERIFY(restored_local);
@@ -682,7 +682,7 @@ private slots:
 			backend.ReloadSettings(nativeSettings, finish);
 		};
 		HostControlClient client(daemon.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto* bitrate = widget.findChild<QSpinBox*>("streamBitrate");
 		QTRY_COMPARE(widget.findChild<QSpinBox*>("streamPort")->value(), nativeSettings.port);
@@ -743,7 +743,7 @@ private slots:
 			});
 		};
 		HostControlClient client(daemon.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto* bitrate = widget.findChild<QSpinBox*>("streamBitrate");
 		QTRY_COMPARE(widget.findChild<QSpinBox*>("streamPort")->value(), nativeSettings.port);
@@ -809,7 +809,7 @@ private slots:
 		                    {"bitrate", 45},      {"codec", "H264"},       {"adapter", "RTX 3090"},
 		                    {"local_audio", false}, {"show_local", false}};
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto*           port    = widget.findChild<QSpinBox*>("streamPort");
 		auto*           bitrate = widget.findChild<QSpinBox*>("streamBitrate");
@@ -844,60 +844,49 @@ private slots:
 		QVERIFY(!sent.contains("show_local"));
 		QVERIFY(!fake.preferences.value("show_local").toBool());
 		HostControlClient restored_client(fake.Path());
-		restored_client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		restored_client.SetAutostartDirectory(dir.path());
 		StreamingWidget restored(&restored_client);
 		QTRY_COMPARE(restored.findChild<QSpinBox*>("streamPort")->value(), 48400);
 		QCOMPARE(restored.findChild<QSpinBox*>("streamBitrate")->value(), 60);
 		QCOMPARE(restored.findChild<QComboBox*>("streamCodec")->currentText(), QString("HEVC"));
 	}
-	void widgetStartStopAndStartAtLoginDriveSystemctl() {
-		QTemporaryDir  dir;
-		FakeHostDaemon fake(dir.path());
-		fake.status["state"] = "Stopped";
-		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
-		StreamingWidget widget(&client);
-		auto*           start     = widget.findChild<QPushButton*>("streamStart");
-		auto*           stop      = widget.findChild<QPushButton*>("streamStop");
-		auto*           autostart = widget.findChild<QCheckBox*>("streamAutostart");
-		QVERIFY(start && stop && autostart);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user is-enabled kyty-host.service"));
-		QTRY_VERIFY(autostart->isChecked()); // the fake reports is-enabled with exit status 0
-		QVERIFY(start->isEnabled());
-		QTest::mouseClick(start, Qt::LeftButton);
-		// The daemon answers while Stopped, and `systemctl start` is a no-op for an active unit.
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user restart kyty-host.service"));
-		QVERIFY(!SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
-		fake.status["state"] = "Ready";
-		QTRY_VERIFY(stop->isEnabled());
-		QTest::mouseClick(stop, Qt::LeftButton);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user stop kyty-host.service"));
-		autostart->setChecked(false);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user disable kyty-host.service"));
-		autostart->setChecked(true);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user enable kyty-host.service"));
-	}
+	void widgetAutostartUsesLoginFileAndDoesNotControlIndependentHosts() {
+ QTemporaryDir dir;
+ FakeHostDaemon fake(dir.path());
+ HostControlClient client(fake.Path());
+ client.SetAutostartDirectory(dir.path());
+ QSignalSpy errors(&client, &HostControlClient::CommandFailed);
+ StreamingWidget widget(&client);
+ auto* autostart = widget.findChild<QCheckBox*>("streamAutostart");
+ QVERIFY(autostart); QVERIFY(!autostart->isChecked());
+ autostart->setChecked(true);
+ QVERIFY(QFile::exists(dir.filePath("autostart/ags.desktop")));
+ autostart->setChecked(false);
+ QVERIFY(!QFile::exists(dir.filePath("autostart/ags.desktop")));
+ client.StopDaemon(); QCOMPARE(errors.count(), 1);
+ QVERIFY(SystemctlLog(dir.path()).isEmpty());
+ }
 	void widgetStartRestartsAnErroredDaemon() {
 		QTemporaryDir  dir;
 		FakeHostDaemon fake(dir.path());
 		fake.status["state"] = "Error";
 		fake.status["error"] = "boom";
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto*           start = widget.findChild<QPushButton*>("streamStart");
 		QVERIFY(start);
 		QTRY_VERIFY(widget.findChild<QLabel*>("streamStatus")->text().contains("error"));
 		QVERIFY(start->isEnabled());
 		QTest::mouseClick(start, Qt::LeftButton);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user restart kyty-host.service"));
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamError")->text().contains("Open AGS"));
 		QVERIFY(!SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
 	}
 	void widgetShowsDaemonStatusAddressAndLists() {
 		QTemporaryDir  dir;
 		FakeHostDaemon fake(dir.path());
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto*           address = widget.findChild<QComboBox*>("streamLanAddress");
 		// The first status arrives asynchronously; before it the widget lists local interfaces.
@@ -1253,7 +1242,7 @@ private slots:
 		QTemporaryDir  dir;
 		FakeHostDaemon fake(dir.path());
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
 		QTest::qWait(200); // let the stored preferences arrive
@@ -1266,7 +1255,7 @@ private slots:
 	void widgetShowsDaemonNotRunningAndKeepsStartAvailable() {
 		QTemporaryDir     dir;
 		HostControlClient client(dir.filePath("none/control.sock")); // nothing listens here
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		widget.resize(940, 900);
 		widget.show();
@@ -1280,7 +1269,7 @@ private slots:
 		QVERIFY(!widget.findChild<QPushButton*>("streamApply")); // preferences auto-save
 		QVERIFY(widget.findChild<QLineEdit*>("streamBackendPath")->isHidden());
 		QTest::mouseClick(start, Qt::LeftButton);
-		QTRY_VERIFY(SystemctlLog(dir.path()).contains("--user start kyty-host.service"));
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamError")->text().contains("Open AGS"));
 		QTest::qWait(100); // let the fake systemctl exit before the client is destroyed
 		const auto screenshot = qEnvironmentVariable("KYTY_STREAM_UI_SCREENSHOT");
 		if (!screenshot.isEmpty()) {
@@ -1773,7 +1762,7 @@ finally:
 		fake.preferences.insert("disconnect_grace", 30);
 		fake.preferences.insert("host_name", "Studio");
 		HostControlClient client(fake.Path());
-		client.SetSystemctl(MakeFakeSystemctl(dir.path()));
+		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
 		auto*           grace = widget.findChild<QSpinBox*>("streamDisconnectGrace");
 		auto*           name  = widget.findChild<QLineEdit*>("streamHostName");

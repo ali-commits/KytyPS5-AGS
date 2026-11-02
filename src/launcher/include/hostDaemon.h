@@ -34,6 +34,7 @@ public:
 	[[nodiscard]] bool Start(QString* error);
 	// Stops hosting, then emits Finished() once the backend is Stopped or Error (bounded native shutdown plus cleanup).
 	void Shutdown();
+	[[nodiscard]] int ShutdownExitCode() const { return m_shutdown_failed ? 1 : 0; }
 
 	// True while an emulator holds the shared lock $XDG_RUNTIME_DIR/kytyps5/emulator.lock.
 	[[nodiscard]] static bool LocalEmulatorRunning();
@@ -66,6 +67,7 @@ private:
 	int                   m_lock_fd         = -1;
 	bool                  m_restart_pending = false;
 	bool                  m_shutting_down   = false;
+	bool                  m_shutdown_failed = false;
 	bool                  m_started         = false;
 	StreamingSettings     m_restart_settings;
 };

@@ -105,8 +105,9 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	actions->addWidget(m_restart);
 	actions->addWidget(m_status, 1);
 	host_form->addRow(actions);
-	m_autostart = new QCheckBox(tr("Start at login"), host);
+	m_autostart = new QCheckBox(tr("Start AGS at login (minimized)"), host);
 	m_autostart->setObjectName("streamAutostart");
+	m_autostart->setToolTip(tr("Starts AGS at graphical login, minimized when a system tray is available. Existing host services and legacy settings are left unchanged."));
 	host_form->addRow(m_autostart);
 	m_error = new QLabel(host);
 	m_error->setObjectName("streamError");
@@ -416,7 +417,7 @@ StreamingSettings StreamingWidget::Settings() const {
 	return s;
 }
 void StreamingWidget::StartHosting() {
-	// `systemctl start` is a no-op on an active unit, so an idle or failed daemon needs a restart.
+	// Restart only the host owned by this AGS application.
 	if (m_host_status.isEmpty())
 		m_host->StartDaemon();
 	else

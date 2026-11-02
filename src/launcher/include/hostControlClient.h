@@ -9,8 +9,9 @@
 #include <functional>
 
 class QTimer;
+class QProcess;
 
-// Client of the headless Kyty host daemon: control.sock requests plus the systemd user unit.
+// Socket client; the GUI lifetime owner controls its own --host child, never a service.
 class HostControlClient: public QObject {
 	Q_OBJECT
 public:
@@ -22,29 +23,35 @@ public:
 	void Request(const QJsonObject&                                    request,
 	             std::function<void(QJsonObject reply, QString error)> done);
 
-	void StartDaemon();         // systemctl --user start kyty-host.service
-	void RestartDaemon();       // systemctl --user restart kyty-host.service
-	void StopDaemon();          // systemctl --user stop kyty-host.service
-	void SetAutostart(bool on); // systemctl --user enable|disable kyty-host.service
-	void QueryAutostart(std::function<void(bool enabled)> done); // systemctl --user is-enabled
+	void SetLifetimeOwner(const QString& executable = {});
+	void ExitOwnedHost();
+	void StartDaemon();
+	void RestartDaemon();
+	void StopDaemon();
+	void SetAutostart(bool on); // per-user graphical login, minimized
+	void QueryAutostart(std::function<void(bool enabled)> done);
 
-	// Tests inject a fake script. Default: $KYTY_HOST_SYSTEMCTL, else "systemctl".
-	void SetSystemctl(const QString& program) { m_systemctl = program; }
-
-	static constexpr char UNIT[] = "kyty-host.service";
+	void SetAutostartDirectory(const QString& path) { m_autostart_directory = path; }
 
 signals:
+	void OwnedHostStopped(QString error);
 	void StatusChanged(QJsonObject status); // 1 s poll; an empty object = daemon not reachable
-	void CommandFailed(QString message);    // a systemctl action did not succeed
+	void CommandFailed(QString message);    // an owned-host or autostart action failed
 
 private:
 	void Poll();
-	void RunSystemctl(const QStringList& arguments, bool report, std::function<void(bool ok)> done);
 
-	QString m_socket;
-	QString m_systemctl;
-	QTimer* m_timer;
-	bool    m_polling = false;
+	static HostControlClient* s_owner;
+	QProcess*                 m_owned = nullptr;
+	QString                   m_executable;
+	bool                      m_starting = false;
+	bool                      m_restart  = false;
+	bool                      m_stopping = false;
+	QString                   m_process_error;
+	QString                   m_socket;
+	QString                   m_autostart_directory;
+	QTimer*                   m_timer;
+	bool                      m_polling = false;
 };
 
 #endif /* LAUNCHER_INCLUDE_HOST_CONTROL_CLIENT_H_ */

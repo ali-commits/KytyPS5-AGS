@@ -254,7 +254,7 @@ if(BUILD_TESTING)
         src/streamingSettings.cpp src/streamingCatalog.cpp src/streamingAudio.cpp
         src/streamingApi.cpp src/streamingBackend.cpp src/streamingWidget.cpp
         src/agsPairing.cpp src/agsRustStreamingDialog.cpp
-        src/hostControlClient.cpp src/hostSocket.cpp
+        src/hostControlClient.cpp src/hostSocket.cpp src/applicationLifetime.cpp include/applicationLifetime.h
         include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h
         include/agsPairing.h
         include/hostControlClient.h include/hostSocket.h)
@@ -269,4 +269,5 @@ if(BUILD_TESTING)
     target_compile_definitions(launcher_streaming_tests PRIVATE KYTY_LAUNCHER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/LauncherStreamingFixtures.py")
     include(tests/preservation.cmake)
     include(tests/host.cmake)
+    include(tests/lifetime.cmake)
 endif()
