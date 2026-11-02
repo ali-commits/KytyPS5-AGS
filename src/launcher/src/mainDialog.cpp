@@ -663,6 +663,8 @@ void MainDialogPrivate::Update() {
 	const bool busy =
 	    hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
 	m_update_checker->SetGameRunning(hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning);
+	// SetSuspended(false) can synchronously publish the first held-button sample.
+	if (!busy && m_controller_preview.IsSuspended()) m_library->ResetControllerNavigation();
 	m_controller_preview.SetSuspended(busy);
 	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget->parentWidget() && item != nullptr
 	                           ? item->GetInfo().basedir

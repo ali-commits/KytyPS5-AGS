@@ -244,9 +244,18 @@ void LibraryPage::Back() {
 	m_list->setFocus();
 }
 
+void LibraryPage::ResetControllerNavigation() {
+	// Resume samples may contain a confirm held by the game we just left.
+	m_controllerBaselinePending = true;
+}
+
 void LibraryPage::HandleController(const QSet<QString>& pressed) {
 	const auto edges  = pressed - m_previousButtons;
 	m_previousButtons = pressed;
+	if (m_controllerBaselinePending) {
+		m_controllerBaselinePending = false;
+		return;
+	}
 	if (!isVisible() || !window()->isActiveWindow()) return;
 	if (edges.contains("East")) {
 		Back();

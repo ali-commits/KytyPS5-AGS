@@ -27,6 +27,7 @@ public:
     void SetRemoteError(const QString& error);
 	QString SelectedId() const;
 	void    SelectId(const QString& id);
+	void    ResetControllerNavigation();
 	void    HandleController(const QSet<QString>& pressed);
 signals:
 	void SelectionChanged(QString id);
@@ -50,6 +51,7 @@ private:
 	bool               m_launchEnabled = true;
     QString m_launchError, m_remoteError;
 	QSet<QString>      m_previousButtons;
+	bool               m_controllerBaselinePending = true;
 	QLabel*            m_empty;
 	QLabel*            m_artwork;
 };

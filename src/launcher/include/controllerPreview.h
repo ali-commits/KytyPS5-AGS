@@ -22,6 +22,7 @@ public:
 	void SetPreviewEnabled(bool enabled);
 	void Stop();
 	void SetSuspended(bool suspended);
+	[[nodiscard]] bool IsSuspended() const { return m_suspended; }
 
 	[[nodiscard]] const QSet<QString>& Pressed() const { return m_pressed; }
 	[[nodiscard]] const QSet<QString>& RawPressed() const { return m_raw_pressed; }

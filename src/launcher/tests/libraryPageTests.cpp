@@ -135,6 +135,58 @@ private slots:
         QSignalSpy hosts(&page, &LibraryPage::RemoteHostsRequested);
         page.findChild<QPushButton*>("libraryRemoteHosts")->click(); QCOMPARE(hosts.size(), 1);
     }
+	void controllerResumeUsesHeldSnapshotAsBaseline() {
+		LibraryPage page;
+		const QList<LibraryCard> games {{"one", "First", "ps5", "/one", {}, true}};
+		page.SetGames(games);
+		page.show();
+		page.activateWindow();
+		QTest::qWait(20);
+		QVERIFY(page.isActiveWindow());
+		page.findChild<QListWidget*>("libraryGames")->setFocus();
+		page.HandleController({});
+		page.HandleController({"South"});
+		page.SetLaunchEnabled(false);
+		page.SetGames(games); // Remote Changed reloads details while Play is disabled.
+		auto* back = page.findChild<QPushButton*>("libraryBack");
+		auto* list = page.findChild<QListWidget*>("libraryGames");
+		QVERIFY(!page.findChild<QPushButton*>("libraryPlay")->isEnabled());
+		QVERIFY(back->hasFocus());
+		page.HandleController({}); // Suspension clears the preview's raw buttons.
+		page.ResetControllerNavigation();
+		page.HandleController({"South"}); // Immediate resume snapshot: still held.
+		QVERIFY(back->isVisible());
+		QVERIFY(!list->isVisible());
+		page.HandleController({"South"});
+		QVERIFY(back->isVisible());
+		page.HandleController({});
+		page.HandleController({"South"});
+		QVERIFY(list->isVisible());
+	}
+	void controllerFirstSnapshotAndInactiveTracking() {
+		LibraryPage page;
+		page.SetGames({{"one", "First", "ps5", "/one", {}, true}});
+		page.HandleController({"South"}); // First snapshot arrives while hidden.
+		page.show();
+		page.activateWindow();
+		QTest::qWait(20);
+		auto* list = page.findChild<QListWidget*>("libraryGames");
+		list->setFocus();
+		page.HandleController({"South"});
+		QVERIFY(list->isVisible());
+		page.HandleController({});
+		page.HandleController({"South"});
+		QVERIFY(!list->isVisible());
+		page.ResetControllerNavigation();
+		page.HandleController({"South"}); // An active first snapshot is safe too.
+		QSignalSpy play(&page, &LibraryPage::PlayRequested);
+		page.HandleController({"South"});
+		QCOMPARE(play.count(), 0);
+		page.HandleController({});
+		page.HandleController({"South"});
+		page.HandleController({"South"});
+		QCOMPARE(play.count(), 1);
+	}
 	void controllerEdges() {
 		LibraryPage page;
 		page.SetGames({{"one", "First", "ps5", "/one", {}, true},
@@ -144,6 +196,7 @@ private slots:
 		QTest::qWait(20);
 		QVERIFY(page.isActiveWindow());
 		page.findChild<QListWidget*>("libraryGames")->setFocus();
+		page.HandleController({});
 		page.HandleController({"DpadRight"});
 		QCOMPARE(page.SelectedId(), QString("two"));
 		page.HandleController({});
