@@ -9,9 +9,21 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QPushButton>
+#include <QProxyStyle>
 #include <QSignalSpy>
 #include <QStackedWidget>
 #include <QTest>
+class ActivationStyle final: public QProxyStyle {
+public:
+    explicit ActivationStyle(bool singleClick): m_singleClick(singleClick) {}
+    int styleHint(StyleHint hint, const QStyleOption* option = nullptr,
+                  const QWidget* widget = nullptr, QStyleHintReturn* data = nullptr) const override {
+        return hint == SH_ItemView_ActivateItemOnSingleClick ? int(m_singleClick)
+            : QProxyStyle::styleHint(hint, option, widget, data);
+    }
+private:
+    bool m_singleClick;
+};
 class LibraryPageTests: public QObject {
 	Q_OBJECT
 private slots:
@@ -20,6 +32,38 @@ private slots:
 		QVERIFY(style.open(QIODevice::ReadOnly));
 		qApp->setStyleSheet(QString::fromUtf8(style.readAll()));
 	}
+    void pointerOpensDetailsBeforePlay_data() {
+        QTest::addColumn<bool>("singleClick");
+        QTest::newRow("double-click-desktop") << false;
+        QTest::newRow("single-click-desktop") << true;
+    }
+    void pointerOpensDetailsBeforePlay() {
+        QFETCH(bool, singleClick);
+        LibraryPage page;
+        page.SetGames({{"ps5-id", "A game", "ps5", "/fixture/game", {}, true}});
+        auto* list = page.findChild<QListWidget*>("libraryGames");
+        ActivationStyle style(singleClick);
+        list->setStyle(&style);
+        page.resize(960, 540);
+        page.show();
+        QTest::qWait(20);
+        QSignalSpy play(&page, &LibraryPage::PlayRequested);
+        auto* action = page.findChild<QPushButton*>("libraryPlay");
+        const auto point = list->visualItemRect(list->item(0)).center();
+        QTest::mouseClick(list->viewport(), Qt::RightButton, Qt::NoModifier, point);
+        QVERIFY(list->isVisible());
+        QVERIFY(!action->isVisible());
+        QCOMPARE(play.count(), 0);
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+        QVERIFY(action->isVisible());
+        QVERIFY(!list->isVisible());
+        QCOMPARE(play.count(), 0);
+        QTest::mouseClick(action, Qt::LeftButton);
+        QCOMPARE(play.count(), 1);
+        QCOMPARE(play.first().first().toString(), QString("/fixture/game"));
+        list->setStyle(nullptr);
+    }
+
 	void detailsPlayAndBack() {
 		LibraryPage page;
 		page.SetGames({{"ps5-id", "A game", "ps5", "/fixture/game", {}, true}});

@@ -39,6 +39,7 @@ signals:
 	void SettingsRequested();
 
 private:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 	void               ShowDetails();
 	void               Back();
 	void               ApplyFilter();

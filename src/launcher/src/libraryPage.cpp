@@ -113,7 +113,10 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	details->setObjectName("libraryDetails");
 	browseLayout->addWidget(details);
 	connect(details, &QPushButton::clicked, this, &LibraryPage::ShowDetails);
-	connect(m_list, &QListWidget::itemActivated, this, [this] { ShowDetails(); });
+	// clicked is left-button only; itemActivated follows the platform activation
+    // policy and can also fire for a right click under single-click styles.
+    connect(m_list, &QListWidget::itemClicked, this, [this] { ShowDetails(); });
+    m_list->installEventFilter(this);
 	connect(search, &QLineEdit::textChanged, this, [this] { ApplyFilter(); });
 	m_pages->addWidget(browse);
 	auto* detail       = new QWidget(this);
@@ -225,6 +228,17 @@ void LibraryPage::SetRemoteError(const QString& error) {
     m_remoteError = error;
     if (m_pages->currentIndex() == 1) ShowDetails();
 }
+bool LibraryPage::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_list && event->type() == QEvent::KeyPress) {
+        const auto* key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            ShowDetails();
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void LibraryPage::ShowDetails() {
 	int row = m_list->currentRow();
 	if (row < 0 || m_list->item(row)->isHidden()) return;
