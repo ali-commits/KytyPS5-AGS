@@ -230,6 +230,9 @@ def main():
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         with private_lock(state/'emulator.lock.launch') as admission:
             fcntl.flock(admission, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            marker = state/'emulator.lock.host-steam-owner'
+            if marker.exists() or marker.is_symlink():
+                raise ValueError('Steam ownership recovery required')
             with private_lock(state/'emulator.lock') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if legacy_emulator_running():

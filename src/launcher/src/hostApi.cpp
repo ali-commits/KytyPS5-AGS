@@ -243,7 +243,29 @@ void HostApi::ConfigureNativeLaunch(const QString& interpreter, const QString& l
 	m_local_lock = lock_path;
 	m_runtime_root = runtime_root;
 }
+bool HostApi::NativeOwnershipBlocked() const {
+    const QFileInfo marker(m_local_lock + ".host-steam-owner");
+    return !m_local_lock.isEmpty() && (marker.exists() || marker.isSymLink());
+}
+bool HostApi::NativeOwnershipRecoveryRequired() const {
+    if (!NativeOwnershipBlocked()) return false;
+    const auto path = QFile::encodeName(m_local_lock + ".host-steam-owner");
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return true;
+    struct stat metadata {};
+    if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+        metadata.st_uid != ::geteuid() || (metadata.st_mode & 0077) || metadata.st_size > 4096) {
+        ::close(fd);
+        return true;
+    }
+    QFile marker;
+    if (!marker.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { ::close(fd); return true; }
+    const auto record = QJsonDocument::fromJson(marker.read(4097)).object();
+    return record["guard_start"].toString().isEmpty() ||
+        ProcessStart(record["guard_pid"].toInteger()) != record["guard_start"].toString();
+}
 void HostApi::ReapRuntime() {
+    if (NativeOwnershipBlocked()) return;
 	if (!m_runtime.session_id.isEmpty() &&
 	    (ProcessStart(m_runtime.owner_pid) != m_runtime.owner_start ||
 	     (!m_runtime.acquired && MonotonicMs() >= m_runtime.deadline_ms) ||
@@ -359,7 +381,9 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 	static const QRegularExpression TOKEN("\\A[0-9a-f]{64}\\z");
 	if (!TOKEN.match(session).hasMatch() || !TOKEN.match(token).hasMatch() || body["client_id"] != client_id)
 		return done(Error(400, "invalid-runtime"));
-	if (state == "closed" && m_runtime.session_id.isEmpty()) return done(Json(200, {{"ok", true}}));
+	if ((state == "starting" || state == "closed") && NativeOwnershipBlocked())
+        return done(Error(409, "host-ownership-blocked"));
+    if (state == "closed" && m_runtime.session_id.isEmpty()) return done(Json(200, {{"ok", true}}));
 	if (state == "starting") {
 		if (!m_runtime.session_id.isEmpty()) return done(Error(409, "host-busy"));
 		const auto& launch = m_resolved.game;
@@ -383,7 +407,10 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 	if (session != m_runtime.session_id || token != m_runtime.token || client_id != m_runtime.client_id ||
 	    game_id != m_runtime.game || runtime != m_runtime.directory || m_runtime.owner_start.isEmpty() ||
 	    ProcessStart(m_runtime.owner_pid) != m_runtime.owner_start) return done(Error(409, "runtime-mismatch"));
-	if (state == "ready") return done(Json(200, {{"acquired", m_runtime.acquired}}));
+	if (state == "ready") {
+        if (NativeOwnershipRecoveryRequired()) return done(Error(409, "host-ownership-blocked"));
+        return done(Json(200, {{"acquired", m_runtime.acquired}}));
+    }
 	if (state == "closed") { ClearRuntime(); return done(Json(200, {{"ok", true}})); }
 	if (state == "claim" && !m_runtime.claimed && !m_runtime.acquired && MonotonicMs() < m_runtime.deadline_ms) {
 		m_runtime.claimed = true;
@@ -616,6 +643,7 @@ std::unique_ptr<Configuration> HostApi::TrophyConfiguration(const GameEntry& gam
 
 void HostApi::Library(const Client& client, const std::function<void(HostReply)>& done) const {
 	auto status = m_status();
+    if (NativeOwnershipBlocked()) status.pc_busy = true;
 	if (!m_runtime.game.isEmpty()) { status.running_id = m_runtime.game; status.pc_busy = true; }
 	QJsonArray games;
 	for (const auto& game: m_library->Games()) {

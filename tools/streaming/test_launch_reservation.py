@@ -41,6 +41,14 @@ class LaunchReservationTests(unittest.TestCase):
         self.assertFalse((self.runtime/'child-ran').exists())
         self.assertFalse((self.prefix/'_CrashCapture').exists())
 
+    def test_residual_steam_ownership_blocks_local_child_with_free_locks(self):
+        marker = self.state/'emulator.lock.host-steam-owner'
+        marker.write_text('{"verified_empty":false}')
+        result = self.run_guard()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.runtime/'child-ran').exists())
+        self.assertTrue(marker.exists())
+
     def test_adopts_lifetime_fd_and_keeps_diagnostics_isolated(self):
         lock_path = self.state/'emulator.lock'
         with lock_path.open('w') as lock, (self.state/'emulator.lock.launch').open('w') as admission:

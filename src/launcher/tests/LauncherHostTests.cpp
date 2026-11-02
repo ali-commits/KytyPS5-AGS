@@ -410,6 +410,25 @@ private slots:
 		QVERIFY(::flock(admission, LOCK_EX | LOCK_NB) == 0);
 		::flock(admission, LOCK_UN);
 		QCOMPARE(send("claim").status, 409);
+        // A durable ownership barrier survives guard exit and a free lock.
+        const auto marker = lockPath + ".host-steam-owner";
+        WriteFile(marker, R"({"version":1,"guard_pid":1,"guard_start":"not-this-process","verified_empty":false})");
+        QVERIFY(resolver.NativeOwnershipBlocked());
+        QVERIFY(resolver.NativeOwnershipRecoveryRequired());
+        ::flock(local, LOCK_UN);
+        QCOMPARE(send("ready").status, 409);
+        QCOMPARE(send("closed").status, 409);
+        QCOMPARE(send("starting").status, 409);
+        QVERIFY(!resolver.NativeRuntimeGameId().isEmpty());
+        // Reconstructing the owner must still fail closed without runtime state.
+        HostApi restarted {&library, [] { return HostApi::Status {}; }};
+        restarted.ConfigureNativeLaunch("/usr/bin/true", lockPath, config.path());
+        QVERIFY(restarted.NativeOwnershipBlocked());
+        QVERIFY(restarted.NativeOwnershipRecoveryRequired());
+        QCOMPARE(Call(restarted, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}})).status, 200);
+        QCOMPARE(Call(restarted, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status, 409);
+        // The test owns this synthetic marker; product client clear cannot remove it.
+        QVERIFY(QFile::remove(marker));
 		QCOMPARE(send("closed").status, 200);
 		::close(local); ::close(admission);
 	}

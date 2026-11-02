@@ -32,6 +32,8 @@ public:
 	void ConfigureNativeLaunch(const QString& interpreter, const QString& lock_path,
 	                           const QString& runtime_root = {});
 
+	[[nodiscard]] bool NativeOwnershipBlocked() const;
+	[[nodiscard]] bool NativeOwnershipRecoveryRequired() const;
 	[[nodiscard]] QString NativeRuntimeGameId() const { return m_runtime.game; }
 
 	// request: {"method":"GET|PUT|POST","path":"/kyty/v1/...","body":{...}?,"if_none_match":"..."?,

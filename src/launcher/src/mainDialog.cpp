@@ -88,7 +88,8 @@ public:
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
 	[[nodiscard]] bool           StreamGameRunning() const {
-		return m_host_status.value("stream_game_running").toBool();
+		return m_host_status.value("stream_game_running").toBool() ||
+               m_host_status.value("ownership_blocked").toBool();
 	}
 
 	static void WriteSettings(QSettings& s);

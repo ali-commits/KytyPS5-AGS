@@ -344,20 +344,22 @@ QJsonObject HostDaemon::StatusObject() const {
 	}
 	const auto state = m_backend.GetState();
 	const auto name  = QMetaEnum::fromType<StreamingBackend::State>().valueToKey(int(state));
-	return {{"state", QString::fromLatin1(name)},
-	        {"error", m_backend.Error()},
+    const bool recovery = m_api.NativeOwnershipRecoveryRequired();
+	return {{"state", recovery ? QStringLiteral("Error") : QString::fromLatin1(name)},
+	        {"error", recovery ? QStringLiteral("Steam ownership recovery required") : m_backend.Error()},
+	        {"ownership_blocked", m_api.NativeOwnershipBlocked()},
 	        {"address", LanAddress()},
 	        {"port", m_backend.NativeStatus().value("address").toString().section(':', -1).toInt()},
 	        {"native", m_backend.NativeStatus()},
 	        {"pairing_open", state == StreamingBackend::State::Ready &&
 	                             PairingEnrollmentOpen(m_backend.NativeProfile(), QDateTime::currentMSecsSinceEpoch())},
 	        {"backend", m_backend.Version()},
-	        {"session", !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
+	        {"session", recovery ? QStringLiteral("Steam ownership recovery required") : !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
 	                            !m_backend.ClosingSession()
 	                        ? QStringLiteral("Starting game…")
 							: m_backend.Session()},
 	        {"stream_game_running",
-	         m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty()},
+	         !recovery && (m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty())},
 	        {"local_game_running", LocalGameRunning()},
 	        {"pairings", pairings},
 	        {"clients", clients},
