@@ -13,6 +13,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QWidget>
 class LifetimeTests: public QObject {
 	Q_OBJECT
@@ -48,8 +49,8 @@ private slots:
 		owner.StartDaemon();
 		owner.StartDaemon();
 		QTest::qWait(150);
-		owner.ExitOwnedHost();
-		owner.ExitOwnedHost();
+		owner.StopDaemon();
+		owner.StopDaemon();
 		QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 3000);
 		QCOMPARE(stopped.at(0).at(0).toString(), QString());
 		QCOMPARE(errors.count(), 0);
@@ -57,6 +58,56 @@ private slots:
 		QTest::qWait(150);
 		owner.ExitOwnedHost();
 		QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 2, 3000);
+	}
+	void exitCannotBeReversedByRestartOrStart() {
+		QTemporaryDir dir;
+		QFile         script(dir.filePath("fake-host"));
+		QVERIFY(script.open(QIODevice::WriteOnly));
+		script.write("#!/bin/sh\necho started >> \"$0.started\"\ntrap 'sleep 0.15; exit 0' "
+		             "TERM\nwhile :; do sleep 0.05; done\n");
+		script.close();
+		QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		HostControlClient owner(dir.filePath("missing.sock"));
+		owner.SetLifetimeOwner(script.fileName());
+		QSignalSpy stopped(&owner, &HostControlClient::OwnedHostStopped);
+		owner.StartDaemon();
+		QTRY_VERIFY(QFile::exists(script.fileName() + ".started"));
+		owner.ExitOwnedHost();
+		owner.RestartDaemon();
+		owner.StartDaemon();
+		QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 1500);
+		QCOMPARE(stopped.at(0).at(0).toString(), QString());
+		owner.RestartDaemon();
+		owner.StartDaemon();
+		QTest::qWait(200);
+		QFile starts(script.fileName() + ".started");
+		QVERIFY(starts.open(QIODevice::ReadOnly));
+		QCOMPARE(starts.readAll(), QByteArray("started\n"));
+	}
+	void exitCancelsLateReadinessProbe() {
+		QTemporaryDir dir;
+		QFile         script(dir.filePath("fake-host"));
+		QVERIFY(script.open(QIODevice::WriteOnly));
+		script.write(
+		    "#!/bin/sh\ntouch \"$0.started\"\ntrap 'exit 0' TERM\nwhile :; do sleep 0.05; done\n");
+		script.close();
+		QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		HostSocketServer server([](const QJsonObject&, std::function<void(HostReply)> done) {
+			QTimer::singleShot(
+			    50, [done] { done({503, "application/json", "{\"error\":\"not ready\"}", {}}); });
+		});
+		QString          error;
+		QVERIFY(server.Listen(dir.filePath("control.sock"), &error));
+		HostControlClient owner(dir.filePath("control.sock"));
+		owner.SetLifetimeOwner(script.fileName());
+		QSignalSpy stopped(&owner, &HostControlClient::OwnedHostStopped);
+		owner.StartDaemon();
+		owner.ExitOwnedHost();
+		owner.RestartDaemon();
+		owner.StartDaemon();
+		QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 1500);
+		QTest::qWait(150);
+		QVERIFY(!QFile::exists(script.fileName() + ".started"));
 	}
 	void failedOwnedShutdownIsReported() {
 		QTemporaryDir dir;

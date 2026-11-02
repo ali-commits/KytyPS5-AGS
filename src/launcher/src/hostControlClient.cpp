@@ -100,10 +100,14 @@ void HostControlClient::StartDaemon() {
 		emit CommandFailed(tr("Open AGS to start its owned host."));
 		return;
 	}
-	if (m_owned || m_starting) return;
+	if (m_exit_requested || m_owned || m_starting) return;
 	m_starting = true;
 	Request({{"type", "status"}}, [this](QJsonObject, QString error) {
 		m_starting = false;
+		if (m_exit_requested) {
+			emit OwnedHostStopped({});
+			return;
+		}
 		if (error.isEmpty()) {
 			emit CommandFailed(tr("An independent AGS host is already running. Stop its existing "
 			                      "service or diagnostic --host process, then select Start. AGS "
@@ -127,12 +131,12 @@ void HostControlClient::StartDaemon() {
 			        : tr("AGS host did not shut down cleanly. %1").arg(m_process_error.trimmed());
 			const bool stopping = m_stopping;
 			m_stopping          = false;
-			if (m_restart && error.isEmpty()) {
+			if (m_restart && !m_exit_requested && error.isEmpty()) {
 				m_restart = false;
 				StartDaemon();
 			} else {
 				m_restart = false;
-				if (stopping)
+				if (stopping || m_exit_requested)
 					emit OwnedHostStopped(error);
 				else
 					emit CommandFailed(
@@ -160,6 +164,7 @@ void HostControlClient::RestartDaemon() {
 		s_owner->RestartDaemon();
 		return;
 	}
+	if (m_exit_requested) return;
 	if (!m_owned) {
 		StartDaemon();
 		return;
@@ -191,11 +196,14 @@ void HostControlClient::StopDaemon() {
 	});
 }
 void HostControlClient::ExitOwnedHost() {
-	m_restart = false;
-	if (m_starting) {
-		QTimer::singleShot(100, this, &HostControlClient::ExitOwnedHost);
+	if (s_owner && s_owner != this) {
+		s_owner->ExitOwnedHost();
 		return;
 	}
+	// Exit is terminal: neither a queued UI action nor a late probe may recreate the owner.
+	m_exit_requested = true;
+	m_restart        = false;
+	if (m_starting) return; // the outstanding readiness callback completes Exit without spawning
 	if (!m_owned) {
 		emit OwnedHostStopped({});
 		return;

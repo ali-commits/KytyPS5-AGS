@@ -44,9 +44,10 @@ private:
 	static HostControlClient* s_owner;
 	QProcess*                 m_owned = nullptr;
 	QString                   m_executable;
-	bool                      m_starting = false;
-	bool                      m_restart  = false;
-	bool                      m_stopping = false;
+	bool                      m_starting       = false;
+	bool                      m_exit_requested = false;
+	bool                      m_restart        = false;
+	bool                      m_stopping       = false;
 	QString                   m_process_error;
 	QString                   m_socket;
 	QString                   m_autostart_directory;
