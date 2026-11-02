@@ -3,6 +3,7 @@
 #include "remoteHostsWidget.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QEventLoop>
 #include <QFile>
 #include <QJsonDocument>
@@ -76,6 +77,85 @@ elif command=='close':
  print('{"ok":true,"running":null,"session_id":null}')
 )PY",
 		      true);
+	}
+	void receiverCapsPersistAndLegacyProfilesKeepDefaults() {
+		{
+			RemoteClient original(RemoteClient::TestOptions {script, settings, 2500});
+			original.AddProfile("PC", "127.0.0.1:4444", profile);
+			QTRY_COMPARE(original.Cards().size(), 1);
+			QFile saved(settings);
+			QVERIFY(saved.open(QIODevice::ReadOnly));
+			const auto document = QJsonDocument::fromJson(saved.readAll());
+			saved.close();
+			const auto profiles = document.isArray()
+			                          ? document.array()
+			                          : document.object().value("profiles").toArray();
+			write(settings, QJsonDocument(profiles).toJson()); // genuine legacy array-only settings
+		}
+		{
+			RemoteClient legacy(RemoteClient::TestOptions {script, settings, 2500});
+			QCOMPARE(legacy.Cards().size(), 1);
+			QCOMPARE(legacy.Quality().width, 1920);
+			QCOMPARE(legacy.Quality().height, 1080);
+			QCOMPARE(legacy.Quality().fps, 60);
+			QVERIFY(legacy.SetQuality(1280, 720, 30));
+		}
+		RemoteClient restored(RemoteClient::TestOptions {script, settings, 2500});
+		QCOMPARE(restored.Cards().size(), 1);
+		QCOMPARE(restored.Quality().width, 1280);
+		QCOMPARE(restored.Quality().height, 720);
+		QCOMPARE(restored.Quality().fps, 30);
+		RemoteHostsWidget page(&restored);
+		QCOMPARE(page.findChild<QComboBox*>("remoteQuality")->currentText(),
+		         QString("720p · up to 30 fps"));
+		QFile saved(settings);
+		QVERIFY(saved.open(QIODevice::ReadOnly));
+		const auto bytes = saved.readAll();
+		QVERIFY(QJsonDocument::fromJson(bytes).isObject());
+		QVERIFY(!bytes.contains("token"));
+		QVERIFY(!(saved.permissions() &
+		          (QFile::ReadGroup | QFile::WriteGroup | QFile::ReadOther | QFile::WriteOther)));
+		page.findChild<QComboBox*>("remoteQuality")->setCurrentIndex(2);
+		RemoteClient afterUiChange(RemoteClient::TestOptions {script, settings, 2500});
+		QCOMPARE(afterUiChange.Quality().width, 1920);
+		QCOMPARE(afterUiChange.Quality().height, 1080);
+		QCOMPARE(afterUiChange.Quality().fps, 30);
+	}
+	void invalidPersistedCapsDefaultWithoutDroppingProfilesOrRewriting() {
+		for (const auto& limits:
+		     {QJsonObject {{"width", 63}, {"height", 720}, {"fps", 30}},
+		      QJsonObject {{"width", 1280}, {"height", 720}, {"fps", 241}},
+		      QJsonObject {{"width", 1280.5}, {"height", 720}, {"fps", 30}},
+		      QJsonObject {{"width", "1280"}, {"height", 720}, {"fps", 30}}, QJsonObject {}}) {
+			const QJsonArray profiles {QJsonObject {
+			    {"id", "00000000-0000-4000-8000-000000000001"},
+			    {"name", "PC"},
+			    {"endpoint", "127.0.0.1:4444"},
+			    {"directory", profile},
+			    {"games", QJsonArray {QJsonObject {{"id", "fixture"}, {"name", "Fixture"}}}}}};
+			const auto       bytes =
+			    QJsonDocument(
+			        QJsonObject {{"version", 1}, {"profiles", profiles}, {"receiver", limits}})
+			        .toJson();
+			write(settings, bytes);
+			RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+			QCOMPARE(client.Cards().size(), 1);
+			QFile unchanged(settings);
+			QVERIFY(unchanged.open(QIODevice::ReadOnly));
+			QCOMPARE(unchanged.readAll(), bytes);
+			QCOMPARE(client.Quality().width, 1920);
+			QCOMPARE(client.Quality().height, 1080);
+			QCOMPARE(client.Quality().fps, 60);
+		}
+		RemoteClient valid(RemoteClient::TestOptions {script, settings, 2500});
+		QVERIFY(valid.SetQuality(1600, 900, 59));
+		QVERIFY(!valid.SetQuality(8193, 900, 59));
+		RemoteClient restored(RemoteClient::TestOptions {script, settings, 2500});
+		QCOMPARE(restored.Quality().width, 1600);
+		QCOMPARE(restored.Quality().height, 900);
+		QCOMPARE(restored.Quality().fps, 59);
+		RemoteHostsWidget page(&restored);
+		QVERIFY(page.findChild<QComboBox*>("remoteQuality")->currentText().contains("1600"));
 	}
 	void offlineCacheAndCompositeIdentity() {
 		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});

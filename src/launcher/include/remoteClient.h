@@ -42,6 +42,10 @@ public:
 	bool    Forget(const QString& id);
 	bool    Play(const QString& compositeId);
 	bool    SetQuality(int width, int height, int fps);
+	struct Limits {
+		int width, height, fps;
+	};
+	Limits Quality() const { return {m_width, m_height, m_fps}; }
 	struct Controller {
 		QString name, path;
 	};

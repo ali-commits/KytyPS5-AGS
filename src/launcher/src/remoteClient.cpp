@@ -26,7 +26,10 @@
 namespace {
 constexpr qint64 MaxReply    = 1024 * 1024;
 constexpr qint64 MaxSettings = 32 * MaxReply;
-bool             Text(const QString& text, int max) {
+bool             ValidLimits(int width, int height, int fps) {
+	return width >= 64 && width <= 8192 && height >= 64 && height <= 8192 && fps >= 1 && fps <= 240;
+}
+bool Text(const QString& text, int max) {
 	if (text.isEmpty() || text.size() > max) return false;
 	for (auto ch: text)
 		if (ch.category() == QChar::Other_Control) return false;
@@ -388,12 +391,11 @@ QList<LibraryCard> RemoteClient::Cards() const {
 	return result;
 }
 bool RemoteClient::SetQuality(int width, int height, int fps) {
-	if (Busy() || width < 64 || width > 8192 || height < 64 || height > 8192 || fps < 1 ||
-	    fps > 240)
-		return false;
+	if (Busy() || !ValidLimits(width, height, fps)) return false;
 	m_width  = width;
 	m_height = height;
 	m_fps    = fps;
+	Save();
 	return true;
 }
 QList<RemoteClient::Controller> RemoteClient::Controllers() const {
@@ -568,7 +570,28 @@ void RemoteClient::Load() {
 	if (!PrivatePath(m_settingsFile, false, true, MaxSettings)) return;
 	QFile file(m_settingsFile);
 	if (!file.open(QIODevice::ReadOnly)) return;
-	const auto array = QJsonDocument::fromJson(file.read(MaxSettings + 1)).array();
+	const auto document = QJsonDocument::fromJson(file.read(MaxSettings + 1));
+	QJsonArray array;
+	if (document.isArray())
+		array = document.array(); // legacy profile-only settings
+	else {
+		const auto object = document.object();
+		if (object.value("version").toInt() != 1 || !object.value("profiles").isArray()) return;
+		array               = object.value("profiles").toArray();
+		const auto receiver = object.value("receiver").toObject();
+		auto       integer  = [&receiver](const QString& key) {
+			const auto value  = receiver.value(key);
+			const int  number = value.toInt(-1);
+			return value.isDouble() && value.toDouble() == number ? number : -1;
+		};
+		const int width = integer("width"), height = integer("height"), fps = integer("fps");
+		if (ValidLimits(width, height, fps)) {
+			m_width  = width;
+			m_height = height;
+			m_fps    = fps;
+		}
+		// Missing/malformed limits retain native defaults without dropping valid profiles.
+	}
 	if (array.size() > 32) return;
 	QSet<QString> paths;
 	for (const auto value: array) {
@@ -611,7 +634,13 @@ void RemoteClient::Save() {
 		return;
 	}
 	QSaveFile  file(m_settingsFile);
-	const auto bytes = QJsonDocument(array).toJson();
+	const auto bytes =
+	    QJsonDocument(
+	        QJsonObject {{"version", 1},
+			             {"profiles", array},
+			             {"receiver",
+			              QJsonObject {{"width", m_width}, {"height", m_height}, {"fps", m_fps}}}})
+	        .toJson();
 	if (bytes.size() > MaxSettings) {
 		emit Error(tr("Remote library cache exceeds its storage limit."));
 		return;

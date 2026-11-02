@@ -65,13 +65,22 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 	layout->addLayout(buttons);
 	auto* quality = new QComboBox(this);
 	quality->setObjectName("remoteQuality");
-	quality->addItem(tr("720p · up to 30 fps"));
-	quality->addItem(tr("720p · up to 60 fps"));
-	quality->addItem(tr("1080p · up to 30 fps"));
-	quality->addItem(tr("1080p · up to 60 fps"));
-	quality->setCurrentIndex(3);
+	quality->addItem(tr("720p · up to 30 fps"), QVariantList {1280, 720, 30});
+	quality->addItem(tr("720p · up to 60 fps"), QVariantList {1280, 720, 60});
+	quality->addItem(tr("1080p · up to 30 fps"), QVariantList {1920, 1080, 30});
+	quality->addItem(tr("1080p · up to 60 fps"), QVariantList {1920, 1080, 60});
+	const auto         saved = client->Quality();
+	const QVariantList savedData {saved.width, saved.height, saved.fps};
+	int                qualityIndex = quality->findData(savedData);
+	if (qualityIndex < 0) {
+		quality->addItem(
+		    tr("%1 × %2 · up to %3 fps").arg(saved.width).arg(saved.height).arg(saved.fps),
+		    savedData);
+		qualityIndex = quality->count() - 1;
+	}
+	quality->setCurrentIndex(qualityIndex);
 	auto* qualityForm = new QFormLayout;
-	qualityForm->addRow(tr("Receiver video limit"), quality);
+	qualityForm->addRow(tr("New-game video caps"), quality);
 	layout->addLayout(qualityForm);
 	auto* controller = new QComboBox(this);
 	controller->setObjectName("remoteController");
@@ -158,8 +167,10 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 			    "Connection forgotten. Private credentials remain in their profile directory."));
 	});
 	connect(stop, &QPushButton::clicked, client, &RemoteClient::StopForExit);
-	connect(quality, &QComboBox::currentIndexChanged, this, [client](int index) {
-		client->SetQuality(index < 2 ? 1280 : 1920, index < 2 ? 720 : 1080, index % 2 ? 60 : 30);
+	connect(quality, &QComboBox::currentIndexChanged, this, [client, quality](int) {
+		const auto limits = quality->currentData().toList();
+		if (limits.size() == 3)
+			client->SetQuality(limits[0].toInt(), limits[1].toInt(), limits[2].toInt());
 	});
 	connect(existing, &QPushButton::clicked, this, [this, client, name, endpoint] {
 		const auto directory =
