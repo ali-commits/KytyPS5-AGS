@@ -143,12 +143,17 @@ RemoteClient::RemoteClient(const TestOptions& options, QObject* parent)
 			emit Error(tr("Cannot start the packaged AGS receiver. Check that libexec/ags-client "
 			              "is installed and executable."));
 			emit Changed();
-			if (m_stopping) FinishStop();
+			if (m_stopping) CloseAfterReceiver();
 		}
+	});
+	connect(&m_receiver, &QProcess::started, this, [this] {
+		if (m_stopping) InterruptReceiver();
 	});
 	connect(&m_receiver, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
 		if (m_stopping) {
-			FinishStop();
+			// SIGINT during native startup may exit nonzero before its handler is installed.
+			// Only a final authenticated Close after termination proves remote cleanup.
+			CloseAfterReceiver();
 			return;
 		}
 		if (code == 0 && status == QProcess::NormalExit)
@@ -488,6 +493,7 @@ void RemoteClient::StopForExit() {
 	if (m_stopping) return;
 	m_stopping = true;
 	m_stopError.clear();
+	m_closeStarted      = false;
 	m_closeFinished     = false;
 	const auto revision = ++m_stopRevision;
 	for (auto& p: m_profiles)
@@ -500,39 +506,56 @@ void RemoteClient::StopForExit() {
 		m_pair->kill();
 		m_pair = nullptr;
 	}
+	// Quiesce this producer before obtaining a final host snapshot. An idle Close
+	// observed while native startup can still send Launch is not cleanup evidence.
+	if (m_receiver.state() == QProcess::NotRunning)
+		CloseAfterReceiver();
+	else {
+		InterruptReceiver();
+		QTimer::singleShot(20000, this, [this, revision] {
+			if (!m_stopping || revision != m_stopRevision ||
+			    m_receiver.state() == QProcess::NotRunning)
+				return;
+			m_stopError = tr("Receiver did not drain in time and was forcibly stopped.");
+			m_receiver.kill(); // finished() still performs final authenticated Close.
+		});
+	}
+	emit Changed();
+}
+void RemoteClient::InterruptReceiver() {
+	if (m_receiver.state() != QProcess::Running) return; // started() handles QProcess::Starting.
+#ifdef Q_OS_UNIX
+	if (m_receiver.processId() > 0) ::kill(static_cast<pid_t>(m_receiver.processId()), SIGINT);
+#else
+	m_receiver.terminate();
+#endif
+}
+void RemoteClient::CloseAfterReceiver() {
+	if (!m_stopping || m_receiver.state() != QProcess::NotRunning || m_closeStarted) return;
+	m_closeStarted = true;
 	if (m_ownedProfile.isEmpty()) {
 		m_closeFinished = true;
 		FinishStop();
 		return;
 	}
-	const auto p = m_profiles.value(m_ownedProfile);
-	Request(Arguments(p) + QStringList {"close"}, [this, revision](QByteArray data, QString error) {
+	const auto revision = m_stopRevision;
+	const auto profile  = m_profiles.value(m_ownedProfile);
+	Request(Arguments(profile) + QStringList {"close"}, [this, revision](QByteArray data,
+	                                                                     QString    error) {
 		if (revision != m_stopRevision) return;
-		if (error.isEmpty() && !QJsonDocument::fromJson(data).object().value("ok").toBool())
-			error = tr("Host did not confirm closing the remote game.");
-		if (!error.isEmpty())
-			m_stopError =
+		const auto reply = QJsonDocument::fromJson(data).object();
+		if (error.isEmpty() && (!reply.value("ok").toBool() || !reply.value("running").isNull() ||
+		                        !reply.value("session_id").isNull()))
+			error = tr("Host did not confirm an idle session after receiver shutdown.");
+		if (!error.isEmpty()) {
+			if (!m_stopError.isEmpty()) m_stopError += "\n";
+			m_stopError +=
 			    error + tr(" Remote game closure is unconfirmed; host disconnect grace is the "
 				           "fallback. Retry Stop remote game when the host is reachable.");
-		m_closeFinished = true;
-		if (m_receiver.state() != QProcess::NotRunning) {
-#ifdef Q_OS_UNIX
-			if (m_receiver.processId() > 0)
-				::kill(static_cast<pid_t>(m_receiver.processId()), SIGINT);
-#else
-            m_receiver.terminate();
-#endif
-			QTimer::singleShot(20000, this, [this, revision] {
-				if (!m_stopping || revision != m_stopRevision ||
-				    m_receiver.state() == QProcess::NotRunning)
-					return;
-				m_stopError += tr(" Receiver did not drain in time and was forcibly stopped.");
-				m_receiver.kill();
-			});
 		}
+		m_closeFinished = true;
 		FinishStop();
 	});
-	emit Changed();
 }
 void RemoteClient::FinishStop() {
 	if (!m_stopping || !m_closeFinished || m_receiver.state() != QProcess::NotRunning) return;

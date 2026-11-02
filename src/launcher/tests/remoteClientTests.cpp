@@ -59,6 +59,9 @@ elif command=='launch':
  if mode=='fail':sys.exit(1)
  def interrupted(*a):
   with open(__file__+'.interrupted','w') as f:f.write('SIGINT')
+  if mode=='startup-race':
+   with open(__file__+'.host-game-running','w') as f:f.write('late Launch')
+   sys.exit(23)
   sys.exit(0)
  signal.signal(signal.SIGINT,interrupted)
  with open(__file__+'.receiver-pid','w') as f:f.write(str(os.getpid()))
@@ -66,7 +69,11 @@ elif command=='launch':
  while True:time.sleep(.02)
 elif command=='close':
  if mode=='fail':sys.exit(1)
- print('{"ok":true}')
+ if mode=='nonidle':print('{"ok":true,"running":"late","session_id":"late"}');sys.exit(0)
+ if os.path.exists(__file__+'.host-game-running'):os.unlink(__file__+'.host-game-running')
+ if os.path.exists(__file__+'.interrupted'):
+  with open(__file__+'.close-after-drain','w') as f:f.write('confirmed after receiver exit')
+ print('{"ok":true,"running":null,"session_id":null}')
 )PY",
 		      true);
 	}
@@ -203,6 +210,50 @@ elif command=='close':
 		QTest::qWait(50);
 		client.StopForExit();
 		QTRY_COMPARE(stopped.size(), 2);
+	}
+	void startupExitRequiresCloseAfterNonzeroReceiverDrain() {
+		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+		client.AddProfile("PC", "127.0.0.1:4444", profile);
+		QTRY_COMPARE(client.Cards().size(), 1);
+		write(script + ".mode", "startup-race");
+		QVERIFY(client.Play(client.Cards()[0].id));
+		QTRY_VERIFY(QFile::exists(script + ".receiver-pid"));
+		QSignalSpy stopped(&client, &RemoteClient::Stopped);
+		client.StopForExit();
+		QTRY_COMPARE_WITH_TIMEOUT(stopped.size(), 1, 5000);
+		QVERIFY2(stopped[0][0].toString().isEmpty(), qPrintable(stopped[0][0].toString()));
+		QVERIFY(!QFile::exists(script + ".host-game-running"));
+		QVERIFY(QFile::exists(script + ".close-after-drain"));
+		QVERIFY(!client.Busy());
+	}
+	void exitWhileProcessIsStartingStillDrainsBeforeClose() {
+		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+		client.AddProfile("PC", "127.0.0.1:4444", profile);
+		QTRY_COMPARE(client.Cards().size(), 1);
+		QSignalSpy stopped(&client, &RemoteClient::Stopped);
+		QVERIFY(client.Play(client.Cards()[0].id));
+		client.StopForExit();
+		QTRY_COMPARE_WITH_TIMEOUT(stopped.size(), 1, 5000);
+		QVERIFY(stopped[0][0].toString().isEmpty());
+		QVERIFY(!client.Busy());
+	}
+	void finalCloseMustProveIdleNotJustOk() {
+		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+		client.AddProfile("PC", "127.0.0.1:4444", profile);
+		QTRY_COMPARE(client.Cards().size(), 1);
+		QVERIFY(client.Play(client.Cards()[0].id));
+		QTRY_VERIFY(QFile::exists(script + ".receiver-pid"));
+		write(script + ".mode", "nonidle");
+		QSignalSpy stopped(&client, &RemoteClient::Stopped);
+		client.StopForExit();
+		QTRY_COMPARE_WITH_TIMEOUT(stopped.size(), 1, 5000);
+		QVERIFY(!stopped[0][0].toString().isEmpty());
+		QVERIFY(client.Busy());
+		write(script + ".mode", "ok");
+		client.StopForExit();
+		QTRY_COMPARE(stopped.size(), 2);
+		QVERIFY(stopped[1][0].toString().isEmpty());
+		QVERIFY(!client.Busy());
 	}
 	void receiverOwnedOnceAndClosedBeforeStop() {
 		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
