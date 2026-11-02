@@ -121,8 +121,10 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	auto* profile_row  = new QHBoxLayout;
 	m_resolution       = new QComboBox(m_quality);
 	m_resolution->setObjectName("streamResolution");
-	m_resolution->addItems({"Native", "1080p", "1440p"});
-	m_resolution->setCurrentText(settings.resolution);
+	m_resolution->addItem(tr("Default (1080p)"), "Native");
+	m_resolution->addItem("1080p", "1080p");
+	m_resolution->addItem("1440p", "1440p");
+	m_resolution->setCurrentIndex(qMax(0, m_resolution->findData(settings.resolution)));
 	profile_row->addWidget(m_resolution);
 	m_fps = new QComboBox(m_quality);
 	m_fps->setObjectName("streamFps");
@@ -130,7 +132,8 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_fps->addItem("60 FPS", 60);
 	m_fps->addItem("90 FPS", 90);
 	m_fps->addItem("120 FPS", 120);
-	m_fps->setCurrentIndex(settings.fps == 30 ? 0 : 1);
+	const int saved_fps_index = m_fps->findData(settings.fps);
+	m_fps->setCurrentIndex(saved_fps_index >= 0 ? saved_fps_index : m_fps->findData(60));
 	profile_row->addWidget(m_fps);
 	m_bitrate = new QSpinBox(m_quality);
 	m_bitrate->setObjectName("streamBitrate");
@@ -399,7 +402,7 @@ StreamingSettings StreamingWidget::Settings() const {
 	StreamingSettings s;
 	s.backend               = m_path->text();
 	s.port                  = m_port->value();
-	s.resolution            = m_resolution->currentText();
+	s.resolution            = m_resolution->currentData().toString();
 	s.fps                   = m_fps->currentData().toInt();
 	s.bitrate               = m_bitrate->value();
 	s.codec                 = m_codec->currentText();
@@ -453,8 +456,12 @@ void StreamingWidget::ApplyPreferences(const QJsonObject& p) {
 	m_prefs_loaded     = true;
 	m_loading_prefs    = true; // values from the daemon are not user edits
 	if (p.contains("port")) m_port->setValue(p.value("port").toInt());
-	if (p.contains("resolution")) m_resolution->setCurrentText(p.value("resolution").toString());
-	if (p.contains("fps")) m_fps->setCurrentIndex(m_fps->findData(p.value("fps").toInt()));
+	if (p.contains("resolution"))
+		m_resolution->setCurrentIndex(qMax(0, m_resolution->findData(p.value("resolution").toString())));
+	if (p.contains("fps")) {
+		const int index = m_fps->findData(p.value("fps").toInt());
+		m_fps->setCurrentIndex(index >= 0 ? index : m_fps->findData(60));
+	}
 	if (p.contains("bitrate")) m_bitrate->setValue(p.value("bitrate").toInt());
 	if (p.contains("codec")) m_codec->setCurrentText(p.value("codec").toString());
 	if (p.contains("audio_codec"))

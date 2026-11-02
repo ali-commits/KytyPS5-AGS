@@ -612,6 +612,34 @@ private slots:
 		QVERIFY(!error.isEmpty());
 		QCOMPARE(server.requests.size(), 4);
 	}
+	void qualityPreferencesSurviveUnrelatedSave_data() {
+		QTest::addColumn<int>("fps");
+		for (int fps: {30, 60, 90, 120, 999}) QTest::newRow(qPrintable(QString::number(fps))) << fps;
+	}
+	void qualityPreferencesSurviveUnrelatedSave() {
+		QFETCH(int, fps);
+		QTemporaryDir dir;
+		FakeHostDaemon fake(dir.path());
+		fake.preferences.insert("fps", fps);
+		fake.preferences.insert("resolution", "Native");
+		HostControlClient client(fake.Path());
+		client.SetAutostartDirectory(dir.path());
+		StreamingWidget widget(&client);
+		auto* rate = widget.findChild<QComboBox*>("streamFps");
+		auto* resolution = widget.findChild<QComboBox*>("streamResolution");
+		auto* local = widget.findChild<QCheckBox*>("streamShowLocal");
+		QVERIFY(rate && resolution && local);
+		QTRY_VERIFY(!fake.Requests("get-preferences").isEmpty());
+		const int expected = fps == 999 ? 60 : fps;
+		QTRY_COMPARE(rate->currentData().toInt(), expected);
+		QCOMPARE(resolution->currentText(), QString("Default (1080p)"));
+		QCOMPARE(widget.Settings().resolution, QString("Native"));
+		local->setChecked(!local->isChecked());
+		QTRY_VERIFY(!fake.Requests("set-preferences").isEmpty());
+		QCOMPARE(widget.Settings().fps, expected);
+		QCOMPARE(fake.preferences.value("fps").toInt(), fps);
+		QCOMPARE(fake.preferences.value("resolution").toString(), QString("Native"));
+	}
 	void streamingOnlyDisplayRoundTripsThroughDaemonPreferences() {
 		QTemporaryDir dir;
 		FakeHostDaemon fake(dir.path());
