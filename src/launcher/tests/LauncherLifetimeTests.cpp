@@ -164,6 +164,23 @@ private slots:
 		QCOMPARE(ApplicationLifetime::StateForStatus(
 		             {{"pairing_open", true}, {"stream_game_running", true}}),
 		         State::PairingOpen);
+		for (const auto& state: {"Stopped", "Starting", "Stopping", "Error", "Unknown"}) {
+			QCOMPARE(ApplicationLifetime::StateForStatus({{"state", state}}), State::Unavailable);
+			QCOMPARE(ApplicationLifetime::StateForStatus(
+			             {{"state", state}, {"local_game_running", true}}),
+			         State::GameRunning);
+			QCOMPARE(ApplicationLifetime::StateForStatus(
+			             {{"state", state}, {"stream_game_running", true}}),
+			         State::GameRunning);
+		}
+		QCOMPARE(
+		    ApplicationLifetime::StateForStatus({{"state", "Ready"}, {"local_game_running", true}}),
+		    State::GameRunning);
+		QCOMPARE(ApplicationLifetime::StateForStatus({{"state", "Error"},
+		                                              {"local_game_running", true},
+		                                              {"stream_game_running", true},
+		                                              {"pairing_open", true}}),
+		         State::PairingOpen);
 		QVERIFY(!QIcon(":/brand/ags-app-icon.png").isNull());
 		QList<QImage> rendered;
 		for (auto state:
@@ -182,10 +199,28 @@ private slots:
 		QVERIFY(tray);
 		QCOMPARE(tray->toolTip(), QString("AGS — Unavailable"));
 		life.SetStatus({{"state", "Ready"}, {"pairing_open", true}, {"stream_game_running", true}});
-		QCOMPARE(tray->toolTip(), QString("AGS — Game running · Pairing open"));
+		QCOMPARE(tray->toolTip(), QString("AGS — Remote game running · Pairing open"));
 		QCOMPARE(tray->icon().pixmap(22, 22).toImage(), rendered.last());
 		life.SetStatus({{"state", "Ready"}});
 		QCOMPARE(tray->toolTip(), QString("AGS — Ready"));
+		life.SetStatus({{"state", "Ready"}, {"local_game_running", true}});
+		QCOMPARE(tray->toolTip(), QString("AGS — Local game running"));
+		life.SetStatus({{"state", "Error"},
+		                {"local_game_running", true},
+		                {"stream_game_running", true},
+		                {"pairing_open", true}});
+		QCOMPARE(tray->toolTip(),
+		         QString("AGS — Local game running · Remote game running · Pairing open · Error"));
+		for (const auto& state: {"Stopped", "Starting", "Stopping", "Error"}) {
+			life.SetStatus({{"state", state}});
+			QCOMPARE(tray->toolTip(), QString("AGS — ") + state);
+			QCOMPARE(tray->icon().pixmap(22, 22).toImage(), rendered.first());
+		}
+		life.SetStatus({{"state", "Error"},
+		                {"error", "Steam ownership recovery required"},
+		                {"ownership_blocked", true}});
+		QCOMPARE(tray->toolTip(), QString("AGS — Error"));
+		QCOMPARE(tray->icon().pixmap(22, 22).toImage(), rendered.first());
 		life.SetStatus({});
 		QCOMPARE(tray->toolTip(), QString("AGS — Unavailable"));
 	}

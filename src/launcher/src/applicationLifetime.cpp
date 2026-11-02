@@ -103,9 +103,9 @@ void ApplicationLifetime::Stopped(const QString& error) {
 ApplicationLifetime::TrayState ApplicationLifetime::StateForStatus(const QJsonObject& status) {
 	// Pairing is time-sensitive and takes visual priority; the tooltip retains both states.
 	if (status.value("pairing_open").toBool()) return TrayState::PairingOpen;
-	if (status.value("stream_game_running").toBool()) return TrayState::GameRunning;
-	if (status.value("state").toString().trimmed().isEmpty()) return TrayState::Unavailable;
-	return TrayState::Idle;
+	if (status.value("local_game_running").toBool() || status.value("stream_game_running").toBool())
+		return TrayState::GameRunning;
+	return status.value("state").toString() == "Ready" ? TrayState::Idle : TrayState::Unavailable;
 }
 QIcon ApplicationLifetime::TrayIcon(TrayState state) {
 	const QIcon base(QStringLiteral(":/brand/ags-app-icon.png"));
@@ -141,10 +141,11 @@ QIcon ApplicationLifetime::TrayIcon(TrayState state) {
 void ApplicationLifetime::SetStatus(const QJsonObject& status) {
 	if (!m_tray) return;
 	QStringList details;
-	if (status.value("stream_game_running").toBool()) details << tr("Game running");
+	if (status.value("local_game_running").toBool()) details << tr("Local game running");
+	if (status.value("stream_game_running").toBool()) details << tr("Remote game running");
 	if (status.value("pairing_open").toBool()) details << tr("Pairing open");
-	if (details.isEmpty()) {
-		const auto hostState = status.value("state").toString().trimmed();
+	const auto hostState = status.value("state").toString().trimmed();
+	if (details.isEmpty() || (!hostState.isEmpty() && hostState != "Ready")) {
 		details << (hostState.isEmpty() ? tr("Unavailable") : hostState);
 	}
 	m_tray->setToolTip("AGS — " + details.join(" · "));
