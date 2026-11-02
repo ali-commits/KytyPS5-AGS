@@ -9,8 +9,15 @@
 #include <QRegularExpression>
 #include <QSet>
 
+#include <algorithm>
 #include <functional>
 #include <optional>
+#ifdef __unix__
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // Only public installation manifests and an explicit owner recipe file are read.
 namespace SteamSource {
@@ -24,9 +31,43 @@ inline QString Id(const QString& app) {
 	    QCryptographicHash::hash(("steam:" + app).toUtf8(), QCryptographicHash::Sha256).toHex());
 }
 inline QByteArray Read(const QString& path) {
+	constexpr qsizetype limit = 1024 * 1024;
+#ifdef __unix__
+	// Inspect the opened inode, not a prior path lookup. NONBLOCK prevents a FIFO
+	// from blocking before fstat; NOFOLLOW rejects a substituted final symlink.
+	// Parent Steam root aliases remain supported.
+	const int fd =
+	    ::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+	if (fd < 0) return {};
+	struct Close {
+		int fd;
+		~Close() { ::close(fd); }
+	} close {fd};
+	struct stat metadata {};
+	if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_size < 0 ||
+	    metadata.st_size > limit)
+		return {};
+	QByteArray bytes;
+	char       buffer[16384];
+	while (bytes.size() <= limit) {
+		const auto count =
+		    ::read(fd, buffer, std::min<qsizetype>(sizeof(buffer), limit + 1 - bytes.size()));
+		if (count < 0) {
+			if (errno == EINTR) continue;
+			return {};
+		}
+		if (count == 0) return bytes;
+		bytes.append(buffer, count);
+	}
+	return {};
+#else
 	QFile f(path);
-	if (!f.open(QIODevice::ReadOnly) || f.size() > 1024 * 1024) return {};
-	return f.readAll();
+	if (QFileInfo(path).isSymLink() || !QFileInfo(path).isFile() || !f.open(QIODevice::ReadOnly) ||
+	    f.size() > limit)
+		return {};
+	const auto bytes = f.read(limit + 1);
+	return bytes.size() <= limit ? bytes : QByteArray {};
+#endif
 }
 // Strict small KeyValues reader: quoted scalars/objects, escapes, comments; reject malformed input.
 inline QJsonObject Parse(const QByteArray& bytes) {

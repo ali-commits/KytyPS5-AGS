@@ -24,6 +24,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <thread>
 #include <unistd.h>
 
@@ -111,6 +113,45 @@ private slots:
 		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
 	}
 	void cleanup() { QDir::setCurrent(m_old_cwd); }
+	void steamReadsRejectSpecialAndOversizedFiles() {
+		QTemporaryDir fixture;
+		QDir().mkpath(fixture.filePath("steamapps"));
+		const auto fifo = fixture.filePath("steamapps/libraryfolders.vdf");
+		QCOMPARE(::mkfifo(QFile::encodeName(fifo), 0600), 0);
+		const auto child = ::fork();
+		QVERIFY(child >= 0);
+		if (child == 0) ::_exit(SteamSource::Discover({fixture.path()}, {}).isEmpty() ? 0 : 1);
+		int   status = 0;
+		pid_t result = 0;
+		for (int attempt = 0; attempt < 100 && result == 0; ++attempt) {
+			result = ::waitpid(child, &status, WNOHANG);
+			if (result == 0) QTest::qWait(10);
+		}
+		if (result == 0) {
+			::kill(child, SIGKILL);
+			::waitpid(child, &status, 0);
+		}
+		QVERIFY2(result == child, "FIFO discovery did not complete within one second");
+		QVERIFY(WIFEXITED(status));
+		QCOMPARE(WEXITSTATUS(status), 0);
+		QVERIFY(SteamSource::Read("/dev/zero").isEmpty());
+		const auto large = fixture.filePath("appmanifest_1.acf");
+		WriteFile(large, QByteArray(1024 * 1024 + 1, 'x'));
+		QVERIFY(SteamSource::Read(large).isEmpty());
+		const auto regular = fixture.filePath("regular");
+		WriteFile(regular, "fixture");
+		const auto link = fixture.filePath("file-link");
+		QVERIFY(QFile::link(regular, link));
+		QVERIFY(SteamSource::Read(link).isEmpty());
+		const auto alias = fixture.filePath("root-alias");
+		QVERIFY(QFile::link(fixture.path(), alias));
+		QCOMPARE(SteamSource::Read(alias + "/regular"), QByteArray("fixture"));
+		// procfs files report size zero despite having content: the actual read must
+		// still be bounded, rather than treating stat size as the read limit.
+		const auto proc = SteamSource::Read("/proc/version");
+		QVERIFY(!proc.isEmpty());
+		QVERIFY(proc.size() <= 1024 * 1024);
+	}
 	void steamDiscoveryAndOwnedAdmission() {
 		QTemporaryDir fixture;
 		const auto    root = fixture.filePath("steam"), second = fixture.filePath("second");
