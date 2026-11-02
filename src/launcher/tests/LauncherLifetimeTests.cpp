@@ -19,6 +19,17 @@
 class LifetimeTests: public QObject {
 	Q_OBJECT
 private slots:
+    void cleanupPermissionAllowsVisibleWindowToClose() {
+        QDialog window;
+        ApplicationLifetime lifetime(&window, false, [] {});
+        window.show();
+        lifetime.Exit();
+        QSignalSpy ready(&lifetime, &ApplicationLifetime::ReadyToQuit);
+        lifetime.Stopped({});
+        QCOMPARE(ready.size(), 1);
+        QVERIFY(window.close());
+        QVERIFY(!window.isVisible());
+    }
 
 	void pairingAvailabilityRequiresPrivateCurrentTicket() {
 		QTemporaryDir dir;

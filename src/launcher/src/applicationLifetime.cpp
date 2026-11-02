@@ -58,7 +58,7 @@ bool ApplicationLifetime::eventFilter(QObject* object, QEvent* event) {
 		m_window->close();
 		return true;
 	}
-	if (object == m_window && event->type() == QEvent::Close) {
+	if (object == m_window && event->type() == QEvent::Close && !m_allow_quit) {
 		event->ignore();
 		if (m_available)
 			m_window->hide();
