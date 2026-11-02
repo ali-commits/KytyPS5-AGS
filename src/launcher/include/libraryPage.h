@@ -6,6 +6,7 @@
 #include <QString>
 #include <QWidget>
 class QListWidget;
+class QLineEdit;
 class QStackedWidget;
 class QLabel;
 class QPushButton;
@@ -35,8 +36,10 @@ signals:
 private:
 	void               ShowDetails();
 	void               Back();
+	void               ApplyFilter();
 	QList<LibraryCard> m_games;
 	QListWidget*       m_list;
+	QLineEdit*         m_search;
 	QStackedWidget*    m_pages;
 	QLabel *           m_title, *m_source, *m_reason;
 	QPushButton*       m_play;

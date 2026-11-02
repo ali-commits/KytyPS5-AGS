@@ -4,6 +4,7 @@
 #include <QBuffer>
 #include <QFile>
 #include <QImage>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPainter>
 #include <QPushButton>
@@ -39,6 +40,49 @@ private slots:
 		QCOMPARE(page.SelectedId(), QString("ps5-id"));
 		QCOMPARE(selection.count(),
 		         0); // reload must not feed settings persistence back into rescanning
+	}
+
+	void selectionPersistenceKeepsSearchAcrossReload() {
+		LibraryPage        page;
+		QList<LibraryCard> games {{"one", "First", "ps5", "/one", {}, true},
+		                          {"two", "Second", "ps5", "/two", {}, true}};
+		page.SetGames(games);
+		page.show();
+		page.activateWindow();
+		QTest::qWait(20);
+		auto* list      = page.findChild<QListWidget*>("libraryGames");
+		auto* search    = page.findChild<QLineEdit*>("librarySearch");
+		int   persisted = 0;
+		connect(&page, &LibraryPage::SelectionChanged, &page, [&](const QString& id) {
+			if (id.isEmpty()) return;
+			++persisted;
+			page.SetGames(
+			    games); // synchronous WriteSettings -> CatalogChanged -> ReloadLibrary path
+		});
+		search->setText("Second");
+		QVERIFY(list->item(0)->isHidden());
+		list->setFocus();
+		list->setCurrentRow(1);
+		QCOMPARE(persisted, 1);
+		QCOMPARE(search->text(), QString("Second"));
+		QCOMPARE(page.SelectedId(), QString("two"));
+		QVERIFY(list->item(0)->isHidden());
+		QVERIFY(!list->item(1)->isHidden());
+		QVERIFY(list->hasFocus());
+		page.SetGames(games);
+		QVERIFY(list->item(0)->isHidden());
+		QCOMPARE(page.SelectedId(), QString("two"));
+		page.findChild<QPushButton*>("libraryDetails")->click();
+		games.removeLast();
+		page.SetGames(games);
+		QVERIFY(list->isVisible());
+		QVERIFY(list->hasFocus());
+		QVERIFY(page.SelectedId().isEmpty());
+		QVERIFY(list->item(0)->isHidden());
+		QCOMPARE(search->text(), QString("Second"));
+		QSignalSpy play(&page, &LibraryPage::PlayRequested);
+		page.findChild<QPushButton*>("libraryDetails")->click();
+		QCOMPARE(play.count(), 0);
 	}
 	void sourceAndBusyGuards() {
 		LibraryPage page;

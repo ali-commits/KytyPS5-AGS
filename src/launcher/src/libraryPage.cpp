@@ -64,6 +64,8 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	heading->setObjectName("libraryHeading");
 	browseLayout->addWidget(heading);
 	auto* search = new QLineEdit(browse);
+	m_search     = search;
+	search->setObjectName("librarySearch");
 	search->setPlaceholderText(tr("Search games"));
 	search->setClearButtonEnabled(true);
 	search->setAccessibleName(tr("Search games"));
@@ -102,11 +104,7 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	browseLayout->addWidget(details);
 	connect(details, &QPushButton::clicked, this, &LibraryPage::ShowDetails);
 	connect(m_list, &QListWidget::itemActivated, this, [this] { ShowDetails(); });
-	connect(search, &QLineEdit::textChanged, this, [this](const QString& text) {
-		for (int i = 0; i < m_list->count(); ++i)
-			m_list->item(i)->setHidden(!m_games[i].name.contains(text, Qt::CaseInsensitive));
-		if (m_list->currentItem() && m_list->currentItem()->isHidden()) m_list->setCurrentRow(-1);
-	});
+	connect(search, &QLineEdit::textChanged, this, [this] { ApplyFilter(); });
 	m_pages->addWidget(browse);
 	auto* detail       = new QWidget(this);
 	auto* detailLayout = new QVBoxLayout(detail);
@@ -180,7 +178,16 @@ void LibraryPage::SetGames(const QList<LibraryCard>& games) {
 		item->setSizeHint(QSize(196, 184));
 		if (game.id == selected) selectedRow = i;
 	}
-	m_list->setCurrentRow(selectedRow >= 0 ? selectedRow : (games.isEmpty() ? -1 : 0));
+	ApplyFilter();
+	if (selectedRow < 0 || m_list->item(selectedRow)->isHidden()) {
+		selectedRow = -1;
+		for (int row = 0; row < m_list->count(); ++row)
+			if (!m_list->item(row)->isHidden()) {
+				selectedRow = row;
+				break;
+			}
+	}
+	m_list->setCurrentRow(selectedRow);
 	if (m_pages->currentIndex() == 1) {
 		if (m_list->currentRow() >= 0)
 			ShowDetails();
@@ -257,8 +264,24 @@ void LibraryPage::HandleController(const QSet<QString>& pressed) {
 
 void LibraryPage::SelectId(const QString& id) {
 	for (int row = 0; row < m_games.size(); ++row)
-		if (m_games[row].id == id) {
+		if (m_games[row].id == id && !m_list->item(row)->isHidden()) {
 			m_list->setCurrentRow(row);
 			return;
 		}
+}
+
+void LibraryPage::ApplyFilter() {
+	const QSignalBlocker blockSelection(m_list);
+	bool                 anyVisible = false;
+	for (int row = 0; row < m_list->count(); ++row) {
+		const bool hidden = !m_games[row].name.contains(m_search->text(), Qt::CaseInsensitive);
+		m_list->item(row)->setHidden(hidden);
+		anyVisible |= !hidden;
+	}
+	if (m_list->currentItem() && m_list->currentItem()->isHidden()) m_list->setCurrentRow(-1);
+	m_empty->setVisible(!anyVisible);
+	m_empty->setText(m_games.isEmpty()
+	                     ? tr("No games found. Open Settings to add game directories. Steam roots "
+						      "and owned launch recipes are configured in Kyty.ini.")
+						 : tr("No games match your search."));
 }
