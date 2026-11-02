@@ -65,7 +65,7 @@ bool ApplicationLifetime::eventFilter(QObject* object, QEvent* event) {
 		else {
 			auto* box =
 			    new QMessageBox(QMessageBox::Question, tr("Exit AGS"),
-				                tr("No system tray is available. Exit AGS, stop hosting, and close any remote game?"),
+				                tr("No system tray is available. Exit AGS and close active games?"),
 				                QMessageBox::Yes | QMessageBox::No, m_window);
 			box->setAttribute(Qt::WA_DeleteOnClose);
 			connect(box, &QMessageBox::finished, this, [this](int result) {
