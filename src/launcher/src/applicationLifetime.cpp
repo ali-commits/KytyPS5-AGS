@@ -80,6 +80,11 @@ bool ApplicationLifetime::eventFilter(QObject* object, QEvent* event) {
 void ApplicationLifetime::ShowInitial(bool minimized) {
 	if (!minimized || !m_available) m_window->show();
 }
+void ApplicationLifetime::Show() {
+	m_window->showNormal();
+	m_window->raise();
+	m_window->activateWindow();
+}
 void ApplicationLifetime::Exit() {
 	if (m_exiting) return;
 	m_exiting = true;
@@ -88,11 +93,13 @@ void ApplicationLifetime::Exit() {
 void ApplicationLifetime::Stopped(const QString& error) {
 	if (error.isEmpty()) {
 		if (m_exiting) {
+			emit ExitCompleted({});
 			m_allow_quit = true;
 			emit ReadyToQuit();
 		}
 		return;
 	}
+	emit ExitCompleted(error);
 	m_exiting = false;
 	m_window->showNormal();
 	auto* box = new QMessageBox(QMessageBox::Critical, tr("AGS host shutdown failed"), error,

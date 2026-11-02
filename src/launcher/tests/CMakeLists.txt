@@ -24,6 +24,7 @@ if(KYTY_LAUNCHER_WARM_BUILD)
 endif()
 
 include(lifetime.cmake)
+include(gui-instance.cmake)
 
 add_executable(launcher_library_page_tests libraryPageTests.cpp ../src/libraryPage.cpp ../include/libraryPage.h ../resources.qrc)
 set_target_properties(launcher_library_page_tests PROPERTIES AUTORCC ON)

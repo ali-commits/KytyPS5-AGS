@@ -13,6 +13,7 @@ class ApplicationLifetime: public QObject {
 public:
 	ApplicationLifetime(QWidget* window, bool trayAvailable, std::function<void()> stop);
 	void ShowInitial(bool minimized);
+	void Show();
 	void Exit();
 	void Stopped(const QString& error);
 	enum class TrayState { Unavailable, Idle, GameRunning, PairingOpen };
@@ -23,6 +24,7 @@ public:
 	                                QString* error);
 signals:
 	void ReadyToQuit();
+	void ExitCompleted(const QString& error);
 
 protected:
 	bool eventFilter(QObject*, QEvent*) override;
