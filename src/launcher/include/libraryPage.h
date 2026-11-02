@@ -23,12 +23,14 @@ public:
 	explicit LibraryPage(QWidget* parent = nullptr);
 	void    SetGames(const QList<LibraryCard>& games);
 	void    SetLaunchEnabled(bool enabled);
+    void SetLaunchError(const QString& error);
 	QString SelectedId() const;
 	void    SelectId(const QString& id);
 	void    HandleController(const QSet<QString>& pressed);
 signals:
 	void SelectionChanged(QString id);
 	void PlayRequested(QString gamePath);
+    void LocalPlayRequested(QString gameId);
 	void GameActionRequested(QString stableId, QString source);
 	void StreamingRequested();
 	void SettingsRequested();
@@ -44,6 +46,7 @@ private:
 	QLabel *           m_title, *m_source, *m_reason;
 	QPushButton*       m_play;
 	bool               m_launchEnabled = true;
+    QString m_launchError;
 	QSet<QString>      m_previousButtons;
 	QLabel*            m_empty;
 	QLabel*            m_artwork;

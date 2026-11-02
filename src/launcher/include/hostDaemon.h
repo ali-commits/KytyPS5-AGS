@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <QProcess>
 
 // The only Kyty host: owns the streaming backend, the game library, the library API on api.sock
 // and the control protocol on control.sock.
@@ -54,7 +55,14 @@ private:
 	void                         OnBackendChanged();
 	void                         StartHosting(const StreamingSettings& settings);
 	void                         ArmRetry();
+    void StartLocalGame(const QJsonObject& request, std::function<void(HostReply)> done);
+    void LocalFinished(int code, QProcess::ExitStatus status);
 
+    QProcess m_local;
+    QTimer m_local_deadline;
+    QString m_local_id, m_local_title, m_local_error, m_local_stderr;
+    std::function<void(HostReply)> m_local_start_done, m_local_stop_done;
+    bool m_local_started = false;
 	CompatibilityDatabase m_compat;
 	GameLibrary           m_library;
 	StreamingBackend      m_backend;

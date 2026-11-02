@@ -347,7 +347,10 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 	const auto body = request["body"].toObject();
 	if (QJsonDocument(body).toJson(QJsonDocument::Compact).size() > MAX_BODY) return done(Error(413, "body-too-large"));
 	const auto game_id = body["game"].toString();
-	if (request["path"] == "/ags/internal/resolve-launch") {
+	if (request["path"] == "/ags/internal/resolve-launch" || request["path"] == "/ags/internal/resolve-local-launch") {
+        const bool local = request["path"] == "/ags/internal/resolve-local-launch";
+        if (local != (client_id == m_local_client_id)) return done(Error(403, "invalid-local-owner"));
+        if (local && (!m_library->Find(game_id) || m_library->Find(game_id)->source != "steam")) return done(Error(400, "invalid-local-source"));
 		if (body.size() != 1) return done(Error(400, "bad-body"));
 		m_resolved = {};
 		const auto launch = ResolveNative(client_id, game_id);
@@ -390,6 +393,7 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 		const auto& launch = m_resolved.game;
 		const auto pid = body["owner_pid"].toInteger();
 		const auto start = body["owner_start"].toString();
+        if (client_id == m_local_client_id && pid != m_local_owner_pid) return done(Error(403, "invalid-local-owner"));
 		if (launch.isEmpty() || m_resolved.client_id != client_id || launch["id"] != game_id ||
 		    (!m_resolved.trophy_config && m_library->Find(game_id) && m_library->Find(game_id)->info) || !m_library->Find(game_id) || runtime != launch["cwd"].toString() || !(m_library->Find(game_id)->info ? SafeRuntime(runtime) : QFileInfo(runtime).isDir()) ||
 		    start.isEmpty() || ProcessStart(pid) != start) return done(Error(400, "invalid-runtime"));
@@ -400,6 +404,7 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 		}
 		if (LifetimeHeld(m_local_lock) || LegacyEmulatorRunning()) { ::close(admission); return done(Error(409, "host-busy")); }
 		m_reservation_fd = admission;
+		m_local_spawned = false;
 		m_runtime = {session, game_id, client_id, runtime, start, token, pid, false, false,
 		             MonotonicMs() + 30000, std::move(m_resolved.trophy_config)};
 		m_resolved = {};
@@ -408,6 +413,11 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 	if (session != m_runtime.session_id || token != m_runtime.token || client_id != m_runtime.client_id ||
 	    game_id != m_runtime.game || runtime != m_runtime.directory || m_runtime.owner_start.isEmpty() ||
 	    ProcessStart(m_runtime.owner_pid) != m_runtime.owner_start) return done(Error(409, "runtime-mismatch"));
+    if (state == "spawned" && NativeRuntimeIsLocal() && m_runtime.acquired && !m_local_spawned && LifetimeHeld(m_local_lock)) {
+        m_local_spawned = true;
+        emit LocalGameSpawned(game_id);
+        return done(Json(200, {{"ok", true}}));
+    }
 	if (state == "ready") {
         if (NativeOwnershipRecoveryRequired()) return done(Error(409, "host-ownership-blocked"));
         return done(Json(200, {{"acquired", m_runtime.acquired}}));

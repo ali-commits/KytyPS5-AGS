@@ -1,4 +1,7 @@
 #include "hostDaemon.h"
+#include "clientProfiles.h"
+#include <QUuid>
+#include <sys/stat.h>
 
 #include "common/u59Preset.h"
 #include "emulatorCommand.h"
@@ -125,6 +128,33 @@ HostDaemon::HostDaemon(QObject* parent)
 	}
 	m_api.ConfigureNativeLaunch(Interpreter(), QDir(lock_dir).filePath("emulator.lock"),
 	                            qEnvironmentVariable("AGS_SESSION_RUNTIME_ROOT"));
+    m_local_deadline.setSingleShot(true);
+    m_local_deadline.setInterval(30000);
+    connect(&m_local_deadline, &QTimer::timeout, this, [this] {
+        m_local_error = tr("Local game did not finish its launch/cleanup before the deadline.");
+        if (m_local_start_done) { auto done = std::move(m_local_start_done); done(Json(Fail(m_local_error))); }
+        if (m_local_stop_done) { auto done = std::move(m_local_stop_done); done(Json(Fail(m_local_error))); }
+        m_local.terminate(); // Never force-kill the ownership guard or clear unknown ownership.
+    });
+    connect(&m_local, &QProcess::readyReadStandardError, this, [this] {
+        m_local_stderr += QString::fromUtf8(m_local.readAllStandardError());
+        m_local_stderr = m_local_stderr.right(8192);
+    });
+    connect(&m_local, &QProcess::readyReadStandardOutput, this, [this] { m_local.readAllStandardOutput(); });
+    connect(&m_local, &QProcess::finished, this, &HostDaemon::LocalFinished);
+    connect(&m_local, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            m_local_error = m_local.errorString();
+            LocalFinished(-1, QProcess::CrashExit);
+        }
+    });
+    connect(&m_api, &HostApi::LocalGameSpawned, this, [this](const QString& id) {
+        if (id != m_local_id || !m_local_start_done) return;
+        m_local_started = true;
+        m_local_deadline.stop();
+        auto done = std::move(m_local_start_done);
+        done(Json({{"ok", true}, {"game", id}}));
+    });
 	m_reload.setSingleShot(true);
 	m_reload.setInterval(500);
 	m_refresh.setInterval(1000);
@@ -177,6 +207,9 @@ HostDaemon::HostDaemon(QObject* parent)
 }
 
 HostDaemon::~HostDaemon() {
+    // Normal exit uses Shutdown. A forced teardown must not invoke callbacks after
+    // other owner members have been destroyed; any uncertain guard keeps its marker.
+    disconnect(&m_local, nullptr, this, nullptr);
 	if (m_lock_fd >= 0) ::close(m_lock_fd);
 }
 
@@ -210,8 +243,8 @@ bool HostDaemon::LocalEmulatorRunning() {
 }
 
 bool HostDaemon::LocalGameRunning() const {
-	return LocalEmulatorRunning() && !m_backend.StreamGameRunning() &&
-	       m_api.NativeRuntimeGameId().isEmpty();
+	return m_local.state() != QProcess::NotRunning || m_api.NativeRuntimeIsLocal() ||
+           (LocalEmulatorRunning() && !m_backend.StreamGameRunning() && m_api.NativeRuntimeGameId().isEmpty());
 }
 
 QString HostDaemon::Interpreter() {
@@ -301,8 +334,8 @@ void HostDaemon::OnBackendChanged() {
 		StartHosting(m_restart_settings);
 		return;
 	}
-	if (m_shutting_down && Idle(state)) {
-		m_shutdown_failed = state == StreamingBackend::State::Error;
+	if (m_shutting_down && Idle(state) && m_local.state() == QProcess::NotRunning) {
+		m_shutdown_failed = m_shutdown_failed || state == StreamingBackend::State::Error || !m_local_error.isEmpty() || m_api.NativeOwnershipBlocked();
 		if (m_shutdown_failed) qWarning().noquote() << m_backend.Error();
 		m_shutdown_cap.stop();
 		emit Finished();
@@ -322,11 +355,12 @@ void HostDaemon::Shutdown() {
 	m_retry.stop();
 	m_refresh.stop();
 	m_reload.stop();
-	if (Idle(m_backend.GetState())) {
-		QTimer::singleShot(0, this, &HostDaemon::Finished);
-		return;
-	}
 	m_shutdown_cap.start();
+    if (m_local.state() != QProcess::NotRunning) m_local.terminate();
+    if (Idle(m_backend.GetState())) {
+        QTimer::singleShot(0, this, &HostDaemon::OnBackendChanged);
+        return;
+    }
 	m_backend.Stop();
 }
 
@@ -345,8 +379,8 @@ QJsonObject HostDaemon::StatusObject() const {
 	const auto state = m_backend.GetState();
 	const auto name  = QMetaEnum::fromType<StreamingBackend::State>().valueToKey(int(state));
     const bool recovery = m_api.NativeOwnershipRecoveryRequired();
-	return {{"state", recovery ? QStringLiteral("Error") : QString::fromLatin1(name)},
-	        {"error", recovery ? QStringLiteral("Steam ownership recovery required") : m_backend.Error()},
+	return {{"state", recovery || !m_local_error.isEmpty() ? QStringLiteral("Error") : QString::fromLatin1(name)},
+	        {"error", recovery ? QStringLiteral("Steam ownership recovery required") : !m_local_error.isEmpty() ? m_local_error : m_backend.Error()},
 	        {"ownership_blocked", m_api.NativeOwnershipBlocked()},
 	        {"address", LanAddress()},
 	        {"port", m_backend.NativeStatus().value("address").toString().section(':', -1).toInt()},
@@ -354,12 +388,15 @@ QJsonObject HostDaemon::StatusObject() const {
 	        {"pairing_open", state == StreamingBackend::State::Ready &&
 	                             PairingEnrollmentOpen(m_backend.NativeProfile(), QDateTime::currentMSecsSinceEpoch())},
 	        {"backend", m_backend.Version()},
-	        {"session", recovery ? QStringLiteral("Steam ownership recovery required") : !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
+	        {"local_game_id", m_local_id},
+        {"local_game_title", m_local_title},
+        {"local_game_error", m_local_error},
+        {"session", LocalGameRunning() && !m_local_title.isEmpty() ? tr("Local: %1").arg(m_local_title) : recovery ? QStringLiteral("Steam ownership recovery required") : !m_api.NativeRuntimeGameId().isEmpty() && !m_backend.StreamGameRunning() &&
 	                            !m_backend.ClosingSession()
 	                        ? QStringLiteral("Starting game…")
 							: m_backend.Session()},
 	        {"stream_game_running",
-	         !recovery && (m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty())},
+	         !recovery && (m_backend.StreamGameRunning() || (!m_api.NativeRuntimeGameId().isEmpty() && !m_api.NativeRuntimeIsLocal()))},
 	        {"local_game_running", LocalGameRunning()},
 	        {"pairings", pairings},
 	        {"clients", clients},
@@ -470,7 +507,16 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 		done(Json(error.isEmpty() ? reply : Fail(error)));
 	};
 	if (type == "native-status") return done(Json(m_backend.NativeStatus()));
+    if (type == "start-local-game") return StartLocalGame(request, std::move(done));
 	if (type == "stop-game") {
+        if (m_local.state() != QProcess::NotRunning) {
+            if (m_local_stop_done) return done(Json(Fail(tr("Local game is already stopping."))));
+            m_local_stop_done = std::move(done);
+            m_local_deadline.start();
+            m_local.terminate();
+            return;
+        }
+        if (m_api.NativeRuntimeIsLocal() || m_api.NativeOwnershipRecoveryRequired()) return done(Json(Fail(tr("Game ownership cleanup is not complete."))));
 		m_backend.CloseSession(complete);
 		return;
 	}
@@ -491,6 +537,62 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 		return done(Json(Fail(QStringLiteral("Native AGS requires a one-use pairing bundle."))));
 
 	done(Json(Fail(QStringLiteral("unknown-request"))));
+}
+
+void HostDaemon::StartLocalGame(const QJsonObject& request, std::function<void(HostReply)> done) {
+    if (request.size() != 2 || !request.value("game").isString()) return done(Json(Fail(tr("Invalid local launch request."))));
+    const auto id = request.value("game").toString();
+    const auto* game = m_library.Find(id);
+    if (!game || game->source != "steam" || !game->owned_launch) return done(Json(Fail(tr("No owned Steam launch recipe is available."))));
+    if (m_shutting_down || LocalGameRunning() || m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty() || m_api.NativeOwnershipBlocked())
+        return done(Json(Fail(tr("A game already owns this computer."))));
+    const auto profile = QDir(StreamingSettings::ProfileDirectory()).filePath("local");
+    QString error;
+    if (!PrepareHostDirectory(profile, &error)) return done(Json(Fail(error)));
+    const auto identity_path = QDir(profile).filePath("identity");
+    const int fd = ::open(QFile::encodeName(identity_path), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    struct stat meta {};
+    if (fd < 0) return done(Json(Fail(tr("Cannot open local PC identity."))));
+    if (::fstat(fd, &meta) != 0 || !S_ISREG(meta.st_mode) || meta.st_uid != ::geteuid() || (meta.st_mode & 0077) || meta.st_size > 36) {
+        ::close(fd); return done(Json(Fail(tr("Unsafe local PC identity."))));
+    }
+    char bytes[37] {};
+    const auto count = ::read(fd, bytes, 36);
+    QString uuid = count >= 0 ? QString::fromLatin1(bytes, count) : QString();
+    if (count == 0) {
+        uuid = QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+        const auto encoded = uuid.toLatin1();
+        if (::write(fd, encoded.constData(), encoded.size()) != encoded.size() || ::fsync(fd) != 0) uuid.clear();
+    }
+    ::close(fd);
+    if (!ClientProfiles::IsValidClientId(uuid)) return done(Json(Fail(tr("Invalid local PC identity."))));
+    m_api.ConfigureLocalOwner(uuid, QCoreApplication::applicationPid());
+    m_local_id = id;
+    m_local_title = game->name;
+    m_local_error.clear();
+    m_local_stderr.clear();
+    m_local_started = false;
+    m_local_start_done = std::move(done);
+    m_local_deadline.start();
+    m_local.start(ReadSettings().backend, {"local-launch", profile, HostRuntimeDirectory() + "/api.sock",
+        QDir(qEnvironmentVariable("XDG_RUNTIME_DIR")).filePath("kytyps5/emulator.lock"), uuid, id,
+        QString::number(QCoreApplication::applicationPid())});
+}
+
+void HostDaemon::LocalFinished(int code, QProcess::ExitStatus status) {
+    m_local_deadline.stop();
+    m_local_stderr += QString::fromUtf8(m_local.readAllStandardError());
+    if ((status != QProcess::NormalExit || code != 0 || !m_local_started) && m_local_error.isEmpty())
+        m_local_error = m_local_stderr.trimmed().isEmpty() ? tr("Local game exited unsuccessfully.") : m_local_stderr.trimmed().right(8192);
+    const bool local_blocked = m_api.NativeOwnershipRecoveryRequired() || (m_api.NativeRuntimeIsLocal() && m_api.NativeOwnershipBlocked());
+    if (local_blocked && m_local_error.isEmpty()) m_local_error = tr("Game ownership cleanup is not complete.");
+    if (m_local_start_done) { auto done = std::move(m_local_start_done); done(Json(Fail(m_local_error))); }
+    if (m_local_stop_done) { auto done = std::move(m_local_stop_done); done(Json(m_local_error.isEmpty() ? QJsonObject{{"ok", true}} : Fail(m_local_error))); }
+    if (!local_blocked) {
+        m_local_id.clear();
+        m_local_title.clear();
+    }
+    if (m_shutting_down) OnBackendChanged();
 }
 
 int RunHostDaemon(int argc, char** argv) {

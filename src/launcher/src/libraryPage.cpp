@@ -118,6 +118,7 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	m_title->setObjectName("libraryHeading");
 	m_source = new QLabel(detail);
 	m_reason = new QLabel(detail);
+    m_reason->setObjectName("libraryLaunchReason");
 	m_reason->setWordWrap(true);
 	m_source->setTextFormat(Qt::PlainText);
 	m_reason->setTextFormat(Qt::PlainText);
@@ -145,9 +146,10 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 		int row = m_list->currentRow();
 		if (row < 0 || row >= m_games.size() || !m_games[row].ready || !m_launchEnabled) return;
 		emit GameActionRequested(m_games[row].id, m_games[row].source);
-		if (m_games[row].source == "steam")
-			emit StreamingRequested();
-		else
+		if (m_games[row].source == "steam") {
+            SetLaunchEnabled(false);
+			emit LocalPlayRequested(m_games[row].id);
+        } else
 			emit PlayRequested(m_games[row].gamePath);
 	});
 	m_pages->addWidget(detail);
@@ -170,7 +172,7 @@ void LibraryPage::SetGames(const QList<LibraryCard>& games) {
 		const auto& game = games[i];
 		auto*       item = new QListWidgetItem(
 		    game.name + "\n" + (game.source == "steam" ? tr("Steam") : tr("PS5")) +
-		        (game.ready ? (game.source == "steam" ? tr(" · Ready to stream") : tr(" · Ready"))
+		        (game.ready ? (game.source == "steam" ? tr(" · Ready") : tr(" · Ready"))
 				            : tr(" · Setup required")),
 		    m_list);
 		item->setIcon(QIcon(Cover(game)));
@@ -203,6 +205,11 @@ void LibraryPage::SetLaunchEnabled(bool enabled) {
 	const int row   = m_list->currentRow();
 	m_play->setEnabled(enabled && row >= 0 && row < m_games.size() && m_games[row].ready);
 }
+void LibraryPage::SetLaunchError(const QString& error) {
+    if (m_launchError == error) return;
+    m_launchError = error;
+    if (m_pages->currentIndex() == 1) ShowDetails();
+}
 void LibraryPage::ShowDetails() {
 	int row = m_list->currentRow();
 	if (row < 0 || m_list->item(row)->isHidden()) return;
@@ -211,12 +218,8 @@ void LibraryPage::ShowDetails() {
 	m_artwork->setPixmap(
 	    Cover(game).scaled(280, 150, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 	m_source->setText(game.source == "steam" ? tr("Steam · App %1").arg(game.sourceId) : tr("PS5"));
-	m_reason->setText(
-	    game.source == "steam" && game.ready
-	        ? tr("Owned launch recipe configured. Start this game from the library on your paired "
-			     "device. Local Steam Play is not available in this build.")
-			: (game.ready ? tr("Ready to play on this computer.") : game.reason));
-	m_play->setText(game.source == "steam" ? tr("Open streaming") : tr("Play"));
+    m_reason->setText(!m_launchError.isEmpty() ? m_launchError : game.ready ? tr("Ready to play on this computer.") : game.reason);
+    m_play->setText(tr("Play"));
 	SetLaunchEnabled(m_launchEnabled);
 	m_pages->setCurrentIndex(1);
 	(m_play->isEnabled() ? m_play : findChild<QPushButton*>("libraryBack"))->setFocus();

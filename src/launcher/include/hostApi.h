@@ -32,6 +32,8 @@ public:
 	void ConfigureNativeLaunch(const QString& interpreter, const QString& lock_path,
 	                           const QString& runtime_root = {});
 
+	void ConfigureLocalOwner(const QString& id, qint64 pid) { m_local_client_id = id; m_local_owner_pid = pid; }
+    [[nodiscard]] bool NativeRuntimeIsLocal() const { return !m_runtime.game.isEmpty() && m_runtime.client_id == m_local_client_id; }
 	[[nodiscard]] bool NativeOwnershipBlocked() const;
 	[[nodiscard]] bool NativeOwnershipRecoveryRequired() const;
 	[[nodiscard]] QString NativeRuntimeGameId() const { return m_runtime.game; }
@@ -72,6 +74,7 @@ signals:
 	// Emitted after a device profile write changes launch arguments, so the daemon can regenerate
 	// launch.json's client_games.
 	void ClientProfileChanged();
+    void LocalGameSpawned(QString game);
 
 private:
 	void Internal(const QJsonObject& request, const std::function<void(HostReply)>& done);
@@ -86,7 +89,9 @@ private:
 		QJsonObject game;
 		std::unique_ptr<Configuration> trophy_config;
 	} m_resolved;
-	QString m_interpreter, m_local_lock, m_runtime_root;
+	QString m_interpreter, m_local_lock, m_runtime_root, m_local_client_id;
+    qint64 m_local_owner_pid = 0;
+    bool m_local_spawned = false;
 	struct RuntimeContext {
 		QString session_id, game, client_id, directory, owner_start, token;
 		qint64 owner_pid = 0;

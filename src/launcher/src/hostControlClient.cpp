@@ -29,7 +29,7 @@ struct CallResult {
 CallResult Call(const QString& socket, const QJsonObject& request) {
 	CallResult result;
 	const auto type    = request.value("type").toString();
-	const int  timeout = type == "stop-game" || type == "set-preferences" || type == "unpair" ||
+	const int  timeout = type == "stop-game" || type == "start-local-game" || type == "set-preferences" || type == "unpair" ||
 	                             type == "pair-ticket"
 	                         ? 95000
 	                         : REQUEST_TIMEOUT_MS;

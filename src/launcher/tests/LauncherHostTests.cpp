@@ -21,6 +21,7 @@
 #include <QtTest>
 
 #include <atomic>
+#include <barrier>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -235,6 +236,38 @@ private slots:
 		QCOMPARE(
 		    Call(resolver, ClientReq("GET", "/kyty/v1/games/" + id + "/settings", uuid)).status,
 		    409);
+        const QString localId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        resolver.ConfigureLocalOwner(localId, QCoreApplication::applicationPid());
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}})).status, 403);
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", localId, {{"game", id}})).status, 403);
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", localId, {{"game", id}})).status, 200);
+        auto localBody = RuntimeBody(id, localId, cwd);
+        auto wrongOwner = localBody; wrongOwner["owner_pid"] = QCoreApplication::applicationPid() + 1;
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, wrongOwner)).status, 403);
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
+        QVERIFY(resolver.NativeRuntimeIsLocal());
+        localBody["state"] = "spawned";
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 409);
+        localBody["state"] = "claim";
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
+        const int localLock = ::open(QFile::encodeName(fixture.filePath("emulator.lock")), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        QVERIFY(localLock >= 0);
+        QVERIFY(::flock(localLock, LOCK_EX | LOCK_NB) == 0);
+        localBody["state"] = "acquired";
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
+        QSignalSpy spawned(&resolver, &HostApi::LocalGameSpawned);
+        localBody["state"] = "spawned";
+        auto tampered = localBody; tampered["reservation_token"] = QString(64, 'b');
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, tampered)).status, 409);
+        QCOMPARE(spawned.count(), 0);
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
+        QCOMPARE(spawned.count(), 1);
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 409);
+        ::close(localLock);
+        localBody["state"] = "closed";
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", localId, localBody)).status, 200);
+        QVERIFY(!resolver.NativeRuntimeIsLocal());
+
 	}
 	void isolatedDiagnosticTraversalCannotTouchExternalSentinels() {
 		QTemporaryDir config;
@@ -1013,6 +1046,128 @@ private slots:
 		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
 		daemon.Shutdown();
 	}
+
+    void localSteamDaemonOwnsWorkerAndStopsCleanly() {
+        const auto binary = qEnvironmentVariable("AGS_TEST_HOST_BINARY");
+        if (binary.isEmpty()) QSKIP("Set AGS_TEST_HOST_BINARY for local launch integration");
+        QTemporaryDir run, profile, games;
+        qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+        qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+        qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+        WriteFile(profile.filePath("streaming.ini"), "[host]\nbackend=" + binary.toUtf8() + "\n");
+        WriteFile(games.filePath("steamapps/appmanifest_620.acf"),
+            "\"AppState\" { \"appid\" \"620\" \"name\" \"Local fixture\" \"installdir\" \"fixture\" \"StateFlags\" \"4\" }");
+        QDir().mkpath(games.filePath("steamapps/common/fixture"));
+        const auto script = games.filePath("fixture.sh");
+        WriteFile(script, "#!/bin/sh\nprintf '%s' \"$DISPLAY|$PULSE_SERVER\" > desktop\necho $$ > pid\nwhile :; do sleep 1; done\n");
+        QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        const QJsonObject recipe{{"executable", script}, {"cwd", games.path()}, {"args", QJsonArray{}}, {"env", QJsonObject{}}};
+        const auto recipes = games.filePath("recipes.json");
+        WriteFile(recipes, QJsonDocument(QJsonObject{{"620", recipe}}).toJson());
+        auto settings = GameLibraryFiles::OpenSettings();
+        settings->setValue("Launcher/steam_roots", games.path());
+        settings->setValue("Launcher/steam_recipes", recipes);
+        settings->sync();
+        HostDaemon daemon;
+        QString error;
+        QVERIFY2(daemon.Start(&error), qPrintable(error));
+        const auto socket = run.filePath("kyty-host/control.sock");
+        const auto id = SteamSource::Id("620");
+        const QJsonObject play{{"type", "start-local-game"}, {"game", id}};
+        auto injected = play; injected["executable"] = "/bin/true";
+        QVERIFY(!Control(socket, injected)["ok"].toBool());
+        auto reply = Control(socket, play);
+        QVERIFY2(reply["ok"].toBool(), QJsonDocument(reply).toJson().constData());
+        QTRY_VERIFY(QFileInfo::exists(games.filePath("pid")));
+        const auto pid = ReadFile(games.filePath("pid")).trimmed().toInt();
+        QVERIFY(pid > 1);
+        auto status = Control(socket, {{"type", "status"}});
+        QVERIFY(status["local_game_running"].toBool());
+        QVERIFY(!status["stream_game_running"].toBool());
+        QCOMPARE(status["local_game_id"].toString(), id);
+        QCOMPARE(status["local_game_title"].toString(), QString("Local fixture"));
+        QCOMPARE(ReadFile(games.filePath("desktop")), qgetenv("DISPLAY") + "|" + qgetenv("PULSE_SERVER"));
+        QVERIFY(!Control(socket, play)["ok"].toBool());
+        const auto apiSocket = run.filePath("kyty-host/api.sock");
+        const QString remoteId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        auto remoteLaunch = Control(apiSocket, ClientReq("POST", "/ags/internal/resolve-launch", remoteId, {{"game", id}}));
+        QVERIFY(remoteLaunch.contains("cwd"));
+        auto remoteBody = RuntimeBody(id, remoteId, remoteLaunch["cwd"].toString());
+        QVERIFY(!Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", remoteId, remoteBody))["ok"].toBool());
+        const auto pythonGuard = games.filePath("python-guard/kyty_emulator");
+        QDir().mkpath(games.filePath("python-guard/libexec"));
+        QVERIFY(QFile::copy(QStringLiteral(AGS_TEST_GUARD_SOURCE), pythonGuard));
+        const auto pythonChild = games.filePath("python-guard/libexec/kyty_emulator");
+        WriteFile(pythonChild, "#!/bin/sh\necho running > python-child\nexec sleep 20\n");
+        QFile::setPermissions(pythonChild, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        QProcess contender;
+        contender.setWorkingDirectory(games.path());
+        contender.start("/usr/bin/python3", {pythonGuard, "--game", "fixture"});
+        QVERIFY(contender.waitForFinished(5000));
+        QVERIFY(contender.exitCode() != 0);
+        QVERIFY(!QFileInfo::exists(games.filePath("python-child")));
+        const auto pcIdentity = ReadFile(profile.filePath("local/identity"));
+        QCOMPARE(pcIdentity.size(), 36);
+        reply = Control(socket, {{"type", "stop-game"}});
+        QVERIFY2(reply["ok"].toBool(), QJsonDocument(reply).toJson().constData());
+        QVERIFY(::kill(pid, 0) != 0);
+        QVERIFY(!Control(socket, {{"type", "status"}})["local_game_running"].toBool());
+        // Existing Python local owner also excludes the new local Steam worker.
+        contender.start("/usr/bin/python3", {pythonGuard, "--game", "fixture"});
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(games.filePath("python-child")), 5000);
+        QVERIFY(!Control(socket, play)["ok"].toBool());
+        contender.terminate();
+        QVERIFY(contender.waitForFinished(5000));
+        QVERIFY(!HostDaemon::LocalEmulatorRunning());
+        // Remote reservation wins first: local Play cannot replace it.
+        QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/resolve-launch", remoteId, {{"game", id}})).contains("cwd"));
+        QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", remoteId, remoteBody))["ok"].toBool());
+        QVERIFY(!Control(socket, play)["ok"].toBool());
+        remoteBody["state"] = "closed";
+        QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", remoteId, remoteBody))["ok"].toBool());
+        // Race local Play with the remote reservation. Exactly one admission wins.
+        QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/resolve-launch", remoteId, {{"game", id}})).contains("cwd"));
+        remoteBody["state"] = "starting";
+        std::barrier gate(3);
+        std::atomic<int> completed{0};
+        QJsonObject localRace, remoteRace;
+        auto racingCall = [&](const QString& path, const QJsonObject& request, QJsonObject& result) {
+            gate.arrive_and_wait();
+            QString failure;
+            const auto response = HostSocketCall(path, request, 5000, &failure);
+            if (response) result = QJsonDocument::fromJson(response->body).object();
+            completed.fetch_add(1);
+        };
+        std::thread localThread([&] { racingCall(socket, play, localRace); });
+        std::thread remoteThread([&] { racingCall(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", remoteId, remoteBody), remoteRace); });
+        gate.arrive_and_wait();
+        for (int i = 0; i < 600 && completed.load() != 2; ++i) QTest::qWait(10);
+        localThread.join(); remoteThread.join();
+        QCOMPARE(int(localRace["ok"].toBool()) + int(remoteRace["ok"].toBool()), 1);
+        if (localRace["ok"].toBool()) {
+            QVERIFY(Control(socket, {{"type", "stop-game"}})["ok"].toBool());
+        } else {
+            remoteBody["state"] = "closed";
+            QVERIFY(Control(apiSocket, ClientReq("POST", "/ags/internal/session-runtime", remoteId, remoteBody))["ok"].toBool());
+        }
+        // A failed exec must never receive the post-spawn acknowledgement.
+        WriteFile(script, "#!/nonexistent/fixture-interpreter\n");
+        reply = Control(socket, play);
+        QVERIFY(!reply["ok"].toBool());
+        QVERIFY(!reply["error"].toString().isEmpty());
+        QCOMPARE(Control(socket, {{"type", "status"}})["state"].toString(), QString("Error"));
+        // Same identity on the next launch; successful shutdown waits for owned cleanup.
+        WriteFile(script, "#!/bin/sh\necho $$ > pid\nwhile :; do sleep 1; done\n");
+        reply = Control(socket, play);
+        QVERIFY2(reply["ok"].toBool(), QJsonDocument(reply).toJson().constData());
+        QCOMPARE(ReadFile(profile.filePath("local/identity")), pcIdentity);
+        QSignalSpy finished(&daemon, &HostDaemon::Finished);
+        daemon.Shutdown();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(daemon.ShutdownExitCode(), 0);
+        QVERIFY(!HostDaemon::LocalEmulatorRunning());
+        QVERIFY(!QFileInfo::exists(profile.filePath("local/host.json")));
+    }
 	void secondDaemonIsRefused() {
 		QTemporaryDir run, profile;
 		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());

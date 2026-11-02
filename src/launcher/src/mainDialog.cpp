@@ -88,8 +88,9 @@ public:
 	void SetPresetWarning(const QString& text);
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
-	[[nodiscard]] bool           StreamGameRunning() const {
+	[[nodiscard]] bool           HostGameBusy() const {
 		return m_host_status.value("stream_game_running").toBool() ||
+               m_host_status.value("local_game_running").toBool() || m_local_starting ||
                m_host_status.value("ownership_blocked").toBool();
 	}
 
@@ -125,6 +126,7 @@ private:
 	QProcess           m_process;
 	HostControlClient* m_host = nullptr;
 	QJsonObject        m_host_status;
+    bool m_local_starting = false;
 	StreamingWidget*   m_streaming_widget = nullptr;
 	LibraryPage*       m_library = nullptr;
 	QTabWidget*        m_tabs             = nullptr;
@@ -182,6 +184,19 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
         m_library->HandleController(m_controller_preview.RawPressed());
     });
 	m_host             = new HostControlClient(QString(), this);
+    connect(m_library, &LibraryPage::LocalPlayRequested, this, [this](const QString& id) {
+        if (HostGameBusy() || m_process.state() != QProcess::NotRunning) return;
+        m_local_starting = true;
+        Update();
+        m_host->Request({{"type", "start-local-game"}, {"game", id}}, [this](QJsonObject reply, QString error) {
+            m_local_starting = false;
+            if (error.isEmpty() && !reply.value("ok").toBool()) error = reply.value("error").toString();
+            if (error.isEmpty()) m_host_status["local_game_running"] = true;
+            Update();
+            if (!error.isEmpty()) QMessageBox::warning(m_ui->widget, tr("Cannot start game"), error);
+        });
+    });
+
 	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
 	m_streaming_widget->SetRustCatalogProvider(
 	    [this] { return m_ui->widget->CreateStreamingCatalog(m_interpreter); });
@@ -199,10 +214,11 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		m_host->Request({{"type", "reload-library"}}, {});
 	});
 	connect(m_host, &HostControlClient::StatusChanged, this, [this](const QJsonObject& status) {
-		const bool was_running = StreamGameRunning();
+		const bool was_running = HostGameBusy();
 		m_host_status          = status;
-		// Status arrives every second; only a change in the streamed-game guard needs a refresh.
-		if (was_running != StreamGameRunning()) Update();
+        m_library->SetLaunchError(status.value("local_game_error").toString());
+		// Status arrives every second; refresh controls when game ownership changes.
+		if (was_running != HostGameBusy()) Update();
 	});
 
 	m_main_dialog    = main_dialog;
@@ -220,7 +236,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
-		        if (m_process.state() == QProcess::NotRunning && !StreamGameRunning()) {
+		        if (m_process.state() == QProcess::NotRunning && !HostGameBusy()) {
 			        m_controller_preview.SetColor(color);
 		        }
 	        });
@@ -564,7 +580,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 
 void MainDialogPrivate::Run() {
 	if (m_update_checker->IsInstalling() || m_process.state() != QProcess::NotRunning) return;
-	if (StreamGameRunning()) return;
+	if (HostGameBusy()) return;
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
 		return;
@@ -601,9 +617,8 @@ void MainDialogPrivate::ReloadLibrary() {
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	// The daemon reads the global emulator lock itself; local play is blocked only while a
-	// streamed game runs, not while hosting is merely ready.
-	const bool hosting = StreamGameRunning();
+	// The daemon reports local and remote ownership; hosting alone does not block Play.
+	const bool hosting = HostGameBusy();
 	const bool busy =
 	    hosting || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
 	m_update_checker->SetGameRunning(hosting || m_process.state() != QProcess::NotRunning);

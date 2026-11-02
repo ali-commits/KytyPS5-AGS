@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QBuffer>
+#include <QLabel>
 #include <QFile>
 #include <QImage>
 #include <QLineEdit>
@@ -88,20 +89,29 @@ private slots:
 		LibraryPage page;
 		page.SetGames({{"steam-id", "Steam game", "steam", {}, "Missing recipe", false}});
 		page.show();
-		QSignalSpy streaming(&page, &LibraryPage::StreamingRequested);
+		QSignalSpy local(&page, &LibraryPage::LocalPlayRequested);
 		QSignalSpy play(&page, &LibraryPage::PlayRequested);
 		page.findChild<QPushButton*>("libraryDetails")->click();
 		auto* button = page.findChild<QPushButton*>("libraryPlay");
 		QVERIFY(!button->isEnabled());
 		page.SetGames({{"steam-id", "Steam game", "steam", {}, {}, true}});
 		QVERIFY(button->isEnabled());
-		QCOMPARE(button->text(), QString("Open streaming"));
+		QCOMPARE(button->text(), QString("Play"));
 		button->click();
-		QCOMPARE(streaming.count(), 1);
+		QCOMPARE(local.count(), 1);
+        button->click(); // Pending local launch cannot dispatch twice.
+        QCOMPARE(local.count(), 1);
+        QCOMPARE(local.first().first().toString(), QString("steam-id"));
 		QCOMPARE(play.count(), 0);
+        page.SetLaunchError("Local game exited unsuccessfully.");
+        QCOMPARE(page.findChild<QLabel*>("libraryLaunchReason")->text(), QString("Local game exited unsuccessfully."));
+        page.SetGames({{"steam-id", "Steam game", "steam", {}, {}, true}});
+        QCOMPARE(page.findChild<QLabel*>("libraryLaunchReason")->text(), QString("Local game exited unsuccessfully."));
+        page.SetLaunchError({});
+        QCOMPARE(page.findChild<QLabel*>("libraryLaunchReason")->text(), QString("Ready to play on this computer."));
 		page.SetLaunchEnabled(false);
 		button->click();
-		QCOMPARE(streaming.count(), 1);
+		QCOMPARE(local.count(), 1);
 		QSignalSpy settings(&page, &LibraryPage::SettingsRequested);
 		page.findChild<QPushButton*>("librarySettings")->click();
 		QCOMPARE(settings.count(), 1);
