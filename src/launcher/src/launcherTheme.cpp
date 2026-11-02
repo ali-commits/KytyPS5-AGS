@@ -51,24 +51,30 @@ public:
         if (mode != 0 || scheme != Qt::ColorScheme::Unknown)
             palette = ThemePalette(mode == 1 || (mode == 0 && scheme == Qt::ColorScheme::Dark));
         applying = true;
+        appliedPalette = palette;
         application.setPalette(palette);
+        appliedPalette = application.palette();
         application.setStyleSheet(application.styleSheet());
+        appliedPalette = application.palette();
         applying = false;
     }
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
-        if (watched == &application && event->type() == QEvent::ApplicationPaletteChange && !applying && !pending) {
+        if (watched == &application && event->type() == QEvent::ApplicationPaletteChange && !applying) {
             // Native palette notifications can arrive after startup or an OS theme change.
-            // Keep that fallback separate from our explicit Dark/Light palettes.
-            if (mode == 0) systemPalette = application.palette();
-            pending = true;
-            QTimer::singleShot(0, this, [this] { pending = false; Apply(mode); });
+            // Remember external updates even under an explicit override. Ignore our own
+            // deferred stylesheet notifications by comparing the last applied palette.
+            if (application.palette() != appliedPalette) systemPalette = application.palette();
+            if (!pending) {
+                pending = true;
+                QTimer::singleShot(0, this, [this] { pending = false; Apply(mode); });
+            }
         }
         return QObject::eventFilter(watched, event);
     }
 private:
     QApplication& application;
-    QPalette systemPalette;
+    QPalette systemPalette, appliedPalette;
     int mode = 0;
     bool applying = false, pending = false;
 };

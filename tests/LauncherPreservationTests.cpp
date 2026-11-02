@@ -53,6 +53,7 @@
 #include <QStandardPaths>
 #include <QTabWidget>
 #include <QTabBar>
+#include <QStyleHints>
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QtTest>
@@ -192,6 +193,34 @@ private slots:
         QCOMPARE(changes.count(), 0);
         qApp->setPalette(original);
         QApplication::processEvents();
+    }
+    void systemThemeUsesNativeUpdatesReceivedDuringExplicitOverride() {
+        if (qApp->styleHints()->colorScheme() != Qt::ColorScheme::Unknown)
+            QSKIP("This regression exercises native-palette fallback on Unknown-scheme backends");
+        LauncherTheme::Apply(*qApp, 0);
+        QPalette nativeLight;
+        nativeLight.setColor(QPalette::Window, QColor("#fafafa"));
+        nativeLight.setColor(QPalette::WindowText, QColor("#121212"));
+        qApp->setPalette(nativeLight);
+        QApplication::processEvents();
+        LauncherTheme::Apply(*qApp, 1);
+        auto nativeDark = nativeLight;
+        nativeDark.setColor(QPalette::Window, QColor("#111315"));
+        nativeDark.setColor(QPalette::WindowText, QColor("#e8ecef"));
+        nativeDark.setColor(QPalette::Text, QColor("#e8ecef"));
+        qApp->setPalette(nativeDark); // Simulates the external platform palette notification.
+        QApplication::processEvents();
+        QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#17191e"));
+        QCOMPARE(qApp->palette().color(QPalette::WindowText), QColor("#f2f3f7"));
+        // Deferred stylesheet notifications must not replace the remembered native colors.
+        QTest::qWait(30);
+        LauncherTheme::Apply(*qApp, 0);
+        QApplication::processEvents();
+        QCOMPARE(qApp->palette(), nativeDark);
+        QSignalSpy changes(qApp, &QApplication::paletteChanged);
+        QTest::qWait(30);
+        QCOMPARE(qApp->palette(), nativeDark);
+        QCOMPARE(changes.count(), 0);
     }
     void fullShellResizesWithScrollableSecondaryPages_data() {
         QTest::addColumn<int>("theme");
