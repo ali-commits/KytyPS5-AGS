@@ -1,3 +1,4 @@
+#include "steamArtwork.h"
 #include "hostApi.h"
 
 #include "cheatFile.h"
@@ -707,6 +708,14 @@ void HostApi::Art(const QString& id, const QString& kind, const QString& if_none
 	if (game == nullptr) {
 		return done(Error(404, QStringLiteral("unknown-game")));
 	}
+	if (game->source == "steam") {
+        const auto data = SteamArtwork::Load(game->artwork_roots, game->source_id, kind != "icon");
+        if (data.isEmpty()) return done(Error(404, "no-art"));
+        const auto etag = QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex().left(16);
+        const auto type = data.startsWith("\x89PNG") ? QByteArray("image/png") : QByteArray("image/jpeg");
+        if (if_none_match.toLatin1() == etag) return done({304, type, {}, etag});
+        return done({200, type, data, etag});
+    }
 	if (!game->info) return done(Error(404, "no-art"));
 	const QStringList names =
 	    kind == QLatin1String("icon")

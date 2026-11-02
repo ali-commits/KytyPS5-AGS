@@ -1,3 +1,4 @@
+#include "steamArtwork.h"
 #include "mainDialog.h"
 #include "libraryPage.h"
 #include "gameLibrary.h"
@@ -591,7 +592,7 @@ void MainDialogPrivate::ReloadLibrary() {
                 steam ? game.readiness_reason : tr("Game files are unavailable."),
                 steam ? game.owned_launch.has_value() :
                     (QDir(game.info->basedir).exists() || GameContent::IsArchive(game.info->basedir)), game.source_id,
-                steam ? QByteArray() : GameContent::ReadFile(game.info->basedir, "sce_sys/icon0.png", GameContent::MaxImageSize)});
+                steam ? SteamArtwork::Load(game.artwork_roots, game.source_id) : GameContent::ReadFile(game.info->basedir, "sce_sys/icon0.png", GameContent::MaxImageSize)});
         }
     }
     m_library->SetGames(cards);

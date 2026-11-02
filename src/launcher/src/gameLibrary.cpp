@@ -385,6 +385,7 @@ bool GameLibrary::Load(const CompatibilityDatabase* compatibility, QString* erro
 		g.id               = r.id;
 		g.source           = "steam";
 		g.source_id        = r.app_id;
+		g.artwork_roots    = roots;
 		g.name             = r.name;
 		g.installed        = r.installed;
 		g.readiness_reason = r.reason;

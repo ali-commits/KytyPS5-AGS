@@ -38,6 +38,7 @@ struct GameEntry {
 	bool                           custom = false;
 	QString source = "ps5";
 	QString source_id, name, readiness_reason;
+	QStringList artwork_roots; // Host-private configured Steam client roots.
 	bool installed = true;
 	std::optional<StreamingLaunchEntry> owned_launch;
 };

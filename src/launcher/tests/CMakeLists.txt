@@ -31,3 +31,5 @@ target_include_directories(launcher_library_page_tests PRIVATE ../include)
 target_link_libraries(launcher_library_page_tests PRIVATE Qt6::Widgets Qt6::Test)
 add_test(NAME launcher_library_page COMMAND launcher_library_page_tests)
 set_tests_properties(launcher_library_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+include(artwork.cmake)

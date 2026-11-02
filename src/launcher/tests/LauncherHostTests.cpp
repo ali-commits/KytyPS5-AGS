@@ -663,6 +663,32 @@ private slots:
 		QCOMPARE(doc["games"].toArray().size(), 2);
 		QCOMPARE(doc["capabilities"].toArray()[0].toString(), QString("hid-tunnel-v1"));
 	}
+	void steamCachedArtworkUsesExistingApi() {
+        QTemporaryDir steam;
+        const auto cache = steam.filePath("appcache/librarycache/620");
+        QDir().mkpath(cache);
+        WriteFile(steam.filePath("steamapps/appmanifest_620.acf"),
+                  R"("AppState" { "appid" "620" "name" "Portal 2" "installdir" "Portal 2" })");
+        WriteFile(m_dir.filePath("Kyty.ini"), "[Launcher]\ngame_dirs=" +
+                  m_dir.filePath("games").toUtf8() + "\nsteam_roots=" + steam.path().toUtf8() + "\n");
+        QImage cover(60, 90, QImage::Format_RGB32); cover.fill(Qt::red);
+        QVERIFY(cover.save(cache + "/library_600x900.jpg", "JPG"));
+        QString error;
+        QVERIFY(library.Load(nullptr, &error));
+        const auto id = SteamSource::Id("620");
+        QVERIFY(library.Find(id));
+        const auto path = "/kyty/v1/art/" + id;
+        const auto icon = Call(api, {{"method", "GET"}, {"path", path + "/icon"}});
+        QCOMPARE(icon.status, 200);
+        QCOMPARE(icon.content_type, QByteArray("image/jpeg"));
+        QCOMPARE(Call(api, {{"method", "GET"}, {"path", path + "/background"}}).body, icon.body);
+        QCOMPARE(Call(api, {{"method", "GET"}, {"path", path + "/icon"},
+                           {"if_none_match", QString::fromLatin1(icon.etag)}}).status, 304);
+        const auto listing = Call(api, {{"method", "GET"}, {"path", "/kyty/v1/library"}});
+        QVERIFY(!listing.body.contains(steam.path().toUtf8()));
+        QFile::remove(cache + "/library_600x900.jpg");
+        QCOMPARE(Call(api, {{"method", "GET"}, {"path", path + "/icon"}}).status, 404);
+    }
 	void apiArtEtagAnd304() {
 		const auto id = library.Games().first().id;
 		auto       r  = Call(api, {{"method", "GET"}, {"path", "/kyty/v1/art/" + id + "/icon"}});
