@@ -46,6 +46,8 @@
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardPaths>
@@ -162,6 +164,81 @@ void SetLevels(Configuration& info) {
 class LauncherPreservationTests: public QObject {
     Q_OBJECT
 private slots:
+    void fullShellResizesWithScrollableSecondaryPages_data() {
+        QTest::addColumn<int>("theme");
+        QTest::newRow("auto") << 0;
+        QTest::newRow("dark") << 1;
+        QTest::newRow("light") << 2;
+    }
+    void fullShellResizesWithScrollableSecondaryPages() {
+        QFETCH(int, theme);
+        const auto oldPalette = qApp->palette();
+        const auto restorePalette = qScopeGuard([&] { qApp->setPalette(oldPalette); });
+        // Offscreen plugins do not implement OS color-scheme changes. Exercise both
+        // real application palettes so the stylesheet is still rendered in both modes.
+        auto palette = oldPalette;
+        const bool dark = theme == 1;
+        palette.setColor(QPalette::Window, dark ? QColor("#17191e") : QColor("#f6f6f6"));
+        palette.setColor(QPalette::WindowText, dark ? QColor("#f2f3f7") : QColor("#202124"));
+        palette.setColor(QPalette::Base, palette.color(QPalette::Window));
+        palette.setColor(QPalette::Button, palette.color(QPalette::Window));
+        palette.setColor(QPalette::Text, palette.color(QPalette::WindowText));
+        palette.setColor(QPalette::ButtonText, palette.color(QPalette::WindowText));
+        qApp->setPalette(palette);
+        QTemporaryDir temp;
+        WorkingDirectory cwd(temp.path());
+        QVERIFY(Write("Kyty.ini", QByteArray("[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\ntheme=") + QByteArray::number(theme) + "\n"));
+        QVERIFY(Write("compatibility_db.json", "{}"));
+        LauncherTheme::Initialize(*qApp);
+        MainDialog dialog;
+        dialog.findChild<ControllerPreview*>("controllerPreview")->SetSuspended(true);
+        dialog.show();
+        auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
+        QVERIFY(tabs);
+        for (const QSize size: {QSize(960, 540), QSize(640, 480)}) {
+            tabs->setCurrentIndex(0);
+            dialog.resize(size);
+            QTest::qWait(40);
+            QCOMPARE(dialog.size(), size);
+            QVERIFY(dialog.minimumSizeHint().height() <= 480);
+            auto* library = dialog.findChild<QWidget*>("libraryPage");
+            QLabel* heading = nullptr;
+            for (auto* label: library->findChildren<QLabel*>("libraryHeading"))
+                if (label->text() == "Your library") heading = label;
+            QVERIFY(heading && heading->isVisible());
+            const auto fg = heading->palette().color(QPalette::WindowText);
+            const auto bg = library->palette().color(QPalette::Window);
+            QVERIFY2(qAbs(fg.lightness() - bg.lightness()) > 80, "Heading contrast must follow the active palette");
+            const auto shellPixels = dialog.grab().toImage();
+            const auto backgroundPoint = heading->mapTo(&dialog, QPoint(heading->width() - 2, heading->height() / 2));
+            const auto paintedBackground = shellPixels.pixelColor(backgroundPoint);
+            QVERIFY2(qAbs(fg.lightness() - paintedBackground.lightness()) > 80, "Rendered heading background must contrast with text");
+            for (const char* name: {"libraryRemoteHosts", "librarySettings"}) {
+                auto* action = library->findChild<QWidget*>(name);
+                QVERIFY(action && action->isVisible());
+                QVERIFY(dialog.rect().contains(QRect(action->mapTo(&dialog, QPoint()), action->size())));
+            }
+            for (const char* name: {"settingsScroll", "remoteHostsScroll", "streamingScroll"}) {
+                auto* scroll = dialog.findChild<QScrollArea*>(name);
+                QVERIFY(scroll && scroll->widgetResizable());
+                tabs->setCurrentWidget(scroll);
+                QCoreApplication::processEvents();
+                QCOMPARE(dialog.size(), size);
+                if (scroll->widget()->minimumSizeHint().height() > scroll->viewport()->height())
+                    QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
+            }
+            tabs->setCurrentIndex(0);
+            const auto requested = qEnvironmentVariable("KYTY_PRESERVATION_SCREENSHOT");
+            if (!requested.isEmpty()) {
+                const QFileInfo base(requested);
+                const auto path = base.dir().filePath(base.completeBaseName() + QString("-shell-%1-%2x%3.png").arg(theme).arg(size.width()).arg(size.height()));
+                QVERIFY(dialog.grab().save(path));
+                QCOMPARE(dialog.size(), size);
+            }
+            qInfo() << "full shell" << theme << size << "minimum" << dialog.minimumSizeHint();
+        }
+    }
+
     void realShellPaintsAfterInitialShow_data() {
         QTest::addColumn<bool>("coldHidden");
         QTest::newRow("normal-show") << false;
@@ -507,10 +584,10 @@ private slots:
         QVERIFY(!UpdateChecker::IsSupported()); // Custom packages cannot install official runtime archives.
         auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
         QVERIFY(streaming);
-        auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
+        auto* tabs=dialog.findChild<QTabWidget*>("launcherTabs");
         QVERIFY(tabs);
         auto* configuration = dialog.findChild<ConfigurationListWidget*>();
-        auto* settingsPage = configuration->parentWidget();
+        auto* settingsPage = dialog.findChild<QScrollArea*>("settingsScroll");
         QVERIFY(tabs->indexOf(settingsPage) >= 0);
         tabs->setCurrentWidget(settingsPage);
         auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
@@ -519,7 +596,7 @@ private slots:
         QTest::mouseClick(toggle,Qt::LeftButton);
         QVERIFY(Capture(dialog,"-main-grid"));
         QCOMPARE(title->Title(),dialog.findChild<ConfigurationListWidget*>()->GetSelectedItem()->GetInfo().basedir);
-        tabs->setCurrentWidget(streaming);
+        tabs->setCurrentWidget(dialog.findChild<QScrollArea*>("streamingScroll"));
         QVERIFY(title->Title().isEmpty());
         QVERIFY(Capture(dialog,"-streaming-current-ui"));
         dialog.resize(1100,900);
@@ -849,11 +926,11 @@ private slots:
             }
         QVERIFY(library_tab && stream_tab);
         if (!qEnvironmentVariableIsEmpty("KYTY_PRESERVATION_SCREENSHOT")) {
-            auto* tabs = qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
+            auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
             QVERIFY(tabs);
             tabs->setCurrentIndex(0);
             QVERIFY(Capture(dialog, "-library"));
-            tabs->setCurrentWidget(streaming);
+            tabs->setCurrentWidget(dialog.findChild<QScrollArea*>("streamingScroll"));
             QVERIFY(Capture(dialog, "-streaming"));
         }
         for (const auto* name: {"streamBackendPath", "streamStart", "streamStop", "streamPair", "streamPairingPath", "streamAutostart", "streamStopGame",
@@ -954,13 +1031,16 @@ private slots:
 int main(int argc, char** argv) {
     // --local selects the real offline compatibility database seam. Keep it out of QtTest's CLI.
     std::vector<char*> app_args(argv, argv + argc);
+    char client_only[] = "--client-only";
+    const bool client_fixture = qEnvironmentVariableIsSet("KYTY_PRESERVATION_CLIENT_ONLY");
+    if (client_fixture) app_args.push_back(client_only);
     char local[] = "--local";
     app_args.push_back(local);
     const bool headless_fixture=argc==2 && QByteArray(argv[1])=="--headless-ui-startup-fixture";
     char start_host[]="--start-streaming-host";
     if(headless_fixture) app_args.push_back(start_host);
     app_args.push_back(nullptr);
-    int app_argc = argc + 1 + int(headless_fixture);
+    int app_argc = argc + 1 + int(headless_fixture) + int(client_fixture);
     QApplication app(app_argc, app_args.data());
     QStandardPaths::setTestModeEnabled(true);
     // Never reach the real systemd or daemon: a fake systemctl logs its arguments, and the
@@ -1003,8 +1083,8 @@ int main(int argc, char** argv) {
         auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
         auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
         if(!streaming || !title || !preview) return 11;
-        auto* tabs=qobject_cast<QTabWidget*>(streaming->parentWidget()->parentWidget());
-        if(!tabs || tabs->currentWidget()!=streaming || !title->Title().isEmpty()) return 12;
+        auto* tabs=dialog.findChild<QTabWidget*>("launcherTabs");
+        if(!tabs || tabs->currentWidget()!=dialog.findChild<QScrollArea*>("streamingScroll") || !title->Title().isEmpty()) return 12;
         dialog.Start();
         // The GUI lifetime owner starts only its fixture --host child, never systemd.
         QElapsedTimer deadline; deadline.start();
@@ -1013,7 +1093,7 @@ int main(int argc, char** argv) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,20);
             started = Read(ownedLog).contains("--host");
         }
-        return started && tabs->currentWidget()==streaming && title->Title().isEmpty() ? 0 : 13;
+        return started && tabs->currentWidget()==dialog.findChild<QScrollArea*>("streamingScroll") && title->Title().isEmpty() ? 0 : 13;
     }
     LauncherPreservationTests tests;
     return QTest::qExec(&tests, argc, argv);

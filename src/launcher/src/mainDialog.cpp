@@ -36,6 +36,7 @@
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QScrollArea>
 #include <QStringList>
 #include <QStyleHints>
 #include <QTabWidget>
@@ -134,6 +135,8 @@ private:
 	StreamingWidget*   m_streaming_widget = nullptr;
 	LibraryPage*       m_library = nullptr;
     RemoteClient* m_remote = nullptr;
+	QWidget*           m_settings_page = nullptr;
+    QWidget*           m_streaming_page = nullptr;
 	QTabWidget*        m_tabs             = nullptr;
 
 	QPointer<ConfigurationItem> m_running_item;
@@ -142,7 +145,7 @@ private:
 QByteArray MainDialogPrivate::g_last_geometry;
 QString MainDialogPrivate::g_library_selection;
 bool       MainDialogPrivate::g_check_updates_on_startup = true;
-int        MainDialogPrivate::g_theme                    = 0;
+int        MainDialogPrivate::g_theme                    = 1;
 
 MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPrivate(this)) {
 	m_p->Setup(this);
@@ -164,6 +167,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_title_sound.setObjectName("titleSound");
 	m_ui->widget->SetControllerPreview(&m_controller_preview);
 	m_tabs = new QTabWidget(main_dialog);
+    m_tabs->setObjectName("launcherTabs");
 	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
 	m_library = new LibraryPage(m_tabs);
     m_tabs->addTab(m_library, tr("Library"));
@@ -172,20 +176,30 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
     settingsLayout->addWidget(m_ui->widget);
     m_ui->verticalLayout_5->removeItem(m_ui->verticalLayout_4);
     settingsLayout->addLayout(m_ui->verticalLayout_4);
-    m_tabs->addTab(settingsPage, tr("Settings"));
-    connect(m_library, &LibraryPage::SettingsRequested, this, [this, settingsPage] {
-        m_tabs->setCurrentWidget(settingsPage);
+    auto scrollPage = [this](QWidget* content, const QString& name) {
+        auto* scroll = new QScrollArea(m_tabs);
+        scroll->setObjectName(name);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(content);
+        return scroll;
+    };
+    m_settings_page = scrollPage(settingsPage, "settingsScroll");
+    m_tabs->addTab(m_settings_page, tr("Settings"));
+    connect(m_library, &LibraryPage::SettingsRequested, this, [this] {
+        m_tabs->setCurrentWidget(m_settings_page);
     });
     connect(m_library, &LibraryPage::PlayRequested, this, [this](const QString& path) {
         if (m_ui->widget->SelectGamePath(path)) Run();
     });
     connect(m_library, &LibraryPage::StreamingRequested, this, [this] {
-        m_tabs->setCurrentWidget(m_streaming_widget);
+        m_tabs->setCurrentWidget(m_streaming_page);
     });
     m_remote = new RemoteClient(this);
     auto* remotePage = new RemoteHostsWidget(m_remote, m_tabs);
-    m_tabs->addTab(remotePage, tr("Remote hosts"));
-    connect(m_library, &LibraryPage::RemoteHostsRequested, this, [this, remotePage] { m_tabs->setCurrentWidget(remotePage); });
+    auto* remoteTab = scrollPage(remotePage, "remoteHostsScroll");
+    m_tabs->addTab(remoteTab, tr("Remote hosts"));
+    connect(m_library, &LibraryPage::RemoteHostsRequested, this, [this, remoteTab] { m_tabs->setCurrentWidget(remoteTab); });
     connect(m_remote, &RemoteClient::Changed, this, [this] { ReloadLibrary(); if (m_update_checker) Update(); });
     connect(m_remote, &RemoteClient::Error, this, [this](const QString& error) {
         // Keep network failures visible without a recurring modal on library refresh.
@@ -223,15 +237,16 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
 	m_streaming_widget->SetRustCatalogProvider(
 	    [this] { return m_ui->widget->CreateStreamingCatalog(m_interpreter); });
-	m_tabs->addTab(m_streaming_widget, tr("Host streaming"));
-    if (QApplication::arguments().contains("--client-only")) m_tabs->setTabVisible(m_tabs->indexOf(m_streaming_widget), false);
+	m_streaming_page = scrollPage(m_streaming_widget, "streamingScroll");
+	m_tabs->addTab(m_streaming_page, tr("Host streaming"));
+    if (QApplication::arguments().contains("--client-only")) m_tabs->setTabVisible(m_tabs->indexOf(m_streaming_page), false);
 	if (!QApplication::arguments().contains("--client-only") && QApplication::arguments().contains("--start-streaming-host"))
-		m_tabs->setCurrentWidget(m_streaming_widget);
+		m_tabs->setCurrentWidget(m_streaming_page);
 	connect(m_tabs, &QTabWidget::currentChanged, this, [this] { Update(); });
 	m_ui->verticalLayout_3->addWidget(m_tabs);
 
 	main_dialog->setMinimumSize(520, 480);
-	main_dialog->resize(920, 860);
+	main_dialog->resize(960, 540);
 	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
         if (m_started && m_interpreter.isEmpty() && m_ui->widget->HasConfiguredGameDirectories()) FindInterpreter();
 		ReloadLibrary();
@@ -372,7 +387,7 @@ void MainDialogPrivate::FindInterpreter() {
 		m_update_checker->Check(false);
 	}
 	if (start_streaming_host) {
-		m_tabs->setCurrentWidget(m_streaming_widget);
+		m_tabs->setCurrentWidget(m_streaming_page);
 		m_host->StartDaemon();
 	}
 }
@@ -608,10 +623,10 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 
 	g_last_geometry = s.value(SETTINGS_MAIN_LAST_GEOMETRY, g_last_geometry).toByteArray();
 	g_check_updates_on_startup = s.value(SETTINGS_CHECK_UPDATES, true).toBool();
-	g_theme                    = s.value(SETTINGS_THEME, 0).toInt();
+	g_theme                    = s.value(SETTINGS_THEME, 1).toInt();
     g_library_selection = s.value("library_selection").toString();
 	if (g_theme < 0 || g_theme > 2) {
-		g_theme = 0;
+		g_theme = 1;
 	}
 
 	s.endGroup();
@@ -666,7 +681,7 @@ void MainDialogPrivate::Update() {
 	// SetSuspended(false) can synchronously publish the first held-button sample.
 	if (!busy && m_controller_preview.IsSuspended()) m_library->ResetControllerNavigation();
 	m_controller_preview.SetSuspended(busy);
-	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_ui->widget->parentWidget() && item != nullptr
+	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_settings_page && item != nullptr
 	                           ? item->GetInfo().basedir
 							   : QString {});
 	bool run_enabled = !busy && !m_interpreter.isEmpty() && item != nullptr;
