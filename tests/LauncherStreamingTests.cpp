@@ -926,6 +926,59 @@ private slots:
 		QVERIFY(widget.findChild<QPushButton*>("streamStop")->isEnabled());
 		QVERIFY(!widget.findChild<QPushButton*>("streamStart")->isEnabled());
 	}
+
+    void widgetOwnedLocalGameStopAndTitle_data() {
+        QTest::addColumn<QString>("state");
+        QTest::addColumn<bool>("local");
+        QTest::addColumn<bool>("owned");
+        QTest::addColumn<bool>("remote");
+        QTest::addColumn<bool>("canStop");
+        for (const auto& state: {QString("Ready"), QString("Stopped"), QString("Starting"), QString("Error")})
+            QTest::newRow(qPrintable("local-" + state)) << state << true << true << false << true;
+        QTest::newRow("legacy-local-ready") << QString("Ready") << true << false << false << false;
+        QTest::newRow("remote-ready") << QString("Ready") << false << false << true << true;
+        QTest::newRow("remote-stopped") << QString("Stopped") << false << false << true << false;
+        QTest::newRow("no-game") << QString("Ready") << false << false << false << false;
+    }
+    void widgetOwnedLocalGameStopAndTitle() {
+        QFETCH(QString, state); QFETCH(bool, local); QFETCH(bool, owned);
+        QFETCH(bool, remote); QFETCH(bool, canStop);
+        QTemporaryDir dir;
+        FakeHostDaemon daemon(dir.path());
+        daemon.status["state"] = state;
+        daemon.status["local_game_running"] = local;
+        daemon.status["local_game_id"] = owned ? QString(64, 'a') : QString();
+        daemon.status["local_game_title"] = owned ? QString("Local fixture") : QString();
+        daemon.status["stream_game_running"] = remote;
+        daemon.status["session"] = owned ? "Local: Local fixture" : remote ? "Remote fixture" : "No game running";
+        daemon.status["error"] = state == "Error" ? "Local cleanup failed" : "";
+        HostControlClient client(daemon.Path());
+        client.SetAutostartDirectory(dir.path());
+        StreamingWidget widget(&client);
+        QSignalSpy status(&client, &HostControlClient::StatusChanged);
+        QTRY_VERIFY(status.count() > 0);
+        auto* stop = widget.findChild<QPushButton*>("streamStopGame");
+        QCOMPARE(stop->isEnabled(), canStop);
+        auto* session = widget.findChild<QLabel*>("streamSession");
+        QVERIFY(session);
+        if (owned) QCOMPARE(session->text(), QString("Local: Local fixture"));
+        if (state == "Error") QCOMPARE(widget.findChild<QLabel*>("streamError")->text(), QString("Local cleanup failed"));
+        stop->click();
+        if (canStop) {
+            QVERIFY(!stop->isEnabled());
+            client.StatusChanged(daemon.status); // Polls cannot reenable a pending Stop.
+            QVERIFY(!stop->isEnabled());
+        }
+        stop->click(); // Pending owner request cannot dispatch twice.
+        if (canStop) {
+            QTRY_COMPARE(daemon.Requests("stop-game").size(), 1);
+        } else {
+            QCOMPARE(daemon.Requests("stop-game").size(), 0);
+        }
+        client.StatusChanged({});
+        QVERIFY(!stop->isEnabled());
+        QCOMPARE(session->text(), QString("No managed stream session"));
+    }
 	void widgetPairsUnpairsAndStopsGameThroughDaemon() {
 		QTemporaryDir dir;
 		FakeHostDaemon daemon(dir.path());

@@ -45,6 +45,7 @@ private:
 	QJsonObject                                  m_pending_preferences;
 	bool                                         m_preferences_edited_during_save = false;
 	QString                                      m_daemon_error;
+	bool                                         m_close_pending     = false;
 	bool                                         m_prefs_loaded      = false;
 	bool                                         m_autostart_touched = false;
 	bool                                         m_loading_prefs     = false;

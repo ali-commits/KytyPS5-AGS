@@ -249,6 +249,7 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	auto* sessions       = new QGroupBox(tr("Session"), content);
 	auto* session_layout = new QHBoxLayout(sessions);
 	m_session            = new QLabel(sessions);
+	m_session->setObjectName("streamSession");
 	m_session->setWordWrap(true);
 	session_layout->addWidget(m_session, 1);
 	m_close = new QPushButton(tr("Stop game"), sessions);
@@ -329,9 +330,14 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	connect(m_stop, &QPushButton::clicked, m_host, &HostControlClient::StopDaemon);
 	connect(m_restart, &QPushButton::clicked, m_host, &HostControlClient::RestartDaemon);
 	connect(m_close, &QPushButton::clicked, this, [this] {
+        if (m_close_pending) return;
+        m_close_pending = true;
+        Update();
 		m_host->Request({{"type", "stop-game"}},
 		                [self = QPointer(this)](QJsonObject reply, QString error) {
 			                if (!self) return;
+                        self->m_close_pending = false;
+                        self->Update();
 			                if (error.isEmpty() && !reply.value("ok").toBool())
 				                error = reply.value("error").toString();
 			                if (!error.isEmpty()) {
@@ -610,8 +616,15 @@ void StreamingWidget::Update() {
 		                       .arg(video.value("fps").toInt())
 		                       .arg(video.value("codec").toString()));
 	const auto session = m_host_status.value("session").toString();
-	m_session->setText(ready ? session : tr("No managed stream session"));
-	m_close->setEnabled(ready && m_host_status.value("stream_game_running").toBool());
+    // A legacy PS5 process also sets local_game_running, but only daemon-owned
+    // local games have an ID and can be stopped through the owner control socket.
+    const bool owned_local = reachable && m_host_status.value("local_game_running").toBool() &&
+                             !m_host_status.value("local_game_id").toString().isEmpty();
+    const auto local_title = m_host_status.value("local_game_title").toString();
+    m_session->setText(owned_local ? (local_title.isEmpty() ? session : tr("Local: %1").arg(local_title)) :
+                       ready ? session : tr("No managed stream session"));
+    m_close->setEnabled(!m_close_pending && (owned_local ||
+                        (ready && m_host_status.value("stream_game_running").toBool())));
 	QStringList addresses;
 	const auto  host_address = m_host_status.value("address").toString();
 	if (!host_address.isEmpty()) {
