@@ -189,6 +189,15 @@ private slots:
 		QVERIFY(found->installed);
 		QVERIFY(found->launch);
 		QCOMPARE(found->id, SteamSource::Id("620"));
+        QCOMPARE(found->launch->process_visibility, QString("private"));
+        auto hostRecipe = recipe;
+        hostRecipe["process_visibility"] = "host_steam";
+        QCOMPARE(SteamSource::Discover({root}, {{"620", hostRecipe}}).first().launch->process_visibility, QString("host_steam"));
+        for (const auto value : {QJsonValue("host"), QJsonValue(true)}) {
+            auto invalid = recipe;
+            invalid["process_visibility"] = value;
+            QVERIFY(!SteamSource::Discover({root}, {{"620", invalid}}).first().launch);
+        }
 		auto bad   = recipe;
 		bad["env"] = QJsonObject {{"DISPLAY", ":0"}};
 		QVERIFY(!SteamSource::Discover({root}, {{"620", bad}}).first().launch);
@@ -196,7 +205,7 @@ private slots:
 		    std::find_if(records.begin(), records.end(), [](auto r) { return r.app_id == "88"; });
 		QVERIFY(!incomplete->installed);
 		const auto recipePath = fixture.filePath("recipes.json");
-		WriteFile(recipePath, QJsonDocument(QJsonObject {{"620", recipe}}).toJson());
+		WriteFile(recipePath, QJsonDocument(QJsonObject {{"620", hostRecipe}}).toJson());
 		auto settings = GameLibraryFiles::OpenSettings();
 		settings->setValue("Launcher/steam_roots", root);
 		settings->setValue("Launcher/steam_recipes", recipePath);
@@ -211,6 +220,7 @@ private slots:
 		auto          reply =
 		    Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", uuid, {{"game", id}}));
 		QCOMPARE(reply.status, 200);
+        QCOMPARE(QJsonDocument::fromJson(reply.body).object()["process_visibility"].toString(), QString("host_steam"));
 		QCOMPARE(
 		    QJsonDocument::fromJson(reply.body).object()["env"].toObject()["SteamAppId"].toString(),
 		    QString("620"));

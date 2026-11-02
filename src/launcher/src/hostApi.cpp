@@ -274,7 +274,8 @@ QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game
 		        {"executable", entry->program},
 		        {"args", QJsonArray::fromStringList(entry->arguments)},
 		        {"cwd", entry->working_directory},
-		        {"env", entry->environment}};
+		        {"env", entry->environment},
+                {"process_visibility", entry->process_visibility}};
 	}
 	auto        cwd = entry->working_directory;
 	QJsonObject env;

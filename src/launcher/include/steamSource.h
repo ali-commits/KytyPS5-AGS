@@ -192,11 +192,15 @@ inline QList<Record> Discover(const QStringList& roots, const QJsonObject& recip
 			auto        recipe  = recipes[id].toObject();
 			auto        program = recipe["executable"].toString();
 			auto        cwd     = recipe["cwd"].toString();
+			auto visibility = recipe.value("process_visibility").toString("private");
 			QStringList args;
-			bool        valid = recipe["args"].isArray();
+			bool        valid = recipe["args"].isArray() &&
+                            (!recipe.contains("process_visibility") || recipe["process_visibility"].isString()) &&
+                            (visibility == "private" || visibility == "host_steam");
 			for (auto a: recipe["args"].toArray()) {
 				if (!a.isString() || a.toString().contains(QChar('\0')) ||
-				    a.toString() == "--streaming-only" ||
+				    a.toString() == "-applaunch" || a.toString().startsWith("steam://") ||
+                    a.toString() == "--streaming-only" ||
 				    a.toString().startsWith("--streaming-only=") ||
 				    a.toString() == "--streaming-socket" ||
 				    a.toString().startsWith("--streaming-socket="))
@@ -227,7 +231,7 @@ inline QList<Record> Discover(const QStringList& roots, const QJsonObject& recip
 					valid = false;
 			}
 			if (r.installed && valid) {
-				r.launch = StreamingLaunchEntry {r.id, r.name, program, args, cwd, {}, env};
+				r.launch = StreamingLaunchEntry {r.id, r.name, program, args, cwd, {}, env, visibility};
 				r.reason.clear();
 			} else if (!recipe.isEmpty() && r.installed)
 				r.reason = "invalid-owned-launch-recipe";
