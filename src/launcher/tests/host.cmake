@@ -74,4 +74,5 @@ set_tests_properties(launcher_host PROPERTIES TIMEOUT 60
 # Optional cross-language fixture; the caller supplies its freshly built host binary.
 # Source paths are derived from the configured tree, never from an installed personal runtime.
 target_compile_definitions(launcher_host_tests PRIVATE
+    AGS_TEST_NATIVE_HOST_FIXTURE="${host_root}/tests/LauncherNativeHostFixture.py"
     AGS_TEST_GUARD_SOURCE="${host_root}/tools/streaming/emulator_guard.py")

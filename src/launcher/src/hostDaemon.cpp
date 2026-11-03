@@ -379,7 +379,10 @@ QJsonObject HostDaemon::StatusObject() const {
 	const auto state = m_backend.GetState();
 	const auto name  = QMetaEnum::fromType<StreamingBackend::State>().valueToKey(int(state));
     const bool recovery = m_api.NativeOwnershipRecoveryRequired();
-	return {{"state", recovery || !m_local_error.isEmpty() ? QStringLiteral("Error") : QString::fromLatin1(name)},
+	// A retained ownership marker adds recovery detail; it must not make a live,
+	// admission-blocked worker look stopped or enable the UI's Start action.
+	const bool error_state = state != StreamingBackend::State::Blocked && (recovery || !m_local_error.isEmpty());
+	return {{"state", error_state ? QStringLiteral("Error") : QString::fromLatin1(name)},
 	        {"error", recovery ? QStringLiteral("Steam ownership recovery required") : !m_local_error.isEmpty() ? m_local_error : m_backend.Error()},
 	        {"ownership_blocked", m_api.NativeOwnershipBlocked()},
 	        {"address", LanAddress()},

@@ -6,9 +6,11 @@
 #include "gameLibrary.h"
 #include "hostApi.h"
 #include "hostDaemon.h"
+#include "hostControlClient.h"
 #include "hostMetrics.h"
 #include "hostSocket.h"
 #include "steamSource.h"
+#include "streamingWidget.h"
 
 #include <QDir>
 #include <QFile>
@@ -17,6 +19,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalSocket>
+#include <QLabel>
+#include <QPushButton>
+#include <QUdpSocket>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -1047,6 +1052,56 @@ private slots:
 		QCOMPARE(HostDaemon::PlanRestart(S::Stopped, false), R::StartNow);
 		QCOMPARE(HostDaemon::PlanRestart(S::Error, false), R::StartNow);
 	}
+	void retainedOwnershipMarkerKeepsReachableHostBlocked() {
+		QTemporaryDir run, profile, fixture;
+		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
+		qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		const auto binary = fixture.filePath("native-host");
+		QVERIFY(QFile::copy(QStringLiteral(AGS_TEST_NATIVE_HOST_FIXTURE), binary));
+		QVERIFY(QFile::setPermissions(binary, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		QUdpSocket freePort;
+		QVERIFY(freePort.bind(QHostAddress::Any, 0));
+		const auto port = freePort.localPort();
+		freePort.close();
+		WriteFile(profile.filePath("streaming.ini"), "[host]\nbackend=" + binary.toUtf8() +
+		          "\nport=" + QByteArray::number(port) + "\n");
+		WriteFile(fixture.filePath("native-state.json"), R"({"state":"quarantined","error":"cleanup unconfirmed"})");
+		HostDaemon daemon;
+		QString error;
+		QVERIFY2(daemon.Start(&error), qPrintable(error));
+		const auto marker = run.filePath("kytyps5/emulator.lock.host-steam-owner");
+		const QByteArray stale = R"({"version":1,"guard_pid":1,"guard_start":"not-this-process","verified_empty":false})";
+		WriteFile(marker, stale);
+		QVERIFY(QFile::setPermissions(marker, QFile::ReadOwner | QFile::WriteOwner));
+		const auto socket = run.filePath("kyty-host/control.sock");
+		auto prefs = Control(socket, {{"type", "get-preferences"}});
+		prefs["type"] = "set-preferences";
+		prefs["fps"] = 30;
+		qunsetenv("KYTY_HOST_NO_AUTOSTART");
+		const auto applied = Control(socket, prefs);
+		qputenv("KYTY_HOST_NO_AUTOSTART", "1");
+		QVERIFY(applied["ok"].toBool());
+		QTRY_COMPARE_WITH_TIMEOUT(Control(socket, {{"type", "status"}})["native"].toObject()["state"].toString(), QString("quarantined"), 5000);
+		const auto status = Control(socket, {{"type", "status"}});
+		QCOMPARE(status["state"].toString(), QString("Blocked"));
+		QVERIFY(status["ownership_blocked"].toBool());
+		QVERIFY(status["error"].toString().contains("recovery"));
+		QVERIFY(!daemon.RetryScheduled());
+		HostControlClient client(socket);
+		StreamingWidget widget(&client);
+		QTRY_VERIFY(widget.findChild<QLabel*>("streamStatus")->text().contains("needs attention"));
+		QVERIFY(!widget.findChild<QPushButton*>("streamStart")->isEnabled());
+		QVERIFY(widget.findChild<QPushButton*>("streamStop")->isEnabled());
+		QVERIFY(!ReadFile(fixture.filePath("native-requests.jsonl")).contains("\"shutdown\""));
+		QCOMPARE(ReadFile(marker), stale);
+		// Fixture-owned removal is deliberate; status handling must never clear this marker.
+		QVERIFY(QFile::remove(marker));
+		QSignalSpy finished(&daemon, &HostDaemon::Finished);
+		daemon.Shutdown();
+		QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+	}
+
 	void errorSchedulesRetryWithBackoff() {
 		QTemporaryDir run, profile;
 		qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
