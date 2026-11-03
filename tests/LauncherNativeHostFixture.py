@@ -47,7 +47,8 @@ def safe(value):
 def status():
     state_file = root / 'native-state.json'
     extra = json.loads(state_file.read_text()) if state_file.exists() else {}
-    return dict(ok=True, state='ready', generation=generation, address='127.0.0.1:48231',
+    return dict(ok=True, state=extra.get('state', 'ready'), error=extra.get('error'),
+                generation=generation, address='127.0.0.1:48231',
                 running=extra.get('running'), media_state=extra.get('media_state'),
                 paired_devices=[{'id': key, 'name': name} for key, name in config['devices'].items()],
                 connections=[], active=safe(active), configured=safe(config),

@@ -321,7 +321,7 @@ void StreamingBackend::Tool(const QStringList& arguments, const QByteArray& inpu
 }
 
 void StreamingBackend::Start(const StreamingSettings& settings) {
-	if (m_state == State::Starting || m_state == State::Ready || m_state == State::Stopping) return;
+	if (m_state == State::Starting || m_state == State::Ready || m_state == State::Blocked || m_state == State::Stopping) return;
 	++m_generation;
 	m_failed = false;
 	m_startup_cancel = false;
@@ -429,37 +429,40 @@ void StreamingBackend::AcceptStatus(const QJsonObject& status) {
 		m_clients.append(
 		    QJsonObject {{"uuid", device.value("id")}, {"name", device.value("name")}});
 	}
-	m_error   = status.value("error").toString();
-	m_session = m_closing                   ? tr("Stopping game…")
+	const bool blocked = status.value("state") == "quarantined";
+	m_error = blocked ? tr("Game cleanup could not be confirmed. New games are blocked. Check that the game has stopped before restarting hosting.")
+	                  : status.value("error").toString();
+	m_session = blocked                     ? tr("Game cleanup needs attention")
+	            : m_closing                 ? tr("Stopping game…")
 	            : RunningGameId().isEmpty() ? tr("No game running · choose a game in AGS")
 	            : status.value("media_state") == "starting" ? tr("Starting game…")
 	                                                        : tr("Game running");
 	if (status.value("restart_required").toBool())
 		m_session += tr(" · host endpoint changes require restart");
-	emit Changed();
+	// A reachable owner may block admission after failed cleanup. Keep polling it
+	// without entering Fail(), which stops the worker and schedules an automatic retry.
+	m_start_timeout.stop();
+	SetState(blocked ? State::Blocked : State::Ready);
 }
 void StreamingBackend::Refresh() {
 	if (m_refreshing || m_reloading || m_closing ||
-	    (m_state != State::Starting && m_state != State::Ready) ||
+	    (m_state != State::Starting && m_state != State::Ready && m_state != State::Blocked) ||
 	    m_host.state() != QProcess::Running)
 		return;
 	m_refreshing = true;
 	Request({{"op", "status"}}, [this](QJsonObject status, QString error) {
 		m_refreshing = false;
 		if (!error.isEmpty()) {
-			if (m_state == State::Ready) Fail(error);
+			if (m_state == State::Ready || m_state == State::Blocked) Fail(error);
 			return;
 		}
-		if (status.value("state") != "ready" || !status.value("paired_devices").isArray() ||
+		if ((status.value("state") != "ready" && status.value("state") != "quarantined") ||
+		    !status.value("paired_devices").isArray() ||
 		    !status.value("active").isObject() || !status.value("configured").isObject()) {
 			Fail(tr("Invalid native owner readiness response."));
 			return;
 		}
 		AcceptStatus(status);
-		if (m_state == State::Starting) {
-			m_start_timeout.stop();
-			SetState(State::Ready);
-		}
 		if (m_catalog_dirty) PublishCatalog();
 	});
 }

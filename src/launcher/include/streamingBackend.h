@@ -18,7 +18,7 @@ class QLocalSocket;
 class StreamingBackend: public QObject {
 	Q_OBJECT
 public:
-	enum class State { Stopped, Starting, Ready, Stopping, Error };
+	enum class State { Stopped, Starting, Ready, Stopping, Error, Blocked };
 	Q_ENUM(State)
 	using Done = std::function<void(QJsonObject, QString)>;
 	explicit StreamingBackend(const QString& profile, QObject* parent = nullptr);

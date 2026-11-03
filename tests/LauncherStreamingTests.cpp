@@ -320,6 +320,50 @@ private slots:
 		QVERIFY(!ProcessRunning(Read(dir.filePath("native-pid")).trimmed().toLongLong()));
 	}
 
+	void nativeCleanupBlockKeepsOwnerAndPolling_data() {
+		QTest::addColumn<bool>("blockedAtStartup");
+		QTest::newRow("startup") << true;
+		QTest::newRow("after-ready") << false;
+	}
+	void nativeCleanupBlockKeepsOwnerAndPolling() {
+		QFETCH(bool, blockedAtStartup);
+		QTemporaryDir dir;
+		const auto source = QFileInfo(QStringLiteral(KYTY_LAUNCHER_FIXTURE)).dir().filePath("LauncherNativeHostFixture.py");
+		QVERIFY(Put(dir.filePath("native-host"), Read(source)));
+		QVERIFY(QFile::setPermissions(dir.filePath("native-host"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		const QByteArray blocked = R"({"state":"quarantined","error":"remote game cleanup is unconfirmed; host admission remains quarantined"})";
+		if (blockedAtStartup) QVERIFY(Put(dir.filePath("native-state.json"), blocked));
+		StreamingBackend backend(dir.filePath("profile"));
+		backend.SetApiSocket(dir.filePath("api.sock"));
+		StreamingSettings settings; settings.backend = dir.filePath("native-host"); settings.port = FreeBasePort();
+		backend.Start(settings);
+		if (!blockedAtStartup) {
+			QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 5000);
+			QVERIFY(Put(dir.filePath("native-state.json"), blocked));
+			backend.Refresh();
+		}
+		QTRY_COMPARE_WITH_TIMEOUT(backend.NativeStatus().value("state").toString(), QString("quarantined"), 5000);
+		QCOMPARE(backend.GetState(), StreamingBackend::State::Blocked);
+		QVERIFY(backend.Error().contains("cleanup", Qt::CaseInsensitive));
+		QVERIFY(!backend.Error().contains("quarantin"));
+		const auto pid = Read(dir.filePath("native-pid")).trimmed().toLongLong();
+		QVERIFY(ProcessRunning(pid));
+		const auto before = Read(dir.filePath("native-requests.jsonl")).count("\"status\"");
+		QTRY_VERIFY_WITH_TIMEOUT(Read(dir.filePath("native-requests.jsonl")).count("\"status\"") >= before + 2, 3000);
+		QVERIFY(!Read(dir.filePath("native-requests.jsonl")).contains("\"shutdown\""));
+		backend.Start(settings);
+		bool rejected = false;
+		backend.ExportPairing({}, [&](QJsonObject, QString error) { rejected = !error.isEmpty(); });
+		QVERIFY(rejected);
+		// Only a subsequent verified native status may restore readiness.
+		QVERIFY(Put(dir.filePath("native-state.json"), "{}"));
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Ready, 3000);
+		QVERIFY(backend.Error().isEmpty());
+		QCOMPARE(Read(dir.filePath("native-pid")).trimmed().toLongLong(), pid);
+		backend.Stop();
+		QTRY_COMPARE_WITH_TIMEOUT(backend.GetState(), StreamingBackend::State::Stopped, 3000);
+	}
+
 	void nativeReadinessReloadAndLifecycle() {
 		QTemporaryDir dir;
 		const auto source = QFileInfo(QStringLiteral(KYTY_LAUNCHER_FIXTURE)).dir().filePath("LauncherNativeHostFixture.py");

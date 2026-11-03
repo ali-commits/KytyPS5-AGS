@@ -586,6 +586,8 @@ void StreamingWidget::Update() {
 		m_status->setText(tr("Starting · waiting for native owner readiness…"));
 	} else if (state == "Ready") {
 		m_status->setText(tr("Hosting ready · choose a game on a client"));
+	} else if (state == "Blocked") {
+		m_status->setText(tr("Hosting needs attention · game cleanup is unconfirmed"));
 	} else if (state == "Stopping") {
 		m_status->setText(tr("Stopping native host and draining its game…"));
 	} else if (state == "Error") {
