@@ -12,6 +12,7 @@ struct StreamingLaunchEntry {
 	QString     image_path;
 	QJsonObject environment;
 	QString     process_visibility = "private";
+	QJsonObject stream_environment {};
 	bool        operator==(const StreamingLaunchEntry&) const = default;
 };
 namespace StreamingCatalog {

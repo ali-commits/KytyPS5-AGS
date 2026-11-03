@@ -78,7 +78,7 @@ signals:
 
 private:
 	void Internal(const QJsonObject& request, const std::function<void(HostReply)>& done);
-	[[nodiscard]] QJsonObject ResolveNative(const QString& client_id, const QString& game_id) const;
+	[[nodiscard]] QJsonObject ResolveNative(const QString& client_id, const QString& game_id, bool local) const;
 	[[nodiscard]] QString RuntimeDirectory(const QString& game_id) const;
 	void ClearRuntime();
 	void ReapRuntime();

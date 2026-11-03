@@ -284,7 +284,7 @@ QString HostApi::RuntimeDirectory(const QString& game_id) const {
 	if (!m_runtime_root.isEmpty()) return QDir(m_runtime_root).filePath(game_id);
 	return m_interpreter.isEmpty() ? QCoreApplication::applicationDirPath() : QFileInfo(m_interpreter).absolutePath();
 }
-QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game_id) const {
+QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game_id, bool local) const {
 	const auto entry = m_library->ResolveLaunch(m_interpreter, client_id, game_id);
 	if (!entry || !QDir::isAbsolutePath(entry->program) || !QFileInfo(entry->program).isExecutable()) return {};
 	const bool ps5 = m_library->Find(game_id)->info != nullptr;
@@ -292,12 +292,17 @@ QJsonObject HostApi::ResolveNative(const QString& client_id, const QString& game
 		if (!QDir::isAbsolutePath(entry->working_directory) ||
 		    !QFileInfo(entry->working_directory).isDir())
 			return {};
+		auto env = entry->environment;
+		if (!local) {
+			for (auto i = entry->stream_environment.begin(); i != entry->stream_environment.end(); ++i)
+				env.insert(i.key(), i.value());
+		}
 		return {{"id", entry->id},
 		        {"name", entry->name},
 		        {"executable", entry->program},
 		        {"args", QJsonArray::fromStringList(entry->arguments)},
 		        {"cwd", entry->working_directory},
-		        {"env", entry->environment},
+		        {"env", env},
                 {"process_visibility", entry->process_visibility}};
 	}
 	auto        cwd = entry->working_directory;
@@ -353,7 +358,7 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
         if (local && (!m_library->Find(game_id) || m_library->Find(game_id)->source != "steam")) return done(Error(400, "invalid-local-source"));
 		if (body.size() != 1) return done(Error(400, "bad-body"));
 		m_resolved = {};
-		const auto launch = ResolveNative(client_id, game_id);
+		const auto launch = ResolveNative(client_id, game_id, local);
 		if (launch.isEmpty()) return done(Error(404, "invalid-launch"));
 		if (!m_library->Find(game_id)->info) {
 			m_resolved = {client_id, launch, {}};

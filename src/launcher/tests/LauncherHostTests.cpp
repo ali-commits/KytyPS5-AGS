@@ -188,6 +188,10 @@ private slots:
 		row("nul", QString("0x1234/0x5678") + QChar('\0'), false);
 		QTest::newRow("other-sdl-overrides-remain-disallowed")
 		    << QJsonObject {{"SDL_GAMECONTROLLER_IGNORE_DEVICES", "0x1234/0x5678"}} << false;
+		QTest::newRow("protected-display") << QJsonObject {{"DISPLAY", ":0"}} << false;
+		QTest::newRow("wrong-steam-app") << QJsonObject {{"SteamAppId", "123"}} << false;
+		QTest::newRow("relative-compat-path")
+		    << QJsonObject {{"STEAM_COMPAT_DATA_PATH", "relative/path"}} << false;
 	}
 	void steamControllerCompatibilityRecipe() {
 		QFETCH(QJsonObject, env);
@@ -196,17 +200,89 @@ private slots:
 		WriteFile(fixture.filePath("steamapps/appmanifest_620.acf"),
 		          R"("AppState" { "appid" "620" "name" "Native Fixture" "installdir" "native" "StateFlags" "4" })");
 		QVERIFY(QDir().mkpath(fixture.filePath("steamapps/common/native")));
-		const QJsonObject recipe {{"executable", "/usr/bin/true"}, {"args", QJsonArray {}},
-		                          {"cwd", QFileInfo(fixture.path()).canonicalFilePath()},
-		                          {"env", env}};
-		const auto records = SteamSource::Discover({fixture.path()}, {{"620", recipe}});
-		QCOMPARE(records.size(), 1);
-		QVERIFY(records.first().installed);
-		QCOMPARE(records.first().launch.has_value(), ready);
-		if (ready) {
-			QVERIFY(records.first().reason.isEmpty());
-			QCOMPARE(records.first().launch->environment, env);
-		} else {
+		for (const auto key: {"env", "stream_env"}) {
+			QJsonObject recipe {{"executable", "/usr/bin/true"}, {"args", QJsonArray {}},
+			                    {"cwd", QFileInfo(fixture.path()).canonicalFilePath()},
+			                    {"env", QJsonObject {}}};
+			recipe[key] = env;
+			const auto records = SteamSource::Discover({fixture.path()}, {{"620", recipe}});
+			QCOMPARE(records.size(), 1);
+			QVERIFY(records.first().installed);
+			QCOMPARE(records.first().launch.has_value(), ready);
+			if (ready) {
+				QVERIFY(records.first().reason.isEmpty());
+				QCOMPARE(records.first().launch->environment,
+				         QString(key) == "env" ? env : QJsonObject {});
+			} else {
+				QCOMPARE(records.first().reason, QString("invalid-owned-launch-recipe"));
+			}
+		}
+	}
+	void steamStreamEnvironmentResolution_data() {
+		QTest::addColumn<QJsonObject>("env");
+		QTest::addColumn<QJsonValue>("streamEnv");
+		QTest::addColumn<QJsonObject>("remoteEnv");
+		const QJsonObject base {{"SteamAppId", "620"}};
+		const QJsonObject pad {{"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", "0x1234/0x5678"}};
+		const QJsonObject merged {{"SteamAppId", "620"},
+		                         {"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", "0x1234/0x5678"}};
+		QTest::newRow("no-environment-maps")
+		    << QJsonObject {} << QJsonValue(QJsonValue::Undefined) << QJsonObject {};
+		QTest::newRow("absent-preserves-default") << base << QJsonValue(QJsonValue::Undefined) << base;
+		QTest::newRow("empty-preserves-default") << base << QJsonValue(QJsonObject {}) << base;
+		QTest::newRow("stream-only-pad") << base << QJsonValue(pad) << merged;
+		QTest::newRow("stream-overrides-common-key")
+		    << QJsonObject {{"SteamAppId", "620"},
+		                    {"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", "0x045e/0x028e"}}
+		    << QJsonValue(pad) << merged;
+	}
+	void steamStreamEnvironmentResolution() {
+		QFETCH(QJsonObject, env);
+		QFETCH(QJsonValue, streamEnv);
+		QFETCH(QJsonObject, remoteEnv);
+		QTemporaryDir fixture;
+		WriteFile(fixture.filePath("steamapps/appmanifest_620.acf"),
+		          R"("AppState" { "appid" "620" "name" "Native Fixture" "installdir" "native" "StateFlags" "4" })");
+		QVERIFY(QDir().mkpath(fixture.filePath("steamapps/common/native")));
+		QJsonObject recipe {{"executable", "/usr/bin/true"}, {"args", QJsonArray {}},
+		                    {"cwd", QFileInfo(fixture.path()).canonicalFilePath()}};
+		if (!env.isEmpty()) recipe["env"] = env;
+		if (!streamEnv.isUndefined()) recipe["stream_env"] = streamEnv;
+		const auto path = fixture.filePath("recipes.json");
+		WriteFile(path, QJsonDocument(QJsonObject {{"620", recipe}}).toJson());
+		auto settings = GameLibraryFiles::OpenSettings();
+		settings->setValue("Launcher/steam_roots", fixture.path());
+		settings->setValue("Launcher/steam_recipes", path);
+		settings->sync();
+		QString error;
+		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch("/usr/bin/true", fixture.filePath("emulator.lock"));
+		const QString remoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+		const QString localId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+		resolver.ConfigureLocalOwner(localId, QCoreApplication::applicationPid());
+		const QJsonObject body {{"game", SteamSource::Id("620")}};
+		const auto remote = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", remoteId, body));
+		QCOMPARE(remote.status, 200);
+		QCOMPARE(QJsonDocument::fromJson(remote.body).object()["env"].toObject(), remoteEnv);
+		QVERIFY(!QJsonDocument::fromJson(remote.body).object().contains("stream_env"));
+		const auto local = Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", localId, body));
+		QCOMPARE(local.status, 200);
+		QCOMPARE(QJsonDocument::fromJson(local.body).object()["env"].toObject(), env);
+	}
+	void steamStreamEnvironmentRequiresObject() {
+		QTemporaryDir fixture;
+		WriteFile(fixture.filePath("steamapps/appmanifest_620.acf"),
+		          R"("AppState" { "appid" "620" "name" "Native Fixture" "installdir" "native" "StateFlags" "4" })");
+		QVERIFY(QDir().mkpath(fixture.filePath("steamapps/common/native")));
+		for (const auto& value: {QJsonValue(), QJsonValue(true), QJsonValue("invalid"), QJsonValue(QJsonArray {})}) {
+			const QJsonObject recipe {{"executable", "/usr/bin/true"}, {"args", QJsonArray {}},
+			                          {"cwd", QFileInfo(fixture.path()).canonicalFilePath()},
+			                          {"env", QJsonObject {}},
+			                          {"stream_env", value}};
+			const auto records = SteamSource::Discover({fixture.path()}, {{"620", recipe}});
+			QCOMPARE(records.size(), 1);
+			QVERIFY(!records.first().launch);
 			QCOMPARE(records.first().reason, QString("invalid-owned-launch-recipe"));
 		}
 	}
