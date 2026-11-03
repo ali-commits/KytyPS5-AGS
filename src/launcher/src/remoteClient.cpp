@@ -162,9 +162,30 @@ RemoteClient::RemoteClient(const TestOptions& options, QObject* parent)
 		}
 		if (code == 0 && status == QProcess::NormalExit)
 			m_ownedProfile.clear();
-		else
-			emit Error(tr("Receiver ended unexpectedly. Use Stop remote game to confirm host "
-			              "cleanup. If unreachable, the host disconnect grace policy applies."));
+		else {
+			// A playback error does not prove that the host still owns a game. Natural
+			// game exit can race the final media packets; ask the authenticated host
+			// before retaining a local admission block. Never close another session.
+			const auto profileId = m_ownedProfile;
+			const auto revision = m_receiverRevision;
+			if (!profileId.isEmpty() && m_profiles.contains(profileId)) {
+				Request(Arguments(m_profiles.value(profileId)) + QStringList {"status"},
+				        [this, profileId, revision](QByteArray data, QString error) {
+					if (revision != m_receiverRevision || m_stopping ||
+					    m_ownedProfile != profileId || m_receiver.state() != QProcess::NotRunning)
+						return;
+					const auto reply = QJsonDocument::fromJson(data).object();
+					if (error.isEmpty() && reply.value("ok").toBool() &&
+					    reply.value("running").isNull() && reply.value("session_id").isNull()) {
+						m_ownedProfile.clear();
+						emit Changed();
+					}
+				});
+			}
+			emit Error(tr("Receiver ended unexpectedly. Checking host session status. If closure "
+			              "remains unconfirmed, use Stop remote game; if unreachable, the host "
+			              "disconnect grace policy applies."));
+		}
 		emit Changed();
 	});
 }
@@ -476,6 +497,7 @@ bool RemoteClient::Play(const QString& id) {
 				}
 			}
 			m_receiverOutputBytes = 0;
+			++m_receiverRevision;
 			m_ownedProfile        = p.id;
 			m_receiver.setProgram(m_executable);
 			m_receiver.setArguments(
@@ -499,6 +521,7 @@ QString RemoteClient::Activity() const {
 }
 void RemoteClient::StopForExit() {
 	if (m_stopping) return;
+	++m_receiverRevision; // Invalidate an idle reply from an earlier receiver attempt.
 	m_stopping = true;
 	m_stopError.clear();
 	m_closeStarted      = false;

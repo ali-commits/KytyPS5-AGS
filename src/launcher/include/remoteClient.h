@@ -82,6 +82,6 @@ private:
 	bool    m_stopping = false, m_closeStarted = false, m_closeFinished = false;
 	int     m_width = 1920, m_height = 1080, m_fps = 60;
 	qint64  m_receiverOutputBytes = 0;
-	quint64 m_stopRevision = 0, m_pairRevision = 0;
+	quint64 m_stopRevision = 0, m_pairRevision = 0, m_receiverRevision = 0;
 };
 #endif

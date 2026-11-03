@@ -84,6 +84,9 @@ if command=='list':
  print(json.dumps({'ok':True,'games':[{'id':'same id','name':'Game 日本'}]}))
 elif command=='launch':
  if mode=='fail':sys.exit(1)
+ if mode=='natural-end-error':
+  while not os.path.exists(__file__+'.game-quit'):time.sleep(.01)
+  sys.exit(23)
  def interrupted(*a):
   with open(__file__+'.interrupted','w') as f:f.write('SIGINT')
   if mode=='startup-race':
@@ -101,8 +104,102 @@ elif command=='close':
  if os.path.exists(__file__+'.interrupted'):
   with open(__file__+'.close-after-drain','w') as f:f.write('confirmed after receiver exit')
  print('{"ok":true,"running":null,"session_id":null}')
+elif command=='status':
+ probe=open(__file__+'.status-mode').read() if os.path.exists(__file__+'.status-mode') else 'fail'
+ with open(__file__+'.status-started','w') as f:f.write('ready')
+ if probe=='delayed-idle':
+  deadline=time.monotonic()+3
+  while not os.path.exists(__file__+'.release-status') and time.monotonic()<deadline:time.sleep(.01)
+ if probe=='fail':sys.exit(1)
+ if probe=='active':print('{"ok":true,"running":"game","session_id":"session"}')
+ elif probe=='quarantined':print('{"ok":false,"running":null,"session_id":null}')
+ elif probe=='malformed':print('{}')
+ elif probe=='partial':print('{"ok":true,"running":null}')
+ else:print('{"ok":true,"running":null,"session_id":null,"session_error":"media ended"}')
+ with open(__file__+'.status-finished','w') as f:f.write('done')
 )PY",
 		      true);
+	}
+	void naturalGameEndWithReceiverErrorReleasesConfirmedIdleOwnership() {
+		RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+		QSignalSpy errors(&client, &RemoteClient::Error);
+		client.AddProfile("PC", "127.0.0.1:4444", profile);
+		QTRY_COMPARE(client.Cards().size(), 1);
+		write(script + ".mode", "natural-end-error");
+		write(script + ".status-mode", "idle");
+		QVERIFY(client.Play(client.Cards()[0].id));
+		QTRY_COMPARE(client.Activity(), QString("playing"));
+		write(script + ".game-quit", "quit");
+		QTRY_VERIFY(!errors.isEmpty()); // Playback failure remains visible.
+		QTRY_COMPARE(client.Activity(), QString("idle"));
+		QVERIFY(!client.Busy());
+		write(script + ".mode", "ok");
+		QVERIFY(client.Play(client.Cards()[0].id));
+		QTRY_COMPARE(client.Activity(), QString("playing"));
+		client.StopForExit();
+		QTRY_VERIFY(!client.Busy());
+	}
+	void receiverErrorRetainsUnconfirmedWithoutAuthoritativeIdle() {
+		for (const auto probe: {"active", "fail", "quarantined", "malformed", "partial"}) {
+			QFile::remove(script + ".status-started");
+			RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+			if (client.Profiles().isEmpty()) client.AddProfile("PC", "127.0.0.1:4444", profile);
+			else client.RefreshAll();
+			QTRY_VERIFY(client.Cards().size() == 1 && client.Cards()[0].ready);
+			write(script + ".mode", "natural-end-error");
+			write(script + ".status-mode", probe);
+			write(script + ".game-quit", "quit");
+			QVERIFY(client.Play(client.Cards()[0].id));
+			QTRY_VERIFY(QFile::exists(script + ".status-started"));
+			QTest::qWait(100);
+			QCOMPARE(client.Activity(), QString("unconfirmed"));
+			QVERIFY(client.Busy());
+			write(script + ".mode", "ok");
+			client.StopForExit();
+			QTRY_VERIFY(!client.Busy());
+		}
+	}
+	void staleIdleProbeCannotReleaseAnotherReceiverAttempt() {
+		for (bool differentProfile: {false, true}) {
+			for (const auto suffix: {".status-started", ".status-finished", ".release-status"})
+				QFile::remove(script + suffix);
+			RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+			if (client.Profiles().isEmpty()) client.AddProfile("PC", "127.0.0.1:4444", profile);
+			else client.RefreshAll();
+			QTRY_VERIFY(client.Cards().size() == 1 && client.Cards()[0].ready);
+			const auto firstCard = client.Cards()[0].id;
+			QString nextCard = firstCard;
+			if (differentProfile) {
+				const auto second = profile + " second";
+				QVERIFY(QDir().mkpath(second));
+				QFile::setPermissions(second, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+				write(second + "/host.der", "fixture certificate");
+				write(second + "/client.json", "private fixture");
+				client.AddProfile("PC 2", "127.0.0.2:4444", second);
+				QTRY_COMPARE(client.Cards().size(), 2);
+				for (const auto& card: client.Cards()) if (card.id != firstCard) nextCard = card.id;
+			}
+			write(script + ".mode", "natural-end-error");
+			write(script + ".status-mode", "delayed-idle");
+			write(script + ".game-quit", "quit");
+			QVERIFY(client.Play(firstCard));
+			QTRY_VERIFY(QFile::exists(script + ".status-started"));
+			client.StopForExit();
+			QTRY_VERIFY(!client.Busy());
+			QFile::remove(script + ".status-started");
+			write(script + ".status-mode", "active");
+			QVERIFY(client.Play(nextCard));
+			QTRY_VERIFY(QFile::exists(script + ".status-started"));
+			QTRY_VERIFY(QFile::exists(script + ".status-finished"));
+			QFile::remove(script + ".status-finished");
+			write(script + ".release-status", "release old idle reply");
+			QTRY_VERIFY(QFile::exists(script + ".status-finished"));
+			QTest::qWait(100);
+			QCOMPARE(client.Activity(), QString("unconfirmed"));
+			QVERIFY(client.Busy());
+			client.StopForExit();
+			QTRY_VERIFY(!client.Busy());
+		}
 	}
 	void receiverCapsPersistAndLegacyProfilesKeepDefaults() {
 		{
