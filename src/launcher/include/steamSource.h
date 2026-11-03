@@ -218,7 +218,8 @@ inline QList<Record> Discover(const QStringList& roots, const QJsonObject& recip
 			if (recipe.contains("env") && !recipe["env"].isObject()) valid = false;
 			const QSet<QString> allowed = {"SteamAppId", "SteamGameId", "STEAM_COMPAT_DATA_PATH",
 			                               "STEAM_COMPAT_CLIENT_INSTALL_PATH",
-			                               "STEAM_COMPAT_INSTALL_PATH"};
+			                               "STEAM_COMPAT_INSTALL_PATH",
+			                               "SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT"};
 			for (auto i = env.begin(); i != env.end(); ++i) {
 				if (!allowed.contains(i.key()) || !i.value().isString() ||
 				    i.value().toString().contains(QChar('\0')))
@@ -228,6 +229,14 @@ inline QList<Record> Discover(const QStringList& roots, const QJsonObject& recip
 					valid = false;
 				if (i.key().startsWith("STEAM_COMPAT_") &&
 				    !QDir::isAbsolutePath(i.value().toString()))
+					valid = false;
+				// Explicit per-game SDL compatibility: 1–16 USB VID/PID pairs.
+				// Reject SDL's @file form so the resolved recipe pins the entire list.
+				if (i.key() == "SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT" &&
+				    !QRegularExpression(
+				         "\\A0x[0-9A-Fa-f]{1,4}/0x[0-9A-Fa-f]{1,4}"
+				         "(?:,0x[0-9A-Fa-f]{1,4}/0x[0-9A-Fa-f]{1,4}){0,15}\\z")
+				         .match(i.value().toString()).hasMatch())
 					valid = false;
 			}
 			if (r.installed && valid) {

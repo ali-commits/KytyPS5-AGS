@@ -158,6 +158,58 @@ private slots:
 		QVERIFY(!proc.isEmpty());
 		QVERIFY(proc.size() <= 1024 * 1024);
 	}
+	void steamControllerCompatibilityRecipe_data() {
+		QTest::addColumn<QJsonObject>("env");
+		QTest::addColumn<bool>("ready");
+		QTest::newRow("default-unaffected") << QJsonObject {{"SteamAppId", "620"}} << true;
+		const auto row = [](const char* name, const QJsonValue& value, bool ready) {
+			QTest::newRow(name)
+			    << QJsonObject {{"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", value}} << ready;
+		};
+		row("ags-virtual-pad", "0x1234/0x5678", true);
+		row("device-list", "0x1234/0x5678,0x045E/0x028E", true);
+		row("short-hex", "0x1/0xF", true);
+		row("sixteen-devices", QString("0x1234/0x5678,").repeated(15) + "0x1234/0x5678", true);
+		row("too-many-devices", QString("0x1234/0x5678,").repeated(16) + "0x1234/0x5678", false);
+		row("empty", "", false);
+		row("file-indirection", "@/tmp/controller-list", false);
+		row("non-string", true, false);
+		row("missing-product", "0x1234", false);
+		row("decimal", "4660/22136", false);
+		row("vendor-overflow", "0x10000/0x5678", false);
+		row("product-overflow", "0x1234/0x10000", false);
+		row("non-hex", "0x1234/0x567G", false);
+		row("wildcard", "0x1234/*", false);
+		row("leading-comma", ",0x1234/0x5678", false);
+		row("trailing-comma", "0x1234/0x5678,", false);
+		row("empty-member", "0x1234/0x5678,,0x045e/0x028e", false);
+		row("whitespace", "0x1234/0x5678, 0x045e/0x028e", false);
+		row("trailing-newline", "0x1234/0x5678\n", false);
+		row("nul", QString("0x1234/0x5678") + QChar('\0'), false);
+		QTest::newRow("other-sdl-overrides-remain-disallowed")
+		    << QJsonObject {{"SDL_GAMECONTROLLER_IGNORE_DEVICES", "0x1234/0x5678"}} << false;
+	}
+	void steamControllerCompatibilityRecipe() {
+		QFETCH(QJsonObject, env);
+		QFETCH(bool, ready);
+		QTemporaryDir fixture;
+		WriteFile(fixture.filePath("steamapps/appmanifest_620.acf"),
+		          R"("AppState" { "appid" "620" "name" "Native Fixture" "installdir" "native" "StateFlags" "4" })");
+		QVERIFY(QDir().mkpath(fixture.filePath("steamapps/common/native")));
+		const QJsonObject recipe {{"executable", "/usr/bin/true"}, {"args", QJsonArray {}},
+		                          {"cwd", QFileInfo(fixture.path()).canonicalFilePath()},
+		                          {"env", env}};
+		const auto records = SteamSource::Discover({fixture.path()}, {{"620", recipe}});
+		QCOMPARE(records.size(), 1);
+		QVERIFY(records.first().installed);
+		QCOMPARE(records.first().launch.has_value(), ready);
+		if (ready) {
+			QVERIFY(records.first().reason.isEmpty());
+			QCOMPARE(records.first().launch->environment, env);
+		} else {
+			QCOMPARE(records.first().reason, QString("invalid-owned-launch-recipe"));
+		}
+	}
 	void steamDiscoveryAndOwnedAdmission() {
 		QTemporaryDir fixture;
 		const auto    root = fixture.filePath("steam"), second = fixture.filePath("second");
@@ -198,6 +250,8 @@ private slots:
         QCOMPARE(found->launch->process_visibility, QString("private"));
         auto hostRecipe = recipe;
         hostRecipe["process_visibility"] = "host_steam";
+        hostRecipe["env"] = QJsonObject {{"SteamAppId", "620"},
+            {"SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT", "0x1234/0x5678"}};
         QCOMPARE(SteamSource::Discover({root}, {{"620", hostRecipe}}).first().launch->process_visibility, QString("host_steam"));
         for (const auto value : {QJsonValue("host"), QJsonValue(true)}) {
             auto invalid = recipe;
@@ -230,6 +284,9 @@ private slots:
 		QCOMPARE(
 		    QJsonDocument::fromJson(reply.body).object()["env"].toObject()["SteamAppId"].toString(),
 		    QString("620"));
+		QCOMPARE(QJsonDocument::fromJson(reply.body).object()["env"].toObject()
+		             ["SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT"].toString(),
+		         QString("0x1234/0x5678"));
 		auto body = RuntimeBody(id, uuid, cwd);
 		QCOMPARE(
 		    Call(resolver, ClientReq("POST", "/ags/internal/session-runtime", uuid, body)).status,
