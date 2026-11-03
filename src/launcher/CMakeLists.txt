@@ -107,13 +107,20 @@ install(TARGETS launcher
 	BUNDLE DESTINATION .
 	RUNTIME DESTINATION .)
 
-if(NOT APPLE)
-	# Retain the entry point used by existing wrappers and older release archives.
+if(WIN32)
+	# Retain the Windows entry point used by older release archives.
 	install(CODE "
 		file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\"
 			TYPE PROGRAM RENAME \"launcher${CMAKE_EXECUTABLE_SUFFIX}\"
 			FILES \"\${CMAKE_INSTALL_PREFIX}/${launcher_name}${CMAKE_EXECUTABLE_SUFFIX}\")
 	")
+elseif(NOT APPLE)
+	# A generic launcher ELF collides with external process-name scheduling rules.
+	# Remove the alias from reused install directories as well as new packages.
+	install(CODE "file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/launcher\")")
+endif()
+
+if(NOT APPLE)
 	install(TARGETS kyty_updater RUNTIME DESTINATION .)
 endif()
 

@@ -18,7 +18,7 @@ class PackageTests(unittest.TestCase):
             stage, base, runtime = (root/name for name in ('stage', 'base', 'runtime'))
             for path in (stage, base, runtime):
                 path.mkdir()
-            for name in ('launcher', 'kyty_emulator'):
+            for name in ('kyty_launcher', 'kyty_emulator'):
                 (stage/name).write_text('#!/bin/sh\nexit 0\n')
                 (stage/name).chmod(0o755)
             (stage/'bin').mkdir()
@@ -67,7 +67,7 @@ class PackageTests(unittest.TestCase):
         stage, base, runtime = (root/name for name in ('stage', 'base', 'runtime'))
         for path in (stage, base, runtime):
             path.mkdir()
-        for name in ('launcher', 'kyty_emulator'):
+        for name in ('kyty_launcher', 'kyty_emulator'):
             (stage/name).write_text('#!/bin/sh\nexit 0\n')
             (stage/name).chmod(0o755)
         (base/'Kyty.ini').write_text('[Launcher]\n')
@@ -90,10 +90,19 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             inputs = self.make_inputs(root)
+            (root/'stage'/'launcher').write_text('#!/bin/sh\nexit 99\n')
+            (root/'stage'/'launcher').chmod(0o755)
+            (root/'stage'/'kyty_launcher').write_text('#!/bin/sh\nprintf \'%s\\n\' "$PWD" "$@"\n')
             prefix, config, systemd = root/'prefix', root/'config', root/'systemd'
             command = root/'bin'/'kytyps5-streaming'
             result = self.run_package(inputs, prefix, config, command, systemd)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((prefix/'launcher').exists())
+            for entrypoint in (command, prefix/'start-streaming.sh'):
+                launched = subprocess.run([str(entrypoint), '--host', 'argument with spaces'],
+                                          capture_output=True, text=True)
+                self.assertEqual(launched.returncode, 0, launched.stderr)
+                self.assertEqual(launched.stdout.splitlines(), [str(prefix), '--host', 'argument with spaces'])
             unit = (systemd/'kyty-host.service').read_text()
             self.assertIn(f'ExecStart={command} --host\n', unit)
             self.assertIn('Restart=on-failure\n', unit)

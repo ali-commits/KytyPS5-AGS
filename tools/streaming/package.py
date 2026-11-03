@@ -49,7 +49,7 @@ def install_unit(args, command, config, unit_path, old_unit):
 def package(args):
     stage, backend, base, runtime, prefix, config, link_map = [path.expanduser().resolve() for path in
         (args.stage, args.backend, args.base_install, args.runtime, args.prefix, args.config, args.map)]
-    for path in (stage/'launcher', stage/'kyty_emulator', backend, backend.parent/'ags-guardian',
+    for path in (stage/'kyty_launcher', stage/'kyty_emulator', backend, backend.parent/'ags-guardian',
                  backend.parent/'ags-hid-guard', backend.parent/'ags-capture-worker', backend.parent/'ags-client',
                  base/'Kyty.ini', base/'u59-preset.json', link_map):
         if not path.is_file():
@@ -81,6 +81,9 @@ def package(args):
     base_hash = sha256(base/'Kyty.ini')
     prefix.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(stage, prefix, symlinks=False)
+    # Old stages may contain a generic ELF alias that external scheduler rules
+    # classify as an unrelated background application. Publish only the canonical name.
+    (prefix/'launcher').unlink(missing_ok=True)
     config.mkdir(mode=0o700, parents=True)
     os.chmod(config, 0o700)
     (prefix/'libexec').mkdir(exist_ok=True)
@@ -134,7 +137,7 @@ def package(args):
         'runtime_policy': 'independent copy; no writeback', 'kyty': revision(SOURCE),
         'stream_host': revision(backend_source), 'native_sha256': sha256(prefix/'libexec'/'kyty_emulator'),
         'map_sha256': sha256(prefix/'kyty_emulator_clang_lld.map'),
-        'launcher_sha256': sha256(prefix/'launcher'), 'host_sha256': sha256(prefix/'libexec'/'ags-host'),
+        'launcher_sha256': sha256(prefix/'kyty_launcher'), 'host_sha256': sha256(prefix/'libexec'/'ags-host'),
         'receiver_sha256': sha256(prefix/'libexec'/'ags-client'),
         'base_config_sha256': base_hash, 'crash_capture': True}
     # Retired companion service is not a native receiver capability. A reused
@@ -148,7 +151,7 @@ def package(args):
     wrapper = ('#!/bin/sh\nset -eu\nexport __NV_PRIME_RENDER_OFFLOAD=1\n'
         'export __VK_LAYER_NV_optimus=NVIDIA_only\n'
         f'export KYTY_STREAMING_CONFIG_DIR={shlex.quote(str(config/"streaming"))}\n'
-        f'cd {shlex.quote(str(prefix))}\nexec ./launcher "$@"\n')
+        f'cd {shlex.quote(str(prefix))}\nexec ./kyty_launcher "$@"\n')
     (prefix/'start-streaming.sh').write_text(wrapper)
     (prefix/'start-streaming.sh').chmod(0o755)
     share = prefix/'share'/'kyty'

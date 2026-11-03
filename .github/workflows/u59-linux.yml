@@ -119,7 +119,7 @@ jobs:
           cp 3rdparty/tracy/profiler/src/font/Roboto-*.ttf "$fonts/"
           test "$(ls "$fonts"/Roboto-*.ttf | wc -l)" -eq 4
           cp 3rdparty/SPIRV-Tools/LICENSE "$fonts/LICENSE-Apache-2.0.txt"
-          chmod a+x "$release/launcher" "$release/kyty_emulator"
+          chmod a+x "$release/kyty_launcher" "$release/kyty_emulator"
           file "$release/kyty_emulator" | grep -q 'ELF 64-bit LSB .*x86-64'
           "$release/kyty_emulator" --help > /dev/null
           tar -C "$release" -czf KytyPS5-U59-Linux-x86_64.tar.gz .

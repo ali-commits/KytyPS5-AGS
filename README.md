@@ -338,7 +338,7 @@ To use the graphical launcher:
 ```
 
 ```bash
-./_Build/linux/install/launcher
+./_Build/linux/install/kyty_launcher
 ```
 
 ```bash

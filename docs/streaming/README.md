@@ -7,6 +7,24 @@ together under `libexec`. It also carries the separately licensed clocked
 compositor bundle when present. The old streaming-host HTTP and capability probe
 are not used by the launcher.
 
+Linux installations use `kyty_launcher` as the launcher executable. Do not copy or
+rename it to `launcher`: external process-name policies (including Ananicy rules
+for an unrelated application named `launcher`) can demote it and its child host
+and audio processes to idle scheduling. The CMake target is still `launcher`;
+only the installed executable name matters here. Linux staging and both Python
+installers remove the old generic alias, including when it was copied from an
+older stage. Windows retains its `launcher.exe` compatibility entrypoint.
+
+When upgrading an existing Linux installation, update wrappers, desktop entries,
+and saved autostart commands that explicitly name `launcher` to use
+`kyty_launcher`; regenerate enabled start-at-login entries from the canonical
+launcher. The launcher still derives its child daemon and autostart executable
+from `QCoreApplication::applicationFilePath()`. Preserve the existing arguments,
+working directory, environment and ownership chain. Restart through the updated
+entrypoint from a normally scheduled session: renaming a file does not reset the
+scheduler policy of already running processes. This packaging correction alone
+does not establish an audio-quality result.
+
 The existing daemon entrypoint and `kyty-host.service` remain. Preserve the user's
 existing start-at-login setting. Startup initializes a dedicated `native` directory
 under the existing streaming preference profile, submits complete configuration

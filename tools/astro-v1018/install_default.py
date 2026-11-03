@@ -26,7 +26,7 @@ def main():
     stage, prefix, game, runtime = [x.expanduser().resolve() for x in
                                     (args.stage, args.prefix, args.game, args.runtime)]
     validate(game)
-    for name in ('launcher', 'kyty_emulator', 'u59-preset.json'):
+    for name in ('kyty_launcher', 'kyty_emulator', 'u59-preset.json'):
         if not (stage/name).is_file():
             raise SystemExit(f'Staged build missing {name}')
     if not (runtime/'_SaveData').is_dir():
@@ -48,6 +48,9 @@ def main():
             key = str(path.relative_to(home)).replace('/', '__')
             shutil.copy2(path, backup/key, follow_symlinks=False)
     shutil.copytree(stage, prefix, symlinks=True)
+    # Old stages may contain a generic ELF alias that external scheduler rules
+    # classify as an unrelated background application. Publish only the canonical name.
+    (prefix/'launcher').unlink(missing_ok=True)
     (prefix/'libexec').mkdir()
     (prefix/'kyty_emulator').rename(prefix/'libexec/kyty_emulator')
     shutil.copy2(TOOLS/'emulator_guard.py', prefix/'kyty_emulator')
@@ -100,7 +103,7 @@ def main():
     wrappers = {
         'kytyps5': '#!/bin/sh\nset -eu\nexport __NV_PRIME_RENDER_OFFLOAD=1\n'
                     'export __VK_LAYER_NV_optimus=NVIDIA_only\n'
-                    f'cd {shlex.quote(str(prefix))}\nexec ./launcher "$@"\n',
+                    f'cd {shlex.quote(str(prefix))}\nexec ./kyty_launcher "$@"\n',
         'astro-bot': '#!/bin/sh\nset -eu\nexec python3 '+
                      shlex.quote(str(installed_tools/'launch.py'))+' "$@"\n'}
     for name, text in wrappers.items():
@@ -114,7 +117,7 @@ def main():
         quoted = str(executable).replace('\\', '\\\\').replace('"', '\\"')
         return ('[Desktop Entry]\nType=Application\nName='+name+'\nComment='+comment+
                 '\nExec="'+quoted+'"\nTerminal='+terminal+
-                '\nIcon=applications-games\nCategories=Game;Emulator;\nStartupWMClass=launcher\n')
+                '\nIcon=applications-games\nCategories=Game;Emulator;\nStartupWMClass=kyty_launcher\n')
     (apps/'kytyps5.desktop').write_text(desktop('KytyPS5', bindir/'kytyps5', 'false',
         'Local Jetsku U59 build with the tested Astro Bot profile'))
     (apps/'astro-bot-kytyps5-local.desktop').write_text(desktop('Astro Bot (1080p / 60 FPS)',
