@@ -60,7 +60,6 @@ private slots:
 		dialog.findChild<QComboBox*>("rustPresentation")->setCurrentIndex(1);
 		dialog.findChild<QCheckBox*>("rustLocalAudio")->setChecked(false);
 		dialog.findChild<QSpinBox*>("rustDisconnectGrace")->setValue(0);
-		dialog.findChild<QCheckBox*>("rustFec")->setChecked(true);
 		save->click();
 		const auto find = [&](const QString& type) {
 			for (const auto& r: requests)
@@ -72,7 +71,7 @@ private slots:
 		QVERIFY(updated.value("show_local").toBool());
 		QVERIFY(!updated.value("local_audio").toBool());
 		QCOMPARE(updated.value("disconnect_grace").toInt(-1), 0);
-		QVERIFY(updated.value("fec_enabled").toBool());
+		QVERIFY(!updated.contains("fec_enabled"));
 		QVERIFY(!updated.contains("devices"));
 		devices->setCurrentRow(0);
 		dialog.findChild<QPushButton*>("rustUnpairDevice")->click();

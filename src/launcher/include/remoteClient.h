@@ -46,6 +46,18 @@ public:
 		int width, height, fps;
 	};
 	Limits Quality() const { return {m_width, m_height, m_fps}; }
+	// Per client device: how this receiver asks the host to stream.
+	struct Stream {
+		int     bitrateKbps = 0; // 0: automatic (host value)
+		QString videoCodec  = QStringLiteral("h264");
+		QString audioCodec  = QStringLiteral("opus");
+		bool    fec         = false;
+		QString latency     = QStringLiteral("balanced");
+		QString capture     = QStringLiteral("compositor");
+	};
+	static bool ValidStream(const Stream& stream);
+	Stream      StreamOptions() const { return m_stream; }
+	bool        SetStream(const Stream& stream);
 	struct Controller {
 		QString name, path;
 	};
@@ -80,6 +92,7 @@ private:
 	QProcess                          m_receiver;
 	QString                           m_ownedProfile, m_stopError;
 	bool    m_stopping = false, m_closeStarted = false, m_closeFinished = false;
+	Stream  m_stream;
 	int     m_width = 1920, m_height = 1080, m_fps = 60;
 	qint64  m_receiverOutputBytes = 0;
 	quint64 m_stopRevision = 0, m_pairRevision = 0, m_receiverRevision = 0;

@@ -230,7 +230,7 @@ elif command=='status':
 		QCOMPARE(restored.Quality().fps, 30);
 		RemoteHostsWidget page(&restored);
 		QCOMPARE(page.findChild<QComboBox*>("remoteQuality")->currentText(),
-		         QString("720p · up to 30 fps"));
+		         QString("720p · 30 fps"));
 		QFile saved(settings);
 		QVERIFY(saved.open(QIODevice::ReadOnly));
 		const auto bytes = saved.readAll();

@@ -411,6 +411,19 @@ QList<LibraryCard> RemoteClient::Cards() const {
 		}
 	return result;
 }
+bool RemoteClient::ValidStream(const Stream& stream) {
+	return (stream.bitrateKbps == 0 || (stream.bitrateKbps >= 1000 && stream.bitrateKbps <= 150000)) &&
+	       QStringList {"h264", "hevc", "av1"}.contains(stream.videoCodec) &&
+	       QStringList {"opus", "pcm"}.contains(stream.audioCodec) &&
+	       QStringList {"low", "balanced", "quality"}.contains(stream.latency) &&
+	       QStringList {"compositor", "direct"}.contains(stream.capture);
+}
+bool RemoteClient::SetStream(const Stream& stream) {
+	if (Busy() || !ValidStream(stream)) return false;
+	m_stream = stream;
+	Save();
+	return true;
+}
 bool RemoteClient::SetQuality(int width, int height, int fps) {
 	if (Busy() || !ValidLimits(width, height, fps)) return false;
 	m_width  = width;
@@ -502,9 +515,17 @@ bool RemoteClient::Play(const QString& id) {
 			m_receiver.setProgram(m_executable);
 			m_receiver.setArguments(
 			    Arguments(p) + QStringList {"launch", gameId, "--play", "--close-on-exit",
-				                            "--codec", "h264", "--width", QString::number(m_width),
-				                            "--height", QString::number(m_height), "--fps",
+				                            "--codec", m_stream.videoCodec, "--audio-codec",
+				                            m_stream.audioCodec, "--fec",
+				                            m_stream.fec ? "on" : "off", "--latency",
+				                            m_stream.latency, "--capture", m_stream.capture,
+				                            "--width", QString::number(m_width), "--height",
+				                            QString::number(m_height), "--fps",
 				                            QString::number(m_fps)});
+			if (m_stream.bitrateKbps > 0)
+				m_receiver.setArguments(
+				    m_receiver.arguments() +
+				    QStringList {"--bitrate", QString::number(m_stream.bitrateKbps)});
 			if (!input.isEmpty())
 				m_receiver.setArguments(m_receiver.arguments() + QStringList {"--input", input});
 			m_receiver.start();
@@ -620,6 +641,15 @@ void RemoteClient::Load() {
 			m_fps    = fps;
 		}
 		// Missing/malformed limits retain native defaults without dropping valid profiles.
+		Stream stream = m_stream;
+		if (receiver.value("bitrate_kbps").isDouble())
+			stream.bitrateKbps = receiver.value("bitrate_kbps").toInt(-1);
+		stream.videoCodec = receiver.value("video_codec").toString(stream.videoCodec);
+		stream.audioCodec = receiver.value("audio_codec").toString(stream.audioCodec);
+		stream.fec        = receiver.value("fec").toBool(stream.fec);
+		stream.latency    = receiver.value("latency").toString(stream.latency);
+		stream.capture    = receiver.value("capture").toString(stream.capture);
+		if (ValidStream(stream)) m_stream = stream;
 	}
 	if (array.size() > 32) return;
 	QSet<QString> paths;
@@ -668,7 +698,15 @@ void RemoteClient::Save() {
 	        QJsonObject {{"version", 1},
 			             {"profiles", array},
 			             {"receiver",
-			              QJsonObject {{"width", m_width}, {"height", m_height}, {"fps", m_fps}}}})
+			              QJsonObject {{"width", m_width},
+			                           {"height", m_height},
+			                           {"fps", m_fps},
+			                           {"bitrate_kbps", m_stream.bitrateKbps},
+			                           {"video_codec", m_stream.videoCodec},
+			                           {"audio_codec", m_stream.audioCodec},
+			                           {"fec", m_stream.fec},
+			                           {"latency", m_stream.latency},
+			                           {"capture", m_stream.capture}}}})
 	        .toJson();
 	if (bytes.size() > MaxSettings) {
 		emit Error(tr("Remote library cache exceeds its storage limit."));

@@ -2,6 +2,7 @@
 
 #include "remoteClient.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
@@ -65,23 +66,88 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 	layout->addLayout(buttons);
 	auto* quality = new QComboBox(this);
 	quality->setObjectName("remoteQuality");
-	quality->addItem(tr("720p · up to 30 fps"), QVariantList {1280, 720, 30});
-	quality->addItem(tr("720p · up to 60 fps"), QVariantList {1280, 720, 60});
-	quality->addItem(tr("1080p · up to 30 fps"), QVariantList {1920, 1080, 30});
-	quality->addItem(tr("1080p · up to 60 fps"), QVariantList {1920, 1080, 60});
+	quality->addItem(tr("720p · 30 fps"), QVariantList {1280, 720, 30});
+	quality->addItem(tr("720p · 60 fps"), QVariantList {1280, 720, 60});
+	quality->addItem(tr("1080p · 30 fps"), QVariantList {1920, 1080, 30});
+	quality->addItem(tr("1080p · 60 fps"), QVariantList {1920, 1080, 60});
+	quality->addItem(tr("1440p · 60 fps"), QVariantList {2560, 1440, 60});
 	const auto         saved = client->Quality();
 	const QVariantList savedData {saved.width, saved.height, saved.fps};
 	int                qualityIndex = quality->findData(savedData);
 	if (qualityIndex < 0) {
 		quality->addItem(
-		    tr("%1 × %2 · up to %3 fps").arg(saved.width).arg(saved.height).arg(saved.fps),
+		    tr("%1 × %2 · %3 fps").arg(saved.width).arg(saved.height).arg(saved.fps),
 		    savedData);
 		qualityIndex = quality->count() - 1;
 	}
 	quality->setCurrentIndex(qualityIndex);
 	auto* qualityForm = new QFormLayout;
-	qualityForm->addRow(tr("New-game video caps"), quality);
+	qualityForm->addRow(tr("Resolution"), quality);
 	layout->addLayout(qualityForm);
+	// One saved set per client device; applied to the next launch.
+	auto* bitrate = new QComboBox(this);
+	bitrate->setObjectName("remoteBitrate");
+	bitrate->addItem(tr("Automatic"), 0);
+	for (const int mbps: {5, 10, 20, 30, 50, 80, 100, 150})
+		bitrate->addItem(tr("%1 Mbps").arg(mbps), mbps * 1000);
+	auto* videoCodec = new QComboBox(this);
+	videoCodec->setObjectName("remoteVideoCodec");
+	videoCodec->addItem("H.264", "h264");
+	videoCodec->addItem("HEVC", "hevc");
+	videoCodec->addItem("AV1", "av1");
+	auto* audioCodec = new QComboBox(this);
+	audioCodec->setObjectName("remoteAudioCodec");
+	audioCodec->addItem("Opus", "opus");
+	audioCodec->addItem("PCM", "pcm");
+	auto* fec = new QCheckBox(tr("Forward error correction"), this);
+	fec->setObjectName("remoteFec");
+	auto* latency = new QComboBox(this);
+	latency->setObjectName("remoteLatency");
+	latency->addItem(tr("Low"), "low");
+	latency->addItem(tr("Balanced"), "balanced");
+	latency->addItem(tr("Quality"), "quality");
+	auto* capture = new QComboBox(this);
+	capture->setObjectName("remoteCapture");
+	capture->addItem(tr("Gamescope"), "compositor");
+	capture->addItem(tr("Native"), "direct");
+	capture->setToolTip(tr("Steam games always use gamescope."));
+	{
+		const auto stream = client->StreamOptions();
+		const auto select = [](QComboBox* box, const QVariant& value) {
+			const int index = box->findData(value);
+			if (index >= 0) box->setCurrentIndex(index);
+		};
+		if (bitrate->findData(stream.bitrateKbps) < 0)
+			bitrate->addItem(tr("%1 Mbps").arg(stream.bitrateKbps / 1000.0, 0, 'g', 4),
+			                 stream.bitrateKbps);
+		select(bitrate, stream.bitrateKbps);
+		select(videoCodec, stream.videoCodec);
+		select(audioCodec, stream.audioCodec);
+		select(latency, stream.latency);
+		select(capture, stream.capture);
+		fec->setChecked(stream.fec);
+	}
+	qualityForm->addRow(tr("Bitrate"), bitrate);
+	qualityForm->addRow(tr("Video codec"), videoCodec);
+	qualityForm->addRow(tr("Audio codec"), audioCodec);
+	qualityForm->addRow(QString(), fec);
+	qualityForm->addRow(tr("Latency profile"), latency);
+	qualityForm->addRow(tr("Capture method"), capture);
+	const QList<QWidget*> streamControls {bitrate, videoCodec, audioCodec, fec, latency, capture};
+	const auto            saveStream = [client, bitrate, videoCodec, audioCodec, fec, latency,
+	                             capture] {
+		RemoteClient::Stream stream;
+		stream.bitrateKbps = bitrate->currentData().toInt();
+		stream.videoCodec  = videoCodec->currentData().toString();
+		stream.audioCodec  = audioCodec->currentData().toString();
+		stream.fec         = fec->isChecked();
+		stream.latency     = latency->currentData().toString();
+		stream.capture     = capture->currentData().toString();
+		client->SetStream(stream);
+	};
+	for (auto* box: {bitrate, videoCodec, audioCodec, latency, capture})
+		connect(box, &QComboBox::currentIndexChanged, this, saveStream);
+	connect(fec, &QCheckBox::toggled, this, saveStream);
 	auto* controller = new QComboBox(this);
 	controller->setObjectName("remoteController");
 	controller->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -120,8 +186,7 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 			        populateControllers();
 	        });
 	auto* note =
-	    new QLabel(tr("H.264 video. Resolution and frame rate are upper limits; bitrate is "
-		              "controlled by the host. Input stays inside the native receiver window. "
+	    new QLabel(tr("Input stays inside the native receiver window. "
 		              "Hiding AGS keeps playback running. Exit AGS closes the remote game; if the "
 		              "host is unreachable, its disconnect grace policy is the fallback."),
 		           this);
@@ -134,7 +199,8 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 	status->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	layout->addWidget(status);
 	layout->addStretch();
-	auto update = [client, hosts, refresh, forget, stop, quality, controller, refreshControllers] {
+	auto update = [client, hosts, refresh, forget, stop, quality, controller, refreshControllers,
+	              streamControls] {
 		const auto     selected = hosts->currentData().toString();
 		QSignalBlocker block(hosts);
 		hosts->clear();
@@ -148,6 +214,7 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 		forget->setEnabled(hosts->count() > 0 && !client->Busy());
 		stop->setEnabled(client->Busy());
 		quality->setEnabled(!client->Busy());
+		for (auto* control: streamControls) control->setEnabled(!client->Busy());
 		controller->setEnabled(!client->Busy());
 		refreshControllers->setEnabled(!client->Busy());
 	};
