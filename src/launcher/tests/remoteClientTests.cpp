@@ -244,6 +244,32 @@ elif command=='status':
 		QCOMPARE(afterUiChange.Quality().height, 1080);
 		QCOMPARE(afterUiChange.Quality().fps, 30);
 	}
+	void streamChoicesPersistAndRejectInvalidValues() {
+		{
+			RemoteClient client(RemoteClient::TestOptions {script, settings, 2500});
+			RemoteClient::Stream stream;
+			stream.bitrateKbps = 50000;
+			stream.videoCodec  = "hevc";
+			stream.audioCodec  = "pcm";
+			stream.fec         = true;
+			stream.latency     = "low";
+			stream.capture     = "direct";
+			QVERIFY(client.SetStream(stream));
+			stream.bitrateKbps = 999;
+			QVERIFY(!client.SetStream(stream));
+			stream.bitrateKbps = 0;
+			stream.videoCodec  = "vp9";
+			QVERIFY(!client.SetStream(stream));
+		}
+		RemoteClient restored(RemoteClient::TestOptions {script, settings, 2500});
+		const auto   stream = restored.StreamOptions();
+		QCOMPARE(stream.bitrateKbps, 50000);
+		QCOMPARE(stream.videoCodec, QString("hevc"));
+		QCOMPARE(stream.audioCodec, QString("pcm"));
+		QVERIFY(stream.fec);
+		QCOMPARE(stream.latency, QString("low"));
+		QCOMPARE(stream.capture, QString("direct"));
+	}
 	void invalidPersistedCapsDefaultWithoutDroppingProfilesOrRewriting() {
 		for (const auto& limits:
 		     {QJsonObject {{"width", 63}, {"height", 720}, {"fps", 30}},
@@ -403,6 +429,13 @@ elif command=='status':
 		QVERIFY(input >= 0);
 		QCOMPARE(args[input + 1].toString(), devRoot + "/event5");
 		QVERIFY(!args.contains("--raw-input-proxy"));
+		const auto list = args.toVariantList();
+		QCOMPARE(list[list.indexOf("--codec") + 1].toString(), QString("h264"));
+		QCOMPARE(list[list.indexOf("--audio-codec") + 1].toString(), QString("opus"));
+		QCOMPARE(list[list.indexOf("--fec") + 1].toString(), QString("off"));
+		QCOMPARE(list[list.indexOf("--latency") + 1].toString(), QString("balanced"));
+		QCOMPARE(list[list.indexOf("--capture") + 1].toString(), QString("compositor"));
+		QVERIFY(!args.contains("--bitrate"));
 		QSignalSpy stopped(&client, &RemoteClient::Stopped);
 		client.StopForExit();
 		QTRY_COMPARE(stopped.size(), 1);

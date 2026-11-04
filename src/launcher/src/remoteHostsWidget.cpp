@@ -127,12 +127,17 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 		select(capture, stream.capture);
 		fec->setChecked(stream.fec);
 	}
-	qualityForm->addRow(tr("Bitrate"), bitrate);
-	qualityForm->addRow(tr("Video codec"), videoCodec);
-	qualityForm->addRow(tr("Audio codec"), audioCodec);
-	qualityForm->addRow(QString(), fec);
-	qualityForm->addRow(tr("Latency profile"), latency);
-	qualityForm->addRow(tr("Capture method"), capture);
+	const auto pairRow = [this](QWidget* first, QWidget* second) {
+		auto* row    = new QWidget(this);
+		auto* layout = new QHBoxLayout(row);
+		layout->setContentsMargins(0, 0, 0, 0);
+		layout->addWidget(first, 1);
+		layout->addWidget(second, 1);
+		return row;
+	};
+	qualityForm->addRow(tr("Bitrate / latency"), pairRow(bitrate, latency));
+	qualityForm->addRow(tr("Video / audio codec"), pairRow(videoCodec, audioCodec));
+	qualityForm->addRow(tr("Capture method"), pairRow(capture, fec));
 	const QList<QWidget*> streamControls {bitrate, videoCodec, audioCodec, fec, latency, capture};
 	const auto            saveStream = [client, bitrate, videoCodec, audioCodec, fec, latency,
 	                             capture] {

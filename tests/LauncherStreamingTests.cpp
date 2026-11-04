@@ -594,13 +594,15 @@ private slots:
 			QCOMPARE(args.at(args.indexOf("--screen-height") + 1), QString(c.h));
 		}
 	}
-	void nativeProfileControlsAreAvailable() {
+	void clientOwnedStreamControlsAreHiddenOnHost() {
 		QTemporaryDir      dir;
 		HostControlClient  client(dir.filePath("none/control.sock"));
 		client.SetAutostartDirectory(dir.path());
 		StreamingWidget widget(&client);
-		QVERIFY(!widget.findChild<QComboBox*>("streamResolution")->isHidden());
-		QVERIFY(!widget.findChild<QComboBox*>("streamFps")->isHidden());
+		for (const char* name: {"streamResolution", "streamFps", "streamCodec", "streamAudioCodec"})
+			QVERIFY(widget.findChild<QComboBox*>(name)->isHidden());
+		QVERIFY(widget.findChild<QSpinBox*>("streamBitrate")->isHidden());
+		QVERIFY(widget.findChild<QCheckBox*>("streamFec")->isHidden());
 	}
 	void controllerAudioReceiverApiUsesPinnedRoutes() {
 		QTemporaryDir dir;
