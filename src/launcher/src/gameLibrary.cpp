@@ -452,13 +452,8 @@ GameLibrary::ClientCatalog(const QString& interpreter) const {
 			if (config == nullptr) {
 				continue;
 			}
-			// Use the per-client cheat plan when it exists, and no --game-patch otherwise.
-			const auto                   plan_path = ClientProfiles::PatchPlanPath(uuid, g.id);
-			const std::optional<QString> patch_plan =
-			    !plan_path.isEmpty() && QFileInfo::exists(plan_path)
-			        ? std::optional<QString>(plan_path)
-			        : std::optional<QString>(QString {});
-			auto arguments = BuildEmulatorArgs(*config, patch_plan);
+			// Device settings, host cheats: no override, so the host's _Patches plan applies.
+			auto arguments = BuildEmulatorArgs(*config);
 			if (arguments.isEmpty()) {
 				continue;
 			}

@@ -1660,37 +1660,58 @@ private slots:
 		        QDir(config.filePath("clients")).isEmpty());
 	}
 
-	void clientCheatsNeverModifyPcPlanAndProducePerClientPlan() {
+	void clientCheatsFollowAndUpdateTheHostPlan() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
 		const auto plan = Cheats::PlanPath("PPSA00001");
 		WriteFile(
 		    plan,
 		    R"({"id":"PPSA00001","version":"01.002","process":"eboot.bin","mods":[)"
-		    R"({"name":"Inf HP","enabled":false,"memory":[{"offset":"0x10","off":"00","on":"01"}]},)"
+		    R"({"name":"Inf HP","enabled":true,"memory":[{"offset":"0x10","off":"00","on":"01"}]},)"
 		    R"({"name":"Inf MP","enabled":false,"memory":[{"offset":"0x20","off":"00","on":"01"}]}]})");
-		const auto    pc_before = ReadFile(plan);
-		const QString uuid      = "22222222-2222-2222-2222-222222222222";
-		const auto    id        = library.Games().first().id;
-		const auto    path      = "/kyty/v1/games/" + id + "/cheats";
+		const QString uuid = "22222222-2222-2222-2222-222222222222";
+		const auto    id   = library.Games().first().id;
+		const auto    path = "/kyty/v1/games/" + id + "/cheats";
+		// A device sees the host's selection.
 		auto get = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
 		QCOMPARE(get["mods"].toArray().size(), 2);
+		QVERIFY(get["mods"].toArray()[0].toObject()["enabled"].toBool());
+		QVERIFY(!get["mods"].toArray()[1].toObject()["enabled"].toBool());
+		// A device's change is written to the host plan.
 		auto put = Call(
 		    api, ClientReq("PUT", path, uuid,
-		                   {{"revision", get["revision"]}, {"enabled", QJsonArray {true, false}}}));
+		                   {{"revision", get["revision"]}, {"enabled", QJsonArray {false, true}}}));
 		QCOMPARE(put.status, 200);
-		// The PC plan file is byte-for-byte unchanged.
-		QCOMPARE(ReadFile(plan), pc_before);
-		// The device sees its own selection.
-		auto after = QJsonDocument::fromJson(Call(api, ClientReq("GET", path, uuid)).body).object();
-		QVERIFY(after["mods"].toArray()[0].toObject()["enabled"].toBool());
-		QVERIFY(!after["mods"].toArray()[1].toObject()["enabled"].toBool());
-		// A per-client plan was written, enabling exactly the first mod.
-		const auto patch = config.filePath("clients/" + uuid + "/games/" + id + ".patch.json");
-		QVERIFY(QFileInfo::exists(patch));
-		auto mods = QJsonDocument::fromJson(ReadFile(patch)).object()["mods"].toArray();
-		QVERIFY(mods[0].toObject()["enabled"].toBool());
-		QVERIFY(!mods[1].toObject()["enabled"].toBool());
+		auto mods = QJsonDocument::fromJson(ReadFile(plan)).object()["mods"].toArray();
+		QVERIFY(!mods[0].toObject()["enabled"].toBool());
+		QVERIFY(mods[1].toObject()["enabled"].toBool());
+		// The host's view matches, and no per-device plan exists.
+		auto host = QJsonDocument::fromJson(
+		                Call(api, {{"method", "GET"}, {"path", path}}).body)
+		                .object();
+		QVERIFY(host["mods"].toArray()[1].toObject()["enabled"].toBool());
+		QVERIFY(!QFileInfo::exists(
+		    config.filePath("clients/" + uuid + "/games/" + id + ".patch.json")));
+		// A device with its own settings still launches with the host plan.
+		const auto settings = "/kyty/v1/games/" + id + "/settings";
+		const auto rev = QJsonDocument::fromJson(Call(api, ClientReq("GET", settings, uuid)).body)
+		                     .object()["revision"]
+		                     .toString();
+		QCOMPARE(Call(api, ClientReq("PUT", settings, uuid,
+		                             {{"revision", rev},
+		                              {"values", QJsonObject {{"vblank_frequency", "120"}}}}))
+		             .status,
+		         200);
+		bool launched = false;
+		for (const auto& e:
+		     library.ClientCatalog(QStringLiteral("/opt/kyty/kyty_emulator")).value(uuid)) {
+			if (e.id != id) continue;
+			const auto i = e.arguments.indexOf(QStringLiteral("--game-patch"));
+			QVERIFY(i >= 0 && i + 1 < e.arguments.size());
+			QCOMPARE(e.arguments.at(i + 1), plan);
+			launched = true;
+		}
+		QVERIFY(launched);
 		QFile::remove(plan);
 	}
 

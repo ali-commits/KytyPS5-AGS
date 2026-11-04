@@ -890,23 +890,15 @@ void HostApi::GetCheats(const GameEntry& game, const Client& client,
 	QJsonDocument document;
 	QJsonArray    mods;
 	QString       error;
-	QJsonObject   client_cheats;
-	if (client.scoped()) {
-		bool seeded   = false;
-		client_cheats = ClientProfiles::ReadGame(client.id, game.id, &seeded)
-		                    .value(QStringLiteral("cheats"))
-		                    .toObject();
-	}
+	// Cheats change the emulator, not the device: every client sees the host's selection.
+	(void)client;
 	if (!bytes.isEmpty()) {
 		error     = Cheats::ParseDocument(bytes, &document);
 		int index = 0;
 		for (const auto& value: document.object().value(QStringLiteral("mods")).toArray()) {
 			const auto mod  = value.toObject();
 			const auto name = mod.value(QStringLiteral("name")).toString();
-			// Device scope shows this client's own selection, seeded from the plan's flag.
-			const bool enabled = client.scoped() && client_cheats.contains(name)
-			                         ? client_cheats.value(name).toBool()
-			                         : mod.value(QStringLiteral("enabled")).toBool(true);
+			const bool enabled = mod.value(QStringLiteral("enabled")).toBool(true);
 			mods.append(QJsonObject {{"index", index++}, {"name", name}, {"enabled", enabled}});
 		}
 	}
@@ -946,31 +938,16 @@ void HostApi::PutCheats(const GameEntry& game, const Client& client, const QJson
 	if (updated.isNull()) {
 		return done(Error(400, QStringLiteral("selection-size-mismatch")));
 	}
-	if (!client.scoped()) {
-		if (!Cheats::SaveDocument(path, updated, bytes).isEmpty()) {
-			return done(Error(409, QStringLiteral("stale")));
-		}
-		return done(Json(200, {{"revision", CheatRevision(ReadCheatBytes(path))}}));
+	// Cheats are host-wide: a device's change updates the host's _Patches/<TITLE>.json.
+	if (!Cheats::SaveDocument(path, updated, bytes).isEmpty()) {
+		return done(Error(409, QStringLiteral("stale")));
 	}
-	// Device scope: store the selection keyed by mod name, write the per-client plan, and NEVER
-	// touch _Patches/<TITLE>.json.
-	const auto  mods = document.object().value(QStringLiteral("mods")).toArray();
-	QJsonObject cheats;
-	bool        any_enabled = false;
-	for (qsizetype i = 0; i < mods.size(); ++i) {
-		cheats[mods[i].toObject().value(QStringLiteral("name")).toString()] = enabled[i];
-		any_enabled = any_enabled || enabled[i];
+	if (client.scoped()) {
+		// Retire any earlier per-device plan so it can never shadow the host's.
+		(void)ClientProfiles::WritePatchPlan(client.id, game.id, {}, nullptr);
+		emit ClientProfileChanged();
 	}
-	if (const auto error = SaveClientProfile(client, game, {}, cheats); !error.isEmpty()) {
-		return done(Error(400, error));
-	}
-	const auto plan = any_enabled ? updated.toJson() : QByteArray {};
-	if (const auto error = ClientProfiles::WritePatchPlan(client.id, game.id, plan, nullptr);
-	    !error.isEmpty()) {
-		return done(Error(400, error));
-	}
-	emit ClientProfileChanged();
-	done(Json(200, {{"revision", CheatRevision(bytes)}}));
+	return done(Json(200, {{"revision", CheatRevision(ReadCheatBytes(path))}}));
 }
 
 QJsonObject HostApi::Trophies(const Configuration& info, const QString& runtime_directory) {
