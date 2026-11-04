@@ -1,5 +1,12 @@
 #include "hostDaemon.h"
 #include "clientProfiles.h"
+#include "ownerPreferences.h"
+#include "updateRelease.h"
+#include "kytyGitVersion.h"
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include "gameContent.h"
+#include "common/additionalContent.h"
 #include <QUuid>
 #include <sys/stat.h>
 
@@ -486,6 +493,76 @@ QJsonObject HostDaemon::SetPreferences(const QJsonObject& request) {
 void HostDaemon::Control(const QJsonObject& request, std::function<void(HostReply)> done) {
 	const auto type = request.value("type").toString();
 	if (type == "status") return done(Json(StatusObject()));
+	if (type == "check-emulator-update") {
+		if (request.size() != 1) return done(Json(Fail("Invalid update request.")));
+		auto*           network = new QNetworkAccessManager(this);
+		QNetworkRequest query(QUrl(UpdateRelease::LATEST_URL));
+		query.setRawHeader("Accept", "application/vnd.github+json");
+		query.setRawHeader("User-Agent", "AGS-owner-update-check");
+		query.setTransferTimeout(15000);
+		auto* reply = network->get(query);
+		reply->setReadBufferSize(2 * 1024 * 1024 + 1);
+		connect(reply, &QNetworkReply::readyRead, this, [reply] {
+			if (reply->bytesAvailable() > 2 * 1024 * 1024) reply->abort();
+		});
+		connect(reply, &QNetworkReply::finished, this, [network, reply, done] {
+			if (reply->error() != QNetworkReply::NoError)
+				done(Json(Fail(reply->errorString())));
+			else {
+				const auto release =
+				    UpdateRelease::Parse(reply->readAll(), UpdateRelease::PlatformSuffix());
+				if (!release.error.isEmpty())
+					done(Json(Fail(release.error)));
+				else
+					done(Json(
+					    {{"ok", true},
+						 {"current", QString::fromLatin1(KYTY_RELEASE_TAG)},
+						 {"build", QString::fromLatin1(KYTY_BUILD_LABEL)},
+						 {"latest", release.tag},
+						 {"page_url", release.page_url.toString()},
+						 {"published_at", release.published_at.toString(Qt::ISODate)},
+						 {"same_release", release.tag == QString::fromLatin1(KYTY_RELEASE_TAG)},
+						 {"install_supported", false}}));
+			}
+			network->deleteLater();
+		});
+		return;
+	}
+	if (type == "get-emulator-preferences") {
+		auto file    = GameLibraryFiles::OpenSettings();
+		auto result  = OwnerPreferences::Read(*file);
+		result["ok"] = file->status() == QSettings::NoError;
+		return done(Json(result));
+	}
+	if (type == "set-emulator-preferences") {
+		if (m_shutting_down || LocalGameRunning() || m_backend.StreamGameRunning() ||
+		    !m_api.NativeRuntimeGameId().isEmpty() || m_api.NativeOwnershipBlocked())
+			return done(Json(
+			    Fail(tr("A game owns the host. Close it before changing emulator preferences."))));
+		auto patch = request;
+		patch.remove("type");
+		auto    file = GameLibraryFiles::OpenSettings();
+		QString error;
+		if (!OwnerPreferences::Write(*file, patch, error)) return done(Json(Fail(error)));
+		ReloadLibrary();
+		return done(Json({{"ok", true}}));
+	}
+	if (type == "get-additional-content") {
+		if (request.size() != 2 || !request["game"].isString())
+			return done(Json(Fail("Invalid content request.")));
+		const auto* game = m_library.Find(request["game"].toString());
+		if (!game || !game->info)
+			return done(Json(Fail("Additional content requires a PS5 game.")));
+		QJsonArray entries;
+		for (const auto& entry: Common::FindAddContent(GameContent::ToPath(game->info->addons_dir),
+		                                               game->info->title_id.toStdString()))
+			entries.append(
+			    QJsonObject {{"content_id", QString::fromStdString(entry.content_id)},
+				             {"entitlement_label", QString::fromStdString(entry.entitlement_label)},
+				             {"title", QString::fromStdString(entry.title)}});
+		return done(Json({{"ok", true}, {"entries", entries}, {"folder", game->info->addons_dir}}));
+	}
+
 	if (type == "get-preferences") return done(Json(PreferencesObject()));
 	if (type == "set-preferences") {
 		const auto result = SetPreferences(request);
@@ -546,18 +623,18 @@ void HostDaemon::StartLocalGame(const QJsonObject& request, std::function<void(H
     if (request.size() != 2 || !request.value("game").isString()) return done(Json(Fail(tr("Invalid local launch request."))));
     const auto id = request.value("game").toString();
     const auto* game = m_library.Find(id);
-    if (!game || game->source != "steam" || !game->owned_launch) return done(Json(Fail(tr("No owned Steam launch recipe is available."))));
+    if (!game || (game->source == "steam" ? !game->owned_launch.has_value() : game->source != "ps5" || !game->info)) return done(Json(Fail(tr("No local launch recipe is available."))));
     if (m_shutting_down || LocalGameRunning() || m_backend.StreamGameRunning() || !m_api.NativeRuntimeGameId().isEmpty() || m_api.NativeOwnershipBlocked())
-        return done(Json(Fail(tr("A game already owns this computer."))));
+        return done(Json(Fail(tr("A game already owns this host."))));
     const auto profile = QDir(StreamingSettings::ProfileDirectory()).filePath("local");
     QString error;
     if (!PrepareHostDirectory(profile, &error)) return done(Json(Fail(error)));
     const auto identity_path = QDir(profile).filePath("identity");
     const int fd = ::open(QFile::encodeName(identity_path), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     struct stat meta {};
-    if (fd < 0) return done(Json(Fail(tr("Cannot open local PC identity."))));
+    if (fd < 0) return done(Json(Fail(tr("Cannot open local host identity."))));
     if (::fstat(fd, &meta) != 0 || !S_ISREG(meta.st_mode) || meta.st_uid != ::geteuid() || (meta.st_mode & 0077) || meta.st_size > 36) {
-        ::close(fd); return done(Json(Fail(tr("Unsafe local PC identity."))));
+        ::close(fd); return done(Json(Fail(tr("Unsafe local host identity."))));
     }
     char bytes[37] {};
     const auto count = ::read(fd, bytes, 36);
@@ -568,10 +645,10 @@ void HostDaemon::StartLocalGame(const QJsonObject& request, std::function<void(H
         if (::write(fd, encoded.constData(), encoded.size()) != encoded.size() || ::fsync(fd) != 0) uuid.clear();
     }
     ::close(fd);
-    if (!ClientProfiles::IsValidClientId(uuid)) return done(Json(Fail(tr("Invalid local PC identity."))));
+    if (!ClientProfiles::IsValidClientId(uuid)) return done(Json(Fail(tr("Invalid local host identity."))));
     m_api.ConfigureLocalOwner(uuid, QCoreApplication::applicationPid());
     m_local_id = id;
-    m_local_title = game->name;
+    m_local_title = game->info ? game->info->name : game->name;
     m_local_error.clear();
     m_local_stderr.clear();
     m_local_started = false;

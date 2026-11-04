@@ -1,0 +1,127 @@
+#include "ownerPreferences.h"
+
+#include "configuration.h"
+
+#include <QDir>
+#include <QJsonArray>
+#include <QSet>
+
+#include <cmath>
+
+namespace {
+QJsonObject Globals(const Configuration& c) {
+	return {{"controller_color", c.controller.color},
+	        {"controller_speaker_volume", c.controller.speaker_volume},
+	        {"controller_vibration_intensity", c.controller.vibration_intensity},
+	        {"controller_keyboard_player", c.controller.keyboard_player},
+	        {"audio_master_volume", c.audio_mix.master},
+	        {"audio_main_volume", c.audio_mix.main},
+	        {"audio_music_volume", c.audio_mix.music},
+	        {"audio_pad_speaker_main_volume", c.audio_mix.pad_speaker},
+	        {"audio_objects_volume", c.audio_mix.objects},
+	        {"audio_objects_enabled", c.audio_mix.objects_enabled},
+	        {"gpu_occlusion_accurate", c.gpu_occlusion_accurate}};
+}
+void Load(QSettings& s, Configuration& c) {
+	s.beginGroup("GlobalConfiguration");
+	if (!s.childKeys().isEmpty()) c.ReadSettings(&s);
+	c.controller.ReadSettings(&s);
+	c.ReadGlobalOnlySettings(&s);
+	s.endGroup();
+}
+bool Strings(const QJsonValue& value, QStringList& result, bool paths) {
+	if (!value.isArray() || value.toArray().size() > 512) return false;
+	for (const auto& entry: value.toArray()) {
+		if (!entry.isString() || entry.toString().size() > 4096 ||
+		    entry.toString().contains(QChar('\0')))
+			return false;
+		if (paths && (entry.toString().isEmpty() || !QDir::isAbsolutePath(entry.toString())))
+			return false;
+		result << entry.toString();
+	}
+	return true;
+}
+} // namespace
+QJsonObject OwnerPreferences::Read(QSettings& s) {
+	Configuration c;
+	Load(s, c);
+	auto dirs = s.value("Launcher/game_dirs").toStringList();
+	if (dirs.isEmpty()) dirs = s.value("Launcher/game_dir").toStringList();
+	return {{"settings", QJsonObject::fromVariantMap(c.GameSettings())},
+	        {"global", Globals(c)},
+	        {"game_dirs", QJsonArray::fromStringList(dirs)},
+	        {"addons_dir", s.value("Launcher/addons_dir").toString()},
+	        {"host_input_mapping", QJsonArray::fromStringList(c.host_input_mapping)}};
+}
+bool OwnerPreferences::Write(QSettings& s, const QJsonObject& patch, QString& error) {
+	const auto fail = [&error](const QString& text) {
+		error = text;
+		return false;
+	};
+	const QSet<QString> allowed {"settings", "global", "game_dirs", "addons_dir",
+	                             "host_input_mapping"};
+	for (auto i = patch.begin(); i != patch.end(); ++i)
+		if (!allowed.contains(i.key())) return fail("Unknown emulator preference: " + i.key());
+	Configuration c;
+	Load(s, c);
+	if (patch.contains("settings")) {
+		if (!patch["settings"].isObject()) return fail("settings must be an object.");
+		if (!c.SetGameSettings(patch["settings"].toObject(), error)) return false;
+	}
+	auto global = Globals(c);
+	if (patch.contains("global")) {
+		if (!patch["global"].isObject()) return fail("global must be an object.");
+		const auto values = patch["global"].toObject();
+		for (auto i = values.begin(); i != values.end(); ++i) {
+			if (!global.contains(i.key())) return fail("Unknown global preference: " + i.key());
+			if (i.key() == "controller_color") {
+				if (!i.value().isString() ||
+				    (!i.value().toString().isEmpty() && !QColor(i.value().toString()).isValid()))
+					return fail("Invalid controller color.");
+			} else if (global[i.key()].isBool()) {
+				if (!i.value().isBool()) return fail("Expected boolean: " + i.key());
+			} else {
+				const auto max = i.key() == "controller_keyboard_player" ? Config::MAX_PLAYERS
+				                 : i.key().startsWith("audio_")
+				                     ? static_cast<int>(Config::MAX_AUDIO_VOLUME)
+				                     : 100;
+				const auto n   = i.value().toDouble(-1);
+				if (!i.value().isDouble() || !std::isfinite(n) || n < 0 || n > max ||
+				    n != std::floor(n))
+					return fail("Invalid integer: " + i.key());
+			}
+			global[i.key()] = i.value();
+		}
+	}
+	QStringList dirs, mappings;
+	if (patch.contains("game_dirs") && !Strings(patch["game_dirs"], dirs, true))
+		return fail("game_dirs must contain absolute paths.");
+	if (patch.contains("host_input_mapping") &&
+	    !Strings(patch["host_input_mapping"], mappings, false))
+		return fail("Invalid input mapping list.");
+	if (patch.contains("addons_dir") &&
+	    (!patch["addons_dir"].isString() || patch["addons_dir"].toString().size() > 4096 ||
+	     patch["addons_dir"].toString().contains(QChar('\0')) ||
+	     (!patch["addons_dir"].toString().isEmpty() &&
+	      !QDir::isAbsolutePath(patch["addons_dir"].toString()))))
+		return fail("addons_dir must be empty or an absolute path.");
+	// Validate the entire patch before touching any settings; preserve game overrides and unrelated
+	// keys.
+	s.beginGroup("GlobalConfiguration");
+	if (patch.contains("settings"))
+		for (auto values = c.GameSettings(); auto key: values.keys())
+			s.setValue(key, values[key]);
+	if (patch.contains("global"))
+		for (auto i = global.begin(); i != global.end(); ++i)
+			s.setValue(i.key(), i.value().toVariant());
+	if (patch.contains("host_input_mapping")) s.setValue("host_input_mapping", mappings);
+	s.endGroup();
+	if (patch.contains("game_dirs")) {
+		s.setValue("Launcher/game_dirs", dirs);
+		s.remove("Launcher/game_dir");
+	}
+	if (patch.contains("addons_dir"))
+		s.setValue("Launcher/addons_dir", patch["addons_dir"].toString());
+	s.sync();
+	return s.status() == QSettings::NoError || fail("Cannot save emulator preferences.");
+}

@@ -119,6 +119,25 @@ private slots:
 		QVERIFY2(library.Load(nullptr, &error), qPrintable(error));
 	}
 	void cleanup() { QDir::setCurrent(m_old_cwd); }
+	void localPs5RecipePreservesRuntimeAndOwnerBoundary() {
+		QTemporaryDir runtime;
+		const auto interpreter = runtime.filePath("emulator");
+		WriteFile(interpreter, "#!/bin/sh\nexit 0\n");
+		QVERIFY(QFile::setPermissions(interpreter, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+		HostApi resolver {&library, [] { return HostApi::Status {}; }};
+		resolver.ConfigureNativeLaunch(interpreter, runtime.filePath("emulator.lock"));
+		const QString owner = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+		resolver.ConfigureLocalOwner(owner, QCoreApplication::applicationPid());
+		const auto id = library.Games().first().id;
+		const auto reply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", owner, {{"game", id}}));
+		QCOMPARE(reply.status, 200);
+		const auto launch = QJsonDocument::fromJson(reply.body).object();
+		QCOMPARE(launch["cwd"].toString(), runtime.path());
+		QCOMPARE(launch["executable"].toString(), interpreter);
+		QVERIFY(launch["args"].toArray().contains("--game"));
+		QVERIFY(!launch["args"].toArray().contains("--streaming-only"));
+		QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {{"game", id}})).status, 403);
+	}
 	void steamReadsRejectSpecialAndOversizedFiles() {
 		QTemporaryDir fixture;
 		QDir().mkpath(fixture.filePath("steamapps"));
@@ -1468,6 +1487,16 @@ private slots:
 		QVERIFY(!Control(sock, prefs)["ok"].toBool());
 		QCOMPARE(Control(sock, {{"type", "get-preferences"}})["port"].toInt(), 48189);
 		QVERIFY(!Control(sock, {{"type", "nonsense"}})["ok"].toBool());
+		auto emulator = Control(sock, {{"type", "get-emulator-preferences"}});
+		QVERIFY(emulator["ok"].toBool());
+		QVERIFY(Control(sock, {{"type", "set-emulator-preferences"}, {"global", QJsonObject{{"audio_master_volume", 75}}}})["ok"].toBool());
+		QCOMPARE(Control(sock, {{"type", "get-emulator-preferences"}})["global"].toObject()["audio_master_volume"].toInt(), 75);
+		QVERIFY(!Control(sock, {{"type", "set-emulator-preferences"}, {"global", QJsonObject{{"audio_master_volume", -1}}}})["ok"].toBool());
+		const auto content = Control(sock, {{"type", "get-additional-content"}, {"game", library.Games().first().id}});
+		QVERIFY(content["ok"].toBool());
+		QVERIFY(content["entries"].isArray());
+		QVERIFY(!Control(sock, {{"type", "check-emulator-update"}, {"url", "https://example.com"}})["ok"].toBool());
+
 		daemon.Shutdown();
 	}
 

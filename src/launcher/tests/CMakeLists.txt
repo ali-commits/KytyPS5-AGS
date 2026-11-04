@@ -36,3 +36,11 @@ set_tests_properties(launcher_library_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFO
 include(artwork.cmake)
 
 include(remote.cmake)
+
+if(KYTY_LAUNCHER_WARM_BUILD)
+    add_executable(launcher_owner_preferences_tests ownerPreferencesTests.cpp ../src/ownerPreferences.cpp ../src/configuration.cpp ../include/configuration.h)
+    target_include_directories(launcher_owner_preferences_tests PRIVATE ../include ../../ "${KYTY_LAUNCHER_WARM_BUILD}")
+    target_link_libraries(launcher_owner_preferences_tests PRIVATE Qt6::Core Qt6::Gui)
+    add_test(NAME launcher_owner_preferences COMMAND launcher_owner_preferences_tests)
+    include(host.cmake)
+endif()

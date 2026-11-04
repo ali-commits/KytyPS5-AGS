@@ -355,7 +355,7 @@ void HostApi::Internal(const QJsonObject& request, const std::function<void(Host
 	if (request["path"] == "/ags/internal/resolve-launch" || request["path"] == "/ags/internal/resolve-local-launch") {
         const bool local = request["path"] == "/ags/internal/resolve-local-launch";
         if (local != (client_id == m_local_client_id)) return done(Error(403, "invalid-local-owner"));
-        if (local && (!m_library->Find(game_id) || m_library->Find(game_id)->source != "steam")) return done(Error(400, "invalid-local-source"));
+        if (local && (!m_library->Find(game_id) || (m_library->Find(game_id)->source != "steam" && m_library->Find(game_id)->source != "ps5"))) return done(Error(400, "invalid-local-source"));
 		if (body.size() != 1) return done(Error(400, "bad-body"));
 		m_resolved = {};
 		const auto launch = ResolveNative(client_id, game_id, local);
@@ -691,6 +691,7 @@ void HostApi::Library(const Client& client, const std::function<void(HostReply)>
 		    {"version", info.gameVersion},
 		    {"status", EnumToText(info.game_status)},
 		    {"has_cheats", QFile::exists(Cheats::PlanPath(TitleId(info)))},
+		    {"local_running", NativeRuntimeIsLocal() && m_runtime.game == game.id},
 		    {"running", !status.running_id.isEmpty() && status.running_id == game.id},
 		});
 	}
