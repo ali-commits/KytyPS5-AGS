@@ -118,14 +118,12 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	layout->addWidget(host);
 	m_quality          = new QGroupBox(tr("Next game preferences"), content);
 	auto* quality_form = new QFormLayout(m_quality);
-	auto* profile_row  = new QHBoxLayout;
 	m_resolution       = new QComboBox(m_quality);
 	m_resolution->setObjectName("streamResolution");
 	m_resolution->addItem(tr("Default (1080p)"), "Native");
 	m_resolution->addItem("1080p", "1080p");
 	m_resolution->addItem("1440p", "1440p");
 	m_resolution->setCurrentIndex(qMax(0, m_resolution->findData(settings.resolution)));
-	profile_row->addWidget(m_resolution);
 	m_fps = new QComboBox(m_quality);
 	m_fps->setObjectName("streamFps");
 	m_fps->addItem("30 FPS", 30);
@@ -134,27 +132,20 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_fps->addItem("120 FPS", 120);
 	const int saved_fps_index = m_fps->findData(settings.fps);
 	m_fps->setCurrentIndex(saved_fps_index >= 0 ? saved_fps_index : m_fps->findData(60));
-	profile_row->addWidget(m_fps);
 	m_bitrate = new QSpinBox(m_quality);
 	m_bitrate->setObjectName("streamBitrate");
 	m_bitrate->setRange(1, 150);
 	m_bitrate->setSuffix(" Mbps");
 	m_bitrate->setValue(settings.bitrate);
-	profile_row->addWidget(m_bitrate);
 	m_codec = new QComboBox(m_quality);
 	m_codec->setObjectName("streamCodec");
 	m_codec->addItems({"HEVC", "H264", "AV1"});
 	m_codec->setCurrentText(settings.codec);
-	profile_row->addWidget(m_codec);
-	quality_form->addRow(tr("Preferred output"), profile_row);
-	quality_form->setRowVisible(profile_row, true);
-	auto* hint = new QLabel(
-	    tr("These are host output preferences. The active negotiated codec and input capabilities "
-		   "appear in diagnostics. Hardware-dependent modes report errors when unavailable. Native "
-		   "currently uses a 1080p host default; client negotiation can select another size."),
-	    m_quality);
-	hint->setWordWrap(true);
-	quality_form->addRow(hint);
+	// Clients choose size, rate, bitrate and codecs now. These stay as hidden fallback
+	// defaults for older clients; their stored values are kept.
+	for (QWidget* fallback: {static_cast<QWidget*>(m_resolution), static_cast<QWidget*>(m_fps),
+	                         static_cast<QWidget*>(m_bitrate), static_cast<QWidget*>(m_codec)})
+		fallback->hide();
 	m_show_local = new QCheckBox(tr("Show game window on this host"), m_quality);
 	m_show_local->setObjectName("streamShowLocal");
 	m_show_local->setChecked(settings.show_local);
@@ -179,10 +170,10 @@ StreamingWidget::StreamingWidget(HostControlClient* client, QWidget* parent)
 	m_audio_codec->setObjectName("streamAudioCodec");
 	m_audio_codec->addItem(tr("Opus"), "opus");
 	m_audio_codec->addItem(tr("PCM"), "raw_pcm");
-	quality_form->addRow(tr("Audio codec"), m_audio_codec);
+	m_audio_codec->hide();
 	m_fec = new QCheckBox(tr("Forward error correction"), m_quality);
 	m_fec->setObjectName("streamFec");
-	quality_form->addRow(m_fec);
+	m_fec->hide();
 	m_local_sink = new QLineEdit(m_quality);
 	m_local_sink->setObjectName("streamLocalAudioSink");
 	m_local_sink->setPlaceholderText(tr("Default output"));

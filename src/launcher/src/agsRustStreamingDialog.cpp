@@ -56,9 +56,6 @@ AgsRustStreamingDialog::AgsRustStreamingDialog(QWidget* parent,
 	m_encoder->setObjectName("rustEncoder");
 	m_encoder->addItems({"auto", "nvenc", "vaapi", "software"});
 	form->addRow(tr("Encoder preference"), m_encoder);
-	m_fec = new QCheckBox(tr("Forward error correction"), this);
-	m_fec->setObjectName("rustFec");
-	form->addRow(m_fec);
 	layout->addLayout(form);
 	m_save = new QPushButton(tr("Apply to next game"), this);
 	m_save->setObjectName("rustSaveSettings");
@@ -120,7 +117,6 @@ AgsRustStreamingDialog::AgsRustStreamingDialog(QWidget* parent,
 		    self->m_local_sink->setText(p.value("local_audio_sink").toString());
 		    self->m_grace->setValue(p.value("disconnect_grace").toInt(20));
 		    self->m_encoder->setCurrentText(p.value("encoder").toString("auto"));
-		    self->m_fec->setChecked(p.value("fec_enabled").toBool());
 		    self->m_loaded = true;
 		    self->m_save->setEnabled(true);
 	    });
@@ -160,7 +156,6 @@ void AgsRustStreamingDialog::Save() {
 	                 {"local_audio", m_local_audio->isChecked()},
 	                 {"local_audio_sink", m_local_sink->text()},
 	                 {"disconnect_grace", m_grace->value()},
-	                 {"fec_enabled", m_fec->isChecked()},
 	                 {"encoder", m_encoder->currentText()}},
 	                [self = QPointer(this)](QJsonObject reply, QString error) {
 		                if (!self) return;

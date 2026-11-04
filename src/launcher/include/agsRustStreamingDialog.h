@@ -36,7 +36,6 @@ private:
 	QLineEdit*         m_local_sink;
 	QSpinBox*          m_grace;
 	QCheckBox*         m_local_audio;
-	QCheckBox*         m_fec;
 	QPushButton*       m_save;
 	bool               m_loaded = false;
 };
