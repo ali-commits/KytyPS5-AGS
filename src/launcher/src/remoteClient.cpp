@@ -416,7 +416,7 @@ bool RemoteClient::ValidStream(const Stream& stream) {
 	       QStringList {"h264", "hevc", "av1"}.contains(stream.videoCodec) &&
 	       QStringList {"opus", "pcm"}.contains(stream.audioCodec) &&
 	       QStringList {"low", "balanced", "quality"}.contains(stream.latency) &&
-	       QStringList {"compositor", "direct"}.contains(stream.capture);
+	       QStringList {"compositor", "compositor_gpu", "direct"}.contains(stream.capture);
 }
 bool RemoteClient::SetStream(const Stream& stream) {
 	if (Busy() || !ValidStream(stream)) return false;
