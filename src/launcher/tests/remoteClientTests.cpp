@@ -253,6 +253,10 @@ elif command=='status':
 			stream.audioCodec  = "pcm";
 			stream.fec         = true;
 			stream.latency     = "low";
+			stream.capture     = "x11";
+			QVERIFY(!client.SetStream(stream));
+			stream.capture     = "compositor_gpu";
+			QVERIFY(client.SetStream(stream));
 			stream.capture     = "direct";
 			QVERIFY(client.SetStream(stream));
 			stream.bitrateKbps = 999;

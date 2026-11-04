@@ -109,8 +109,8 @@ RemoteHostsWidget::RemoteHostsWidget(RemoteClient* client, QWidget* parent): QWi
 	auto* capture = new QComboBox(this);
 	capture->setObjectName("remoteCapture");
 	capture->addItem(tr("Gamescope"), "compositor");
+	capture->addItem(tr("Gamescope GPU"), "compositor_gpu");
 	capture->addItem(tr("Native"), "direct");
-	capture->setToolTip(tr("Steam games always use gamescope."));
 	{
 		const auto stream = client->StreamOptions();
 		const auto select = [](QComboBox* box, const QVariant& value) {
