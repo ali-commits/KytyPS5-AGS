@@ -9,13 +9,13 @@
 namespace UpdateRelease {
 
 inline const QString LATEST_URL =
-    QStringLiteral("https://api.github.com/repos/KytyPS5/KytyPS5/releases/latest");
+    QStringLiteral("https://api.github.com/repos/ali-commits/KytyPS5-AGS/releases/latest");
 inline const QString TAG_URL =
-    QStringLiteral("https://api.github.com/repos/KytyPS5/KytyPS5/releases/tags/%1");
+    QStringLiteral("https://api.github.com/repos/ali-commits/KytyPS5-AGS/releases/tags/%1");
 inline const QString PAGE_URL =
-    QStringLiteral("https://github.com/KytyPS5/KytyPS5/releases/tag/%1");
+    QStringLiteral("https://github.com/ali-commits/KytyPS5-AGS/releases/tag/%1");
 inline const QString DOWNLOAD_URL =
-    QStringLiteral("https://github.com/KytyPS5/KytyPS5/releases/download/%1/%2");
+    QStringLiteral("https://github.com/ali-commits/KytyPS5-AGS/releases/download/%1/%2");
 
 struct Info {
 	QString    tag;
