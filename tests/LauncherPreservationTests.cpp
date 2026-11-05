@@ -10,16 +10,10 @@
 #include "updateChecker.h"
 #include "emulatorCommand.h"
 #include "mainDialog.h"
-#include "applicationLifetime.h"
 #include "launcherTheme.h"
-#include "hostSocket.h"
-#include "hostControlClient.h"
-#include "hostDaemon.h"
 #include "gameContent.h"
 #include "gameLibrary.h"
 #include "common/archive.h"
-#include "streamingCatalog.h"
-#include "streamingWidget.h"
 
 #include <QApplication>
 #include <QAction>
@@ -138,7 +132,6 @@ bool CreateGridFixture(const QTemporaryDir& temp) {
     }
     QSettings settings(temp.filePath("Kyty.ini"),QSettings::IniFormat);
     settings.setValue("Launcher/game_dirs",QStringList{temp.filePath("games")});
-    settings.setValue("Launcher/steam_roots", QStringList{temp.filePath("absent-steam")});
     settings.sync();
     return Write(temp.filePath("compatibility_db.json"),"{}");
 }
@@ -222,92 +215,53 @@ private slots:
         QCOMPARE(qApp->palette(), nativeDark);
         QCOMPARE(changes.count(), 0);
     }
-    void fullShellResizesWithScrollableSecondaryPages_data() {
+    void shellResizesAndKeepsGameListUsable_data() {
         QTest::addColumn<int>("theme");
         QTest::newRow("auto") << 0;
         QTest::newRow("dark") << 1;
         QTest::newRow("light") << 2;
     }
-    void fullShellResizesWithScrollableSecondaryPages() {
+    void shellResizesAndKeepsGameListUsable() {
         QFETCH(int, theme);
         const auto oldPalette = qApp->palette();
         const auto restorePalette = qScopeGuard([&] { qApp->setPalette(oldPalette); });
         QTemporaryDir temp;
         WorkingDirectory cwd(temp.path());
-        QVERIFY(Write("Kyty.ini", QByteArray("[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n[MainDialog]\ntheme=") + QByteArray::number(theme) + "\n"));
-        QVERIFY(Write("compatibility_db.json", "{}"));
-        LauncherTheme::Initialize(*qApp);
+        QVERIFY(CreateGridFixture(temp));
         QSettings shellSettings("Kyty.ini", QSettings::IniFormat);
+        shellSettings.setValue("MainDialog/theme", theme);
+        shellSettings.sync();
+        LauncherTheme::Initialize(*qApp);
         MainDialog::ReadSettings(shellSettings);
         MainDialog dialog;
         dialog.findChild<ControllerPreview*>("controllerPreview")->SetSuspended(true);
         dialog.show();
-        auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
-        QVERIFY(tabs);
-        QVERIFY(tabs->tabBar()->sizeHint().height() >= 44);
-        auto* brand = qobject_cast<QLabel*>(tabs->cornerWidget(Qt::TopLeftCorner));
-        QVERIFY(brand);
-        const auto expectedLogo = QPixmap(":/brand/logo.svg")
-                                      .scaledToWidth(100, Qt::SmoothTransformation);
-        QCOMPARE(brand->pixmap().toImage(), expectedLogo.toImage());
+        QVERIFY(!dialog.findChild<QTabWidget*>("launcherTabs")); // one window, no tab shell
         if (theme == 1) QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#17191e"));
         if (theme == 2) QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#f6f6f6"));
+        auto* tree = dialog.findChild<QTreeWidget*>("cfgs_list");
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(), 3);
         for (const QSize size: {QSize(960, 540), QSize(520, 480)}) {
-            tabs->setCurrentIndex(0);
             dialog.resize(size);
             QTest::qWait(40);
             QCOMPARE(dialog.size(), size);
             QVERIFY(dialog.minimumSizeHint().height() <= 480);
-            auto* library = dialog.findChild<QWidget*>("libraryPage");
-            QLabel* heading = nullptr;
-            for (auto* label: library->findChildren<QLabel*>("libraryHeading"))
-                if (label->text() == "Your library") heading = label;
-            QVERIFY(heading && heading->isVisible());
-            const auto fg = heading->palette().color(QPalette::WindowText);
-            const auto bg = library->palette().color(QPalette::Window);
-            QVERIFY2(qAbs(fg.lightness() - bg.lightness()) > 80, "Heading contrast must follow the active palette");
-            const auto shellPixels = dialog.grab().toImage();
-            const auto backgroundPoint = heading->mapTo(&dialog, QPoint(heading->width() - 2, heading->height() / 2));
-            const auto paintedBackground = shellPixels.pixelColor(backgroundPoint);
-            QVERIFY2(qAbs(fg.lightness() - paintedBackground.lightness()) > 80, "Rendered heading background must contrast with text");
-            for (const char* name: {"libraryRemoteHosts", "librarySettings"}) {
-                auto* action = library->findChild<QWidget*>(name);
-                QVERIFY(action && !action->isVisible());
-            }
-            for (const char* name: {"settingsScroll", "remoteHostsScroll", "streamingScroll"}) {
-                auto* scroll = dialog.findChild<QScrollArea*>(name);
-                QVERIFY(scroll && scroll->widgetResizable());
-                tabs->setCurrentWidget(scroll);
-                QCoreApplication::processEvents();
-                QCOMPARE(dialog.size(), size);
-                if (scroll->widget()->minimumSizeHint().height() > scroll->viewport()->height())
-                    QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
-            }
-            tabs->setCurrentIndex(0);
+            QVERIFY(tree->isVisible() && tree->height() > 0);
             const auto requested = qEnvironmentVariable("KYTY_PRESERVATION_SCREENSHOT");
             if (!requested.isEmpty()) {
                 const QFileInfo base(requested);
                 const auto path = base.dir().filePath(base.completeBaseName() + QString("-shell-%1-%2x%3.png").arg(theme).arg(size.width()).arg(size.height()));
                 QVERIFY(dialog.grab().save(path));
-                QCOMPARE(dialog.size(), size);
             }
-            qInfo() << "full shell" << theme << size << "minimum" << dialog.minimumSizeHint();
         }
     }
 
-    void realShellPaintsAfterInitialShow_data() {
-        QTest::addColumn<bool>("coldHidden");
-        QTest::newRow("normal-show") << false;
-        QTest::newRow("cold-hidden-tray-show") << true;
-    }
-
-    void realShellPaintsAfterInitialShow() {
-        QFETCH(bool, coldHidden);
+    void shellPaintsGameListAfterShow() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
         WorkingDirectory cwd(temp.path());
-        QVERIFY(Write("Kyty.ini", "[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n"));
-        QVERIFY(Write("compatibility_db.json", "{}"));
+        QVERIFY(CreateGridFixture(temp));
         const auto oldStyle = qApp->styleSheet();
         const auto restoreStyle = qScopeGuard([&] { qApp->setStyleSheet(oldStyle); });
         LauncherTheme::Initialize(*qApp);
@@ -316,145 +270,25 @@ private slots:
         auto* preview = dialog.findChild<ControllerPreview*>("controllerPreview");
         QVERIFY(preview);
         preview->SetSuspended(true); // No Start(), emulator probe, or controller polling.
-        ApplicationLifetime lifetime(&dialog, true, [] {});
-        lifetime.ShowInitial(coldHidden);
-        if (coldHidden) {
-            QVERIFY(!dialog.isVisible());
-            QAction* show = nullptr;
-            for (auto* action: dialog.findChildren<QAction*>())
-                if (action->text() == "Show AGS") show = action;
-            QVERIFY(show);
-            show->trigger(); // Exercise the production tray menu connection.
-        }
-        QTRY_VERIFY(dialog.isVisible());
-        auto* library = dialog.findChild<QWidget*>("libraryPage");
-        QVERIFY(library);
-        QTRY_VERIFY(library->isVisible());
-        QVERIFY(dialog.updatesEnabled());
-        QVERIFY(library->updatesEnabled());
-        QVERIFY(library->width() > 0 && library->height() > 0);
-        QLabel* heading = nullptr;
-        for (auto* label: library->findChildren<QLabel*>("libraryHeading"))
-            if (label->text() == "Your library") heading = label;
-        QVERIFY(heading);
-        QTRY_VERIFY(heading->isVisible());
-        QVERIFY(heading->width() > 0 && heading->height() > 0);
-        // Always inspect actual rendering; Capture() alone is optional and also calls show().
+        dialog.show();
+        auto* tree = dialog.findChild<QTreeWidget*>("cfgs_list");
+        QVERIFY(tree);
+        QTRY_VERIFY(tree->isVisible());
+        QVERIFY(dialog.updatesEnabled() && tree->updatesEnabled());
+        QVERIFY(tree->width() > 0 && tree->height() > 0);
         const auto rendered = dialog.grab().toImage().convertToFormat(QImage::Format_RGB32);
         QVERIFY(!rendered.isNull());
-        const auto headingRect = QRect(heading->mapTo(&dialog, QPoint()), heading->size());
-        const auto pixels = rendered.copy(headingRect);
+        const auto pixels = rendered.copy(QRect(tree->mapTo(&dialog, QPoint()), tree->size()));
         QVERIFY(!pixels.isNull());
         int different = 0;
         const auto background = pixels.pixel(0, 0);
         for (int y = 0; y < pixels.height(); ++y)
             for (int x = 0; x < pixels.width(); ++x)
                 different += pixels.pixel(x, y) != background;
-        QVERIFY2(different > 30, "The visible library heading must render text, not a uniform black surface");
-        qInfo() << "shell paint" << coldHidden << dialog.size() << library->geometry()
-                << "heading pixels differing from background" << different;
+        QVERIFY2(different > 30, "The visible game list must render rows, not a uniform surface");
     }
 
-    void headlessStartupSelectsStreamingBeforePreviewAndStartsOnlyHost() {
-#if defined(__linux__)
-        QTemporaryDir temp; QVERIFY(temp.isValid());
-        QVERIFY(CreateGridFixture(temp));
-        const auto bin=temp.filePath("bin"); QVERIFY(QDir().mkpath(bin));
-        const auto runner=bin+"/launcher_preservation_tests";
-        QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(),runner));
-        const auto emulator=bin+"/kyty_emulator";
-        const QByteArray version_stub = "#!/bin/sh\nif [ \"$#\" -ne 0 ]; then touch unexpected-game; exit 1; fi\nprintf 'UI fixture emulator\\nusage\\n'\n";
-        QVERIFY(Write(emulator,version_stub));
-        QVERIFY(QFile::setPermissions(emulator,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
-        const auto profile=temp.filePath("streaming"); QVERIFY(QDir().mkpath(profile));
-        QSettings settings(profile+"/streaming.ini",QSettings::IniFormat);
-        settings.setValue("host/backend",temp.filePath("missing-helper")); settings.sync();
-        QProcess child; auto environment=QProcessEnvironment::systemEnvironment();
-        environment.insert("KYTY_STREAMING_CONFIG_DIR",profile);
-        child.setProcessEnvironment(environment); child.setWorkingDirectory(temp.path());
-        child.start(runner,{"--headless-ui-startup-fixture"});
-        QVERIFY(child.waitForFinished(10000));
-        QCOMPARE(child.exitStatus(),QProcess::NormalExit);
-        QVERIFY2(child.exitCode()==0,child.readAllStandardError().constData());
-        QVERIFY(!QFile::exists(temp.filePath("unexpected-game")));
-        QVERIFY(!QFile::exists(profile+"/host-key.pem"));
-        QVERIFY(Read(temp.filePath("owned-host.log")).contains("--host"));
-        QVERIFY(!QFile::exists(qEnvironmentVariable("KYTY_PRESERVATION_SYSTEMCTL_LOG")));
-        HostControlClient autostart;
-        autostart.SetAutostartDirectory(temp.path());
-        autostart.SetAutostart(true);
-        const auto desktop = Read(temp.filePath("autostart/ags.desktop"));
-        QVERIFY(desktop.contains("--start-minimized"));
-        QVERIFY(desktop.contains("Type=Application"));
-        autostart.SetAutostart(false);
-        QVERIFY(!QFile::exists(temp.filePath("autostart/ags.desktop")));
-#else
-        QSKIP("The isolated executable fixture uses a Linux shell version stub");
-#endif
-    }
-
-    void archiveRescanRefreshesDaemonWithoutSettingsWrite() {
-        QTemporaryDir temp, run, profile;
-        QVERIFY(temp.isValid() && run.isValid() && profile.isValid());
-        WorkingDirectory cwd(temp.path());
-        QVERIFY(CreateGridFixture(temp));
-        const auto runtime_before = qgetenv("XDG_RUNTIME_DIR");
-        const auto profile_before = qgetenv("KYTY_STREAMING_CONFIG_DIR");
-        const auto no_autostart_before = qgetenv("KYTY_HOST_NO_AUTOSTART");
-        const auto socket_before = qgetenv("KYTY_HOST_SOCKET");
-        const auto restore = qScopeGuard([&] {
-            for (const auto& entry : {std::pair{"XDG_RUNTIME_DIR", runtime_before},
-                                      std::pair{"KYTY_STREAMING_CONFIG_DIR", profile_before},
-                                      std::pair{"KYTY_HOST_NO_AUTOSTART", no_autostart_before},
-                                      std::pair{"KYTY_HOST_SOCKET", socket_before}}) {
-                if (entry.second.isNull()) qunsetenv(entry.first);
-                else qputenv(entry.first, entry.second);
-            }
-        });
-        qputenv("XDG_RUNTIME_DIR", run.path().toUtf8());
-        qputenv("KYTY_STREAMING_CONFIG_DIR", profile.path().toUtf8());
-        qputenv("KYTY_HOST_NO_AUTOSTART", "1");
-        qputenv("KYTY_HOST_SOCKET", run.filePath("kyty-host/control.sock").toUtf8());
-        HostDaemon daemon;
-        QString error;
-        QVERIFY2(daemon.Start(&error), qPrintable(error));
-        MainDialog dialog;
-        auto* widget = dialog.findChild<ConfigurationListWidget*>();
-        QVERIFY(widget);
-        // Drain startup/settings-watch events before replacing a game under the game root.
-        QTest::qWait(700);
-        const auto settings_before = Read(temp.filePath("Kyty.ini"));
-        const auto game = temp.filePath("games/Astro Fixture");
-        const auto archive = game + ".zar";
-        const auto old_id = GameLibraryFiles::CatalogId(GameLibraryFiles::NormalizeGameDirectory(game));
-        const auto new_id = GameLibraryFiles::CatalogId(GameLibraryFiles::NormalizeGameDirectory(archive));
-        const auto daemon_ids = [&] {
-            auto reply = QtConcurrent::run([&] {
-                return HostSocketCall(run.filePath("kyty-host/api.sock"),
-                                      {{"method", "GET"}, {"path", "/kyty/v1/library"}}, 2000, nullptr);
-            });
-            while (!reply.isFinished()) QTest::qWait(10);
-            QSet<QString> ids;
-            if (const auto result = reply.result()) {
-                for (const auto& entry : QJsonDocument::fromJson(result->body).object()["games"].toArray())
-                    ids.insert(entry.toObject()["id"].toString());
-            }
-            return ids;
-        };
-        QVERIFY(daemon_ids().contains(old_id));
-        QVERIFY(Common::PackArchive(GameContent::ToPath(game), GameContent::ToPath(archive), [](uint64_t, uint64_t) { return true; }));
-        QVERIFY(QDir(game).removeRecursively());
-        // This is the same rescan used by Compress to ZAR after deleting the original folder.
-        widget->ScanGameDirectory();
-        QCOMPARE(Read(temp.filePath("Kyty.ini")), settings_before);
-        QTRY_VERIFY_WITH_TIMEOUT(daemon_ids().contains(new_id), 3000);
-        QVERIFY(!daemon_ids().contains(old_id));
-        QCOMPARE(daemon_ids().size(), 3);
-        QCOMPARE(Read(temp.filePath("Kyty.ini")), settings_before);
-        daemon.Shutdown();
-    }
-
-    void upstreamGridSharesSelectionResizesPersistsAndKeepsCatalog() {
+    void upstreamGridSharesSelectionResizesPersistsAndKeepsLaunchArguments() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
         WorkingDirectory cwd(temp.path());
@@ -484,15 +318,19 @@ private slots:
             QCOMPARE(views->currentWidget(),grid);
             QCOMPARE(grid->currentIndex().column(),0);
             QCOMPARE(grid->currentIndex().data().toString(),selected_title);
-            const auto before=library.CreateStreamingCatalog("/fixture/kyty_emulator");
+            const auto launch_args=[&] {
+                QList<QStringList> out;
+                for(int i=0;i<tree->topLevelItemCount();++i)
+                    out.append(BuildEmulatorArgs(*library.CreateConfiguration(*static_cast<ConfigurationItem*>(tree->topLevelItem(i)))));
+                return out;
+            };
+            const auto before=launch_args();
             QCOMPARE(before.size(),3);
             QSignalSpy changed(&library,&ConfigurationListWidget::CatalogChanged);
             size->setValue(320);
             QCOMPARE(grid->iconSize(),QSize(320,180));
             QVERIFY(changed.count()>0);
-            const auto after=library.CreateStreamingCatalog("/fixture/kyty_emulator");
-            QCOMPARE(after.size(),before.size());
-            for(int i=0;i<after.size();++i) QCOMPARE(after[i].arguments,before[i].arguments);
+            QCOMPARE(launch_args(),before);
             QSettings saved("Kyty.ini",QSettings::IniFormat);
             QVERIFY(saved.value("Launcher/grid_view").toBool());
             QCOMPARE(saved.value("Launcher/grid_icon_width").toInt(),320);
@@ -605,22 +443,9 @@ private slots:
         QVERIFY(Capture(dialog,"-debug"));
     }
 
-    void sharedControllerPreviewAndTitleSoundKeepStreamingAndPresetSafeguards() {
+    void sharedControllerPreviewAndTitleSoundFollowSelectionAndKeepPresetSafeguards() {
         QTemporaryDir temp; WorkingDirectory cwd(temp.path());
         QVERIFY(CreateGridFixture(temp));
-        const auto old=qgetenv("KYTY_STREAMING_CONFIG_DIR");
-        qputenv("KYTY_STREAMING_CONFIG_DIR",temp.filePath("private-stream").toUtf8());
-        struct Restore { QByteArray previous; ~Restore(){previous.isNull()?qunsetenv("KYTY_STREAMING_CONFIG_DIR"):qputenv("KYTY_STREAMING_CONFIG_DIR",previous);} } restore{old};
-        const auto old_socket=qgetenv("KYTY_HOST_SOCKET");
-        struct RestoreSocket { QByteArray previous; ~RestoreSocket(){previous.isNull()?qunsetenv("KYTY_HOST_SOCKET"):qputenv("KYTY_HOST_SOCKET",previous);} } restore_socket{old_socket};
-        QJsonObject host_status{{"state","Ready"},{"stream_game_running",false}};
-        HostSocketServer host([&host_status](const QJsonObject& request,std::function<void(HostReply)> done) {
-            const auto reply=request.value("type").toString()=="status"?host_status:QJsonObject{{"ok",true}};
-            done({200,"application/json",QJsonDocument(reply).toJson(QJsonDocument::Compact),{}});
-        });
-        QString listen_error;
-        QVERIFY2(host.Listen(temp.filePath("host/control.sock"),&listen_error),qPrintable(listen_error));
-        qputenv("KYTY_HOST_SOCKET",temp.filePath("host/control.sock").toUtf8());
         MainDialog dialog;
         auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
         QVERIFY(preview);
@@ -638,39 +463,13 @@ private slots:
         for(auto* label:dialog.findChildren<QLabel*>()) warning_visible|=label->text()=="Fixture preset warning";
         QVERIFY(warning_visible);
         QVERIFY(!UpdateChecker::IsSupported()); // Custom packages cannot install official runtime archives.
-        auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
-        QVERIFY(streaming);
-        auto* tabs=dialog.findChild<QTabWidget*>("launcherTabs");
-        QVERIFY(tabs);
-        auto* configuration = dialog.findChild<ConfigurationListWidget*>();
-        auto* settingsPage = dialog.findChild<QScrollArea*>("settingsScroll");
-        QVERIFY(tabs->indexOf(settingsPage) >= 0);
-        tabs->setCurrentWidget(settingsPage);
         auto* tree=dialog.findChild<QTreeWidget*>("cfgs_list");
+        QVERIFY(tree);
         tree->setCurrentItem(tree->topLevelItem(0));
         auto* toggle=dialog.findChild<QToolButton*>("grid_view_button");
         QTest::mouseClick(toggle,Qt::LeftButton);
         QVERIFY(Capture(dialog,"-main-grid"));
         QCOMPARE(title->Title(),dialog.findChild<ConfigurationListWidget*>()->GetSelectedItem()->GetInfo().basedir);
-        tabs->setCurrentWidget(dialog.findChild<QScrollArea*>("streamingScroll"));
-        QVERIFY(title->Title().isEmpty());
-        QVERIFY(Capture(dialog,"-streaming-current-ui"));
-        dialog.resize(1100,900);
-        dialog.show();
-        auto* version=streaming->findChild<QLabel*>("streamStatus");
-        QVERIFY(version);
-        QVERIFY(!version->text().isEmpty());
-        QApplication::processEvents();
-        QVERIFY2(version->height()>=version->heightForWidth(version->width()),
-                 "The native form field clips its wrapped backend status text");
-        tabs->setCurrentWidget(settingsPage);
-        QVERIFY(!title->Title().isEmpty());
-        // Local play is blocked only while the daemon reports a streamed game running.
-        QVERIFY(!preview->Error().contains("paused"));
-        host_status["stream_game_running"]=true;
-        QTRY_VERIFY_WITH_TIMEOUT(preview->Error().contains("paused") && title->Title().isEmpty(),5000);
-        host_status["stream_game_running"]=false;
-        QTRY_VERIFY_WITH_TIMEOUT(!preview->Error().contains("paused") && !title->Title().isEmpty(),5000);
         QVERIFY(!QFile::exists(temp.filePath("private-stream/host-key.pem")));
     }
 
@@ -823,7 +622,7 @@ private slots:
         QCOMPARE(Value(BuildEmulatorArgs(reloaded), "--keyboard-player"), "3");
     }
 
-    void libraryAndStreamingCatalogUseTheSameInheritedAudioAndCheatArguments() {
+    void libraryBuildsInheritedAudioAndCheatArguments() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
         WorkingDirectory cwd(temp.path());
@@ -841,7 +640,6 @@ private slots:
         {
             QSettings file("Kyty.ini", QSettings::IniFormat);
             file.setValue("Launcher/game_dirs", QStringList {temp.filePath("games")});
-            file.setValue("Launcher/steam_roots", QStringList{temp.filePath("absent-steam")});
             file.setValue("Launcher/addons_dir", temp.filePath("Additional Content"));
             file.beginGroup("GlobalConfiguration");
             global.WriteSettings(&file);
@@ -878,9 +676,6 @@ private slots:
         QVERIFY(item);
         const auto local = library.CreateConfiguration(*item);
         const auto local_args = BuildEmulatorArgs(*local);
-        const auto catalog = library.CreateStreamingCatalog(temp.filePath("kyty_emulator"));
-        QCOMPARE(catalog.size(), 1);
-        QCOMPARE(catalog.first().arguments, local_args);
         QCOMPARE(Value(local_args, "--screen-width"), "1920");
         QCOMPARE(Value(local_args, "--audio-master-volume"), "0");
         QCOMPARE(Value(local_args, "--audio-main-volume"), "200");
@@ -902,9 +697,6 @@ private slots:
         QCOMPARE(Value(local_args, "--addcont-dir"), temp.filePath("Additional Content"));
         QCOMPARE(local_args.count("--keymap"), 2);
         QCOMPARE(Value(local_args, "--game-patch"), patch);
-        const auto manifest = StreamingCatalog::Manifest(catalog, "/private/socket", "private-sink", "/private/lock", "1080p", 60, false);
-        QCOMPARE(manifest.value("games").toObject().value(catalog.first().id).toObject().value("arguments").toArray(), QJsonArray::fromStringList(local_args));
-        QCOMPARE(manifest.value("environment").toObject().value("KYTY_STREAM_ONLY").toString(), "1");
     }
 
     void externalSettingsEditsReloadLibraryButOwnWritesDoNot() {
@@ -922,7 +714,7 @@ private slots:
         QTest::qWait(1200);
         QCOMPARE(tree->topLevelItem(0),first);
         {
-            QSettings external("Kyty.ini",QSettings::IniFormat); // the daemon edits the same file
+            QSettings external("Kyty.ini",QSettings::IniFormat); // another process edits the same file
             external.setValue("Launcher/game_dirs",QStringList{});
             external.sync();
         }
@@ -949,7 +741,7 @@ private slots:
         int during=-1;
         QTimer::singleShot(0,&dialog,[&] {
             {
-                QSettings external("Kyty.ini",QSettings::IniFormat); // the daemon edits while the dialog is open
+                QSettings external("Kyty.ini",QSettings::IniFormat); // another process edits while the dialog is open
                 external.setValue("Launcher/game_dirs",QStringList{});
                 external.sync();
             }
@@ -960,49 +752,6 @@ private slots:
         dialog.exec();
         QCOMPARE(during,3); // the list was not swapped under the open dialog
         QTRY_COMPARE_WITH_TIMEOUT(tree->topLevelItemCount(),0,5000); // retried once it closed
-    }
-
-    void streamingTabRetainsPairingAudioAndHeadlessPreferences() {
-        QTemporaryDir temp;
-        QVERIFY(temp.isValid());
-        WorkingDirectory cwd(temp.path());
-        QVERIFY(Write("Kyty.ini", "[Launcher]\ngame_dirs=\nsteam_roots=absent-steam\n"));
-        QVERIFY(Write("compatibility_db.json", "{}"));
-        const auto previous = qgetenv("KYTY_STREAMING_CONFIG_DIR");
-        qputenv("KYTY_STREAMING_CONFIG_DIR", temp.filePath("streaming").toUtf8());
-        struct Restore { QByteArray old; ~Restore() { old.isNull() ? qunsetenv("KYTY_STREAMING_CONFIG_DIR") : qputenv("KYTY_STREAMING_CONFIG_DIR", old); } } restore {previous};
-        MainDialog dialog;
-        auto* streaming = dialog.findChild<StreamingWidget*>("streamingWidget");
-        QVERIFY(streaming);
-        bool library_tab = false, stream_tab = false;
-        for (auto* tabs: dialog.findChildren<QTabWidget*>())
-            for (int i = 0; i < tabs->count(); ++i) {
-                library_tab |= tabs->tabText(i) == "Library";
-                stream_tab |= tabs->tabText(i) == "Host streaming";
-            }
-        QVERIFY(library_tab && stream_tab);
-        if (!qEnvironmentVariableIsEmpty("KYTY_PRESERVATION_SCREENSHOT")) {
-            auto* tabs = dialog.findChild<QTabWidget*>("launcherTabs");
-            QVERIFY(tabs);
-            tabs->setCurrentIndex(0);
-            QVERIFY(Capture(dialog, "-library"));
-            tabs->setCurrentWidget(dialog.findChild<QScrollArea*>("streamingScroll"));
-            QVERIFY(Capture(dialog, "-streaming"));
-        }
-        for (const auto* name: {"streamBackendPath", "streamStart", "streamStop", "streamPair", "streamPairingPath", "streamAutostart", "streamStopGame",
-                               "streamClients", "streamUnpair", "streamPort", "streamControllerAudio",
-                               "streamControllerAudioPort", "streamControllerAudioReceivers", "streamLocalAudio"})
-            QVERIFY2(streaming->findChild<QWidget*>(name), name);
-        streaming->findChild<QCheckBox*>("streamControllerAudio")->setChecked(true);
-        streaming->findChild<QSpinBox*>("streamControllerAudioPort")->setValue(49001);
-        streaming->findChild<QCheckBox*>("streamLocalAudio")->setChecked(false);
-        streaming->findChild<QCheckBox*>("streamShowLocal")->setChecked(false);
-        const auto settings = streaming->Settings();
-        QVERIFY(settings.controller_audio);
-        QCOMPARE(settings.controller_audio_port, 49001);
-        QVERIFY(!settings.local_audio);
-        QVERIFY(!settings.show_local);
-        QVERIFY(!QFile::exists(temp.filePath("streaming/host-key.pem")));
     }
 
     void cheatImportRejectsWrongIdentityExecutableAndUnsupportedAddressing_data() {
@@ -1087,33 +836,12 @@ private slots:
 int main(int argc, char** argv) {
     // --local selects the real offline compatibility database seam. Keep it out of QtTest's CLI.
     std::vector<char*> app_args(argv, argv + argc);
-    char client_only[] = "--client-only";
-    const bool client_fixture = qEnvironmentVariableIsSet("KYTY_PRESERVATION_CLIENT_ONLY");
-    if (client_fixture) app_args.push_back(client_only);
     char local[] = "--local";
     app_args.push_back(local);
-    const bool headless_fixture=argc==2 && QByteArray(argv[1])=="--headless-ui-startup-fixture";
-    char start_host[]="--start-streaming-host";
-    if(headless_fixture) app_args.push_back(start_host);
     app_args.push_back(nullptr);
-    int app_argc = argc + 1 + int(headless_fixture) + int(client_fixture);
+    int app_argc = argc + 1;
     QApplication app(app_argc, app_args.data());
     QStandardPaths::setTestModeEnabled(true);
-    // Never reach the real systemd or daemon: a fake systemctl logs its arguments, and the
-    // control socket points at a path nothing serves. The headless child inherits both.
-    QTemporaryDir host_dir;
-    if(qEnvironmentVariableIsEmpty("KYTY_HOST_SYSTEMCTL")) {
-        const auto script=host_dir.filePath("fake-systemctl");
-        const auto log=host_dir.filePath("systemctl.log");
-        QFile file(script);
-        if(!host_dir.isValid() || !file.open(QIODevice::WriteOnly)) return 14;
-        file.write("#!/bin/sh\necho \"$@\" >> '"+log.toUtf8()+"'\nexit 0\n");
-        file.close();
-        QFile::setPermissions(script,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
-        qputenv("KYTY_HOST_SYSTEMCTL",script.toUtf8());
-        qputenv("KYTY_PRESERVATION_SYSTEMCTL_LOG",log.toUtf8());
-        qputenv("KYTY_HOST_SOCKET",host_dir.filePath("none/control.sock").toUtf8());
-    }
     if(qEnvironmentVariable("KYTY_PRESERVATION_DARK")=="1") {
         auto palette=app.palette();
         palette.setColor(QPalette::Window,QColor("#24272b"));
@@ -1126,30 +854,6 @@ int main(int argc, char** argv) {
         palette.setColor(QPalette::Highlight,QColor("#2d74ad"));
         palette.setColor(QPalette::HighlightedText,Qt::white);
         app.setPalette(palette);
-    }
-    if(headless_fixture) {
-        const auto ownedScript = QDir::current().filePath("owned-host-fixture");
-        const auto ownedLog = QDir::current().filePath("owned-host.log");
-        if (!Write(ownedScript, "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + ownedLog.toUtf8() + "'\n")) return 15;
-        QFile::setPermissions(ownedScript, QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
-        HostControlClient owner;
-        owner.SetLifetimeOwner(ownedScript);
-        MainDialog dialog;
-        auto* streaming=dialog.findChild<StreamingWidget*>("streamingWidget");
-        auto* title=static_cast<TitleSound*>(dialog.findChild<QObject*>("titleSound"));
-        auto* preview=dialog.findChild<ControllerPreview*>("controllerPreview");
-        if(!streaming || !title || !preview) return 11;
-        auto* tabs=dialog.findChild<QTabWidget*>("launcherTabs");
-        if(!tabs || tabs->currentWidget()!=dialog.findChild<QScrollArea*>("streamingScroll") || !title->Title().isEmpty()) return 12;
-        dialog.Start();
-        // The GUI lifetime owner starts only its fixture --host child, never systemd.
-        QElapsedTimer deadline; deadline.start();
-        bool started=false;
-        while(deadline.elapsed()<3000 && !started) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents,20);
-            started = Read(ownedLog).contains("--host");
-        }
-        return started && tabs->currentWidget()==dialog.findChild<QScrollArea*>("streamingScroll") && title->Title().isEmpty() ? 0 : 13;
     }
     LauncherPreservationTests tests;
     return QTest::qExec(&tests, argc, argv);

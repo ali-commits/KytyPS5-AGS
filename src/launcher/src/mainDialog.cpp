@@ -1,13 +1,4 @@
-#include "steamArtwork.h"
-#include "shellNavigation.h"
-#include "launcherTheme.h"
-#include <QTabBar>
 #include "mainDialog.h"
-#include "libraryPage.h"
-#include "remoteClient.h"
-#include "remoteHostsWidget.h"
-#include "gameLibrary.h"
-#include <QVBoxLayout>
 
 #include "cheatFile.h"
 #include "configuration.h"
@@ -16,8 +7,7 @@
 #include "controllerPreview.h"
 #include "emulatorCommand.h"
 #include "gameContent.h"
-#include "hostControlClient.h"
-#include "streamingWidget.h"
+#include "launcherTheme.h"
 #include "titleSound.h"
 #include "updateChecker.h"
 
@@ -30,7 +20,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QIODevice>
-#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
 #include <QObject>
@@ -39,10 +28,8 @@
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
-#include <QScrollArea>
 #include <QStringList>
 #include <QStyleHints>
-#include <QTabWidget>
 #include <QTextStream>
 #include <QVariant>
 #include <QtCore>
@@ -88,19 +75,11 @@ public:
 	/*slots:*/
 
 	void Update();
-	void ReloadLibrary();
 	void FindInterpreter();
 	void Run();
 	void SetPresetWarning(const QString& text);
-    RemoteClient* Remote() const { return m_remote; }
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
-	[[nodiscard]] bool           HostGameBusy() const {
-        if (QApplication::arguments().contains("--client-only")) return false;
-		return m_host_status.value("stream_game_running").toBool() ||
-               m_host_status.value("local_game_running").toBool() || m_local_starting ||
-               m_host_status.value("ownership_blocked").toBool();
-	}
 
 	static void WriteSettings(QSettings& s);
 	static void ReadSettings(QSettings& s);
@@ -109,11 +88,8 @@ private:
 	static QByteArray g_last_geometry;
 	static bool       g_check_updates_on_startup;
 	static int        g_theme;
-    static QString g_library_selection;
 
-	static void ApplyTheme(int theme) {
-        LauncherTheme::Apply(*qApp, theme);
-	}
+	static void ApplyTheme(int theme) { LauncherTheme::Apply(*qApp, theme); }
 
 	Ui::MainDialog*   m_ui             = {nullptr};
 	MainDialog*       m_main_dialog    = nullptr;
@@ -125,30 +101,12 @@ private:
 	QLabel*           m_preset_label = nullptr;
 	bool              m_started      = false;
 
-	QProcess           m_process;
-	HostControlClient* m_host = nullptr;
-	QJsonObject        m_host_status;
-    bool m_local_starting = false;
-	StreamingWidget*   m_streaming_widget = nullptr;
-	LibraryPage*       m_library = nullptr;
-    RemoteClient* m_remote = nullptr;
-	QWidget*           m_settings_page = nullptr;
-    QWidget*           m_streaming_page = nullptr;
-	QTabWidget*        m_tabs             = nullptr;
+	QProcess m_process;
 
-	ShellNavigation m_navigation;
-    bool eventFilter(QObject*, QEvent* event) override {
-        if (event->type() == QEvent::WindowActivate || event->type() == QEvent::WindowDeactivate) {
-            m_navigation.Reset();
-            if (m_library) m_library->ResetControllerNavigation();
-        }
-        return false;
-    }
-    QPointer<ConfigurationItem> m_running_item;
+	QPointer<ConfigurationItem> m_running_item;
 };
 
 QByteArray MainDialogPrivate::g_last_geometry;
-QString MainDialogPrivate::g_library_selection;
 bool       MainDialogPrivate::g_check_updates_on_startup = true;
 int        MainDialogPrivate::g_theme                    = 1;
 
@@ -163,129 +121,15 @@ MainDialogPrivate::~MainDialogPrivate() {
 	delete m_ui;
 }
 
-RemoteClient* MainDialog::Remote() const { return m_p->Remote(); }
-
 void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui = new Ui::MainDialog;
 	m_ui->setupUi(main_dialog);
 	m_controller_preview.setObjectName("controllerPreview");
 	m_title_sound.setObjectName("titleSound");
 	m_ui->widget->SetControllerPreview(&m_controller_preview);
-	m_tabs = new QTabWidget(main_dialog);
-    m_tabs->setObjectName("launcherTabs");
-    main_dialog->installEventFilter(this);
-    m_tabs->tabBar()->setObjectName("launcherNavigation");
-    m_tabs->tabBar()->setExpanding(false);
-    m_tabs->tabBar()->setUsesScrollButtons(true);
-    m_tabs->setStyleSheet("QTabWidget#launcherTabs::pane { border: 0; } QTabBar#launcherNavigation::tab { min-height: 44px; padding: 0 16px; margin: 4px 3px; border: 1px solid palette(mid); border-radius: 12px; background: palette(button); color: palette(button-text); } QTabBar#launcherNavigation::tab:selected { background: palette(highlight); color: palette(highlighted-text); } QTabBar#launcherNavigation::tab:focus { border: 2px solid palette(highlight); }");
-    auto* brand = new QLabel(m_tabs);
-    brand->setAccessibleName(tr("AGS"));
-    brand->setContentsMargins(8, 0, 12, 0);
-    auto updateBrand = [brand] {
-        brand->setPixmap(QPixmap(":/brand/logo.svg").scaledToWidth(100, Qt::SmoothTransformation));
-    };
-    updateBrand();
-    connect(qApp, &QApplication::paletteChanged, brand, [updateBrand](const QPalette&) { updateBrand(); });
-    m_tabs->setCornerWidget(brand, Qt::TopLeftCorner);
-	m_ui->verticalLayout_3->removeWidget(m_ui->widget);
-	m_library = new LibraryPage(m_tabs);
-    m_library->SetEmbeddedHeaderVisible(false);
-    m_tabs->addTab(m_library, tr("Library"));
-    auto* settingsPage = new QWidget(m_tabs);
-    auto* settingsLayout = new QVBoxLayout(settingsPage);
-    settingsLayout->addWidget(m_ui->widget);
-    m_ui->verticalLayout_5->removeItem(m_ui->verticalLayout_4);
-    settingsLayout->addLayout(m_ui->verticalLayout_4);
-    auto scrollPage = [this](QWidget* content, const QString& name) {
-        auto* scroll = new QScrollArea(m_tabs);
-        scroll->setObjectName(name);
-        scroll->setWidgetResizable(true);
-        scroll->setFrameShape(QFrame::NoFrame);
-        scroll->setWidget(content);
-        return scroll;
-    };
-    m_settings_page = scrollPage(settingsPage, "settingsScroll");
-    m_tabs->addTab(m_settings_page, tr("Settings"));
-    connect(m_library, &LibraryPage::SettingsRequested, this, [this] {
-        m_tabs->setCurrentWidget(m_settings_page);
-    });
-    connect(m_library, &LibraryPage::PlayRequested, this, [this](const QString& path) {
-        if (m_ui->widget->SelectGamePath(path)) Run();
-    });
-    connect(m_library, &LibraryPage::StreamingRequested, this, [this] {
-        m_tabs->setCurrentWidget(m_streaming_page);
-    });
-    m_remote = new RemoteClient(this);
-    auto* remotePage = new RemoteHostsWidget(m_remote, m_tabs);
-    auto* remoteTab = scrollPage(remotePage, "remoteHostsScroll");
-    m_tabs->addTab(remoteTab, tr("Remote hosts"));
-    connect(m_library, &LibraryPage::RemoteHostsRequested, this, [this, remoteTab] { m_tabs->setCurrentWidget(remoteTab); });
-    connect(m_remote, &RemoteClient::Changed, this, [this] { ReloadLibrary(); if (m_update_checker) Update(); });
-    connect(m_remote, &RemoteClient::Error, this, [this](const QString& error) {
-        // Keep network failures visible without a recurring modal on library refresh.
-        m_library->SetRemoteError(error);
-    });
-    connect(m_library, &LibraryPage::GameActionRequested, this, [this](const QString& id, const QString& source) {
-        if (source != "remote") return;
-        if (HostGameBusy() || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling()) { Update(); return; }
-        m_library->SetRemoteError({});
-        m_remote->Play(id);
-        Update();
-    });
-    ReloadLibrary();
-    m_library->SelectId(g_library_selection);
-    connect(m_library, &LibraryPage::SelectionChanged, this, [this](const QString& id) {
-        if (!id.isEmpty()) { g_library_selection = id; m_ui->widget->WriteSettings(); }
-    });
-    connect(&m_controller_preview, &ControllerPreview::StateChanged, m_library, [this] {
-        m_navigation.Handle(m_controller_preview.RawPressed(), m_tabs, m_library);
-    });
-	m_host             = new HostControlClient(QString(), this);
-    connect(m_library, &LibraryPage::LocalPlayRequested, this, [this](const QString& id) {
-        if (QApplication::arguments().contains("--client-only") || HostGameBusy() || m_remote->Busy() || m_process.state() != QProcess::NotRunning) return;
-        m_local_starting = true;
-        Update();
-        m_host->Request({{"type", "start-local-game"}, {"game", id}}, [this](QJsonObject reply, QString error) {
-            m_local_starting = false;
-            if (error.isEmpty() && !reply.value("ok").toBool()) error = reply.value("error").toString();
-            if (error.isEmpty()) m_host_status["local_game_running"] = true;
-            Update();
-            if (!error.isEmpty()) QMessageBox::warning(m_ui->widget, tr("Cannot start game"), error);
-        });
-    });
-
-	m_streaming_widget = new StreamingWidget(m_host, m_tabs);
-	m_streaming_widget->SetRustCatalogProvider(
-	    [this] { return m_ui->widget->CreateStreamingCatalog(m_interpreter); });
-	m_streaming_page = scrollPage(m_streaming_widget, "streamingScroll");
-	m_tabs->addTab(m_streaming_page, tr("Host streaming"));
-    if (QApplication::arguments().contains("--client-only")) m_tabs->setTabVisible(m_tabs->indexOf(m_streaming_page), false);
-	if (!QApplication::arguments().contains("--client-only") && QApplication::arguments().contains("--start-streaming-host"))
-		m_tabs->setCurrentWidget(m_streaming_page);
-	connect(m_tabs, &QTabWidget::currentChanged, this, [this] {
-        m_navigation.Reset();
-        m_library->ResetControllerNavigation();
-        if (m_tabs->currentWidget() == m_library) m_library->setFocus();
-        else m_tabs->currentWidget()->setFocus();
-        Update();
-    });
-	m_ui->verticalLayout_3->addWidget(m_tabs);
 
 	main_dialog->setMinimumSize(520, 480);
 	main_dialog->resize(960, 540);
-	connect(m_ui->widget, &ConfigurationListWidget::CatalogChanged, this, [this] {
-        if (m_started && m_interpreter.isEmpty() && m_ui->widget->HasConfiguredGameDirectories()) FindInterpreter();
-		ReloadLibrary();
-		// Rescans after archive conversion can change the library without rewriting Kyty.ini.
-		if (!QApplication::arguments().contains("--client-only")) m_host->Request({{"type", "reload-library"}}, {});
-	});
-	connect(m_host, &HostControlClient::StatusChanged, this, [this](const QJsonObject& status) {
-		const bool was_running = HostGameBusy();
-		m_host_status          = status;
-        m_library->SetLaunchError(status.value("local_game_error").toString());
-		// Status arrives every second; refresh controls when game ownership changes.
-		if (was_running != HostGameBusy()) Update();
-	});
 
 	m_main_dialog    = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
@@ -302,7 +146,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
-		        if (m_process.state() == QProcess::NotRunning && !HostGameBusy()) {
+		        if (m_process.state() == QProcess::NotRunning) {
 			        m_controller_preview.SetColor(color);
 		        }
 	        });
@@ -343,15 +187,6 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 }
 
 void MainDialogPrivate::FindInterpreter() {
-    if (QApplication::arguments().contains("--client-only") || !m_ui->widget->HasConfiguredGameDirectories()) {
-        m_interpreter.clear();
-        m_ui->label_Interpreter->setText(tr("PS5 emulator is optional. Configure game directories in Settings to use it."));
-        m_ui->label_Version->clear();
-        m_started = true;
-        ReloadLibrary();
-        Update();
-        return;
-    }
 	UpdateChecker::ShowPreviousResult(m_main_dialog);
 	QDir search_dir(QApplication::applicationDirPath());
 	m_interpreter = search_dir.absoluteFilePath(EMULATOR_EXE);
@@ -384,25 +219,18 @@ void MainDialogPrivate::FindInterpreter() {
 	}
 
 	if (!found) {
-        m_interpreter.clear();
-        m_ui->label_Interpreter->setText(tr("PS5 emulator unavailable. Remote games are still available."));
-        if (!m_started) QMessageBox::warning(m_main_dialog, tr("PS5 setup"), tr("Cannot find the PS5 emulator. Configure it before playing local PS5 games."));
-        m_started = true;
-        ReloadLibrary();
-        Update();
-        return;
+		QMessageBox::critical(m_main_dialog, tr("Error"), tr("Can't find emulator"));
+		QApplication::quit();
+		return;
 	}
 
 	// Prompt for a game folder when none are configured, but keep the launcher
 	// open if the user dismisses the dialog (quitting here can segfault during
 	// nested modal shutdown / background compatibility load).
 	m_ui->widget->EnsureGameDirectory();
-    ReloadLibrary();
 
 	m_ui->label_settings_file->setText(tr("Settings file: ") + m_ui->widget->GetSettingsFile());
 
-	const bool start_streaming_host =
-	    !m_started && QApplication::arguments().contains("--start-streaming-host");
 	m_started = true;
 	if (!m_preset_warning.isEmpty()) {
 		QMessageBox::warning(m_main_dialog, tr("Release settings not applied"), m_preset_warning);
@@ -411,10 +239,6 @@ void MainDialogPrivate::FindInterpreter() {
 	Update();
 	if (m_ui->check_updates_on_startup->isChecked()) {
 		m_update_checker->Check(false);
-	}
-	if (start_streaming_host) {
-		m_tabs->setCurrentWidget(m_streaming_page);
-		m_host->StartDaemon();
 	}
 }
 
@@ -639,7 +463,6 @@ void MainDialogPrivate::WriteSettings(QSettings& s) {
 	}
 	s.setValue(SETTINGS_CHECK_UPDATES, g_check_updates_on_startup);
 	s.setValue(SETTINGS_THEME, g_theme);
-    s.setValue("library_selection", g_library_selection);
 
 	s.endGroup();
 }
@@ -650,7 +473,6 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 	g_last_geometry = s.value(SETTINGS_MAIN_LAST_GEOMETRY, g_last_geometry).toByteArray();
 	g_check_updates_on_startup = s.value(SETTINGS_CHECK_UPDATES, true).toBool();
 	g_theme                    = s.value(SETTINGS_THEME, 1).toInt();
-    g_library_selection = s.value("library_selection").toString();
 	if (g_theme < 0 || g_theme > 2) {
 		g_theme = 1;
 	}
@@ -659,8 +481,9 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 }
 
 void MainDialogPrivate::Run() {
-	if (m_update_checker->IsInstalling() || m_process.state() != QProcess::NotRunning) return;
-	if (QApplication::arguments().contains("--client-only") || HostGameBusy() || m_remote->Busy() || m_interpreter.isEmpty()) return;
+	if (m_update_checker->IsInstalling() || m_process.state() != QProcess::NotRunning ||
+	    m_interpreter.isEmpty())
+		return;
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
 		return;
@@ -676,40 +499,13 @@ void MainDialogPrivate::Run() {
 	Update();
 }
 
-void MainDialogPrivate::ReloadLibrary() {
-    GameLibrary library;
-    QString error;
-    QList<LibraryCard> cards;
-    if (!QApplication::arguments().contains("--client-only") && library.Load(nullptr, &error)) {
-        for (const auto& game : library.Games()) {
-            const bool steam = game.source == "steam";
-            cards.append({game.id, steam ? game.name : game.info->name, game.source,
-                steam ? QString() : game.info->game_path,
-                steam ? game.readiness_reason : m_interpreter.isEmpty() ? tr("Configure the PS5 emulator in Settings.") : tr("Game files are unavailable."),
-                steam ? game.owned_launch.has_value() :
-                    (!m_interpreter.isEmpty() && (QDir(game.info->basedir).exists() || GameContent::IsArchive(game.info->basedir))), game.source_id,
-                steam ? SteamArtwork::Load(game.artwork_roots, game.source_id) : GameContent::ReadFile(game.info->basedir, "sce_sys/icon0.png", GameContent::MaxImageSize)});
-        }
-    }
-    if (m_remote) cards.append(m_remote->Cards());
-    m_library->SetGames(cards);
-    if (!g_library_selection.isEmpty()) m_library->SelectId(g_library_selection);
-}
-
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	// The daemon reports local and remote ownership; hosting alone does not block Play.
-	const bool hosting = HostGameBusy();
-	const bool busy =
-	    hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
-	m_update_checker->SetGameRunning(hosting || m_remote->Busy() || m_process.state() != QProcess::NotRunning);
-	// SetSuspended(false) can synchronously publish the first held-button sample.
-	if (!busy && m_controller_preview.IsSuspended()) { m_library->ResetControllerNavigation(); m_navigation.Reset(); }
+	const bool busy = m_process.state() != QProcess::NotRunning || m_update_checker->IsInstalling();
+	m_update_checker->SetGameRunning(m_process.state() != QProcess::NotRunning);
 	m_controller_preview.SetSuspended(busy);
-	m_title_sound.SetTitle(!busy && m_tabs->currentWidget() == m_settings_page && item != nullptr
-	                           ? item->GetInfo().basedir
-							   : QString {});
+	m_title_sound.SetTitle(!busy && item != nullptr ? item->GetInfo().basedir : QString {});
 	bool run_enabled = !busy && !m_interpreter.isEmpty() && item != nullptr;
 
 	if (run_enabled) {
@@ -719,7 +515,6 @@ void MainDialogPrivate::Update() {
 	}
 
 	m_ui->widget->SetRunEnabled(run_enabled);
-	m_library->SetLaunchEnabled(!busy);
 	if (busy) return;
 	m_controller_preview.SetColor(m_ui->widget->GetGlobalControllerColor());
 }

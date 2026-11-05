@@ -1,5 +1,0 @@
-get_filename_component(artwork_launcher "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-add_executable(launcher_steam_artwork_tests "${artwork_launcher}/tests/steamArtworkTests.cpp")
-target_include_directories(launcher_steam_artwork_tests PRIVATE "${artwork_launcher}/include")
-target_link_libraries(launcher_steam_artwork_tests PRIVATE Qt6::Core Qt6::Gui)
-add_test(NAME launcher_steam_artwork COMMAND launcher_steam_artwork_tests)

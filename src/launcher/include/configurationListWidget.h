@@ -2,7 +2,6 @@
 #define CONFIGURATION_LIST_WIDGET_H
 
 #include "configuration.h"
-#include "streamingCatalog.h"
 
 #include <QByteArray>
 #include <QMap>
@@ -45,7 +44,6 @@ public:
 	[[nodiscard]] std::unique_ptr<Configuration>
 	CreateConfiguration(const ConfigurationItem& item) const;
 
-	QList<StreamingLaunchEntry> CreateStreamingCatalog(const QString& interpreter) const;
 	bool                        EnsureGameDirectory();
     bool HasConfiguredGameDirectories() const { return !m_game_dirs.isEmpty(); }
 	void                        ScanGameDirectory();

@@ -1,6 +1,0 @@
-add_executable(launcher_remote_tests ${CMAKE_CURRENT_LIST_DIR}/remoteClientTests.cpp ${CMAKE_CURRENT_LIST_DIR}/../src/remoteClient.cpp ${CMAKE_CURRENT_LIST_DIR}/../include/remoteClient.h ${CMAKE_CURRENT_LIST_DIR}/../src/applicationLifetime.cpp ${CMAKE_CURRENT_LIST_DIR}/../include/applicationLifetime.h ${CMAKE_CURRENT_LIST_DIR}/../src/remoteHostsWidget.cpp ${CMAKE_CURRENT_LIST_DIR}/../include/remoteHostsWidget.h)
-target_include_directories(launcher_remote_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../include)
-target_link_libraries(launcher_remote_tests PRIVATE Qt6::Network Qt6::Widgets Qt6::Test)
-set_target_properties(launcher_remote_tests PROPERTIES AUTOMOC ON)
-add_test(NAME launcher_remote COMMAND launcher_remote_tests)
-set_tests_properties(launcher_remote PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

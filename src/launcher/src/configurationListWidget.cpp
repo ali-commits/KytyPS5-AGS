@@ -7,7 +7,6 @@
 #include "configuration.h"
 #include "configurationEditDialog.h"
 #include "configurationItem.h"
-#include "emulatorCommand.h"
 #include "gameContent.h"
 #include "gameLibrary.h"
 #include "gameListTreeWidget.h"
@@ -358,9 +357,8 @@ QByteArray ConfigurationListWidget::SettingsFileBytes() const {
 	return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
-// The host daemon rewrites Kyty.ini when a client changes game settings; follow those edits.
-// ponytail: last writer wins if both edit the same game at once; acceptable for alpha, upgrade path
-// is routing launcher edits through the daemon
+// Another process (for example an editor) may rewrite Kyty.ini; follow those edits.
+// ponytail: last writer wins if both edit the same game at once; there is no cross-process lock
 void ConfigurationListWidget::WatchSettingsFile() {
 	m_settings_snapshot = SettingsFileBytes();
 	m_settings_watcher  = new QFileSystemWatcher(this);
@@ -491,21 +489,6 @@ ConfigurationListWidget::CreateConfiguration(const ConfigurationItem& item) cons
 	info->host_input_mapping = m_global_info.host_input_mapping;
 	info->addons_dir         = m_addons_dir;
 	return info;
-}
-
-QList<StreamingLaunchEntry>
-ConfigurationListWidget::CreateStreamingCatalog(const QString& interpreter) const {
-	QList<StreamingLaunchEntry> entries;
-	for (int index = 0; index < m_ui->cfgs_list->topLevelItemCount(); ++index) {
-		const auto* item = static_cast<ConfigurationItem*>(m_ui->cfgs_list->topLevelItem(index));
-		const auto  info = CreateConfiguration(*item);
-		auto        arguments = BuildEmulatorArgs(*info);
-		if (arguments.isEmpty()) continue;
-		const auto id = CatalogId(info->game_path);
-		entries.append(
-		    {id, info->name, interpreter, arguments, QFileInfo(interpreter).absolutePath()});
-	}
-	return entries;
 }
 
 bool ConfigurationListWidget::EnsureGameDirectory() {

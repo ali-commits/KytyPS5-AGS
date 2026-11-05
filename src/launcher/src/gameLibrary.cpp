@@ -1,13 +1,8 @@
 #include "gameLibrary.h"
 
-#include "clientProfiles.h"
 #include "common/archive.h"
 #include "compatibilityDatabase.h"
-#include "emulatorCommand.h"
 #include "gameContent.h"
-#include "hostApi.h"
-#include "steamSource.h"
-#include "streamingSettings.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -371,30 +366,8 @@ bool GameLibrary::Load(const CompatibilityDatabase* compatibility, QString* erro
 		}
 		m_games.append({CatalogId(game->game_path), game, custom != nullptr});
 	}
-	s->beginGroup(CONF_LAUNCHER);
-	auto roots = SettingsStringList(s->value("steam_roots"));
-	if (roots.isEmpty())
-		roots = {QDir::homePath() + "/.local/share/Steam", QDir::homePath() + "/.steam/steam"};
-	const auto recipePath = s->value("steam_recipes").toString();
-	s->endGroup();
-	const auto recipes = QDir::isAbsolutePath(recipePath)
-	                         ? QJsonDocument::fromJson(SteamSource::Read(recipePath)).object()
-	                         : QJsonObject {};
-	for (const auto& r: SteamSource::Discover(roots, recipes)) {
-		GameEntry g;
-		g.id               = r.id;
-		g.source           = "steam";
-		g.source_id        = r.app_id;
-		g.artwork_roots    = roots;
-		g.name             = r.name;
-		g.installed        = r.installed;
-		g.readiness_reason = r.reason;
-		g.owned_launch     = r.launch;
-		m_games.append(g);
-	}
 	std::sort(m_games.begin(), m_games.end(), [](const GameEntry& a, const GameEntry& b) {
-		return QString::localeAwareCompare(a.info ? a.info->name : a.name,
-		                                   b.info ? b.info->name : b.name) < 0;
+		return QString::localeAwareCompare(a.info->name, b.info->name) < 0;
 	});
 	return true;
 }
@@ -408,88 +381,11 @@ const GameEntry* GameLibrary::Find(const QString& id) const {
 	return nullptr;
 }
 
-QList<StreamingLaunchEntry> GameLibrary::Catalog(const QString& interpreter) const {
-	QList<StreamingLaunchEntry> out;
-	for (const auto& g: m_games) {
-		if (!g.info) {
-			if (g.owned_launch) out.append(*g.owned_launch);
-			continue;
-		}
-		auto arguments = BuildEmulatorArgs(*g.info);
-		if (arguments.isEmpty()) {
-			continue;
-		}
-		const auto icon = GameContent::IsArchive(g.info->basedir)
-		                      ? QString()
-		                      : QDir(g.info->basedir).filePath("sce_sys/icon0.png");
-		out.append({g.id, g.info->name, interpreter, arguments,
-		            QFileInfo(interpreter).absolutePath(), QFile::exists(icon) ? icon : QString()});
-	}
-	return out;
-}
-
-QHash<QString, QList<StreamingLaunchEntry>>
-GameLibrary::ClientCatalog(const QString& interpreter) const {
-	QHash<QString, QList<StreamingLaunchEntry>> out;
-	const QDir clients(QDir(StreamingSettings::ProfileDirectory()).filePath("clients"));
-	if (!clients.exists()) {
-		return out;
-	}
-	for (const auto& uuid: clients.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
-		if (!ClientProfiles::IsValidClientId(uuid)) {
-			continue; // ignore anything that is not a validated device directory
-		}
-		QList<StreamingLaunchEntry> entries;
-		for (const auto& g: m_games) {
-			if (!g.info) continue;
-			bool       seeded  = false;
-			const auto profile = ClientProfiles::ReadGame(uuid, g.id, &seeded);
-			if (!seeded) {
-				continue; // no device profile yet: launch uses the PC catalog entry
-			}
-			const auto config = HostApi::ClientConfig(
-			    *g.info, profile.value(QStringLiteral("settings")).toObject());
-			if (config == nullptr) {
-				continue;
-			}
-			// Device settings, host cheats: no override, so the host's _Patches plan applies.
-			auto arguments = BuildEmulatorArgs(*config);
-			if (arguments.isEmpty()) {
-				continue;
-			}
-			const auto icon = GameContent::IsArchive(g.info->basedir)
-			                      ? QString()
-			                      : QDir(g.info->basedir).filePath("sce_sys/icon0.png");
-			entries.append({g.id, g.info->name, interpreter, arguments,
-			                QFileInfo(interpreter).absolutePath(),
-			                QFile::exists(icon) ? icon : QString()});
-		}
-		if (!entries.isEmpty()) {
-			out.insert(uuid, entries);
-		}
-	}
-	return out;
-}
-
-std::optional<StreamingLaunchEntry> GameLibrary::ResolveLaunch(
-    const QString& interpreter, const QString& client_id, const QString& game_id) const {
-	if (!ClientProfiles::IsValidClientId(client_id) || Find(game_id) == nullptr) return std::nullopt;
-	const auto clients = ClientCatalog(interpreter);
-	for (const auto& entry: clients.value(client_id)) {
-		if (entry.id == game_id) return entry;
-	}
-	for (const auto& entry: Catalog(interpreter)) {
-		if (entry.id == game_id) return entry;
-	}
-	return std::nullopt;
-}
-
 QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& settings) {
 	const auto* game = Find(id);
 	if (game == nullptr) {
 		return QStringLiteral("unknown-game");
 	}
-	if (!game->info) return QStringLiteral("unsupported-source-action");
 	// SetGameSettings starts from the candidate's current values, so seed it with the game's.
 	auto    candidate = std::make_unique<Configuration>();
 	QString error;

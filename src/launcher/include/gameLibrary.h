@@ -2,7 +2,6 @@
 #define LAUNCHER_INCLUDE_GAME_LIBRARY_H_
 
 #include "configuration.h"
-#include "streamingCatalog.h"
 
 #include <QJsonObject>
 #include <QList>
@@ -13,7 +12,6 @@
 #include <QVariant>
 
 #include <memory>
-#include <optional>
 
 class CompatibilityDatabase;
 
@@ -36,11 +34,6 @@ struct GameEntry {
 	QString                        id;
 	std::shared_ptr<Configuration> info;
 	bool                           custom = false;
-	QString source = "ps5";
-	QString source_id, name, readiness_reason;
-	QStringList artwork_roots; // Host-private configured Steam client roots.
-	bool installed = true;
-	std::optional<StreamingLaunchEntry> owned_launch;
 };
 
 namespace GameLibraryFiles {
@@ -77,13 +70,6 @@ public:
 	[[nodiscard]] bool Load(const CompatibilityDatabase* compatibility, QString* error);
 	[[nodiscard]] const QList<GameEntry>&     Games() const { return m_games; }
 	[[nodiscard]] const GameEntry*            Find(const QString& id) const;
-	[[nodiscard]] QList<StreamingLaunchEntry> Catalog(const QString& interpreter) const;
-	// Per-device launch catalog: entries built from each paired client's own profile (settings +
-	// per-client cheat plan), keyed by client UUID, for launch.json's client_games.
-	[[nodiscard]] QHash<QString, QList<StreamingLaunchEntry>>
-	ClientCatalog(const QString& interpreter) const;
-	[[nodiscard]] std::optional<StreamingLaunchEntry> ResolveLaunch(
-	    const QString& interpreter, const QString& client_id, const QString& game_id) const;
 	// Validates through Configuration::SetGameSettings, stores as a custom entry, rewrites
 	// Kyty.ini.
 	[[nodiscard]] QString SaveGameSettings(const QString& id, const QJsonObject& settings);

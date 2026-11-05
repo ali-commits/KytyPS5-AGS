@@ -3,7 +3,6 @@
 get_filename_component(preservation_launcher "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 get_filename_component(preservation_root "${preservation_launcher}/../.." ABSOLUTE)
 find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets Test)
-find_package(OpenSSL REQUIRED)
 file(GLOB preservation_sources "${preservation_launcher}/src/*.cpp" "${preservation_launcher}/include/*.h")
 list(REMOVE_ITEM preservation_sources "${preservation_launcher}/src/main.cpp")
 add_executable(launcher_preservation_tests
@@ -13,7 +12,7 @@ set_target_properties(launcher_preservation_tests PROPERTIES AUTOMOC ON AUTOUIC 
     AUTOUIC_SEARCH_PATHS "${preservation_launcher}/forms")
 target_include_directories(launcher_preservation_tests PRIVATE
     "${preservation_launcher}/include" "${preservation_launcher}/src" "${preservation_root}/src")
-target_link_libraries(launcher_preservation_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static OpenSSL::Crypto)
+target_link_libraries(launcher_preservation_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static)
 if(TARGET common)
     target_link_libraries(launcher_preservation_tests PRIVATE common kyty_git_version Vulkan::Headers
         LibAtrac9 FFmpeg::ffmpeg)

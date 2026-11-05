@@ -1,7 +1,5 @@
 
 find_package(Qt6 6.8 COMPONENTS Concurrent Network Widgets REQUIRED)
-# AGS phone pairing (agsPairing.cpp) computes the SRP-6a verifier with OpenSSL BIGNUM + SHA-256.
-find_package(OpenSSL REQUIRED)
 add_subdirectory("${KYTY_SOURCE_DIR}/updater" "${CMAKE_CURRENT_BINARY_DIR}/updater")
 
 set(CMAKE_AUTOUIC_SEARCH_PATHS forms)
@@ -24,7 +22,7 @@ add_executable(launcher WIN32
 
 
 target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static
-	LibAtrac9 FFmpeg::ffmpeg kyty_git_version common OpenSSL::Crypto)
+	LibAtrac9 FFmpeg::ffmpeg kyty_git_version common)
 if(LINUX)
 	find_package(Qt6 COMPONENTS DBus REQUIRED)
 	target_link_libraries(launcher Qt6::DBus)
@@ -250,37 +248,8 @@ include_what_you_use_with_mappings(launcher "${inc_headers}" "${iwyu_maps}")
 
 clang_tidy_check(launcher "" "${tidy_dirs}" "${inc_headers}")
 
-# Historical wrapper fixtures remain buildable; the native owner uses its own launch guard.
-if(LINUX)
-    add_executable(kyty_stream_launch tools/streamLaunch.cpp)
-    target_link_libraries(kyty_stream_launch PRIVATE Qt6::Core)
-    set_target_properties(kyty_stream_launch PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/libexec")
-endif()
-
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
-    add_executable(launcher_streaming_tests
-        "${PROJECT_SOURCE_DIR}/tests/LauncherStreamingTests.cpp"
-        src/streamingSettings.cpp src/streamingCatalog.cpp src/streamingAudio.cpp
-        src/streamingApi.cpp src/streamingBackend.cpp src/streamingWidget.cpp
-        src/agsPairing.cpp src/agsRustStreamingDialog.cpp
-        src/hostControlClient.cpp src/hostSocket.cpp src/applicationLifetime.cpp include/applicationLifetime.h
-        include/streamingAudio.h include/streamingApi.h include/streamingBackend.h include/streamingWidget.h
-        include/agsPairing.h
-        include/hostControlClient.h include/hostSocket.h)
-    target_include_directories(launcher_streaming_tests PRIVATE include)
-    target_link_libraries(launcher_streaming_tests PRIVATE Qt6::Concurrent Qt6::Widgets Qt6::Network Qt6::Test OpenSSL::Crypto)
-    set_target_properties(launcher_streaming_tests PROPERTIES AUTOMOC ON)
-    if(TARGET kyty_stream_launch)
-        add_dependencies(launcher_streaming_tests kyty_stream_launch)
-    endif()
-    add_test(NAME launcher_streaming COMMAND launcher_streaming_tests)
-    set_tests_properties(launcher_streaming PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-    target_compile_definitions(launcher_streaming_tests PRIVATE KYTY_LAUNCHER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/LauncherStreamingFixtures.py")
     include(tests/preservation.cmake)
-    include(tests/host.cmake)
-    include(tests/lifetime.cmake)
-    include(tests/gui-instance.cmake)
-    include(tests/artwork.cmake)
-    include(tests/remote.cmake)
+    include(tests/services.cmake)
 endif()
