@@ -10,7 +10,7 @@ companion alongside stock Moonlight. Ordinary game audio stays on the laptop's s
 Moonlight output. The helper does not own the SDL gamepad or change the system default
 output, audio profiles, microphone, pairing or saves. Bluetooth and TV output are deferred.
 
-The [binding specification](../superpowers/specs/2026-10-16-dualsense-controller-audio.md),
+The [binding specification](../dualsense-controller-audio.md),
 [native producer notes](../controller-audio-wire.md) and
 [companion build/CLI reference](../../tools/controller-audio/README.md) define the wire,
 queue bounds and independent verification. Silent tests do not establish USB sensations.
