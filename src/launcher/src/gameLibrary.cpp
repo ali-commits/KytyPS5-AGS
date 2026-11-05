@@ -27,6 +27,13 @@ using namespace GameLibraryFiles;
 
 namespace GameLibraryFiles {
 
+std::unique_ptr<QSettings> OpenSettings(const QString& ini_path) {
+	if (ini_path.isEmpty()) {
+		return OpenSettings();
+	}
+	return std::make_unique<QSettings>(ini_path, QSettings::IniFormat);
+}
+
 std::unique_ptr<QSettings> OpenSettings() {
 	if (QFile(QDir(".").absoluteFilePath(CONF_FILE_NAME)).exists()) {
 		return std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
@@ -294,7 +301,7 @@ GameLibrary::~GameLibrary() {
 }
 
 bool GameLibrary::Load(const CompatibilityDatabase* compatibility, QString* error) {
-	auto s          = OpenSettings();
+	auto s          = OpenSettings(m_settings_path);
 	m_settings_file = s->fileName();
 	s->beginGroup(CONF_LAUNCHER);
 	m_game_dirs = NormalizeGameDirectories(SettingsStringList(s->value(CONF_GAME_DIRS)));
@@ -407,7 +414,7 @@ QString GameLibrary::SaveGameSettings(const QString& id, const QJsonObject& sett
 	stored->elf             = candidate->elf;
 	stored->custom_settings = true;
 
-	auto s = OpenSettings();
+	auto s = OpenSettings(m_settings_path);
 	s->remove(CONF_SECTION_NAME);
 	s->beginWriteArray(CONF_SECTION_NAME);
 	int i = 0;

@@ -5,6 +5,14 @@ get_filename_component(preservation_root "${preservation_launcher}/../.." ABSOLU
 find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets Test)
 file(GLOB preservation_sources "${preservation_launcher}/src/*.cpp" "${preservation_launcher}/include/*.h")
 list(REMOVE_ITEM preservation_sources "${preservation_launcher}/src/main.cpp")
+# The reusable code comes from kyty_launcher_core in the in-tree build; the warm standalone build
+# compiles the same list directly.
+include("${preservation_launcher}/coreSources.cmake")
+if(TARGET kyty_launcher_core)
+    foreach(core_file ${launcher_core_sources})
+        list(REMOVE_ITEM preservation_sources "${core_file}")
+    endforeach()
+endif()
 add_executable(launcher_preservation_tests
     "${preservation_root}/tests/LauncherPreservationTests.cpp"
     ${preservation_sources} "${preservation_launcher}/resources.qrc")
@@ -13,6 +21,9 @@ set_target_properties(launcher_preservation_tests PROPERTIES AUTOMOC ON AUTOUIC 
 target_include_directories(launcher_preservation_tests PRIVATE
     "${preservation_launcher}/include" "${preservation_launcher}/src" "${preservation_root}/src")
 target_link_libraries(launcher_preservation_tests PRIVATE Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::Test SDL3::SDL3-static)
+if(TARGET kyty_launcher_core)
+    target_link_libraries(launcher_preservation_tests PRIVATE kyty_launcher_core)
+endif()
 if(TARGET common)
     target_link_libraries(launcher_preservation_tests PRIVATE common kyty_git_version Vulkan::Headers
         LibAtrac9 FFmpeg::ffmpeg)

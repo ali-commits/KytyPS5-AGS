@@ -9,6 +9,9 @@
 namespace Cheats {
 
 [[nodiscard]] bool    IsSupportedTitleId(const QString& title_id);
+// <root>/_Patches/<TITLE>.json; empty for an unsupported title id.
+[[nodiscard]] QString PlanPath(const QString& root, const QString& title_id);
+// Standalone launcher default: the root is the executable directory.
 [[nodiscard]] QString PlanPath(const QString& title_id);
 
 // Local files retain their existing defaults; remote imports receive additional validation.

@@ -5,10 +5,26 @@ add_subdirectory("${KYTY_SOURCE_DIR}/updater" "${CMAKE_CURRENT_BINARY_DIR}/updat
 set(CMAKE_AUTOUIC_SEARCH_PATHS forms)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
+# Reusable, widget-free code shared with the AGS adapter.
+include(coreSources.cmake)
+find_package(Qt6 6.8 COMPONENTS Core Gui Network Concurrent REQUIRED)
+add_library(kyty_launcher_core STATIC ${launcher_core_sources})
+set_target_properties(kyty_launcher_core PROPERTIES AUTOMOC ON)
+target_include_directories(kyty_launcher_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+# QtConcurrent is only used by compatibilityDatabase; the core never links Widgets.
+target_link_libraries(kyty_launcher_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent
+	Vulkan::Headers SDL3::SDL3-static common)
+if (CLANG AND NOT KYTY_CLANG_CL)
+target_compile_options(kyty_launcher_core PRIVATE -frtti)
+endif()
+
 file(GLOB launcher_src
 	"include/*.h"
 	"src/*.cpp"
 )
+foreach(core_file ${launcher_core_sources})
+	list(REMOVE_ITEM launcher_src "${core_file}")
+endforeach()
 
 file(GLOB launcher_forms
 	"forms/*.ui"
@@ -21,7 +37,7 @@ add_executable(launcher WIN32
 )
 
 
-target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static
+target_link_libraries(launcher kyty_launcher_core Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static
 	LibAtrac9 FFmpeg::ffmpeg kyty_git_version common)
 if(LINUX)
 	find_package(Qt6 COMPONENTS DBus REQUIRED)

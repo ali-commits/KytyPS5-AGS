@@ -24,21 +24,6 @@
 		}                                                                                          \
 	} while (false)
 
-namespace {
-
-// Removes the cheat plan fixture on scope exit even if a CHECK() aborts first.
-class ScopedCheatFile {
-public:
-	explicit ScopedCheatFile(QString path): m_path(std::move(path)) {}
-	~ScopedCheatFile() { QFile::remove(m_path); }
-	ScopedCheatFile(const ScopedCheatFile&)            = delete;
-	ScopedCheatFile& operator=(const ScopedCheatFile&) = delete;
-
-private:
-	QString m_path;
-};
-
-} // namespace
 
 static void SafeRuntimeChecks() {
 	QTemporaryDir dir;
@@ -60,62 +45,66 @@ static void SafeRuntimeChecks() {
 }
 
 static void CheatChecks() {
-	CHECK(Cheats::PlanPath(QStringLiteral("not-a-title")).isEmpty());
-	const auto path = Cheats::PlanPath(QStringLiteral("ppsa99997"));
-	CHECK(path == QDir(QCoreApplication::applicationDirPath())
-	                  .filePath(QStringLiteral("_Patches/PPSA99997.json")));
+	QTemporaryDir root_dir;
+	CHECK(root_dir.isValid());
+	const auto root = root_dir.path();
+	CHECK(Cheats::PlanPath(root, QStringLiteral("not-a-title")).isEmpty());
+	CHECK(Cheats::PlanPath(QString {}, QStringLiteral("PPSA99997")).isEmpty());
+	const auto path = Cheats::PlanPath(root, QStringLiteral("ppsa99997"));
+	CHECK(path == QDir(root).filePath(QStringLiteral("_Patches/PPSA99997.json")));
 
 	Configuration unsupported;
 	unsupported.title_id = QStringLiteral("CUSA00001");
-	CHECK(!GameServices::GetCheats(unsupported).value("supported").toBool());
+	CHECK(!GameServices::GetCheats(unsupported, root).value("supported").toBool());
 
 	Configuration info;
 	info.title_id    = QStringLiteral("PPSA99997");
 	info.gameVersion = QStringLiteral("01.000.000");
-	CHECK(!QFile::exists(path)); // never replace an existing fixture
-	const ScopedCheatFile cleanup(path);
-	const auto            document = QJsonDocument::fromJson(
+	CHECK(!QFile::exists(path));
+	const auto document = QJsonDocument::fromJson(
 	    R"({"id":"PPSA99997","version":"01.000.000","process":"eboot.bin","mods":[
 	        {"name":"A","enabled":false,"memory":[{"offset":"10","off":"00","on":"01"}]},
 	        {"name":"B","enabled":true,"memory":[{"offset":"20","off":"FF","on":"00"}]}]})");
 	CHECK(Cheats::SaveDocument(path, document, {}).isEmpty());
 
-	auto reply = GameServices::GetCheats(info);
+	auto reply = GameServices::GetCheats(info, root);
 	CHECK(reply.value("supported").toBool());
 	CHECK(reply.value("mods").toArray().size() == 2);
 	const auto revision = reply.value("revision").toString();
 	CHECK(!revision.isEmpty());
 
 	QString updated;
-	CHECK(GameServices::PutCheats(info, {{"revision", "stale"}, {"enabled", QJsonArray {true, true}}},
+	CHECK(GameServices::PutCheats(info, root, {{"revision", "stale"}, {"enabled", QJsonArray {true, true}}},
 	                              &updated) == "stale");
-	CHECK(GameServices::PutCheats(info, {{"revision", revision}, {"enabled", QJsonArray {true}}},
+	CHECK(GameServices::PutCheats(info, root, {{"revision", revision}, {"enabled", QJsonArray {true}}},
 	                              &updated) == "selection-size-mismatch");
-	CHECK(GameServices::PutCheats(info,
+	CHECK(GameServices::PutCheats(info, root,
 	                              {{"revision", revision}, {"enabled", QJsonArray {true, false}}},
 	                              &updated)
 	          .isEmpty());
 	CHECK(!updated.isEmpty() && updated != revision);
-	reply = GameServices::GetCheats(info);
+	reply = GameServices::GetCheats(info, root);
 	const auto mods = reply.value("mods").toArray();
 	CHECK(mods[0].toObject().value("enabled").toBool());
 	CHECK(!mods[1].toObject().value("enabled").toBool());
 }
 
 static void RemoteCheatListChecks() {
+	QTemporaryDir root_dir;
+	CHECK(root_dir.isValid());
+	const auto root = root_dir.path();
 	Configuration unsupported;
 	unsupported.title_id = QStringLiteral("CUSA00001");
 	const auto reply =
-	    GameServices::RemoteCheatList(unsupported, QList<Cheats::RemoteFile> {}, QString {});
+	    GameServices::RemoteCheatList(unsupported, root, QList<Cheats::RemoteFile> {}, QString {});
 	CHECK(reply.value("files").toArray().isEmpty());
 	CHECK(reply.value("error").toString() == "unsupported-title-id");
 
 	Configuration info;
 	info.title_id    = QStringLiteral("PPSA99997");
 	info.gameVersion = QStringLiteral("01.000.000");
-	const auto path  = Cheats::PlanPath(QStringLiteral("PPSA99997"));
+	const auto path  = Cheats::PlanPath(root, QStringLiteral("PPSA99997"));
 	CHECK(!QFile::exists(path));
-	const ScopedCheatFile cleanup(path);
 
 	QList<Cheats::RemoteFile> files {
 	    {QStringLiteral("PPSA99997_01.000.000_mycheats.json"), QStringLiteral("My Cheats"),
@@ -123,24 +112,26 @@ static void RemoteCheatListChecks() {
 	    {QStringLiteral("PPSA99997_01.000.000_other.mc4"), QStringLiteral("Other"),
 	     QStringLiteral("01.000.000"), QStringLiteral("mc4")},
 	};
-	const auto list_reply = GameServices::RemoteCheatList(info, files, QString {});
+	const auto list_reply = GameServices::RemoteCheatList(info, root, files, QString {});
 	const auto list       = list_reply.value("files").toArray();
 	CHECK(list.size() == 1); // the mc4 entry is filtered out as unsupported
 	CHECK(list[0].toObject().value("name").toString() == files[0].name);
 	CHECK(!list[0].toObject().value("installed_version").toBool()); // no local plan yet
 	CHECK(!list_reply.contains("error"));
 
-	const auto error_reply = GameServices::RemoteCheatList(info, {}, QStringLiteral("boom"));
+	const auto error_reply = GameServices::RemoteCheatList(info, root, {}, QStringLiteral("boom"));
 	CHECK(error_reply.value("error").toString() == "boom");
 }
 
 static void ImportRemoteCheatChecks() {
+	QTemporaryDir root_dir;
+	CHECK(root_dir.isValid());
+	const auto root = root_dir.path();
 	Configuration info;
 	info.title_id    = QStringLiteral("PPSA99997");
 	info.gameVersion = QStringLiteral("01.000.000");
-	const auto path  = Cheats::PlanPath(QStringLiteral("PPSA99997"));
+	const auto path  = Cheats::PlanPath(root, QStringLiteral("PPSA99997"));
 	CHECK(!QFile::exists(path));
-	const ScopedCheatFile cleanup(path);
 
 	const auto valid = QJsonDocument::fromJson(
 	    R"({"id":"PPSA99997","version":"01.000.000","process":"eboot.bin","mods":[
@@ -148,10 +139,10 @@ static void ImportRemoteCheatChecks() {
 	        {"name":"B","enabled":true,"memory":[{"offset":"20","off":"FF","on":"00"}]}]})");
 
 	QString revision;
-	CHECK(GameServices::ImportRemoteCheat(info, valid.toJson(), &revision).isEmpty());
+	CHECK(GameServices::ImportRemoteCheat(info, root, valid.toJson(), &revision).isEmpty());
 	CHECK(!revision.isEmpty());
 	CHECK(QFile::exists(path));
-	const auto saved = GameServices::GetCheats(info);
+	const auto saved = GameServices::GetCheats(info, root);
 	const auto mods  = saved.value("mods").toArray();
 	CHECK(mods.size() == 2);
 	for (const auto& mod: mods) {
@@ -161,7 +152,7 @@ static void ImportRemoteCheatChecks() {
 	const auto wrong_title = QJsonDocument::fromJson(
 	    R"({"id":"CUSA00001","version":"01.000.000","process":"eboot.bin","mods":[
 	        {"name":"A","enabled":true,"memory":[{"offset":"10","off":"00","on":"01"}]}]})");
-	CHECK(!GameServices::ImportRemoteCheat(info, wrong_title.toJson(), nullptr).isEmpty());
+	CHECK(!GameServices::ImportRemoteCheat(info, root, wrong_title.toJson(), nullptr).isEmpty());
 }
 
 static void TrophyAndArtChecks() {

@@ -35,21 +35,23 @@ struct TrophyIconResult {
 [[nodiscard]] TrophyIconResult TrophyIcon(const Configuration& info,
                                           const QString& runtime_directory, int label, int id);
 
+// Cheat plans live in <cheats_root>/_Patches/<TITLE>.json (Cheats::PlanPath).
 // {"supported","revision","mods":[{index,name,enabled}],"error"?}
-[[nodiscard]] QJsonObject GetCheats(const Configuration& info);
+[[nodiscard]] QJsonObject GetCheats(const Configuration& info, const QString& cheats_root);
 // body: {"revision":"...","enabled":[bool,...]}; replaces the whole selection.
-[[nodiscard]] QString PutCheats(const Configuration& info, const QJsonObject& body,
-                                QString* revision);
+[[nodiscard]] QString PutCheats(const Configuration& info, const QString& cheats_root,
+                                const QJsonObject& body, QString* revision);
 // {"files":[{name,title,version,format,installed_version}],"error"?} from a loaded catalog.
 // Returns {"files":[],"error":"unsupported-title-id"} without inspecting files when the game
 // has no cheat plan; the caller should still keep its own supported-only filtered list (the one
 // it cached before calling) for the matching fetch, since this function only formats a reply.
-[[nodiscard]] QJsonObject RemoteCheatList(const Configuration&                  info,
-                                          const QList<Cheats::RemoteFile>&      files,
-                                          const QString&                        error);
+[[nodiscard]] QJsonObject RemoteCheatList(const Configuration&             info,
+                                          const QString&                   cheats_root,
+                                          const QList<Cheats::RemoteFile>& files,
+                                          const QString&                   error);
 // Validates a downloaded cheat file against the game and stores it with every mod disabled.
-[[nodiscard]] QString ImportRemoteCheat(const Configuration& info, const QByteArray& data,
-                                        QString* revision);
+[[nodiscard]] QString ImportRemoteCheat(const Configuration& info, const QString& cheats_root,
+                                        const QByteArray& data, QString* revision);
 
 // kind: "icon" (sce_sys/icon0.png as is) or "background" (pic0/pic1, JPEG at most 1920 wide).
 [[nodiscard]] Image GameArt(const Configuration& info, const QString& kind);

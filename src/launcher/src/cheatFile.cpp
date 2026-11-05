@@ -44,12 +44,15 @@ bool IsSupportedTitleId(const QString& title_id) {
 	return pattern.match(title_id.trimmed().toUpper()).hasMatch();
 }
 
-QString PlanPath(const QString& title_id) {
-	if (!IsSupportedTitleId(title_id)) {
+QString PlanPath(const QString& root, const QString& title_id) {
+	if (!IsSupportedTitleId(title_id) || root.isEmpty()) {
 		return {};
 	}
-	return QDir(QCoreApplication::applicationDirPath())
-	    .filePath(QStringLiteral("_Patches/%1.json").arg(title_id.trimmed().toUpper()));
+	return QDir(root).filePath(QStringLiteral("_Patches/%1.json").arg(title_id.trimmed().toUpper()));
+}
+
+QString PlanPath(const QString& title_id) {
+	return PlanPath(QCoreApplication::applicationDirPath(), title_id);
 }
 
 QString ParseDocument(const QByteArray& data, QJsonDocument* document) {

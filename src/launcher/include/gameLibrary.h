@@ -45,7 +45,10 @@ inline constexpr char CONF_GAME_DIRS[]    = "game_dirs";
 inline constexpr char CONF_ADDONS_DIR[]   = "addons_dir";
 inline constexpr char CONF_GLOBAL[]       = "GlobalConfiguration";
 
-[[nodiscard]] std::unique_ptr<QSettings> OpenSettings(); // same Kyty.ini selection as the widget
+// Standalone lookup: ./Kyty.ini in the working directory, else the user config.
+[[nodiscard]] std::unique_ptr<QSettings> OpenSettings();
+// An explicit settings file (INI format); an empty path falls back to the standalone lookup.
+[[nodiscard]] std::unique_ptr<QSettings> OpenSettings(const QString& ini_path);
 [[nodiscard]] QString                    NormalizeGameDirectory(const QString& dir);
 [[nodiscard]] QStringList                NormalizeGameDirectories(const QStringList& dirs);
 [[nodiscard]] QStringList                SettingsStringList(const QVariant& value);
@@ -74,6 +77,8 @@ public:
 	// Kyty.ini.
 	[[nodiscard]] QString SaveGameSettings(const QString& id, const QJsonObject& settings);
 	[[nodiscard]] QString SettingsFile() const { return m_settings_file; }
+	// Explicit Kyty.ini to read and write; empty (the default) keeps the standalone lookup.
+	void SetSettingsPath(const QString& ini_path) { m_settings_path = ini_path; }
 
 private:
 	Configuration                 m_global;
@@ -81,6 +86,7 @@ private:
 	QStringList                   m_game_dirs;
 	QString                       m_addons_dir;
 	QString                       m_settings_file;
+	QString                       m_settings_path;
 	QList<GameEntry>              m_games;
 };
 
