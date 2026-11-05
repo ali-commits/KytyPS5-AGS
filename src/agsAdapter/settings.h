@@ -24,6 +24,10 @@ namespace AdapterSettings {
 [[nodiscard]] const QJsonArray&  Schema();
 [[nodiscard]] const QJsonObject* FindField(const QString& key);
 
+// The schema option that `text` names, taking the launcher's raw enum spelling ("R1920X1080")
+// as an alias of the choice text ("1920x1080"); false when no option matches.
+[[nodiscard]] bool OptionValue(const QJsonObject& field, const QString& text, QString* out);
+
 // A Kyty.ini string value (GameSettings) as the typed JSON value of `field`.
 [[nodiscard]] QJsonValue Typed(const QJsonObject& field, const QString& stored);
 // A typed value as the GameSettings string, after a type check; false when the type is wrong.

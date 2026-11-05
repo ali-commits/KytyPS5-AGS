@@ -4,6 +4,7 @@
 #include "configuration.h"
 #include "gameLibrary.h"
 #include "ownerPreferences.h"
+#include "preferenceSchema.h"
 
 #include <QColor>
 #include <QDir>
@@ -139,6 +140,12 @@ bool Hidden(const QString& key) {
 
 bool IsGameKey(const QString& key) {
 	return Configuration().GameSettings().contains(key);
+}
+
+// An enum whose options are fixed (not the GPU or microphone list).
+bool IsClosedEnum(const QJsonObject& field, const QString& key) {
+	return field[QStringLiteral("type")].toString() == QLatin1String("enum") &&
+	       key != QLatin1String("gpu_index") && key != QLatin1String("audio_input_device");
 }
 
 bool IsGlobalKey(const QString& key) {
@@ -330,8 +337,26 @@ const QJsonObject* FindField(const QString& key) {
 	return it == index.constEnd() ? nullptr : &it.value();
 }
 
+bool OptionValue(const QJsonObject& field, const QString& text, QString* out) {
+	const auto options = field[QStringLiteral("options")].toArray();
+	// The launcher's raw spelling ("R1920X1080") is an alias of the choice text ("1920x1080").
+	for (const auto& candidate: {text, PreferenceSchema::ChoiceText(text)}) {
+		for (const auto& o: options) {
+			if (o.toObject()[QStringLiteral("value")].toString() == candidate) {
+				*out = candidate;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 QJsonValue Typed(const QJsonObject& field, const QString& stored) {
 	const auto type = field[QStringLiteral("type")].toString();
+	if (type == QLatin1String("enum")) {
+		QString option;
+		return OptionValue(field, stored, &option) ? option : stored;
+	}
 	if (type == QLatin1String("bool")) return stored == QLatin1String("true");
 	if (type == QLatin1String("int")) return stored.toLongLong();
 	return stored;
@@ -375,17 +400,25 @@ bool ApplyPlayer(Configuration& info, const QJsonObject& player, QJsonObject* ap
 			*error = QStringLiteral("Invalid value for %1.").arg(it.key());
 			return false;
 		}
+		QJsonValue value = it.value();
+		if (IsClosedEnum(*field, it.key())) {
+			if (!OptionValue(*field, text, &text)) {
+				*error = QStringLiteral("Invalid value for %1.").arg(it.key());
+				return false;
+			}
+			value = text;
+		}
 		if (IsGlobalKey(it.key())) {
 			if (it.key() == QLatin1String("controller_color") && !text.isEmpty() &&
 			    !QColor(text).isValid()) {
 				*error = QStringLiteral("Invalid controller colour.");
 				return false;
 			}
-			SetGlobalValue(info, it.key(), it.value());
+			SetGlobalValue(info, it.key(), value);
 		} else {
-			game_values.insert(it.key(), text);
+			game_values.insert(it.key(), PreferenceSchema::RawText(text));
 		}
-		applied->insert(it.key(), it.value());
+		applied->insert(it.key(), value);
 	}
 	if (!game_values.isEmpty()) {
 		Configuration candidate;
@@ -473,14 +506,8 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 		if (!Stored(*field, it.value(), &text)) {
 			return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
 		}
-		if (type == QLatin1String("enum") && it.key() != QLatin1String("gpu_index") &&
-		    it.key() != QLatin1String("audio_input_device")) {
-			bool known = false;
-			for (const auto& o: (*field)[QStringLiteral("options")].toArray())
-				known = known || o.toObject()[QStringLiteral("value")].toString() == text;
-			if (!known) {
-				return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
-			}
+		if (IsClosedEnum(*field, it.key()) && !OptionValue(*field, text, &text)) {
+			return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
 		}
 		if (type == QLatin1String("path") && !text.isEmpty() && !QDir::isAbsolutePath(text)) {
 			return Reply::Invalid(QStringLiteral("%1 must be an absolute path.").arg(it.key()));
@@ -497,7 +524,7 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 		} else if (IsGlobalKey(it.key())) {
 			globals.insert(it.key(), it.value());
 		} else if (IsGameKey(it.key())) {
-			settings.insert(it.key(), text);
+			settings.insert(it.key(), PreferenceSchema::RawText(text));
 		}
 	}
 	if (game != nullptr) {
