@@ -21,6 +21,8 @@
 #include "libs/controller.h"
 #include "streaming/captureOptions.h"
 #include "streaming/exporter.h"
+#include "streaming/metricsSource.h"
+#include "streaming/sessionEnv.h"
 #include "streaming/transport.h"
 
 #include <algorithm>
@@ -385,15 +387,19 @@ public:
 				    Libs::Controller::SetRemoteInput(connected, buttons, axes);
 		    },
 		    [&scheduler](uint64_t tick) { return scheduler.IsFree(tick); },
-		    [](const Streaming::Motion* motion) { Libs::Controller::SetRemoteMotion(motion); });
+		    [](const Streaming::Motion* motion) { Libs::Controller::SetRemoteMotion(motion); },
+		    Streaming::MakeEmulatorMetricsHooks());
 	}
+	// False when the transport could not be created (bad capture dimensions or FPS): the caller
+	// then falls back to a metrics-only connection.
+	bool HasTransport() const { return m_transport != nullptr; }
 	~NativeStreamExport() {
 		m_transport.reset();
 		if (m_stream_only) SetSystemOverlayRemoteInputEnabled(false);
 		m_scheduler.Wait(m_last_tick);
 	}
 	bool Capture(const std::array<Presenter::Layer, 2>& layers) {
-		if (m_transport == nullptr) return false;
+		if (m_transport == nullptr || m_metrics_only) return false;
 		// No PQ-to-SDR conversion exists in the native capture protocol. HDR is never
 		// advertised while exporting; reject games that force a PQ source regardless.
 		if (std::ranges::any_of(layers, [](const auto& layer) {
@@ -434,8 +440,10 @@ public:
 			                                    m_graphics.queue_family, width, height, ++m_epoch,
 			                                    error, m_aspect);
 			if (m_pool == nullptr) {
-				LOGF("Streaming disabled: %s\n", error.c_str());
-				m_transport.reset();
+				// Keep the connection for metrics; the host is told there are no frames.
+				LOGF("Streaming frames disabled (metrics only): %s\n", error.c_str());
+				m_metrics_only = true;
+				m_transport->SetMetricsOnly();
 				return false;
 			}
 			m_generation = generation;
@@ -522,7 +530,7 @@ private:
 	std::shared_ptr<Streaming::LeaseRing>            m_ring;
 	std::unique_ptr<Streaming::Transport>            m_transport;
 	std::unique_ptr<SystemOverlay>                   m_system_overlay;
-	bool                                             m_stream_only = false;
+	bool                                             m_stream_only = false, m_metrics_only = false;
 	uint64_t                                         m_generation = 0, m_epoch = 0, m_last_tick = 0;
 	uint32_t                                         m_width = 0, m_height = 0;
 	Streaming::AspectMode                            m_aspect = Streaming::AspectMode::Fit;
@@ -544,10 +552,22 @@ struct Presenter::Impl {
 		if (owner.stream_only && !owner.graphic_ctx.streaming_external_enabled) {
 			EXIT("Streaming-only: Vulkan external-memory streaming is unavailable\n");
 		}
-		if (const char* socket = std::getenv("KYTY_STREAM_SOCKET");
-		    socket != nullptr && *socket != '\0' && owner.graphic_ctx.streaming_external_enabled) {
-			stream_export = std::make_unique<NativeStreamExport>(
-			    owner.graphic_ctx, present_scheduler, socket, owner.stream_only);
+		if (const char* socket = Streaming::SessionSocket(); socket != nullptr) {
+			if (owner.graphic_ctx.streaming_external_enabled &&
+			    Streaming::FramesRequested(std::getenv("KYTY_STREAM_FRAMES"), owner.stream_only)) {
+				stream_export = std::make_unique<NativeStreamExport>(
+				    owner.graphic_ctx, present_scheduler, socket, owner.stream_only);
+			}
+			if (stream_export == nullptr || !stream_export->HasTransport()) {
+				// No frame pool is possible (Gamescope capture, or Vulkan external memory is
+				// missing): still connect so the client gets metrics.
+				stream_export.reset();
+				metrics_only = std::make_unique<Streaming::Transport>(
+				    socket, [](const Streaming::Input*) {}, [](uint64_t) { return true; },
+				    Streaming::Transport::MotionSink {}, Streaming::MakeEmulatorMetricsHooks(),
+				    true);
+				LOGF("Session socket: metrics-only connection (no frame pool)\n");
+			}
 		}
 #endif
 	}
@@ -590,6 +610,7 @@ struct Presenter::Impl {
 	CommandScheduler                    present_scheduler;
 	FramePool                           frames;
 	std::unique_ptr<NativeStreamExport> stream_export;
+	std::unique_ptr<Streaming::Transport> metrics_only;
 	Common::Mutex                       present_mutex;
 	std::array<Layer, 2>                layers {};
 	std::atomic<uint64_t>               presented_overlay_revision {0};

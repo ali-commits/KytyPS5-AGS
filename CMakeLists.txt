@@ -1067,6 +1067,16 @@ if(LINUX)
 	target_include_directories(streaming_tests PRIVATE "${KYTY_SOURCE_DIR}")
 	target_link_libraries(streaming_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 
+	# AGS session socket: env selection, tolerant packets, live metrics, counter/overlay split.
+	add_executable(session_metrics_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/SessionMetricsTests.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/protocol.cpp"
+		"${KYTY_SOURCE_DIR}/streaming/transport.cpp" ${controller_audio_producer_sources})
+	target_include_directories(session_metrics_tests PRIVATE "${KYTY_SOURCE_DIR}")
+	target_compile_definitions(session_metrics_tests PRIVATE
+		KYTY_ADAPTER_SOURCE="${KYTY_SOURCE_DIR}/agsAdapter/adapter.cpp")
+	target_link_libraries(session_metrics_tests PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+
     add_executable(controller_audio_pipeline_producer EXCLUDE_FROM_ALL
         "${KYTY_TESTS_DIR}/ControllerAudioPipelineProducer.cpp" ${controller_audio_producer_sources})
     target_include_directories(controller_audio_pipeline_producer PRIVATE "${KYTY_SOURCE_DIR}")
@@ -1282,6 +1292,8 @@ if(BUILD_TESTING)
         add_test(NAME streaming_protocol COMMAND $<TARGET_FILE:streaming_tests>)
 		add_test(NAME streaming_presentation COMMAND $<TARGET_FILE:streaming_presentation_tests>)
 		set_tests_properties(streaming_protocol PROPERTIES TIMEOUT 30)
+		add_test(NAME session_metrics COMMAND $<TARGET_FILE:session_metrics_tests>)
+		set_tests_properties(session_metrics PROPERTIES TIMEOUT 60)
 		add_test(NAME streaming_gpu COMMAND $<TARGET_FILE:streaming_gpu_tests>)
 		set_tests_properties(streaming_gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)
 	endif()

@@ -3,6 +3,7 @@
 #include "streaming/controllerAudio.h"
 #include "streaming/feedback.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -113,9 +114,11 @@ bool SendPacket(int, const Json&, const std::array<int, 9>*) {
 	return false;
 }
 #endif
-Transport::Transport(std::string path, InputSink input, Completion complete, MotionSink motion)
+Transport::Transport(std::string path, InputSink input, Completion complete, MotionSink motion,
+                     MetricsHooks metrics, bool metrics_only)
     : m_path(std::move(path)), m_input(std::move(input)), m_motion(std::move(motion)),
-      m_complete(std::move(complete)) {
+      m_metrics(std::move(metrics)), m_complete(std::move(complete)) {
+	m_metrics_only.store(metrics_only, std::memory_order_release);
 	m_worker = std::jthread([this](std::stop_token stop) { Run(stop); });
 }
 Transport::~Transport() {
@@ -161,7 +164,18 @@ void Transport::Run(std::stop_token stop) {
 	auto        last_trigger  = retry;
 	auto        last_status   = retry;
 	uint64_t    last_sequence = 0;
-	const auto  disconnect    = [&] {
+	// Live metrics: the host's subscription and when the last message went out.
+	MetricsSubscription                                  subscription;
+	std::optional<std::chrono::steady_clock::time_point> last_metrics;
+	UnknownTypeLog                                       unknown_types;
+	const auto set_subscription = [&](const MetricsSubscription& next) {
+		const bool changed = next.keys != subscription.keys;
+		subscription       = next;
+		if (changed && m_metrics.subscribed) m_metrics.subscribed(subscription.keys);
+	};
+	const auto disconnect = [&] {
+		set_subscription({});
+		last_metrics.reset();
 		ControllerAudio::Disable();
 		audio_generation     = 0;
 		audio_ready_proposed = false;
@@ -243,7 +257,8 @@ void Transport::Run(std::stop_token stop) {
 				m_generation = ++generation;
 				continue;
 			}
-			if (type == "accepted" && !m_attached && hello_sent) {
+			const bool metrics_only = m_metrics_only.load(std::memory_order_acquire);
+			if (type == "accepted" && !m_attached && hello_sent && !metrics_only) {
 				std::lock_guard lock(m_mutex);
 				if (!p.contains("epoch") || !p["epoch"].is_number_unsigned() ||
 				    p["epoch"] != m_descriptor.epoch || !p.contains("version") ||
@@ -266,6 +281,27 @@ void Transport::Run(std::stop_token stop) {
 				invalid = true;
 				break;
 			}
+			if (type == "metrics.subscribe") {
+				// Valid before or after the frame pool is accepted; sent once it is live.
+				MetricsSubscription next;
+				if (ParseMetricsSubscribe(p, next))
+					set_subscription(next);
+				else if (unknown_types.First("metrics.subscribe(malformed)"))
+					std::fprintf(stderr, "AGS session: ignoring malformed metrics.subscribe\n");
+				continue;
+			}
+			if (!IsKnownPacketType(type)) {
+				// A newer host may send types this emulator does not know. Ignore, log once.
+				if (unknown_types.First(type)) {
+					const bool printable = std::all_of(type.begin(), type.end(), [](unsigned char c) {
+						return c >= 0x20 && c < 0x7f;
+					});
+					std::fprintf(stderr, "AGS session: ignoring unknown packet type \"%.40s\"\n",
+					             printable ? type.c_str() : "<non-printable>");
+				}
+				continue;
+			}
+			if (metrics_only) continue; // Frame and controller packets mean nothing without a pool.
 			if (!m_attached) {
 				invalid = true;
 				break;
@@ -342,7 +378,12 @@ void Transport::Run(std::stop_token stop) {
 			disconnect();
 			continue;
 		}
-		if (welcomed && !hello_sent) {
+		if (welcomed && !hello_sent && m_metrics_only.load(std::memory_order_acquire)) {
+			// No frame pool: say so, and serve metrics only. STANDARD defines no field for this;
+			// "frames": false is the smallest addition (see docs/AGS_SESSION.md).
+			if (SendPacket(socket, {{"type", "hello"}, {"version", 1}, {"frames", false}}))
+				hello_sent = true;
+		} else if (welcomed && !hello_sent) {
 			std::lock_guard lock(m_mutex);
 			if (m_ring && m_pool_generation == generation) {
 				const auto& d     = m_descriptor;
@@ -432,6 +473,14 @@ void Transport::Run(std::stop_token stop) {
 					last_feedback   = now;
 				}
 			}
+		}
+		if (subscription.keys != 0 && m_metrics.sample && (m_attached || (hello_sent && m_metrics_only)) &&
+		    (!last_metrics ||
+		     now - *last_metrics >= std::chrono::milliseconds(subscription.interval_ms))) {
+			const auto message =
+			    BuildMetricsMessage(subscription.keys, m_metrics.sample(subscription.keys),
+			                        MonotonicMs());
+			if (!message || SendPacket(socket, *message)) last_metrics = now;
 		}
 	}
 	disconnect();

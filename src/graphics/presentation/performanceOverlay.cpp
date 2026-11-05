@@ -100,7 +100,7 @@ void SetOverlayEnabled(bool enabled) {
 			g_frames = {};
 			g_generation.fetch_add(1, std::memory_order_release);
 		}
-		Common::DebugCounters::SetEnabled(enabled);
+		Common::DebugCounters::SetOverlayVisible(enabled);
 	}
 	g_sampler_wait.notify_all();
 }
@@ -118,7 +118,7 @@ void SamplerThread(const std::stop_token& stop) {
 	uint64_t                                sampled_generation = 0;
 	std::unique_lock                        lock(g_host_mutex);
 	while (!stop.stop_requested()) {
-		g_sampler_wait.wait(lock, stop, [] { return Common::DebugCounters::Enabled(); });
+		g_sampler_wait.wait(lock, stop, [] { return Common::DebugCounters::OverlayVisible(); });
 		if (stop.stop_requested()) {
 			break;
 		}
@@ -132,11 +132,11 @@ void SamplerThread(const std::stop_token& stop) {
 		lock.lock();
 		g_host_stats      = std::move(stats);
 		g_host_generation = generation;
-		if (Common::DebugCounters::Enabled() && GuestStalled(Clock::now())) {
+		if (Common::DebugCounters::OverlayVisible() && GuestStalled(Clock::now())) {
 			g_revision.fetch_add(1, std::memory_order_acq_rel);
 		}
 		g_sampler_wait.wait_for(lock, stop, REFRESH_INTERVAL, [generation] {
-			return !Common::DebugCounters::Enabled() ||
+			return !Common::DebugCounters::OverlayVisible() ||
 			       generation != g_generation.load(std::memory_order_acquire);
 		});
 	}
@@ -593,7 +593,7 @@ void DrawMemoryAndIo(const Snapshot& shown) {
 } // namespace
 
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept {
-	if (!Common::DebugCounters::Enabled()) {
+	if (!Common::DebugCounters::OverlayVisible()) {
 		return;
 	}
 	std::scoped_lock lock(g_frame_mutex);
@@ -616,16 +616,16 @@ void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) n
 }
 
 bool PerformanceOverlayEnabled() noexcept {
-	return Common::DebugCounters::Enabled();
+	return Common::DebugCounters::OverlayVisible();
 }
 
 void TogglePerformanceOverlay() noexcept {
-	SetOverlayEnabled(!Common::DebugCounters::Enabled());
+	SetOverlayEnabled(!Common::DebugCounters::OverlayVisible());
 	g_revision.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void TogglePerformanceOverlayDetails() noexcept {
-	if (Common::DebugCounters::Enabled()) {
+	if (Common::DebugCounters::OverlayVisible()) {
 		g_details.store(!g_details.load(std::memory_order_acquire), std::memory_order_release);
 	} else {
 		g_details.store(true, std::memory_order_release);

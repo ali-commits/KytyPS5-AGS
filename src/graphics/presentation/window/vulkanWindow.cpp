@@ -37,6 +37,7 @@
 #include "kernel/memory.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
+#include "streaming/sessionEnv.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -2038,8 +2039,7 @@ void WindowContext::CreateVulkan() {
 		    });
 
 #if defined(__linux__)
-		if (const char* socket = std::getenv("KYTY_STREAM_SOCKET");
-		    socket != nullptr && *socket != '\0') {
+		if (const char* socket = Streaming::SessionSocket(); socket != nullptr) {
 			const bool supported =
 			    HasExtension(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
 			    HasExtension(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);

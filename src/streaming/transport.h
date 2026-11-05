@@ -1,4 +1,5 @@
 #pragma once
+#include "streaming/metrics.h"
 #include "streaming/protocol.h"
 
 #include <atomic>
@@ -28,7 +29,10 @@ public:
 	using InputSink  = std::function<void(const Input*)>;
 	using MotionSink = std::function<void(const Motion*)>;
 	using Completion = std::function<bool(uint64_t)>;
-	Transport(std::string path, InputSink input, Completion complete, MotionSink motion = {});
+	// `metrics_only` connects without a frame pool: the hello carries "frames": false and only
+	// metrics are served (Gamescope capture, or no Vulkan external memory).
+	Transport(std::string path, InputSink input, Completion complete, MotionSink motion = {},
+	          MetricsHooks metrics = {}, bool metrics_only = false);
 	~Transport();
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	bool     Attached() const { return m_attached.load(std::memory_order_acquire); }
@@ -36,6 +40,8 @@ public:
 	             uint64_t generation);
 	void Publish(PendingFrame frame);
 	void Reconnect();
+	// Gives up frames on a connection that has not sent a pool (the pool could not be created).
+	void SetMetricsOnly() { m_metrics_only.store(true, std::memory_order_release); }
 	uint64_t Dropped() const { return m_dropped.load(std::memory_order_relaxed); }
 	void     Drop() { m_dropped.fetch_add(1, std::memory_order_relaxed); }
 
@@ -44,6 +50,7 @@ private:
 	std::string                m_path;
 	InputSink                  m_input;
 	MotionSink                 m_motion;
+	MetricsHooks               m_metrics;
 	Completion                 m_complete;
 	std::mutex                 m_mutex;
 	PoolDescriptor             m_descriptor;
@@ -58,7 +65,7 @@ private:
 	std::array<Mailbox, SlotCount> m_pending;
 	uint64_t                       m_pool_generation = 0;
 	std::atomic<uint64_t>          m_generation {0}, m_dropped {0}, m_active_epoch {0};
-	std::atomic<bool>              m_attached {false}, m_reconnect {false};
+	std::atomic<bool>              m_attached {false}, m_reconnect {false}, m_metrics_only {false};
 	std::jthread                   m_worker;
 };
 } // namespace Streaming

@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace Streaming {
 constexpr size_t PacketLimit = 8192;
@@ -61,6 +62,29 @@ public:
 
 private:
 	std::array<uint64_t, 2> m_sequence {}, m_time {};
+};
+// Packet types this emulator understands (it reacts to some only once a capability is agreed).
+// Any other type from the host is ignored instead of dropping the connection.
+[[nodiscard]] inline bool IsKnownPacketType(std::string_view type) noexcept {
+	for (const auto known: {"welcome", "accepted", "error", "release", "input", "motion", "reset",
+	                        "controller-audio-state", "metrics.subscribe"})
+		if (type == known) return true;
+	return false;
+}
+// Remembers which unknown packet types were already reported, so each is logged once.
+class UnknownTypeLog {
+public:
+	// True the first time `type` is seen. Past a small cap of distinct types nothing is reported.
+	[[nodiscard]] bool First(std::string_view type) {
+		for (const auto& seen: m_seen)
+			if (seen == type) return false;
+		if (m_seen.size() >= 16) return false;
+		m_seen.emplace_back(type);
+		return true;
+	}
+
+private:
+	std::vector<std::string> m_seen;
 };
 struct Lease {
 	uint64_t epoch, sequence;

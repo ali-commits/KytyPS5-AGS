@@ -24,6 +24,10 @@ struct FpsWindow {
 // game; the first call lazily starts the once-per-second writer thread.
 void FpsStatsRecordFlip() noexcept;
 
+// The window the writer thread aggregated last (once per second), or nullopt before the first
+// tick. Cheap: one short mutex. Feeds the game_fps and frame_time_ms session metrics.
+[[nodiscard]] std::optional<FpsWindow> FpsStatsLatest() noexcept;
+
 // Stop the writer thread and remove the stats file. Idempotent.
 void FpsStatsShutdown() noexcept;
 

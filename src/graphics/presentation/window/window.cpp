@@ -23,6 +23,7 @@
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
+#include "streaming/sessionEnv.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -530,7 +531,9 @@ void WindowContext::ProcessEvent(double time_s) {
 				[[fallthrough]];
 #endif
 			case SDLK_F2:
-				if (pressed) {
+				// The client draws its own overlay while a session socket is set.
+				if (pressed &&
+				    Streaming::OverlayToggleAllowed(Streaming::SessionSocketFromEnvironment())) {
 					if ((event->key.mod & SDL_KMOD_SHIFT) != 0) {
 						TogglePerformanceOverlayDetails();
 					} else {
@@ -842,7 +845,8 @@ static void WindowCreate(WindowContext& context) {
 #endif
 	// A streamed game's window is hidden and never focused, and SDL drops controller input
 	// for an unfocused app by default. The tunnelled DualSense is an SDL pad, so keep its input.
-	if (std::getenv("KYTY_STREAM_SOCKET") != nullptr) {
+	const char* const session_socket = Streaming::SessionSocket();
+	if (session_socket != nullptr) {
 		SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 	}
 	if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -853,7 +857,7 @@ static void WindowCreate(WindowContext& context) {
 
 #if defined(__linux__)
 	context.stream_only =
-	    StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), std::getenv("KYTY_STREAM_SOCKET"));
+	    StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), session_socket);
 #endif
 	const char* prepare_setting = std::getenv("KYTY_PIPELINE_LIST_PREPARE");
 	const bool  preparing =

@@ -7,10 +7,13 @@
 
 namespace Common::DebugCounters {
 
-static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<bool>::is_always_lock_free);
+static_assert(std::atomic<uint64_t>::is_always_lock_free &&
+              std::atomic<uint32_t>::is_always_lock_free);
 
-// Collect events only while the panel is visible. Relaxed, lock-free atomics keep updates
-// cheap and safe in signal handlers. Rates come from comparing two snapshots.
+// Collect events only while a consumer needs them: the performance panel (overlay) or a live
+// metrics subscription. The two are independent switches, so a metrics subscription collects
+// counters without drawing the panel. Relaxed, lock-free atomics keep updates cheap and safe in
+// signal handlers. Rates come from comparing two snapshots.
 enum class Counter {
 	// GPU work.
 	Draws,
@@ -53,17 +56,42 @@ enum class Counter {
 enum class Peak { ShaderCompileNs, PipelineCreateNs, Count };
 
 namespace Detail {
-inline std::atomic<bool>     g_enabled {false};
+inline constexpr uint32_t    OVERLAY_BIT = 1;
+inline constexpr uint32_t    METRICS_BIT = 2;
+inline std::atomic<uint32_t> g_consumers {0}; // OVERLAY_BIT | METRICS_BIT
 inline std::atomic<uint64_t> g_counters[static_cast<int>(Counter::Count)] {};
 inline std::atomic<uint64_t> g_peaks[static_cast<int>(Peak::Count)] {};
 } // namespace Detail
 
-[[nodiscard]] inline bool Enabled() noexcept {
-	return Detail::g_enabled.load(std::memory_order_relaxed);
+inline void SetConsumer(uint32_t bit, bool on) noexcept {
+	if (on) {
+		Detail::g_consumers.fetch_or(bit, std::memory_order_relaxed);
+	} else {
+		Detail::g_consumers.fetch_and(~bit, std::memory_order_relaxed);
+	}
 }
 
-inline void SetEnabled(bool enabled) noexcept {
-	Detail::g_enabled.store(enabled, std::memory_order_relaxed);
+// True while counters collect, for any consumer.
+[[nodiscard]] inline bool Enabled() noexcept {
+	return Detail::g_consumers.load(std::memory_order_relaxed) != 0;
+}
+
+// True while the performance panel is shown. Counters collecting for metrics alone leave it hidden.
+[[nodiscard]] inline bool OverlayVisible() noexcept {
+	return (Detail::g_consumers.load(std::memory_order_relaxed) & Detail::OVERLAY_BIT) != 0;
+}
+
+[[nodiscard]] inline bool MetricsCollecting() noexcept {
+	return (Detail::g_consumers.load(std::memory_order_relaxed) & Detail::METRICS_BIT) != 0;
+}
+
+inline void SetOverlayVisible(bool visible) noexcept {
+	SetConsumer(Detail::OVERLAY_BIT, visible);
+}
+
+// Keeps counters collecting for a live metrics subscription without showing the panel.
+inline void SetMetricsCollecting(bool collecting) noexcept {
+	SetConsumer(Detail::METRICS_BIT, collecting);
 }
 
 inline void Add(Counter counter, uint64_t value = 1) noexcept {

@@ -26,6 +26,9 @@ std::atomic<uint64_t> g_flip_count {0};
 std::atomic<int64_t>  g_last_flip_ns {0};     // Clock::now() of the previous flip, nanoseconds.
 std::atomic<int64_t>  g_last_interval_ns {0}; // Latest frame interval, nanoseconds.
 
+std::mutex               g_latest_mutex;
+std::optional<FpsWindow> g_latest;
+
 std::once_flag g_writer_once;
 std::jthread   g_writer;
 
@@ -85,7 +88,12 @@ void WriterThread(const std::stop_token& stop) {
 		for (size_t i = 0; i < count; ++i) {
 			ordered[i] = per_second[(next + WINDOW_SECONDS - count + i) % WINDOW_SECONDS];
 		}
-		WriteFileAtomic(path, FpsStatsEncode(FpsStatsAggregate(ordered, count, latest_frame_ms)));
+		const auto window = FpsStatsAggregate(ordered, count, latest_frame_ms);
+		{
+			std::lock_guard lock(g_latest_mutex);
+			g_latest = window;
+		}
+		WriteFileAtomic(path, FpsStatsEncode(window));
 	}
 	std::remove(path.c_str());
 }
@@ -100,6 +108,11 @@ void FpsStatsRecordFlip() noexcept {
 	}
 	g_flip_count.fetch_add(1, std::memory_order_relaxed);
 	std::call_once(g_writer_once, [] { g_writer = std::jthread(WriterThread); });
+}
+
+std::optional<FpsWindow> FpsStatsLatest() noexcept {
+	std::lock_guard lock(g_latest_mutex);
+	return g_latest;
 }
 
 void FpsStatsShutdown() noexcept {
