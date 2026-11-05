@@ -1,5 +1,13 @@
 # KytyPS5 experimental
 
+This repository, [ali-commits/KytyPS5-AGS](https://github.com/ali-commits/KytyPS5-AGS), is an AGS
+extension fork of [Jetsku/KytyPS5](https://github.com/Jetsku/KytyPS5). Development happens on the
+`ags-main` branch; `upstream` is Jetsku/KytyPS5. Clone with submodules:
+
+```bash
+git clone --recurse-submodules -b ags-main https://github.com/ali-commits/KytyPS5-AGS.git
+```
+
 The main branch contains the U59 renderer, the validated Demon's Souls shader and
 compatibility changes, and the U59 integration work: command-processor and VRAM
 improvements, profile-guided optimization, and upstream's newer changes. No 60 FPS
@@ -205,11 +213,12 @@ cmake -S . -B _Build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_PREFIX_PATH="$Qt6_DIR"
 
-cmake --build _Build/linux --target launcher --parallel
+cmake --build _Build/linux --target kyty_emulator launcher --parallel
 cmake --install _Build/linux --prefix _Build/linux/install
 ```
 
-The install step copies the Qt libraries and plugins next to the binaries, so
+On machines with limited RAM, pass a smaller `--parallel N`; the emulator sources are large. The
+install step copies the Qt libraries and plugins next to the binaries, so
 `_Build/linux/install` runs without a matching system Qt. FFmpeg is linked statically
 from the pinned [KytyPS5 FFmpeg core](https://github.com/KytyPS5/ext-ffmpeg-core)
 release, including VP9 and WebM support. System FFmpeg packages are not required.
@@ -224,6 +233,14 @@ cmake -S . -B _Build/linux-no-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DKYTY_BUILD_LAUNCHER=OFF
 
 cmake --build _Build/linux-no-qt --target kyty_emulator kyty_tests --parallel
+```
+
+Core tests (the subset CI runs):
+
+```bash
+cmake --build _Build/linux --target kyty_tests
+ctest --test-dir _Build/linux --output-on-failure \
+  -R '^(lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|virtual_memory_allocation|device_compat)$'
 ```
 
 As on Windows, the MSVC compiler is not used; Clang is required. `cl.exe` is rejected at configure
