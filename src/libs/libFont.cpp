@@ -1,12 +1,14 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/fontSearch.h"
 #include "common/logging/log.h"
 #include "common/systemFonts.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"
 
+#include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -699,22 +701,15 @@ static std::vector<uint8_t> read_file_bytes(const std::filesystem::path& path) {
 }
 
 static std::vector<std::filesystem::path> fallback_font_candidates(const char* file_name) {
-	const auto rel =
-	    std::filesystem::path("3rdparty") / "tracy" / "profiler" / "src" / "font" / file_name;
-	std::vector<std::filesystem::path> paths;
-
-	auto source_root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
-	paths.push_back(source_root / rel);
-
+	const char* base_path = SDL_GetBasePath();
 	std::error_code ec;
 	auto            cwd = std::filesystem::current_path(ec);
-	if (!ec) {
-		paths.push_back(cwd / rel);
-		paths.push_back(cwd / ".." / rel);
-		paths.push_back(cwd / ".." / ".." / rel);
-	}
-
-	return paths;
+	return Common::FallbackFontCandidates(file_name, base_path != nullptr ? base_path : "",
+	                                      ec ? std::filesystem::path() : cwd,
+	                                      std::filesystem::path(__FILE__)
+	                                          .parent_path()
+	                                          .parent_path()
+	                                          .parent_path());
 }
 
 static std::vector<uint8_t> load_fallback_font_data(bool bold, bool italic) {

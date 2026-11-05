@@ -923,6 +923,10 @@ add_executable(unresolved_import_log_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(unresolved_import_log_tests PRIVATE ${inc_headers})
 
+# Fallback font search order (common/fontSearch.h).
+add_executable(font_search_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FontSearchTests.cpp")
+target_include_directories(font_search_tests PRIVATE ${inc_headers})
+
 add_executable(pad_haptics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadHapticsTests.cpp"
 	${controller_audio_producer_sources}
@@ -1471,6 +1475,7 @@ if(BUILD_TESTING)
 	add_test(NAME ngs2_sampler COMMAND $<TARGET_FILE:ngs2_sampler_tests>)
 	add_test(NAME audio_propagation COMMAND $<TARGET_FILE:audio_propagation_tests>)
 	add_test(NAME unresolved_import_log COMMAND $<TARGET_FILE:unresolved_import_log_tests>)
+	add_test(NAME font_search COMMAND $<TARGET_FILE:font_search_tests>)
 	add_test(NAME pad_haptics COMMAND $<TARGET_FILE:pad_haptics_tests>)
 	add_test(NAME controller_settings COMMAND $<TARGET_FILE:controller_settings_tests>)
 	add_test(NAME controller_state_coalescing COMMAND $<TARGET_FILE:controller_settings_tests>)
@@ -2628,6 +2633,7 @@ if(BUILD_TESTING)
 		ngs2_sampler_tests
 		audio_propagation_tests
 		unresolved_import_log_tests
+		font_search_tests
 		pad_haptics_tests
 		controller_settings_tests
 		host_input_tests
