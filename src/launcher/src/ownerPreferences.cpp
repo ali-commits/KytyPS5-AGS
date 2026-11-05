@@ -1,6 +1,7 @@
 #include "ownerPreferences.h"
 
 #include "configuration.h"
+#include "preferenceSchema.h"
 
 #include <QDir>
 #include <QJsonArray>
@@ -47,7 +48,40 @@ QJsonObject OwnerPreferences::Read(QSettings& s) {
 	Load(s, c);
 	auto dirs = s.value("Launcher/game_dirs").toStringList();
 	if (dirs.isEmpty()) dirs = s.value("Launcher/game_dir").toStringList();
-	return {{"settings", QJsonObject::fromVariantMap(c.GameSettings())},
+	auto fields = PreferenceSchema::Fields(c);
+	for (auto i = fields.begin(); i != fields.end(); ++i) {
+		auto field = i->toObject();
+		field["scope"] = "settings";
+        if (field["key"] == "console_language") {
+            QJsonArray options;
+            for (qsizetype n = 0; n < PreferenceSchema::CONSOLE_LANGUAGE_NAMES.size(); ++n)
+                options.append(QJsonObject {{"value", QString::number(n)}, {"label", PreferenceSchema::CONSOLE_LANGUAGE_NAMES[n]}});
+            field["options"] = options;
+        }
+		// The owner write API keeps the stored enum spelling.
+		if (field["key"] == "screen_resolution") {
+			QJsonArray choices;
+			for (const auto& choice: field["choices"].toArray()) choices.append(PreferenceSchema::RawText(choice.toString()));
+			field["choices"] = choices;
+			field["value"] = c.GameSettings().value("screen_resolution").toString();
+		}
+		*i = field;
+	}
+	const auto globals = Globals(c);
+	for (auto i = globals.begin(); i != globals.end(); ++i) {
+		auto label = i.key();
+		label.replace('_', ' ');
+		label[0] = label[0].toUpper();
+		QJsonObject field {{"key", i.key()}, {"label", label}, {"scope", "global"},
+		                   {"value", i.value()}, {"type", i.value().isBool() ? "bool" : i.value().isString() ? "string" : "int"}};
+		if (i.value().isDouble()) {
+			field["min"] = 0;
+			field["max"] = i.key() == "controller_keyboard_player" ? Config::MAX_PLAYERS : i.key().startsWith("audio_") ? static_cast<int>(Config::MAX_AUDIO_VOLUME) : 100;
+		}
+		fields.append(field);
+	}
+	return {{"fields", fields},
+	        {"settings", QJsonObject::fromVariantMap(c.GameSettings())},
 	        {"global", Globals(c)},
 	        {"game_dirs", QJsonArray::fromStringList(dirs)},
 	        {"addons_dir", s.value("Launcher/addons_dir").toString()},

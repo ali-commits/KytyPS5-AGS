@@ -1,3 +1,4 @@
+#include "streamTarget.h"
 #include "hostDaemon.h"
 #include "clientProfiles.h"
 #include "ownerPreferences.h"
@@ -620,7 +621,8 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 }
 
 void HostDaemon::StartLocalGame(const QJsonObject& request, std::function<void(HostReply)> done) {
-    if (request.size() != 2 || !request.value("game").isString()) return done(Json(Fail(tr("Invalid local launch request."))));
+    if (request.size() != (request.contains("stream_target") ? 3 : 2) || !request.value("game").isString() ||
+        (request.contains("stream_target") && !StreamTarget::Valid(request["stream_target"]))) return done(Json(Fail(tr("Invalid local launch request."))));
     const auto id = request.value("game").toString();
     const auto* game = m_library.Find(id);
     if (!game || (game->source == "steam" ? !game->owned_launch.has_value() : game->source != "ps5" || !game->info)) return done(Json(Fail(tr("No local launch recipe is available."))));
@@ -654,9 +656,11 @@ void HostDaemon::StartLocalGame(const QJsonObject& request, std::function<void(H
     m_local_started = false;
     m_local_start_done = std::move(done);
     m_local_deadline.start();
-    m_local.start(ReadSettings().backend, {"local-launch", profile, HostRuntimeDirectory() + "/api.sock",
+    QStringList arguments {"local-launch", profile, HostRuntimeDirectory() + "/api.sock",
         QDir(qEnvironmentVariable("XDG_RUNTIME_DIR")).filePath("kytyps5/emulator.lock"), uuid, id,
-        QString::number(QCoreApplication::applicationPid())});
+        QString::number(QCoreApplication::applicationPid())};
+    if (request.contains("stream_target")) arguments << QString::fromUtf8(QJsonDocument(request["stream_target"].toObject()).toJson(QJsonDocument::Compact));
+    m_local.start(ReadSettings().backend, arguments);
 }
 
 void HostDaemon::LocalFinished(int code, QProcess::ExitStatus status) {

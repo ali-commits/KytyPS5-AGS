@@ -1,3 +1,4 @@
+#include "preferenceSchema.h"
 #include "configurationEditDialog.h"
 
 #include "common/emulatorConfig.h"
@@ -61,38 +62,7 @@ static void UpdateControllerColorButton(QPushButton* button, const QString& hex)
 	                                                                   : QStringLiteral("black")));
 }
 
-const QStringList CONSOLE_LANGUAGE_NAMES = {
-    "Japanese",
-    "English (United States)",
-    "French (France)",
-    "Spanish (Spain)",
-    "German",
-    "Italian",
-    "Dutch",
-    "Portuguese (Portugal)",
-    "Russian",
-    "Korean",
-    "Chinese (Traditional)",
-    "Chinese (Simplified)",
-    "Finnish",
-    "Swedish",
-    "Danish",
-    "Norwegian",
-    "Polish",
-    "Portuguese (Brazil)",
-    "English (United Kingdom)",
-    "Turkish",
-    "Spanish (Latin America)",
-    "Arabic",
-    "French (Canada)",
-    "Czech",
-    "Hungarian",
-    "Greek",
-    "Romanian",
-    "Thai",
-    "Vietnamese",
-    "Indonesian",
-};
+using PreferenceSchema::CONSOLE_LANGUAGE_NAMES;
 
 static QString NormalizeGameDirectory(const QString& dir) {
 	const auto trimmed = dir.trimmed();

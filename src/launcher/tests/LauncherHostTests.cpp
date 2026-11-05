@@ -450,6 +450,38 @@ private slots:
         }
 
 	}
+    void streamTargetOverridesOnlyLaunchArguments() {
+        QTemporaryDir config;
+        qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());
+        const QString uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const auto id = library.Games().first().id;
+        const auto before = library.Find(id)->info->GameSettings();
+        const auto settingsPath = GameLibraryFiles::OpenSettings()->fileName();
+        const auto diskBefore = ReadFile(settingsPath);
+        HostApi resolver {&library, [] { return HostApi::Status {}; }};
+        resolver.ConfigureNativeLaunch("/usr/bin/true", config.filePath("emulator.lock"), config.path());
+        resolver.ConfigureLocalOwner(uuid, QCoreApplication::applicationPid());
+        const QJsonObject target {{"width", 1600}, {"height", 900}, {"fps", 120}};
+        const auto reply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", target}}));
+        QCOMPARE(reply.status, 200);
+        const auto args = QJsonDocument::fromJson(reply.body).object()["args"].toArray();
+        for (const auto& pair: {qMakePair("--screen-width", "1600"), qMakePair("--screen-height", "900"), qMakePair("--vblank-frequency", "120")}) {
+            const auto at = std::find(args.begin(), args.end(), QJsonValue(pair.first));
+            QVERIFY(at != args.end() && at + 1 != args.end());
+            QCOMPARE((at + 1)->toString(), QString(pair.second));
+            QCOMPARE(std::count(args.begin(), args.end(), QJsonValue(pair.first)), 1);
+        }
+        QCOMPARE(library.Find(id)->info->GameSettings(), before);
+        QCOMPARE(ReadFile(settingsPath), diskBefore);
+        const QString remote = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const auto remoteReply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", remote, {{"game", id}, {"stream_target", target}}));
+        QCOMPARE(remoteReply.status, 200);
+        QCOMPARE(QJsonDocument::fromJson(remoteReply.body).object()["args"].toArray(), args);
+        for (const auto& invalid: {QJsonValue(QJsonObject {{"width", 1601}, {"height", 900}, {"fps", 120}}), QJsonValue(true), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}}), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 241}})})
+            QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", invalid}})).status, 400);
+        QCOMPARE(library.Find(id)->info->GameSettings(), before);
+        QCOMPARE(ReadFile(settingsPath), diskBefore);
+    }
 	void isolatedDiagnosticTraversalCannotTouchExternalSentinels() {
 		QTemporaryDir config;
 		qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());

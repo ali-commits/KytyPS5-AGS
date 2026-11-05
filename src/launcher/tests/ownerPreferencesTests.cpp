@@ -1,8 +1,10 @@
 #include "ownerPreferences.h"
+#include "preferenceSchema.h"
 
 #include <QCoreApplication>
 #include <QJsonArray>
 #include <QTemporaryDir>
+#include <QSet>
 
 #define CHECK(expression)                                                                          \
 	do {                                                                                           \
@@ -35,6 +37,25 @@ int main(int argc, char** argv) {
 	CHECK(!OwnerPreferences::Write(s, {{"unknown", true}}, error));
 	CHECK(!OwnerPreferences::Write(s, {{"global", QJsonObject {{"audio_objects_enabled", "true"}}}},
 	                               error));
-	CHECK(OwnerPreferences::Write(s, before, error));
+	const auto fields = before["fields"].toArray();
+    CHECK(!fields.isEmpty());
+    QSet<QString> declared;
+    for (const auto& value: fields) {
+        const auto field = value.toObject();
+        const auto key = field["key"].toString();
+        declared.insert(key);
+        CHECK(field["scope"] == "settings" || field["scope"] == "global");
+        if (key == "readback_tiled_images" || key == "audio_objects_enabled") CHECK(field["type"] == "bool");
+        if (key == "present_mode") CHECK(field["choices"].toArray() == QJsonArray::fromStringList(EnumToList<Configuration::PresentMode>()));
+        if (key == "shader_optimization_type") CHECK(field["choices"].toArray() == QJsonArray::fromStringList(EnumToList<Configuration::ShaderOptimizationType>()));
+        if (key == "audio_master_volume") CHECK(field["max"].toInt() == Config::MAX_AUDIO_VOLUME);
+        if (key == "console_language") CHECK(field["options"].toArray().size() == Configuration::MAX_CONSOLE_LANGUAGE + 1);
+    }
+    CHECK(declared.contains("readback_tiled_images"));
+    CHECK(declared.contains("present_mode"));
+    CHECK(!OwnerPreferences::Write(s, {{"fields", fields}}, error));
+    auto writable = before;
+    writable.remove("fields");
+    CHECK(OwnerPreferences::Write(s, writable, error));
 	CHECK(OwnerPreferences::Read(s) == before);
 }
