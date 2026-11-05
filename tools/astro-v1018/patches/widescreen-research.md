@@ -1,8 +1,8 @@
 # Astro Bot PPSA21567 v01.018 widescreen research (UNTESTED)
 
 Status: RESEARCH ONLY. None of this has been applied or launched. Do not enable against a real
-game without the morning experiment in
-`docs/superpowers/specs/2026-10-29-custom-resolution.md` section 5. Keep save backups.
+game without the morning experiment described in the custom-resolution spec (retired with the
+AGS streaming split) section 5. Keep save backups.
 
 The host already presents a correct 16:9 image on the 20:9 phone via the shipped `fit` aspect
 mode. A native 20:9 render is a bonus that needs live validation.

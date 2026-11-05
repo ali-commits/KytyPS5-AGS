@@ -272,7 +272,7 @@ packet delivery and actual GPU capture counters, and can exercise reconnects.
 The Vulkan test producer supports `streaming_gpu_tests --serve <private-socket> 60`.
 
 The binding wire contract is [PROTOCOL.md](PROTOCOL.md); the implementation spec and
-plan are under `docs/superpowers/`. [VERIFICATION.md](VERIFICATION.md) records the
+plan were retired with the AGS streaming split. [VERIFICATION.md](VERIFICATION.md) records the
 final checks, source revisions and remaining device tests. Detailed local evidence
 and the package provenance are retained with this worktree and installation.
 

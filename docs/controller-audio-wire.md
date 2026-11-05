@@ -1,7 +1,7 @@
 # Controller audio PCM producer
 
 The binding contract, exact 72-byte field offsets, enums, limits and direction rules are in
-[the approved specification](superpowers/specs/2026-10-16-dualsense-controller-audio.md).
+[the approved specification](dualsense-controller-audio.md).
 `src/controller_audio` is dependency-free C++20 and can be linked by the emulator and its
 standalone companion. The independently licensed host implements the wire format separately.
 

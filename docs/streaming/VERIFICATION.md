@@ -83,8 +83,8 @@ while the candidate host was idle. Software transport uses complete waveform PCM
 with explicit failure/fallback on queue or age violation, rather than reducing it
 to two vibration strengths.
 
-Source reports/reviews live under
-`.superpowers/sdd/2026-10-16-dualsense-controller-audio/`; local evidence is under
+Source reports/reviews lived under the SDD evidence tree for this phase (retired with the
+AGS streaming split); local evidence is under
 `_Build/astro-evidence/controller-audio-20261016/`. Exact per-component PC hashes
 are in the candidate's `installation-provenance.json`. The PC package's unused
 helper component was refreshed from `1af7464d`; native/launcher/host bytes were
@@ -129,7 +129,7 @@ Crash capture remains enabled with a matching native map.
 
 Detailed new evidence lives under
 `_Build/astro-evidence/stream-only-dualsense-20261016/`; reports and reviews live under
-`.superpowers/sdd/2026-10-16-stream-only-dualsense/`. Generated evidence is local,
+the SDD evidence tree for this phase (retired with the AGS streaming split). Generated evidence is local,
 not added to Git. Focused checks cover changed modules and relevant regressions;
 this is not a claim that every repository target was built or run.
 
