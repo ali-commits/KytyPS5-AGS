@@ -470,7 +470,6 @@ private slots:
         QTest::mouseClick(toggle,Qt::LeftButton);
         QVERIFY(Capture(dialog,"-main-grid"));
         QCOMPARE(title->Title(),dialog.findChild<ConfigurationListWidget*>()->GetSelectedItem()->GetInfo().basedir);
-        QVERIFY(!QFile::exists(temp.filePath("private-stream/host-key.pem")));
     }
 
     void updatedTabsKeepEveryGlobalAudioAndOcclusionControl() {

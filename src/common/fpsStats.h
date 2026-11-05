@@ -27,7 +27,7 @@ void FpsStatsRecordFlip() noexcept;
 // Stop the writer thread and remove the stats file. Idempotent.
 void FpsStatsShutdown() noexcept;
 
-// The file the writer thread emits under $XDG_RUNTIME_DIR/kyty-host, read by the launcher daemon.
+// The file the writer thread emits under $XDG_RUNTIME_DIR/kyty-host.
 [[nodiscard]] std::string FpsStatsFilePath();
 
 // Build the JSON body the writer thread stores, from a window. Pure, for testing.
