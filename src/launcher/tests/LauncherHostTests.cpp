@@ -510,6 +510,30 @@ private slots:
         const auto remoteReply = Call(resolver, ClientReq("POST", "/ags/internal/resolve-launch", remote, {{"game", id}, {"stream_target", target}}));
         QCOMPARE(remoteReply.status, 200);
         QCOMPARE(QJsonDocument::fromJson(remoteReply.body).object()["args"].toArray(), args);
+        const auto savedAspect = std::find(args.begin(), args.end(), QJsonValue("--stream-aspect"));
+        QVERIFY(savedAspect != args.end() && savedAspect + 1 != args.end());
+        QCOMPARE((savedAspect + 1)->toString(), before.value("stream_aspect_mode").toString());
+        for (const auto* aspect: {"fit", "fill", "stretch"}) {
+            auto aspectTarget = target;
+            aspectTarget["aspect"] = aspect;
+            for (const auto& route: {qMakePair("/ags/internal/resolve-local-launch", uuid), qMakePair("/ags/internal/resolve-launch", remote)}) {
+                const auto aspectReply = Call(resolver, ClientReq("POST", route.first, route.second, {{"game", id}, {"stream_target", aspectTarget}}));
+                QCOMPARE(aspectReply.status, 200);
+                const auto aspectArgs = QJsonDocument::fromJson(aspectReply.body).object()["args"].toArray();
+                const auto at = std::find(aspectArgs.begin(), aspectArgs.end(), QJsonValue("--stream-aspect"));
+                QVERIFY(at != aspectArgs.end() && at + 1 != aspectArgs.end());
+                QCOMPARE((at + 1)->toString(), QString(aspect));
+                QCOMPARE(std::count(aspectArgs.begin(), aspectArgs.end(), QJsonValue("--stream-aspect")), 1);
+            }
+        }
+        for (const auto& invalidAspect: {QJsonValue("crop"), QJsonValue(true), QJsonValue(0), QJsonValue(QJsonValue::Null)}) {
+            auto invalidTarget = target;
+            invalidTarget["aspect"] = invalidAspect;
+            QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", invalidTarget}})).status, 400);
+        }
+        auto unknownTarget = target;
+        unknownTarget["unknown"] = "fit";
+        QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", unknownTarget}})).status, 400);
         for (const auto& invalid: {QJsonValue(QJsonObject {{"width", 1601}, {"height", 900}, {"fps", 120}}), QJsonValue(true), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}}), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 241}})})
             QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", invalid}})).status, 400);
         QCOMPARE(library.Find(id)->info->GameSettings(), before);

@@ -9,7 +9,9 @@ namespace StreamTarget {
 inline bool Valid(const QJsonValue& value) {
     if (!value.isObject()) return false;
     const auto target = value.toObject();
-    if (target.size() != 3) return false;
+    if (target.size() != (target.contains("aspect") ? 4 : 3)) return false;
+    if (target.contains("aspect") &&
+        (!target["aspect"].isString() || !QStringList {"fit", "fill", "stretch"}.contains(target["aspect"].toString()))) return false;
     for (const auto* key: {"width", "height", "fps"}) {
         const auto number = target[key].toDouble(-1);
         const bool fps = QString::fromLatin1(key) == "fps";
@@ -24,7 +26,7 @@ inline bool Apply(const QJsonObject& target, QStringList& args) {
     const QStringList keys {"width", "height", "fps"};
     QStringList rewritten;
     for (qsizetype i = 0; i < args.size(); ++i) {
-        if (flags.contains(args[i])) {
+        if (flags.contains(args[i]) || (target.contains("aspect") && args[i] == "--stream-aspect")) {
             if (i + 1 >= args.size() || args[i + 1].startsWith("--")) return false;
             ++i;
         } else rewritten.append(args[i]);
@@ -33,6 +35,7 @@ inline bool Apply(const QJsonObject& target, QStringList& args) {
         const int n = target[keys[i]].toInt();
         rewritten << flags[i] << QString::number(n);
     }
+    if (target.contains("aspect")) rewritten << "--stream-aspect" << target["aspect"].toString();
     args = std::move(rewritten);
     return true;
 }
