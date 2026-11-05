@@ -534,8 +534,11 @@ private slots:
         auto unknownTarget = target;
         unknownTarget["unknown"] = "fit";
         QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", unknownTarget}})).status, 400);
-        for (const auto& invalid: {QJsonValue(QJsonObject {{"width", 1601}, {"height", 900}, {"fps", 120}}), QJsonValue(true), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}}), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 241}})})
+        // fps bounds match the emulator vblank range (30..360): 29 and 361 are out of range, 360 is in range.
+        for (const auto& invalid: {QJsonValue(QJsonObject {{"width", 1601}, {"height", 900}, {"fps", 120}}), QJsonValue(true), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}}), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 29}}), QJsonValue(QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 361}})})
             QCOMPARE(Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", invalid}})).status, 400);
+        const auto hiFps = Call(resolver, ClientReq("POST", "/ags/internal/resolve-local-launch", uuid, {{"game", id}, {"stream_target", QJsonObject {{"width", 1920}, {"height", 1080}, {"fps", 360}}}}));
+        QCOMPARE(hiFps.status, 200);
         QCOMPARE(library.Find(id)->info->GameSettings(), before);
         QCOMPARE(ReadFile(settingsPath), diskBefore);
     }
