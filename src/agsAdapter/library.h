@@ -35,8 +35,10 @@ private:
 [[nodiscard]] QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_dir,
                               ArtCache& cache);
 
+// `runtime_root` is the cheats root (Cheats::PlanPath): a game gets the "cheats" badge when
+// <runtime_root>/_Patches/<TITLE>.json exists.
 [[nodiscard]] QJsonArray Games(const GameLibrary& library, const QString& data_dir,
-                               ArtCache& cache);
+                               const QString& runtime_root, ArtCache& cache);
 
 // `text` without control characters (Unicode category Cc), as GameEntry::validate requires.
 [[nodiscard]] QString DropControls(const QString& text);

@@ -279,6 +279,8 @@ QString TestLibrary(Session& s, const Fixture& f) {
 	EXPECT(g["installed"].toBool());
 	EXPECT(g["identity"].toObject() ==
 	       QJsonObject({{"scheme", "ps5-title"}, {"value", "PPSA01234"}}));
+	EXPECT(g["version"].toString() == "01.000"); // from the fixture's param.json appVersion
+	EXPECT(!Strings(g["badges"].toArray()).contains("cheats")); // no cheat file yet
 	// Icon: the game's own small PNG, inside the game folder (a user folder for AGS).
 	EXPECT(g["icon"].toString() == QDir(f.game).filePath("sce_sys/icon0.png"));
 	// Cover: pic0.png is over 2 MiB, so a re-encoded PNG in the data folder.
@@ -292,6 +294,13 @@ QString TestLibrary(Session& s, const Fixture& f) {
 		EXPECT(QDir::isAbsolutePath(path));
 		EXPECT(path.startsWith(f.game + '/') || path.startsWith(f.data + '/'));
 	}
+	// Writing the cheat plan the game's title id resolves to makes the "cheats" badge appear;
+	// removing it again drops the badge, and later tests (no cheat plan yet) expect it gone.
+	const auto plan_path = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
+	WriteFile(plan_path, "{}");
+	const auto after = s.Result("library.list")["games"].toArray().at(0).toObject();
+	EXPECT(Strings(after["badges"].toArray()).contains("cheats"));
+	CHECK(QFile::remove(plan_path));
 	return id;
 }
 

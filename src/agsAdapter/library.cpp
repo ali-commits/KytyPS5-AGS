@@ -1,5 +1,6 @@
 #include "library.h"
 
+#include "cheatFile.h"
 #include "configuration.h"
 #include "gameContent.h"
 #include "gameLibrary.h"
@@ -114,7 +115,8 @@ QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_
 	return target;
 }
 
-QJsonArray Games(const GameLibrary& library, const QString& data_dir, ArtCache& cache) {
+QJsonArray Games(const GameLibrary& library, const QString& data_dir, const QString& runtime_root,
+                 ArtCache& cache) {
 	QJsonArray games;
 	for (const auto& game: library.Games()) {
 		const auto& info  = *game.info;
@@ -135,6 +137,14 @@ QJsonArray Games(const GameLibrary& library, const QString& data_dir, ArtCache& 
 		if (const auto cover = ArtPath(game, QStringLiteral("cover"), data_dir, cache);
 		    !cover.isEmpty()) {
 			entry["cover"] = cover;
+		}
+		if (const auto version = CutChars(DropControls(info.gameVersion).trimmed(), 32);
+		    !version.isEmpty()) {
+			entry["version"] = version;
+		}
+		if (const auto plan = Cheats::PlanPath(runtime_root, info.title_id);
+		    !plan.isEmpty() && QFileInfo::exists(plan)) {
+			entry["badges"] = QJsonArray {"cheats"};
 		}
 		games.append(entry);
 	}

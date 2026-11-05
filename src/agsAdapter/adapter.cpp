@@ -175,8 +175,8 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	const GameEntry* game = nullptr;
 
 	if (method == QLatin1String("library.list")) {
-		return Reply::Success(
-		    {{"games", AdapterLibrary::Games(*m_library, m_state.DataDir(), m_art_cache)}});
+		return Reply::Success({{"games", AdapterLibrary::Games(*m_library, m_state.DataDir(),
+		                                                       m_runtime_root, m_art_cache)}});
 	}
 	if (method == QLatin1String("settings.get") || method == QLatin1String("settings.set")) {
 		const auto scope = params[QStringLiteral("scope")].toString(QStringLiteral("global"));
