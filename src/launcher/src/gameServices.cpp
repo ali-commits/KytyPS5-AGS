@@ -224,8 +224,12 @@ QString PutCheats(const Configuration& info, const QJsonObject& body, QString* r
 
 QJsonObject RemoteCheatList(const Configuration& info, const QList<Cheats::RemoteFile>& files,
                             const QString& error) {
+	const auto path = Cheats::PlanPath(TitleId(info));
+	if (path.isEmpty()) {
+		return {{"files", QJsonArray {}}, {"error", QStringLiteral("unsupported-title-id")}};
+	}
 	QJsonDocument local;
-	(void)Cheats::ParseDocument(ReadCheatBytes(Cheats::PlanPath(TitleId(info))), &local);
+	(void)Cheats::ParseDocument(ReadCheatBytes(path), &local);
 	const auto local_version = local.object().value(QStringLiteral("version")).toString();
 	QJsonArray list;
 	for (const auto& file: files) {

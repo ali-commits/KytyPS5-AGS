@@ -41,6 +41,9 @@ struct TrophyIconResult {
 [[nodiscard]] QString PutCheats(const Configuration& info, const QJsonObject& body,
                                 QString* revision);
 // {"files":[{name,title,version,format,installed_version}],"error"?} from a loaded catalog.
+// Returns {"files":[],"error":"unsupported-title-id"} without inspecting files when the game
+// has no cheat plan; the caller should still keep its own supported-only filtered list (the one
+// it cached before calling) for the matching fetch, since this function only formats a reply.
 [[nodiscard]] QJsonObject RemoteCheatList(const Configuration&                  info,
                                           const QList<Cheats::RemoteFile>&      files,
                                           const QString&                        error);
