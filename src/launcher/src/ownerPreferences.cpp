@@ -2,6 +2,11 @@
 
 #include "configuration.h"
 #include "preferenceSchema.h"
+#include "preferenceDevices.h"
+#include <QLibrary>
+#include <SDL3/SDL.h>
+#include <vulkan/vulkan.h>
+#include <array>
 
 #include <QDir>
 #include <QJsonArray>
@@ -10,6 +15,50 @@
 #include <cmath>
 
 namespace {
+QStringList GpuNames() {
+    // The owner daemon has QCoreApplication, so do not create a Qt Vulkan window.
+    QLibrary loader("vulkan");
+    const auto get = reinterpret_cast<PFN_vkGetInstanceProcAddr>(loader.resolve("vkGetInstanceProcAddr"));
+    if (!get) return {};
+    const auto create = reinterpret_cast<PFN_vkCreateInstance>(get(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!create) return {};
+    VkInstanceCreateInfo info {};
+    info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (create(&info, nullptr, &instance) != VK_SUCCESS) return {};
+    const auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(get(instance, "vkDestroyInstance"));
+    const auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(get(instance, "vkEnumeratePhysicalDevices"));
+    const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get(instance, "vkGetPhysicalDeviceProperties"));
+    QStringList names;
+    if (enumerate && properties) {
+        std::array<VkPhysicalDevice, 64> devices {};
+        uint32_t count = devices.size();
+        const auto result = enumerate(instance, &count, devices.data());
+        if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
+            for (uint32_t i = 0; i < count && i < devices.size(); ++i) {
+                VkPhysicalDeviceProperties value {};
+                properties(devices[i], &value);
+                names.append(QString::fromUtf8(value.deviceName));
+            }
+        }
+    }
+    if (destroy) destroy(instance, nullptr);
+    return names;
+}
+QStringList MicrophoneNames() {
+    QStringList names;
+    // Enumerate only: never open a recording device or start capture.
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) return names;
+    int count = 0;
+    auto* devices = SDL_GetAudioRecordingDevices(&count);
+    if (devices) {
+        for (int i = 0; i < count && i < 256; ++i)
+            if (const auto* name = SDL_GetAudioDeviceName(devices[i])) names.append(QString::fromUtf8(name));
+    }
+    SDL_free(devices);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    return names;
+}
 QJsonObject Globals(const Configuration& c) {
 	return {{"controller_color", c.controller.color},
 	        {"controller_speaker_volume", c.controller.speaker_volume},
@@ -49,9 +98,13 @@ QJsonObject OwnerPreferences::Read(QSettings& s) {
 	auto dirs = s.value("Launcher/game_dirs").toStringList();
 	if (dirs.isEmpty()) dirs = s.value("Launcher/game_dir").toStringList();
 	auto fields = PreferenceSchema::Fields(c);
+    const auto gpus = GpuNames();
+    const auto microphones = MicrophoneNames();
 	for (auto i = fields.begin(); i != fields.end(); ++i) {
 		auto field = i->toObject();
 		field["scope"] = "settings";
+        if (field["key"] == "gpu_index") field["options"] = PreferenceDevices::GpuOptions(gpus, c.gpu_index);
+        if (field["key"] == "audio_input_device") field["options"] = PreferenceDevices::MicrophoneOptions(microphones, c.audio_input_device);
         if (field["key"] == "console_language") {
             QJsonArray options;
             for (qsizetype n = 0; n < PreferenceSchema::CONSOLE_LANGUAGE_NAMES.size(); ++n)
@@ -78,6 +131,17 @@ QJsonObject OwnerPreferences::Read(QSettings& s) {
 			field["min"] = 0;
 			field["max"] = i.key() == "controller_keyboard_player" ? Config::MAX_PLAYERS : i.key().startsWith("audio_") ? static_cast<int>(Config::MAX_AUDIO_VOLUME) : 100;
 		}
+        if (i.key() == "controller_keyboard_player") {
+            QJsonArray options {QJsonObject {{"value", 0}, {"label", "Shared with player 1"}}};
+            for (int player = 1; player <= Config::MAX_PLAYERS; ++player)
+                options.append(QJsonObject {{"value", player}, {"label", QString("Player %1").arg(player)}});
+            field["options"] = options;
+        }
+        if (i.key() == "controller_color") field["type"] = "color";
+        if (i.value().isDouble() && i.key() != "controller_keyboard_player") {
+            field["control"] = "range";
+            field["unit"] = "%";
+        }
 		fields.append(field);
 	}
 	return {{"fields", fields},
