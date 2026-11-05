@@ -55,8 +55,7 @@ LibraryPage::LibraryPage(QWidget* parent): QWidget(parent) {
 	header->setContentsMargins(0, 0, 0, 0);
 	auto* logo   = new QLabel(this);
 	auto updateLogo = [logo] {
-        const bool light = qApp->palette().color(QPalette::Window).lightness() > 128;
-        logo->setPixmap(QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png")
+        logo->setPixmap(QPixmap(":/brand/logo.svg")
                             .scaledToWidth(150, Qt::SmoothTransformation));
     };
     updateLogo();

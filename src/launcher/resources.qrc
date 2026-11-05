@@ -1,9 +1,7 @@
 <RCC>
  <qresource prefix="/brand">
-  <file alias="ags-horizontal-light.png">../../../../assets/brand/png/horizontal-color-on-light.png</file>
-  <file alias="ags-horizontal-color.png">../../../../assets/brand/png/horizontal-color.png</file>
-  <file alias="ags-app-icon.png">../../../../assets/brand/png/app-icon-color.png</file>
-  <file alias="ags-horizontal.png">../../../../assets/brand/png/horizontal-reversed-flat-blue.png</file>
+  <file alias="app-icon.svg">icons/kyty.svg</file>
+  <file alias="logo.svg">icons/kyty-small.svg</file>
  </qresource>
  <qresource prefix="/icons">
   <file alias="edit-configuration.svg">icons/edit-configuration.svg</file>

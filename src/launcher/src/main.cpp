@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 #endif
-	QApplication::setWindowIcon(QIcon(QStringLiteral(":/brand/ags-app-icon.png")));
+	QApplication::setWindowIcon(QIcon(QStringLiteral(":/brand/app-icon.svg")));
 	const bool    clientOnly     = a.arguments().contains("--client-only");
 	const QString preset_warning = clientOnly ? QString {} : ApplyBundledPreset();
 	LauncherTheme::Initialize(a);

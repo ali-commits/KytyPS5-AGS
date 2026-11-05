@@ -117,7 +117,7 @@ ApplicationLifetime::TrayState ApplicationLifetime::StateForStatus(const QJsonOb
     return status.value("receiver_only").toBool() || status.value("state").toString() == "Ready" ? TrayState::Idle : TrayState::Unavailable;
 }
 QIcon ApplicationLifetime::TrayIcon(TrayState state) {
-	const QIcon base(QStringLiteral(":/brand/ags-app-icon.png"));
+	const QIcon base(QStringLiteral(":/brand/app-icon.svg"));
 	QIcon       icon;
 	for (int size: {16, 22, 24, 32, 48, 64}) {
 		auto pixmap = base.pixmap(size, size);

@@ -182,8 +182,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
     brand->setAccessibleName(tr("AGS"));
     brand->setContentsMargins(8, 0, 12, 0);
     auto updateBrand = [brand] {
-        const bool light = qApp->palette().color(QPalette::Window).lightness() > 128;
-        brand->setPixmap(QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png").scaledToWidth(100, Qt::SmoothTransformation));
+        brand->setPixmap(QPixmap(":/brand/logo.svg").scaledToWidth(100, Qt::SmoothTransformation));
     };
     updateBrand();
     connect(qApp, &QApplication::paletteChanged, brand, [updateBrand](const QPalette&) { updateBrand(); });

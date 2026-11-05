@@ -247,8 +247,7 @@ private slots:
         QVERIFY(tabs->tabBar()->sizeHint().height() >= 44);
         auto* brand = qobject_cast<QLabel*>(tabs->cornerWidget(Qt::TopLeftCorner));
         QVERIFY(brand);
-        const bool light = qApp->palette().color(QPalette::Window).lightness() > 128;
-        const auto expectedLogo = QPixmap(light ? ":/brand/ags-horizontal-light.png" : ":/brand/ags-horizontal-color.png")
+        const auto expectedLogo = QPixmap(":/brand/logo.svg")
                                       .scaledToWidth(100, Qt::SmoothTransformation);
         QCOMPARE(brand->pixmap().toImage(), expectedLogo.toImage());
         if (theme == 1) QCOMPARE(qApp->palette().color(QPalette::Window), QColor("#17191e"));

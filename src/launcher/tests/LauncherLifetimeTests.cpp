@@ -203,7 +203,7 @@ private slots:
 		                                              {"stream_game_running", true},
 		                                              {"pairing_open", true}}),
 		         State::PairingOpen);
-		QVERIFY(!QIcon(":/brand/ags-app-icon.png").isNull());
+		QVERIFY(!QIcon(":/brand/app-icon.svg").isNull());
 		QList<QImage> rendered;
 		for (auto state:
 		     {State::Unavailable, State::Idle, State::GameRunning, State::PairingOpen}) {
