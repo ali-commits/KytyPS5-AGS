@@ -7,6 +7,7 @@
 #include "common/trophies.h"
 #include "configuration.h"
 #include "preferenceSchema.h"
+#include "ownerPreferences.h"
 #include "streamTarget.h"
 #include "gameContent.h"
 
@@ -377,7 +378,7 @@ QString HostApi::SettingsRevision(const Configuration& info) {
 }
 
 QJsonArray HostApi::SettingsSchema(const Configuration& info) {
-	return PreferenceSchema::Fields(info);
+	return OwnerPreferences::SettingsFields(info);
 }
 
 void HostApi::Handle(const QJsonObject& request, std::function<void(HostReply)> done) {

@@ -450,6 +450,39 @@ private slots:
         }
 
 	}
+    void perGameSchemaIncludesDeviceAndLanguageChoices() {
+        Configuration config;
+        config.gpu_index = 99999;
+        config.audio_input_device = "Missing test microphone";
+        const auto fields = HostApi::SettingsSchema(config);
+        QSet<QString> found;
+        for (const auto& value: fields) {
+            const auto field = value.toObject();
+            const auto key = field["key"].toString();
+            found.insert(key);
+            QVERIFY(field["scope"] != "global");
+            if (key == "console_language") {
+                const auto options = field["options"].toArray();
+                QCOMPARE(options.size(), Configuration::MAX_CONSOLE_LANGUAGE + 1);
+                QCOMPARE(options[0].toObject()["label"].toString(), QString("Japanese"));
+                QCOMPARE(options[0].toObject()["value"].toString(), QString("0"));
+            }
+            if (key == "gpu_index") {
+                const auto options = field["options"].toArray();
+                QCOMPARE(options[0].toObject()["value"].toString(), QString("-1"));
+                QCOMPARE(options.last().toObject()["value"].toString(), QString("99999"));
+                QCOMPARE(field["value"].toString(), QString("99999"));
+            }
+            if (key == "audio_input_device") {
+                const auto options = field["options"].toArray();
+                QCOMPARE(options[0].toObject()["value"].toString(), QString());
+                QCOMPARE(options.last().toObject()["value"].toString(), config.audio_input_device);
+            }
+            if (key == "screen_resolution") QCOMPARE(field["value"].toString(), QString("1280x720"));
+        }
+        QVERIFY(found.contains("gpu_index") && found.contains("audio_input_device") && found.contains("console_language"));
+        QVERIFY(!found.contains("controller_keyboard_player"));
+    }
     void streamTargetOverridesOnlyLaunchArguments() {
         QTemporaryDir config;
         qputenv("KYTY_STREAMING_CONFIG_DIR", config.path().toUtf8());

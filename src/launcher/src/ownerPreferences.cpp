@@ -92,11 +92,7 @@ bool Strings(const QJsonValue& value, QStringList& result, bool paths) {
 	return true;
 }
 } // namespace
-QJsonObject OwnerPreferences::Read(QSettings& s) {
-	Configuration c;
-	Load(s, c);
-	auto dirs = s.value("Launcher/game_dirs").toStringList();
-	if (dirs.isEmpty()) dirs = s.value("Launcher/game_dir").toStringList();
+QJsonArray OwnerPreferences::SettingsFields(const Configuration& c) {
 	auto fields = PreferenceSchema::Fields(c);
     const auto gpus = GpuNames();
     const auto microphones = MicrophoneNames();
@@ -111,6 +107,18 @@ QJsonObject OwnerPreferences::Read(QSettings& s) {
                 options.append(QJsonObject {{"value", QString::number(n)}, {"label", PreferenceSchema::CONSOLE_LANGUAGE_NAMES[n]}});
             field["options"] = options;
         }
+		*i = field;
+	}
+	return fields;
+}
+QJsonObject OwnerPreferences::Read(QSettings& s) {
+	Configuration c;
+	Load(s, c);
+	auto dirs = s.value("Launcher/game_dirs").toStringList();
+	if (dirs.isEmpty()) dirs = s.value("Launcher/game_dir").toStringList();
+	auto fields = SettingsFields(c);
+    for (auto i = fields.begin(); i != fields.end(); ++i) {
+        auto field = i->toObject();
 		// The owner write API keeps the stored enum spelling.
 		if (field["key"] == "screen_resolution") {
 			QJsonArray choices;
