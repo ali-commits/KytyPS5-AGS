@@ -15,9 +15,9 @@ inline bool Valid(const QJsonValue& value) {
     for (const auto* key: {"width", "height", "fps"}) {
         const auto number = target[key].toDouble(-1);
         const bool fps = QString::fromLatin1(key) == "fps";
-        // fps matches the emulator vblank range Configuration::SetGameSettings enforces (30..360).
+        // Stream FPS intersects media support (1..240) and emulator vblank (30..360).
         if (!target[key].isDouble() || !std::isfinite(number) || number != std::floor(number) ||
-            number < (fps ? 30 : 64) || number > (fps ? 360 : 8192) || (!fps && static_cast<int>(number) % 2 != 0)) return false;
+            number < (fps ? 30 : 64) || number > (fps ? 240 : 8192) || (!fps && static_cast<int>(number) % 2 != 0)) return false;
     }
     return true;
 }
