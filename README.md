@@ -235,12 +235,12 @@ cmake -S . -B _Build/linux-no-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build _Build/linux-no-qt --target kyty_emulator kyty_tests --parallel
 ```
 
-Core tests (the subset CI runs):
+Core tests (the Linux CI subset from `.github/workflows/build.yml`):
 
 ```bash
 cmake --build _Build/linux --target kyty_tests
 ctest --test-dir _Build/linux --output-on-failure \
-  -R '^(lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|virtual_memory_allocation|device_compat)$'
+  -R '^(audio_out2_port|pad_haptics|controller_settings|host_input|ime_dialog|lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
 ```
 
 As on Windows, the MSVC compiler is not used; Clang is required. `cl.exe` is rejected at configure
