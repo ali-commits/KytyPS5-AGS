@@ -1,0 +1,28 @@
+# AGS extension manifest (protocol 1). Rendered by CMake from ags-extension.toml.in; edit the .in file.
+# The copy at the repository root is what AGS reads at the tagged commit (ctest -R ags_manifest checks it).
+id = "kytyps5"
+name = "KytyPS5"
+version = "0.4.0"
+license = "GPL-2.0"
+protocol = 1
+adapter = "kyty-ags-adapter"
+
+[assets]
+icon = "assets/ags/icon.png"
+logo = "assets/ags/logo.png"
+badge = "assets/ags/badge.svg"
+
+[install.release]
+asset = "kytyps5-ags-{version}-linux-{arch}.tar.zst"
+sha256_asset = "{asset}.sha256"
+
+[install.source]
+depends = ["cmake", "ninja", "clang", "clang++", "ld.lld", "glslangValidator", "git", "pkg-config", "qmake6"]
+submodules = true
+build = [
+  ["cmake", "-S", ".", "-B", "_Build/ags", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DKYTY_EMULATOR_IPO=ON", "-DKYTY_BUILD_ORIGIN=Fork", "-DKYTY_BUILD_REPOSITORY=ali-commits/KytyPS5-AGS", "-DBUILD_TESTING=OFF", "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"],
+  ["cmake", "--build", "_Build/ags", "--target", "launcher", "kyty_emulator", "kyty-ags-adapter", "--parallel"],
+]
+stage = [
+  ["cmake", "--install", "_Build/ags", "--prefix", "{stage}"],
+]

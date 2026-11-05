@@ -1,0 +1,127 @@
+name: AGS extension release
+
+# Pushing a tag vX.Y.Z builds the Linux package for the AGS extension (ags-extension.toml) and attaches
+# kytyps5-ags-<version>-linux-<arch>.tar.zst plus its .sha256 to the GitHub release for that tag.
+# The tag must equal v<project version> (CMake project VERSION, rendered into ags-extension.toml).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'ali-commits/KytyPS5-AGS'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang glslang-tools libasound2-dev libdbus-1-dev libgl1-mesa-dev libpulse-dev libudev-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxkbcommon-dev \
+            libxrandr-dev libxss-dev libxtst-dev lld ninja-build pkg-config wayland-protocols zstd
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Configure Release
+        shell: bash
+        run: |
+          cmake -S . -B _Build/linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKYTY_EMULATOR_IPO=ON \
+            -DKYTY_BUILD_ORIGIN=Fork \
+            -DKYTY_BUILD_REPOSITORY="$GITHUB_REPOSITORY" \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+
+      - name: Check the tag and the committed manifest
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' _Build/linux/ags-extension.toml | head -n 1)
+          if [ -z "$version" ] || [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match project version v$version"
+            exit 1
+          fi
+          cmp ags-extension.toml _Build/linux/ags-extension.toml ||
+            { echo "::error::ags-extension.toml is stale; copy _Build/linux/ags-extension.toml and commit it"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build _Build/linux --target launcher kyty_emulator kyty-ags-adapter kyty_ags_adapter_tests \
+            page_manager_tests memory_tracker_tests lru_cache_tests virtual_memory_allocation_tests \
+            resource_tracking_tests scalar_provenance_tests resource_materialization_tests \
+            shader_vertex_metadata_tests device_compat_tests --parallel -- -k 0 2>&1 | tee ags-build.log
+
+      - name: Show build errors
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f ags-build.log ]; then
+            grep -E 'error:|FAILED:|undefined reference|fatal' ags-build.log | sort -u | head -n 40 |
+              while IFS= read -r line; do echo "::error::${line//%/%25}"; done
+          fi
+
+      - name: Test
+        shell: bash
+        run: |
+          ctest --test-dir _Build/linux --output-on-failure \
+            -R '^(lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|virtual_memory_allocation|device_compat|kyty_ags_adapter|ags_manifest)$'
+
+      - name: Package
+        shell: bash
+        run: tools/package.sh _Build/linux ags-package
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ags-package
+          path: ags-package/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: ags-package
+          path: ags-package
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(ags-package/kytyps5-ags-*-linux-*.tar.zst ags-package/kytyps5-ags-*-linux-*.tar.zst.sha256)
+          [ "${#files[@]}" -eq 2 ] || { echo "::error::expected the package and its checksum, got ${#files[@]} files"; exit 1; }
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "KytyPS5 AGS ${GITHUB_REF_NAME#v}" \
+              --notes "AGS extension package for KytyPS5. Install from AGS with https://github.com/$GITHUB_REPOSITORY"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

@@ -2784,6 +2784,26 @@ if(KYTY_BUILD_LAUNCHER)
 	# The AGS extension adapter shares kyty_launcher_core; it speaks over POSIX stdin/stdout.
 	if(UNIX)
 		add_subdirectory("${KYTY_SOURCE_DIR}/agsAdapter" "${CMAKE_CURRENT_BINARY_DIR}/agsAdapter")
+
+		# AGS extension package: the manifest (rendered with PROJECT_VERSION), its assets, the licenses and
+		# libFont's fallback fonts. AGS reads ags-extension.toml from the repository at the tagged commit, so
+		# a rendered copy is committed at the root; the ags_manifest test fails when it is stale.
+		configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml.in"
+			"${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml")
+		install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml" DESTINATION .)
+		install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/ags" DESTINATION assets)
+		install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION .)
+		install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/LICENSES" DESTINATION .)
+		if(LINUX)
+			file(GLOB kyty_ags_fonts "${KYTY_THIRD_PARTY_DIR}/tracy/profiler/src/font/Roboto-*.ttf")
+			install(FILES ${kyty_ags_fonts} DESTINATION 3rdparty/tracy/profiler/src/font)
+			install(FILES "${KYTY_THIRD_PARTY_DIR}/SPIRV-Tools/LICENSE"
+				DESTINATION 3rdparty/tracy/profiler/src/font RENAME LICENSE-Apache-2.0.txt)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ags_manifest COMMAND ${CMAKE_COMMAND} -E compare_files
+				"${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml" "${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml")
+		endif()
 	endif()
 endif()
 if(KYTY_CLANG_CL)

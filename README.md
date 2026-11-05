@@ -396,6 +396,26 @@ SDL_VULKAN_LIBRARY=/path/to/libMoltenVK.dylib ./kyty_emulator --game "/games/Exa
 Run `kyty_emulator --help` to see the available graphics, logging, validation, profiling, and
 debugging options.
 
+## Install as an AGS extension
+
+This repository is an AGS emulator extension (`ags-extension.toml`,
+adapter `kyty-ags-adapter`, Linux x86_64 and aarch64). In AGS open **Settings**, **Emulators**,
+**Add emulator**, paste `https://github.com/ali-commits/KytyPS5-AGS` and confirm. AGS installs the release
+package for the latest release and falls back to a source build when the release has none.
+
+To cut a release:
+
+1. Bump `project(... VERSION x.y.z)` in `CMakeLists.txt`.
+2. Configure, then copy the rendered manifest to the repository root and commit it:
+   `cp _Build/linux/ags-extension.toml ags-extension.toml`. `ctest --test-dir _Build/linux -R ags_manifest`
+   fails while the committed copy differs from `ags-extension.toml.in`.
+3. Tag the commit `vx.y.z` (the tag must equal `v` plus the project version) and push the tag. The
+   `ags-release.yml` workflow builds, tests and packages the release and uploads
+   `kytyps5-ags-<version>-linux-<arch>.tar.zst` and its `.sha256`.
+
+To build the package locally: `tools/package.sh _Build/linux out` after building `launcher`,
+`kyty_emulator` and `kyty-ags-adapter`.
+
 ### AI Use
 
 AI tools may be used for research, reverse engineering, and development assistance. Contributors
