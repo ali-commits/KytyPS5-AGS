@@ -15,8 +15,11 @@ public:
 	[[nodiscard]] QString RuntimeRoot(QString* error) const;
 	// The value as stored (or the default), without validation, for settings.get.
 	[[nodiscard]] QString StoredRuntimeRoot() const;
-	[[nodiscard]] bool    SetRuntimeRoot(const QString& path, QString* error);
-	[[nodiscard]] QString DefaultRuntimeRoot() const;
+	// A runtime root is valid when empty (the default) or absolute, an existing folder and free
+	// of symbolic links (GameServices::SafeRuntime). `error` is set otherwise.
+	[[nodiscard]] static bool CheckRuntimeRoot(const QString& path, QString* error);
+	[[nodiscard]] bool        SetRuntimeRoot(const QString& path, QString* error);
+	[[nodiscard]] QString     DefaultRuntimeRoot() const;
 
 	// <runtime_root>/Kyty.ini for a validated runtime root.
 	[[nodiscard]] static QString IniPath(const QString& runtime_root);

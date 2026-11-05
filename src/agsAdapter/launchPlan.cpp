@@ -116,6 +116,19 @@ int NearestCaptureFps(int fps) {
 	return best;
 }
 
+bool IsReservedEnvName(const QString& name) {
+	static const QStringList reserved = {QStringLiteral("DISPLAY"),
+	                                     QStringLiteral("WAYLAND_DISPLAY"),
+	                                     QStringLiteral("WAYLAND_SOCKET"),
+	                                     QStringLiteral("XDG_RUNTIME_DIR"),
+	                                     QStringLiteral("GAMESCOPE_EIS_SOCKET"),
+	                                     QStringLiteral("PULSE_SERVER"),
+	                                     QStringLiteral("PULSE_SINK"),
+	                                     QStringLiteral("PIPEWIRE_REMOTE"),
+	                                     QStringLiteral("PIPEWIRE_RUNTIME_DIR")};
+	return name.startsWith(QLatin1String("AGS_")) || reserved.contains(name);
+}
+
 QString CutUtf8(const QString& text, int max_bytes) {
 	QString out;
 	for (const auto c: text.toUcs4()) {
@@ -219,7 +232,10 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 		env.insert(QStringLiteral("KYTY_STREAM_FPS"), QString::number(fps));
 	}
 	for (const auto& key: env.keys()) {
-		if (key.startsWith(QLatin1String("AGS_"))) env.remove(key);
+		if (!IsReservedEnvName(key)) continue;
+		fprintf(stderr, "kyty-ags-adapter: not passing reserved environment name %s\n",
+		        qPrintable(key));
+		env.remove(key);
 	}
 
 	QJsonArray argv {exe};

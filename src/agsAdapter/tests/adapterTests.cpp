@@ -1,7 +1,14 @@
 // Drives the built kyty-ags-adapter over protocol 1 framing against a fixture runtime root and
 // game folder. Plain checks, no framework.
+#include "actions.h"
+#include "configuration.h"
 #include "framing.h"
+#include "gameLibrary.h"
+#include "launchPlan.h"
+#include "library.h"
+#include "trophyItems.h"
 
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -16,8 +23,10 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QThread>
 
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +53,25 @@ void WriteFile(const QString& path, const QByteArray& data) {
 	QFile file(path);
 	CHECK(file.open(QIODevice::WriteOnly));
 	CHECK(file.write(data) == data.size());
+}
+
+// Noise does not compress: a PNG well over 2 MiB that must be re-encoded.
+void WriteNoisePng(const QString& path) {
+	QImage pic(1200, 1200, QImage::Format_RGB32);
+	for (int y = 0; y < pic.height(); ++y) {
+		auto* line = reinterpret_cast<quint32*>(pic.scanLine(y));
+		for (int x = 0; x < pic.width(); ++x)
+			line[x] = QRandomGenerator::global()->generate() | 0xff000000u;
+	}
+	CHECK(QDir().mkpath(QFileInfo(path).absolutePath()));
+	CHECK(pic.save(path, "PNG"));
+	CHECK(QFileInfo(path).size() > (2 << 20));
+}
+
+QByteArray ReadAll(const QString& path) {
+	QFile file(path);
+	CHECK(file.open(QIODevice::ReadOnly));
+	return file.readAll();
 }
 
 QStringList Strings(const QJsonValue& v) {
@@ -123,6 +151,23 @@ public:
 		}
 	}
 
+	// The request written in pieces with pauses, so the adapter sees partial reads.
+	QJsonObject CallInPieces(const QString& method, const QJsonObject& params,
+	                         const QList<int>& cuts) {
+		const int  id    = ++m_id;
+		const auto frame = AgsFrame::Encode({{"id", id}, {"method", method}, {"params", params}});
+		qsizetype  from  = 0;
+		for (const int cut: cuts) {
+			WriteRaw(frame.mid(from, cut - from));
+			QThread::msleep(150);
+			from = cut;
+		}
+		WriteRaw(frame.mid(from));
+		const auto message = Read(30000);
+		CHECK(message[QStringLiteral("id")].toInt() == id);
+		return message;
+	}
+
 	QJsonObject Result(const QString& method, const QJsonObject& params = {}) {
 		const auto reply = Call(method, params);
 		if (reply.contains(QStringLiteral("error"))) {
@@ -182,15 +227,7 @@ struct Fixture {
 		QImage icon(64, 64, QImage::Format_RGB32);
 		icon.fill(Qt::blue);
 		CHECK(icon.save(QDir(game).filePath("sce_sys/icon0.png"), "PNG"));
-		// Noise does not compress: a PNG well over 2 MiB that must be re-encoded.
-		QImage pic(1200, 1200, QImage::Format_RGB32);
-		for (int y = 0; y < pic.height(); ++y) {
-			auto* line = reinterpret_cast<quint32*>(pic.scanLine(y));
-			for (int x = 0; x < pic.width(); ++x)
-				line[x] = QRandomGenerator::global()->generate() | 0xff000000u;
-		}
-		CHECK(pic.save(QDir(game).filePath("sce_sys/pic0.png"), "PNG"));
-		CHECK(QFileInfo(QDir(game).filePath("sce_sys/pic0.png")).size() > (2 << 20));
+		WriteNoisePng(QDir(game).filePath("sce_sys/pic0.png"));
 
 		QSettings ini(QDir(runtime).filePath("Kyty.ini"), QSettings::IniFormat);
 		ini.setValue("Launcher/game_dirs", QStringList {games});
@@ -488,6 +525,346 @@ void TestOversized(const Fixture& f) {
 	EXPECT(s.Process().readAllStandardOutput().isEmpty());
 }
 
+// Reads Kyty.ini entries the way the launcher does, to see what survived a write.
+QStringList GamePaths(const QString& ini_path) {
+	QSettings   ini(ini_path, QSettings::IniFormat);
+	QStringList paths;
+	const int   n = ini.beginReadArray("GameConfigurations");
+	for (int i = 0; i < n; ++i) {
+		ini.setArrayIndex(i);
+		paths.append(ini.value("game_path").toString());
+	}
+	ini.endArray();
+	return paths;
+}
+
+// I1: the launcher saved per-game settings for another game after the adapter loaded Kyty.ini; a
+// per-game settings.set must keep them.
+void TestStaleCache(Session& s, const Fixture& f, const QString& id) {
+	(void)s.Result("library.list"); // the adapter's cache is now loaded
+	const auto ini_path = QDir(f.runtime).filePath("Kyty.ini");
+	{
+		QSettings ini(ini_path, QSettings::IniFormat);
+		const int n = ini.beginReadArray("GameConfigurations");
+		ini.endArray();
+		ini.beginWriteArray("GameConfigurations", n + 1);
+		ini.setArrayIndex(n);
+		ini.setValue("game_path", "/launcher/saved/Other Game");
+		ini.setValue("name", "Other Game");
+		ini.setValue("basedir", "/launcher/saved/Other Game");
+		ini.setValue("custom_settings", "true");
+		ini.endArray();
+		ini.sync();
+		CHECK(ini.status() == QSettings::NoError);
+	}
+	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
+	// Straight away, before the file watcher's debounce could reload the cache.
+	(void)s.Result(
+	    "settings.set",
+	    {{"scope", "game"}, {"game", id}, {"values", QJsonObject {{"support_zmask", false}}}});
+	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
+	EXPECT(GamePaths(ini_path).contains(f.game));
+	// A global set rewrites no per-game data, and keeps both.
+	(void)s.Result("settings.set",
+	               {{"scope", "global"}, {"values", QJsonObject {{"trophy_enabled", true}}}});
+	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
+}
+
+// Kyty.ini that QSettings cannot parse: every settings.set is refused and the file is untouched.
+void TestMalformedIni(const Fixture& f) {
+	const QDir root(f.dir.path());
+	const auto data    = root.filePath("data-malformed");
+	const auto runtime = root.filePath("runtime-malformed");
+	CHECK(QDir().mkpath(data) && QDir().mkpath(runtime));
+	WriteFile(QDir(data).filePath("adapter.json"),
+	          QJsonDocument(QJsonObject {{"runtime_root", runtime}}).toJson());
+	const auto       ini_path = QDir(runtime).filePath("Kyty.ini");
+	const QByteArray bad = "this line has no equals sign\n[Launcher]\ngame_dirs=\"unterminated\n";
+	WriteFile(ini_path, bad);
+	{
+		QSettings probe(ini_path, QSettings::IniFormat);
+		(void)probe.allKeys();
+		CHECK(probe.status() != QSettings::NoError); // the fixture really is malformed for Qt
+	}
+	Session    s(f.adapter, data, f.home);
+	const auto global = s.Call(
+	    "settings.set", {{"scope", "global"}, {"values", QJsonObject {{"trophy_enabled", false}}}});
+	EXPECT(global["error"]["code"].toString() == "failed");
+	EXPECT(global["error"]["message"].toString() == "Kyty.ini could not be read; not saving");
+	const auto game = s.Call(
+	    "settings.set",
+	    {{"scope", "game"}, {"game", "0123"}, {"values", QJsonObject {{"support_zmask", true}}}});
+	EXPECT(game["error"]["code"].toString() == "failed");
+	EXPECT(game["error"]["message"].toString() == "Kyty.ini could not be read; not saving");
+	const auto runtime_only = s.Call(
+	    "settings.set", {{"scope", "global"}, {"values", QJsonObject {{"runtime_root", runtime}}}});
+	EXPECT(runtime_only["error"]["code"].toString() == "failed");
+	EXPECT(ReadAll(ini_path) == bad); // byte for byte
+	QStringList names;
+	for (const auto& e: QDir(runtime).entryList(QDir::Files | QDir::Hidden))
+		names.append(e);
+	EXPECT(names == QStringList({"Kyty.ini"})); // no temporary or backup file either
+}
+
+// M3: a request is validated whole before anything is written; a runtime_root change is answered
+// from the new root.
+void TestSettingsAtomic(Session& s, const Fixture& f) {
+	const auto before     = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+	const auto ini_before = ReadAll(QDir(f.runtime).filePath("Kyty.ini"));
+	const QDir root(f.dir.path());
+	const auto file = root.filePath("not-a-folder");
+	WriteFile(file, "x");
+	const auto link = root.filePath("link-to-runtime");
+	CHECK(QFile::link(f.runtime, link));
+	const QJsonObject good {{"audio_master_volume", 77}};
+	for (const auto& bad: {QString("relative/path"), root.filePath("missing"), file, link}) {
+		auto values            = good;
+		values["runtime_root"] = bad;
+		EXPECT(s.ErrorCode("settings.set", {{"scope", "global"}, {"values", values}}) ==
+		       "invalid-params");
+		EXPECT(ReadAll(QDir(f.runtime).filePath("Kyty.ini")) == ini_before);
+	}
+	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"].toObject() == before);
+
+	const auto other = root.filePath("runtime-other");
+	CHECK(QDir().mkpath(other));
+	{
+		QSettings ini(QDir(other).filePath("Kyty.ini"), QSettings::IniFormat);
+		ini.setValue("GlobalConfiguration/audio_master_volume", 33);
+		ini.sync();
+	}
+	auto values =
+	    s.Result("settings.set",
+		         {{"scope", "global"}, {"values", QJsonObject {{"runtime_root", other}}}})["values"]
+	        .toObject();
+	EXPECT(values["runtime_root"].toString() == other);
+	EXPECT(values["audio_master_volume"].toInt() == 33); // read from the new root's Kyty.ini
+	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"]
+	           .toObject()["audio_master_volume"]
+	           .toInt() == 33);
+	values =
+	    s.Result("settings.set", {{"scope", "global"},
+		                          {"values", QJsonObject {{"runtime_root", f.runtime}}}})["values"]
+	        .toObject();
+	EXPECT(values["runtime_root"].toString() == f.runtime);
+	EXPECT(values["audio_master_volume"].toInt() == before["audio_master_volume"].toInt());
+}
+
+// M8: framing edge cases.
+void TestFraming(const Fixture& f) {
+	{
+		Session s(f.adapter, f.data, f.home);
+		// A frame written in several pieces: inside the length, then inside the JSON.
+		auto reply = s.CallInPieces("hello", {{"protocol", 1}}, {2, 7, 20});
+		EXPECT(reply["result"].toObject()["protocol"].toInt() == 1);
+		// Two requests in one write are both answered, in order.
+		const auto two = AgsFrame::Encode({{"id", 101}, {"method", "launch.ended"}}) +
+		                 AgsFrame::Encode({{"id", 102}, {"method", "no.such"}});
+		s.WriteRaw(two);
+		const auto first  = s.Read(10000);
+		const auto second = s.Read(10000);
+		EXPECT(first["id"].toInt() == 101 && first.contains("result"));
+		EXPECT(second["id"].toInt() == 102 &&
+		       second["error"]["code"].toString() == "unknown-method");
+		// An id that is not an integer is answered with invalid-params, echoing the id.
+		for (const QJsonValue& id:
+		     {QJsonValue("abc"), QJsonValue(1.5), QJsonValue(QJsonValue::Null)}) {
+			s.WriteRaw(AgsFrame::Encode({{"id", id}, {"method", "hello"}}));
+			const auto bad = s.Read(10000);
+			EXPECT(bad.contains("id") && QJsonValue(bad["id"]) == id);
+			EXPECT(bad["error"]["code"].toString() == "invalid-params");
+		}
+		// A message without id is a notification: no reply, and the adapter carries on.
+		s.WriteRaw(AgsFrame::Encode({{"method", "hello"}}));
+		EXPECT(s.Result("hello", {{"protocol", 1}})["protocol"].toInt() == 1);
+		// params that is not an object.
+		s.WriteRaw(AgsFrame::Encode({{"id", 7}, {"method", "hello"}, {"params", 5}}));
+		const auto params = s.Read(10000);
+		EXPECT(params["id"].toInt() == 7 && params["error"]["code"].toString() == "invalid-params");
+	}
+	{
+		// A frame that is not JSON cannot be answered: the adapter stops with exit code 2 and
+		// writes nothing to stdout.
+		Session          s(f.adapter, f.data, f.home);
+		const QByteArray junk = "{this is not json";
+		QByteArray       frame(4, '\0');
+		frame[3] = static_cast<char>(junk.size());
+		s.WriteRaw(frame + junk);
+		EXPECT(s.Process().waitForFinished(10000));
+		EXPECT(s.Process().exitCode() == 2);
+		EXPECT(s.Process().readAllStandardOutput().isEmpty());
+	}
+	{
+		// Valid JSON that is not an object: same.
+		Session          s(f.adapter, f.data, f.home);
+		const QByteArray junk = "[1,2,3]";
+		QByteArray       frame(4, '\0');
+		frame[3] = static_cast<char>(junk.size());
+		s.WriteRaw(frame + junk);
+		EXPECT(s.Process().waitForFinished(10000));
+		EXPECT(s.Process().exitCode() == 2);
+	}
+}
+
+// In-process checks of the helpers behind M1, M2, M4, M5, M6, M7 and M9.
+void TestUnits(const Fixture& f) {
+	// M9: control characters and code point cuts.
+	EXPECT(AdapterLibrary::DropControls(QString("a\x01") + "b" + QChar(0x7f) + QChar(0x85) +
+	                                    "c\n") == "abc");
+	EXPECT(AdapterLibrary::DropControls(QString::fromUtf8("PPSA\xF0\x9F\x98\x80\x01")) ==
+	       QString::fromUtf8("PPSA\xF0\x9F\x98\x80"));
+	EXPECT(AdapterLibrary::DropControls("\x01\x02").isEmpty());
+	const auto emoji = QString::fromUtf8("\xF0\x9F\x98\x80"); // one character, two UTF-16 units
+	EXPECT(emoji.size() == 2);
+	EXPECT(AdapterLibrary::CutChars("a" + emoji + "b", 2) == "a" + emoji);
+	EXPECT(AdapterLibrary::CutChars("a" + emoji + "b", 1) == "a");
+	const auto cut = AdapterLibrary::CutChars(emoji.repeated(300), 200);
+	EXPECT(cut.toUcs4().size() == 200 && cut.size() == 400);
+	for (const auto c: cut.toUcs4())
+		EXPECT(c == 0x1F600);
+	EXPECT(AdapterLibrary::CutChars("short", 200) == "short");
+
+	// M7: names AGS reserves.
+	for (const auto* name:
+	     {"AGS_X", "AGS_SESSION_RUNTIME", "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET",
+	      "XDG_RUNTIME_DIR", "GAMESCOPE_EIS_SOCKET", "PULSE_SERVER", "PULSE_SINK",
+	      "PIPEWIRE_REMOTE", "PIPEWIRE_RUNTIME_DIR"}) {
+		EXPECT(AdapterLaunch::IsReservedEnvName(name));
+	}
+	for (const auto* name:
+	     {"KYTY_STREAM_ONLY", "TRACY_NO_EXIT", "PATH", "XDG_DATA_HOME", "display"}) {
+		EXPECT(!AdapterLaunch::IsReservedEnvName(name));
+	}
+
+	// M1: only the file for the installed version.
+	QList<Cheats::RemoteFile> files;
+	for (const auto* version: {"01.000", "01.001"}) {
+		Cheats::RemoteFile file;
+		file.name    = QString("PPSA01234_%1.json").arg(version);
+		file.title   = "PPSA01234";
+		file.version = version;
+		file.format  = "json";
+		files.append(file);
+	}
+	QString error;
+	auto    pick = AdapterActions::PickCheatFile(files, "01.001", &error);
+	EXPECT(pick && pick->name == "PPSA01234_01.001.json" && error.isEmpty());
+	pick = AdapterActions::PickCheatFile(files, "01.002", &error);
+	EXPECT(!pick && error == "No cheat file for version 01.002.");
+	pick = AdapterActions::PickCheatFile({}, "01.000", &error);
+	EXPECT(!pick && error == "No cheat file for version 01.000.");
+
+	// M2: a finished background result is served once, within 60 s.
+	{
+		FetchResultCache cache;
+		cache.Store({"g1", {}, "done"}, 1000);
+		auto got = cache.Take("g1", 1000 + FetchResultCache::MaxAgeMs);
+		EXPECT(got && got->message == "done");
+		EXPECT(!cache.Take("g1", 1000 + 1)); // served once
+		cache.Store({"g1", "failed", {}}, 1000);
+		EXPECT(!cache.Take("g1", 1000 + FetchResultCache::MaxAgeMs + 1)); // too old: discarded
+		EXPECT(!cache.Take("g1", 1000 + 2));                              // and gone
+		cache.Store({"g1", {}, "done"}, 1000);
+		EXPECT(!cache.Take("g2", 1001)); // another game's result is never returned
+		EXPECT(!cache.Take("g1", 1002));
+	}
+
+	// M5, M6: items come from one loaded package, ids are `<label>-<id>`.
+	{
+		QImage image(4, 4, QImage::Format_RGB32);
+		image.fill(Qt::red);
+		QByteArray png;
+		QBuffer    buffer(&png);
+		CHECK(buffer.open(QIODevice::WriteOnly) && image.save(&buffer, "PNG"));
+		const auto bytes = [&](const QByteArray& b) {
+			std::vector<std::byte> out;
+			for (const char c: b)
+				out.push_back(static_cast<std::byte>(c));
+			return out;
+		};
+		Common::Trophies::Package package;
+		package.trophies[1].id          = 1;
+		package.trophies[1].name        = "First";
+		package.trophies[1].grade       = 2;
+		package.trophies[1].icon_png    = bytes(png);
+		package.trophies[2].id          = 2; // no icon
+		package.trophies[2].name        = "Plain";
+		package.trophies[2].description = "No picture";
+		package.trophies[3].id          = 3;
+		package.trophies[3].name        = "Secret one";
+		package.trophies[3].description = "Do not tell";
+		package.trophies[3].hidden      = true;
+		package.trophies[3].icon_png    = bytes(png);
+		package.trophies[4].id          = 4;
+		package.trophies[4].name        = "Secret opened";
+		package.trophies[4].hidden      = true;
+		package.trophies[4].icon_png    = bytes(png);
+		Common::Trophies::UnlockData unlocks;
+		unlocks.unlocked.insert(1);
+		unlocks.unlocked.insert(4);
+		const auto icons  = QDir(f.dir.path()).filePath("trophy-icons");
+		const auto items0 = AdapterTrophies::Items(package, unlocks, 0, icons);
+		const auto items1 = AdapterTrophies::Items(package, unlocks, 1, icons);
+		EXPECT(items0.size() == 4 && items1.size() == 4);
+		QStringList ids;
+		for (const auto& v: items0)
+			ids.append(v.toObject()["id"].toString());
+		for (const auto& v: items1)
+			ids.append(v.toObject()["id"].toString());
+		EXPECT(ids == QStringList({"0-1", "0-2", "0-3", "0-4", "1-1", "1-2", "1-3", "1-4"}));
+		EXPECT(QSet<QString>(ids.begin(), ids.end()).size() == ids.size());
+		const auto first = items0.at(0).toObject();
+		EXPECT(first["label"] == "First" && first["unlocked"].toBool());
+		EXPECT(first["description"].toString().startsWith("Gold"));
+		EXPECT(first["icon"].toString() == QDir(icons).filePath("0-1.png"));
+		EXPECT(ReadAll(first["icon"].toString()) == png);
+		const auto plain = items0.at(1).toObject();
+		EXPECT(plain["id"] == "0-2" && !plain.contains("icon"));
+		EXPECT(plain["description"].toString().endsWith("No picture"));
+		const auto secret = items0.at(2).toObject(); // hidden and locked: nothing revealed
+		EXPECT(secret["label"] == "Hidden trophy" && !secret.contains("icon"));
+		EXPECT(!secret["description"].toString().contains("tell"));
+		EXPECT(!QFileInfo::exists(QDir(icons).filePath("0-3.png")));
+		const auto opened = items0.at(3).toObject(); // hidden but unlocked: shown
+		EXPECT(opened["label"] == "Secret opened" && opened.contains("icon"));
+	}
+
+	// M4: a game without art is remembered; art that changes is written again.
+	{
+		const QDir root(f.dir.path());
+		const auto basedir = root.filePath("art-game");
+		const auto data    = root.filePath("art-data");
+		const auto pic0    = QDir(basedir).filePath("sce_sys/pic0.png");
+		CHECK(QDir().mkpath(data));
+		WriteFile(pic0, QByteArray(3 << 20, '\x5a')); // over 2 MiB and not an image
+		GameEntry game;
+		game.id            = "feedface";
+		game.info          = std::make_shared<Configuration>();
+		game.info->basedir = basedir;
+		AdapterLibrary::ArtCache cache;
+		EXPECT(AdapterLibrary::ArtPath(game, "cover", data, cache).isEmpty());
+		EXPECT(cache.Missing("feedface", "cover") && !cache.Missing("feedface", "icon"));
+		WriteNoisePng(pic0);
+		EXPECT(AdapterLibrary::ArtPath(game, "cover", data, cache).isEmpty()); // remembered
+		AdapterLibrary::ArtCache fresh;
+		const auto               target = AdapterLibrary::ArtPath(game, "cover", data, fresh);
+		EXPECT(target == QDir(data).filePath("art/feedface/cover.png"));
+		EXPECT(QFileInfo(target).size() > 0 && QFileInfo(target).size() <= (2 << 20));
+		// Up to date: left alone.
+		const auto written = QFileInfo(target).lastModified();
+		QThread::msleep(1100);
+		EXPECT(AdapterLibrary::ArtPath(game, "cover", data, fresh) == target);
+		EXPECT(QFileInfo(target).lastModified() == written);
+		// The source is newer than the written art: regenerated.
+		QFile source(pic0);
+		CHECK(source.open(QIODevice::ReadWrite));
+		CHECK(source.setFileTime(written.addSecs(5), QFileDevice::FileModificationTime));
+		source.close();
+		EXPECT(AdapterLibrary::ArtPath(game, "cover", data, fresh) == target);
+		EXPECT(QFileInfo(target).lastModified() > written);
+	}
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -501,9 +878,14 @@ int main(int argc, char* argv[]) {
 		TestSettings(s, f, id);
 		TestLaunch(s, f, id);
 		TestActions(s, id);
+		TestStaleCache(s, f, id);
+		TestSettingsAtomic(s, f);
 		TestChangedAndEof(s, f);
 	}
 	TestOversized(f);
+	TestMalformedIni(f);
+	TestFraming(f);
+	TestUnits(f);
 	printf("kyty_ags_adapter: %d checks passed\n", g_checks);
 	return 0;
 }

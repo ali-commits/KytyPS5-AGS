@@ -20,6 +20,10 @@ namespace AdapterLaunch {
 // `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary.
 [[nodiscard]] QString CutUtf8(const QString& text, int max_bytes);
 
+// Env names AGS owns for the game's session (STANDARD.md section 5.4): the `AGS_` prefix and the
+// display, audio and runtime-dir names. A plan that sets one is rejected, so none is emitted.
+[[nodiscard]] bool IsReservedEnvName(const QString& name);
+
 [[nodiscard]] Reply Plan(const GameEntry& game, const QJsonObject& params,
                          const QString& runtime_root, const QString& adapter_dir);
 

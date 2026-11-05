@@ -156,14 +156,27 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		return Reply::Error(QStringLiteral("unknown-method"),
 		                    QStringLiteral("Unknown method %1.").arg(method));
 	}
-	if (method == QLatin1String("library.list")) m_library_dirty = true; // always a fresh scan
+	// library.list always scans afresh. settings.set starts from a fresh read of Kyty.ini too, so a
+	// stale cache can never overwrite what the launcher saved meanwhile.
+	if (method == QLatin1String("library.list") || method == QLatin1String("settings.set")) {
+		m_library_dirty = true;
+	}
 	Reply reply;
+	if (method == QLatin1String("settings.set")) {
+		// Writing would replace a Kyty.ini we cannot parse: refuse before anything is loaded.
+		QString    root_error;
+		const auto root = m_state.RuntimeRoot(&root_error);
+		if (!root.isEmpty() && !AdapterSettings::IniReadable(AdapterState::IniPath(root))) {
+			return Reply::Failed(QString::fromLatin1(AdapterSettings::INI_UNREADABLE));
+		}
+	}
 	if (!Ready(&reply)) return reply;
 	const auto       ini  = AdapterState::IniPath(m_runtime_root);
 	const GameEntry* game = nullptr;
 
 	if (method == QLatin1String("library.list")) {
-		return Reply::Success({{"games", AdapterLibrary::Games(*m_library, m_state.DataDir())}});
+		return Reply::Success(
+		    {{"games", AdapterLibrary::Games(*m_library, m_state.DataDir(), m_art_cache)}});
 	}
 	if (method == QLatin1String("settings.get") || method == QLatin1String("settings.set")) {
 		const auto scope = params[QStringLiteral("scope")].toString(QStringLiteral("global"));
@@ -181,6 +194,12 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		                                   params[QStringLiteral("values")].toObject());
 		// A global change (or a new runtime root) changes every game's merged values.
 		if (game == nullptr) m_library_dirty = true;
+		if (result.Ok() &&
+		    params[QStringLiteral("values")].toObject().contains(QStringLiteral("runtime_root"))) {
+			// Watch the new root's Kyty.ini and tell AGS that the library may differ.
+			Reply ignored;
+			if (Ready(&ignored)) m_notify(QJsonObject {{"method", "library.changed"}});
+		}
 		return result;
 	}
 	if (method == QLatin1String("actions.list")) {

@@ -7,8 +7,10 @@
 
 #include <QColor>
 #include <QDir>
+#include <QFileInfo>
 #include <QHash>
 #include <QSettings>
+#include <QTemporaryDir>
 
 #include <cmath>
 
@@ -395,6 +397,18 @@ bool ApplyPlayer(Configuration& info, const QJsonObject& player, QJsonObject* ap
 	return true;
 }
 
+bool IniReadable(const QString& ini) {
+	if (!QFileInfo::exists(ini)) return true; // QSettings creates it
+	// QSettings reports a parse error only the first time a file name is opened in a process, so
+	// parse a private copy under a new name every time.
+	const QTemporaryDir copy;
+	const auto          path = copy.filePath(QStringLiteral("check.ini"));
+	if (!copy.isValid() || !QFile::copy(ini, path)) return false;
+	QSettings s(path, QSettings::IniFormat);
+	(void)s.allKeys(); // loads the file
+	return s.status() == QSettings::NoError;
+}
+
 Reply Get(AdapterState& state, const QString& ini, const GameEntry* game) {
 	QJsonObject values;
 	if (game != nullptr) {
@@ -430,6 +444,9 @@ Reply Get(AdapterState& state, const QString& ini, const GameEntry* game) {
 
 Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const GameEntry* game,
           const QJsonObject& values) {
+	// Every key and value is validated before anything is written, so a request is applied
+	// whole or not at all. An unreadable Kyty.ini would be replaced by what we write: refuse.
+	if (!IniReadable(ini)) return Reply::Failed(QString::fromLatin1(INI_UNREADABLE));
 	QJsonObject settings;
 	QJsonObject globals;
 	QJsonObject patch;
@@ -469,6 +486,8 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 			return Reply::Invalid(QStringLiteral("%1 must be an absolute path.").arg(it.key()));
 		}
 		if (it.key() == QLatin1String("runtime_root")) {
+			QString error;
+			if (!AdapterState::CheckRuntimeRoot(text, &error)) return Reply::Invalid(error);
 			runtime_root     = text;
 			set_runtime_root = true;
 		} else if (it.key() == QLatin1String("addons_dir")) {
@@ -494,9 +513,6 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 	}
 	if (!settings.isEmpty()) patch.insert(QStringLiteral("settings"), settings);
 	if (!globals.isEmpty()) patch.insert(QStringLiteral("global"), globals);
-	if (set_runtime_root && !runtime_root.isEmpty() && !QDir::isAbsolutePath(runtime_root)) {
-		return Reply::Invalid(QStringLiteral("runtime_root must be an absolute path."));
-	}
 	if (!patch.isEmpty()) {
 		auto    s = GameLibraryFiles::OpenSettings(ini);
 		QString error;
@@ -505,11 +521,16 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 			                                                      : Reply::Invalid(error);
 		}
 	}
+	auto reply_ini = ini;
 	if (set_runtime_root) {
 		QString error;
-		if (!state.SetRuntimeRoot(runtime_root, &error)) return Reply::Invalid(error);
+		if (!state.SetRuntimeRoot(runtime_root, &error)) return Reply::Failed(error);
+		// The reply shows the new root's Kyty.ini.
+		const auto root = state.RuntimeRoot(&error);
+		if (root.isEmpty()) return Reply::Failed(error);
+		reply_ini = AdapterState::IniPath(root);
 	}
-	return Get(state, ini, nullptr);
+	return Get(state, reply_ini, nullptr);
 }
 
 } // namespace AdapterSettings

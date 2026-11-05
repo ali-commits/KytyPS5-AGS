@@ -5,6 +5,7 @@
 // library.changed.
 #include "actions.h"
 #include "adapterState.h"
+#include "library.h"
 #include "reply.h"
 
 #include <QFileSystemWatcher>
@@ -46,6 +47,7 @@ private:
 	QFileSystemWatcher                      m_watcher;
 	QTimer                                  m_debounce;
 	CheatFetcher                            m_fetcher;
+	AdapterLibrary::ArtCache                m_art_cache;
 };
 
 #endif

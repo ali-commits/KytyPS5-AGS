@@ -35,6 +35,12 @@ namespace AdapterSettings {
 [[nodiscard]] bool ApplyPlayer(Configuration& info, const QJsonObject& player, QJsonObject* applied,
                                QString* error);
 
+// The refusal text when Kyty.ini cannot be read; nothing is written then.
+inline constexpr char INI_UNREADABLE[] = "Kyty.ini could not be read; not saving";
+// True when Kyty.ini is missing or parses without error (QSettings status NoError after load);
+// checked on a fresh copy because QSettings reports a parse error once per file name.
+[[nodiscard]] bool IniReadable(const QString& ini);
+
 [[nodiscard]] Reply Get(AdapterState& state, const QString& ini, const GameEntry* game);
 [[nodiscard]] Reply Set(AdapterState& state, const QString& ini, GameLibrary& library,
                         const GameEntry* game, const QJsonObject& values);

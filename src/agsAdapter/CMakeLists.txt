@@ -9,16 +9,26 @@ set(ags_adapter_lib_sources
 	settings.cpp settings.h
 	library.cpp library.h
 	actions.cpp actions.h
+	fetchResult.h
+	trophyItems.cpp trophyItems.h
 	launchPlan.cpp launchPlan.h
 	adapter.cpp adapter.h)
 
-add_executable(kyty-ags-adapter main.cpp ${ags_adapter_lib_sources})
-set_target_properties(kyty-ags-adapter PROPERTIES
-	AUTOMOC ON
-	RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:kyty_emulator>")
-target_link_libraries(kyty-ags-adapter PRIVATE kyty_launcher_core)
+# Everything but main(): linked into the adapter and into the tests.
+add_library(kyty_ags_adapter_core STATIC ${ags_adapter_lib_sources})
+set_target_properties(kyty_ags_adapter_core PROPERTIES AUTOMOC ON)
+target_include_directories(kyty_ags_adapter_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(kyty_ags_adapter_core PUBLIC kyty_launcher_core)
 # hello.version, and (P2-6) the manifest version, come from the CMake project version.
-target_compile_definitions(kyty-ags-adapter PRIVATE KYTY_AGS_ADAPTER_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(kyty_ags_adapter_core PUBLIC KYTY_AGS_ADAPTER_VERSION="${PROJECT_VERSION}")
+if (CLANG AND NOT KYTY_CLANG_CL)
+	target_compile_options(kyty_ags_adapter_core PRIVATE -frtti)
+endif()
+
+add_executable(kyty-ags-adapter main.cpp)
+set_target_properties(kyty-ags-adapter PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:kyty_emulator>")
+target_link_libraries(kyty-ags-adapter PRIVATE kyty_ags_adapter_core)
 if (CLANG AND NOT KYTY_CLANG_CL)
 	target_compile_options(kyty-ags-adapter PRIVATE -frtti)
 endif()
@@ -35,11 +45,12 @@ install(FILES "${CMAKE_SOURCE_DIR}/tools/u59-preset.json" DESTINATION .)
 
 if(BUILD_TESTING)
 	find_package(Qt6 REQUIRED COMPONENTS Test)
-	add_executable(kyty_ags_adapter_tests tests/adapterTests.cpp framing.cpp framing.h)
-	target_include_directories(kyty_ags_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-	target_link_libraries(kyty_ags_adapter_tests PRIVATE Qt6::Core Qt6::Gui)
+	add_executable(kyty_ags_adapter_tests tests/adapterTests.cpp)
+	target_link_libraries(kyty_ags_adapter_tests PRIVATE kyty_ags_adapter_core Qt6::Core Qt6::Gui)
+	if (CLANG AND NOT KYTY_CLANG_CL)
+		target_compile_options(kyty_ags_adapter_tests PRIVATE -frtti)
+	endif()
 	target_compile_definitions(kyty_ags_adapter_tests PRIVATE
-		KYTY_AGS_ADAPTER_VERSION="${PROJECT_VERSION}"
 		KYTY_TEST_ADAPTER="$<TARGET_FILE:kyty-ags-adapter>"
 		KYTY_TEST_PRESET="${CMAKE_SOURCE_DIR}/tools/u59-preset.json")
 	add_dependencies(kyty_ags_adapter_tests kyty-ags-adapter)

@@ -1,5 +1,11 @@
 // kyty-ags-adapter: describes KytyPS5 to AGS over framed JSON on stdin and stdout
 // (docs/extensions/STANDARD.md in the AGS repository, protocol 1). It never starts the emulator.
+//
+// Framing rules: a frame larger than 1 MiB, or a frame that is not a JSON object, cannot be
+// answered (there is no id to echo) and means the stream is no longer trustworthy: the adapter
+// logs to stderr and exits with code 2, and AGS restarts it. A message without `id` is a
+// notification and gets no reply. An `id` that is not an integer is answered with
+// `invalid-params`, echoing the id as received. EOF exits 0.
 #include "adapter.h"
 #include "framing.h"
 
@@ -9,6 +15,7 @@
 #include <QSocketNotifier>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <fcntl.h>
 #include <unistd.h>
@@ -43,17 +50,30 @@ void Send(const QJsonObject& message) {
 	}
 }
 
-void Handle(Adapter& adapter, const QByteArray& payload) {
+bool IsInteger(const QJsonValue& id) {
+	const double n = id.toDouble();
+	return id.isDouble() && std::isfinite(n) && n == std::floor(n) &&
+	       std::fabs(n) < 9007199254740992.0;
+}
+
+// False when the stream must stop (the frame is not a JSON object).
+bool Handle(Adapter& adapter, const QByteArray& payload) {
 	QJsonParseError error {};
 	const auto      document = QJsonDocument::fromJson(payload, &error);
 	if (error.error != QJsonParseError::NoError || !document.isObject()) {
-		fprintf(stderr, "kyty-ags-adapter: ignoring a message that is not a JSON object\n");
-		return;
+		fprintf(stderr, "kyty-ags-adapter: message is not a JSON object, stopping\n");
+		return false;
 	}
 	const auto request = document.object();
-	const auto id      = request.value(QStringLiteral("id"));
-	if (!id.isDouble()) {
-		return; // a notification from AGS; protocol 1 defines none
+	if (!request.contains(QStringLiteral("id"))) {
+		return true; // a notification from AGS; protocol 1 defines none
+	}
+	const auto id = request.value(QStringLiteral("id"));
+	if (!IsInteger(id)) {
+		Send({{"id", id},
+		      {"error",
+		       QJsonObject {{"code", "invalid-params"}, {"message", "id must be an integer."}}}});
+		return true;
 	}
 	const auto params = request.value(QStringLiteral("params"));
 	Reply      reply;
@@ -70,6 +90,7 @@ void Handle(Adapter& adapter, const QByteArray& payload) {
 		Send({{"id", id},
 		      {"error", QJsonObject {{"code", reply.code}, {"message", reply.message}}}});
 	}
+	return true;
 }
 
 } // namespace
@@ -115,7 +136,10 @@ int main(int argc, char* argv[]) {
 				QCoreApplication::exit(2);
 				return;
 			}
-			Handle(adapter, payload);
+			if (!Handle(adapter, payload)) {
+				QCoreApplication::exit(2);
+				return;
+			}
 		}
 		if (eof) {
 			QCoreApplication::exit(0);

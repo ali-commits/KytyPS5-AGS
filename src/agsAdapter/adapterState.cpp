@@ -57,14 +57,19 @@ QString AdapterState::RuntimeRoot(QString* error) const {
 	return path;
 }
 
-bool AdapterState::SetRuntimeRoot(const QString& path, QString* error) {
-	const auto clean = path.isEmpty() ? QString {} : QDir::cleanPath(path);
-	if (!clean.isEmpty() && !GameServices::SafeRuntime(clean)) {
+bool AdapterState::CheckRuntimeRoot(const QString& path, QString* error) {
+	if (!path.isEmpty() && !GameServices::SafeRuntime(QDir::cleanPath(path))) {
 		*error = QStringLiteral(
 		    "runtime_root must be an existing absolute folder without symbolic links.");
 		return false;
 	}
-	auto state = ReadState(m_data_dir);
+	return true;
+}
+
+bool AdapterState::SetRuntimeRoot(const QString& path, QString* error) {
+	if (!CheckRuntimeRoot(path, error)) return false;
+	const auto clean = path.isEmpty() ? QString {} : QDir::cleanPath(path);
+	auto       state = ReadState(m_data_dir);
 	if (clean.isEmpty() || clean == DefaultRuntimeRoot()) {
 		state.remove(QStringLiteral("runtime_root"));
 	} else {

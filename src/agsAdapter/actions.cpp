@@ -4,6 +4,7 @@
 #include "configuration.h"
 #include "gameLibrary.h"
 #include "gameServices.h"
+#include "trophyItems.h"
 
 #include <QDir>
 #include <QEventLoop>
@@ -19,18 +20,6 @@ namespace {
 
 QString CheatTitle(const Configuration& info) {
 	return info.title_id.trimmed().toUpper();
-}
-
-// Version strings such as "01.020" compared part by part as numbers.
-bool VersionLess(const QString& a, const QString& b) {
-	const auto pa = a.split(QLatin1Char('.'));
-	const auto pb = b.split(QLatin1Char('.'));
-	for (qsizetype i = 0; i < std::max(pa.size(), pb.size()); ++i) {
-		const auto x = i < pa.size() ? pa[i].toLongLong() : 0;
-		const auto y = i < pb.size() ? pb[i].toLongLong() : 0;
-		if (x != y) return x < y;
-	}
-	return false;
 }
 
 QJsonArray CheatItems(const QJsonObject& cheats) {
@@ -85,51 +74,12 @@ Reply CheatList(const GameEntry& game, const QJsonObject& params, const QString&
 	return Reply::Success(result);
 }
 
-QString GradeName(const QString& grade) {
-	return grade.isEmpty() ? grade : grade.left(1).toUpper() + grade.mid(1);
-}
-
 Reply Trophies(const GameEntry& game, const QString& runtime_root, const QString& data_dir) {
 	const auto&                     info = *game.info;
 	static const QRegularExpression safe(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
 	const auto folder = safe.match(info.title_id).hasMatch() ? info.title_id : game.id;
-	const QDir icons(QDir(data_dir).filePath(QStringLiteral("trophies/%1").arg(folder)));
-	const auto list = GameServices::Trophies(info, runtime_root);
-	QJsonArray items;
-	for (const auto& v: list[QStringLiteral("trophies")].toArray()) {
-		const auto t        = v.toObject();
-		const bool unlocked = t[QStringLiteral("unlocked")].toBool();
-		const bool hidden   = t[QStringLiteral("hidden")].toBool() && !unlocked;
-		const auto grade    = GradeName(t[QStringLiteral("grade")].toString());
-		const auto icon_ref = t[QStringLiteral("icon")].toString();
-		const auto id =
-		    icon_ref.isEmpty() ? QString::number(t[QStringLiteral("id")].toInt()) : icon_ref;
-		auto label =
-		    hidden ? QStringLiteral("Hidden trophy") : t[QStringLiteral("name")].toString();
-		if (label.isEmpty()) label = QStringLiteral("Trophy %1").arg(id);
-		auto description = grade;
-		if (!hidden && !t[QStringLiteral("detail")].toString().isEmpty()) {
-			description += QStringLiteral(". ") + t[QStringLiteral("detail")].toString();
-		}
-		QJsonObject item {{"id", id}, {"label", label}, {"unlocked", unlocked}};
-		if (!description.isEmpty()) item[QStringLiteral("description")] = description;
-		if (!icon_ref.isEmpty()) {
-			const auto parts = icon_ref.split(QLatin1Char('-'));
-			const auto path  = icons.filePath(icon_ref + QStringLiteral(".png"));
-			if (!QFileInfo(path).isFile() && parts.size() == 2) {
-				const auto png = GameServices::TrophyIcon(info, runtime_root, parts[0].toInt(),
-				                                          parts[1].toInt());
-				QSaveFile  file(path);
-				if (!png.png.isEmpty() && icons.mkpath(QStringLiteral(".")) &&
-				    file.open(QIODevice::WriteOnly) && file.write(png.png) == png.png.size()) {
-					(void)file.commit();
-				}
-			}
-			if (QFileInfo(path).isFile()) item[QStringLiteral("icon")] = path;
-		}
-		items.append(item);
-	}
-	return Reply::Success({{"items", items}});
+	return AdapterTrophies::Run(info, runtime_root,
+	                            QDir(data_dir).filePath(QStringLiteral("trophies/%1").arg(folder)));
 }
 
 Reply Info(const GameEntry& game) {
@@ -149,6 +99,7 @@ Reply Info(const GameEntry& game) {
 } // namespace
 
 CheatFetcher::CheatFetcher(QObject* parent): QObject(parent) {
+	m_clock.start();
 	connect(
 	    &m_repository, &Cheats::CheatRepository::CatalogLoaded, this,
 	    [this](const QList<Cheats::RemoteFile>& files, const QString& error) {
@@ -163,14 +114,13 @@ CheatFetcher::CheatFetcher(QObject* parent): QObject(parent) {
 				       {});
 			    return;
 		    }
-		    // The file for the installed version, else the newest.
-		    const auto version = m_info->gameVersion;
-		    auto       pick    = std::find_if(supported.begin(), supported.end(),
-			                                  [&](const auto& f) { return f.version == version; });
-		    if (pick == supported.end()) {
-			    pick = std::max_element(
-			        supported.begin(), supported.end(),
-			        [](const auto& a, const auto& b) { return VersionLess(a.version, b.version); });
+		    // Only the file for the installed version; nothing is downloaded otherwise.
+		    QString    pick_error;
+		    const auto pick =
+		        AdapterActions::PickCheatFile(supported, m_info->gameVersion, &pick_error);
+		    if (!pick) {
+			    Finish(pick_error, {});
+			    return;
 		    }
 		    m_message = QStringLiteral("Installed cheats %1 (%2).").arg(pick->version, pick->name);
 		    m_phase   = Phase::File;
@@ -190,51 +140,65 @@ CheatFetcher::CheatFetcher(QObject* parent): QObject(parent) {
 }
 
 void CheatFetcher::Finish(const QString& error, const QString& message) {
-	m_error   = error;
-	m_message = message;
-	m_phase   = Phase::Done;
+	m_phase = Phase::Idle;
+	m_results.Store({m_game, error, message}, m_clock.elapsed());
 }
 
 Reply CheatFetcher::Run(const GameEntry& game, const QString& cheats_root, int wait_ms) {
 	if (Cheats::PlanPath(cheats_root, CheatTitle(*game.info)).isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cheats are not available for this game."));
 	}
-	if (m_phase != Phase::Idle && m_phase != Phase::Done && m_game != game.id) {
+	if (m_phase != Phase::Idle && m_game != game.id) {
 		return Reply::Failed(
 		    QStringLiteral("Cheats for another game are downloading; try again in a moment."));
 	}
-	if (m_phase == Phase::Idle || (m_phase == Phase::Done && m_game != game.id)) {
+	const auto answer = [](const FetchOutcome& outcome) {
+		return outcome.error.isEmpty() ? Reply::Success({{"message", outcome.message}})
+		                               : Reply::Failed(outcome.error);
+	};
+	if (m_phase == Phase::Idle) {
+		// A result that finished after an earlier call gave up, if still fresh; older ones are
+		// discarded here.
+		if (const auto done = m_results.Take(game.id, m_clock.elapsed())) return answer(*done);
 		m_game        = game.id;
 		m_info        = game.info;
 		m_cheats_root = cheats_root;
-		m_error.clear();
 		m_message.clear();
 		m_phase = Phase::Catalog;
 		m_repository.Load(CheatTitle(*game.info));
 	}
-	if (m_phase != Phase::Done) {
+	if (m_phase != Phase::Idle) {
 		QEventLoop loop;
 		QTimer     timer;
 		timer.setSingleShot(true);
 		connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
 		QTimer poll;
 		connect(&poll, &QTimer::timeout, &loop, [&] {
-			if (m_phase == Phase::Done) loop.quit();
+			if (m_phase == Phase::Idle) loop.quit();
 		});
 		timer.start(wait_ms);
 		poll.start(25);
-		if (m_phase != Phase::Done) loop.exec();
+		if (m_phase != Phase::Idle) loop.exec();
 	}
-	if (m_phase != Phase::Done) {
+	if (m_phase != Phase::Idle) {
 		return Reply::Failed(
 		    QStringLiteral("Cheats are still downloading. Run Fetch cheats again in a moment."));
 	}
-	m_phase = Phase::Idle;
-	if (!m_error.isEmpty()) return Reply::Failed(m_error);
-	return Reply::Success({{"message", m_message}});
+	const auto done = m_results.Take(game.id, m_clock.elapsed());
+	return done ? answer(*done) : Reply::Failed(QStringLiteral("The cheat download was lost."));
 }
 
 namespace AdapterActions {
+
+std::optional<Cheats::RemoteFile> PickCheatFile(const QList<Cheats::RemoteFile>& supported,
+                                                const QString& version, QString* error) {
+	const auto pick = std::find_if(supported.begin(), supported.end(),
+	                               [&](const auto& f) { return f.version == version; });
+	if (pick != supported.end()) return *pick;
+	*error = QStringLiteral("No cheat file for version %1.")
+	             .arg(version.isEmpty() ? QStringLiteral("unknown") : version);
+	return std::nullopt;
+}
 
 Reply List(const GameEntry* game) {
 	if (game == nullptr) return Reply::Success({{"actions", QJsonArray {}}});

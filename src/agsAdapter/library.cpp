@@ -1,16 +1,20 @@
 #include "library.h"
 
+#include "configuration.h"
 #include "gameContent.h"
 #include "gameLibrary.h"
 #include "gameServices.h"
 
 #include <QBuffer>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QJsonObject>
 #include <QSaveFile>
+
+#include <algorithm>
 
 namespace AdapterLibrary {
 
@@ -36,9 +40,44 @@ QByteArray EncodePng(QImage image, int max_width) {
 	return {};
 }
 
+// When the art source last changed: the newest of the candidate files in a game folder, or the
+// archive file itself.
+QDateTime SourceTime(const Configuration& info, const QStringList& names) {
+	if (GameContent::IsArchive(info.basedir)) return QFileInfo(info.basedir).lastModified();
+	QDateTime newest;
+	for (const auto& name: names) {
+		if (const QFileInfo file(QDir(info.basedir).filePath(name)); file.exists()) {
+			newest = std::max(newest, file.lastModified());
+		}
+	}
+	return newest;
+}
+
 } // namespace
 
-QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_dir) {
+QString DropControls(const QString& text) {
+	QString out;
+	for (const auto c: text.toUcs4()) {
+		if (QChar::category(c) != QChar::Other_Control) out += QString::fromUcs4(&c, 1);
+	}
+	return out;
+}
+
+QString CutChars(const QString& text, int max_chars) {
+	QString out;
+	int     count = 0;
+	for (qsizetype i = 0; i < text.size() && count < max_chars; ++count) {
+		const auto length =
+		    text[i].isHighSurrogate() && i + 1 < text.size() && text[i + 1].isLowSurrogate() ? 2
+			                                                                                 : 1;
+		out += text.mid(i, length);
+		i += length;
+	}
+	return out;
+}
+
+QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_dir,
+                ArtCache& cache) {
 	const bool  icon = kind == QLatin1String("icon");
 	const auto& info = *game.info;
 	const auto  names =
@@ -50,16 +89,24 @@ QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_
 			if (IsPngFile(path)) return QFileInfo(path).absoluteFilePath();
 		}
 	}
+	if (cache.Missing(game.id, kind)) return {};
 	const auto target = QDir(data_dir).filePath(QStringLiteral("art/%1/%2.png").arg(game.id, kind));
-	if (QFileInfo(target).isFile()) return target; // written once
+	if (const QFileInfo done(target);
+	    done.isFile() && done.lastModified() >= SourceTime(info, names)) {
+		return target; // up to date: written after the source file last changed
+	}
 	// GameServices::GameArt reads the same files, also from archives (backgrounds as JPEG).
 	const auto art =
 	    GameServices::GameArt(info, icon ? QStringLiteral("icon") : QStringLiteral("background"));
-	if (art.data.isEmpty()) return {};
-	QImage image;
-	if (!image.loadFromData(art.data)) return {};
-	const auto png = EncodePng(image, icon ? 512 : GameServices::MAX_BACKGROUND_WIDTH);
-	if (png.isEmpty() || !QDir().mkpath(QFileInfo(target).absolutePath())) return {};
+	QImage     image;
+	const auto png = art.data.isEmpty() || !image.loadFromData(art.data)
+	                     ? QByteArray {}
+	                     : EncodePng(image, icon ? 512 : GameServices::MAX_BACKGROUND_WIDTH);
+	if (png.isEmpty()) {
+		cache.SetMissing(game.id, kind);
+		return {};
+	}
+	if (!QDir().mkpath(QFileInfo(target).absolutePath())) return {};
 	QSaveFile file(target);
 	if (!file.open(QIODevice::WriteOnly) || file.write(png) != png.size() || !file.commit()) {
 		return {};
@@ -67,22 +114,26 @@ QString ArtPath(const GameEntry& game, const QString& kind, const QString& data_
 	return target;
 }
 
-QJsonArray Games(const GameLibrary& library, const QString& data_dir) {
+QJsonArray Games(const GameLibrary& library, const QString& data_dir, ArtCache& cache) {
 	QJsonArray games;
 	for (const auto& game: library.Games()) {
 		const auto& info  = *game.info;
 		auto        title = info.name.trimmed();
 		if (title.isEmpty()) title = game.id.left(16);
-		QJsonObject entry {
-		    {"id", game.id}, {"title", title.left(200)}, {"platform", "ps5"}, {"installed", true}};
-		const auto title_id = info.title_id.trimmed();
-		if (!title_id.isEmpty() && title_id.size() <= 128) {
+		QJsonObject entry {{"id", game.id},
+		                   {"title", CutChars(title, 200)},
+		                   {"platform", "ps5"},
+		                   {"installed", true}};
+		const auto  title_id = DropControls(info.title_id).trimmed();
+		if (!title_id.isEmpty() && title_id.toUcs4().size() <= 128) {
 			entry["identity"] = QJsonObject {{"scheme", "ps5-title"}, {"value", title_id}};
 		}
-		if (const auto icon = ArtPath(game, QStringLiteral("icon"), data_dir); !icon.isEmpty()) {
+		if (const auto icon = ArtPath(game, QStringLiteral("icon"), data_dir, cache);
+		    !icon.isEmpty()) {
 			entry["icon"] = icon;
 		}
-		if (const auto cover = ArtPath(game, QStringLiteral("cover"), data_dir); !cover.isEmpty()) {
+		if (const auto cover = ArtPath(game, QStringLiteral("cover"), data_dir, cache);
+		    !cover.isEmpty()) {
 			entry["cover"] = cover;
 		}
 		games.append(entry);
