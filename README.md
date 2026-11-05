@@ -399,16 +399,33 @@ debugging options.
 ## Install as an AGS extension
 
 This repository is an AGS emulator extension (`ags-extension.toml`,
-adapter `kyty-ags-adapter`, Linux x86_64 and aarch64). In AGS open **Settings**, **Emulators**,
+adapter `kyty-ags-adapter`). In AGS open **Settings**, **Emulators**,
 **Add emulator**, paste `https://github.com/ali-commits/KytyPS5-AGS` and confirm. AGS installs the release
 package for the latest release and falls back to a source build when the release has none.
+
+The release package is Linux x86_64 only. On aarch64 there is no matching package, so AGS falls back to a
+source build, which is untested.
+
+Building from source (the AGS fallback) needs:
+
+- Qt 6.8 or newer with the Concurrent, Network, Widgets and DBus components, installed system-wide.
+  CMake finds Qt only from system paths, so a Qt under `~/Qt` is not used.
+- The tools in the manifest `depends` list (cmake, ninja, clang, clang++, ld.lld, glslangValidator, git,
+  pkg-config, qmake6) and the development libraries. On Ubuntu:
+  `clang glslang-tools libasound2-dev libdbus-1-dev libgl1-mesa-dev libpulse-dev libudev-dev
+  libwayland-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxkbcommon-dev
+  libxrandr-dev libxss-dev libxtst-dev lld ninja-build pkg-config wayland-protocols` plus the distribution's
+  Qt 6 development packages.
+- Network access during configure: CMake clones several third-party libraries (SHA-pinned) with git.
+- AGS runs the build with only `PATH`, `HOME` and `LANG` in the environment.
 
 To cut a release:
 
 1. Bump `project(... VERSION x.y.z)` in `CMakeLists.txt`.
 2. Configure, then copy the rendered manifest to the repository root and commit it:
    `cp _Build/linux/ags-extension.toml ags-extension.toml`. `ctest --test-dir _Build/linux -R ags_manifest`
-   fails while the committed copy differs from `ags-extension.toml.in`.
+   fails while the committed copy differs from the manifest rendered from `ags-extension.toml.in`.
+   The template is rendered by `configure_file`, so it must not contain other `${...}` or `@VAR@` text.
 3. Tag the commit `vx.y.z` (the tag must equal `v` plus the project version) and push the tag. The
    `ags-release.yml` workflow builds, tests and packages the release and uploads
    `kytyps5-ags-<version>-linux-<arch>.tar.zst` and its `.sha256`.

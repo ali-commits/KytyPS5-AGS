@@ -41,12 +41,13 @@ root=$(realpath -e -- "$tree")
 # Only regular files, directories and relative links that resolve inside the tree.
 special=$(find "$root" ! -type f ! -type d ! -type l)
 [ -z "$special" ] || { echo "error: special files in the package:" >&2; echo "$special" >&2; exit 1; }
+find "$root" -type l -print0 > "$work/links" || { echo "error: scanning links failed" >&2; exit 1; }
 while IFS= read -r -d '' link; do
 	target=$(readlink -- "$link")
 	case "$target" in /*) echo "error: absolute link $link -> $target" >&2; exit 1 ;; esac
 	real=$(realpath -e -- "$link") || { echo "error: dangling or looping link $link" >&2; exit 1; }
 	case "$real/" in "$root"/*) ;; *) echo "error: link escapes the package: $link -> $target" >&2; exit 1 ;; esac
-done < <(find "$root" -type l -print0)
+done < "$work/links"
 
 # The adapter, the assets and the manifest, as AGS checks them after extraction.
 [ -f "$root/$adapter" ] && [ -x "$root/$adapter" ] && [ ! -L "$root/$adapter" ] ||
@@ -59,9 +60,9 @@ for key in icon logo badge; do
 done
 cmp -s -- "$manifest" "$root/ags-extension.toml" || { echo "error: installed manifest differs from the build manifest" >&2; exit 1; }
 
-# Deterministic archive: sorted names, fixed owner and times, GNU format (no pax time headers).
+# Deterministic archive: sorted names, fixed owner, times and permission bits, GNU format (no pax time headers).
 epoch=${SOURCE_DATE_EPOCH:-0}
-tar --sort=name --format=gnu --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \
+tar --sort=name --format=gnu --owner=0 --group=0 --numeric-owner --mode=u+rwX,go+rX,go-w --mtime="@$epoch" \
 	-C "$root" -cf - . | zstd -19 -T0 -q -f -o "$work/$asset"
 (cd "$work" && sha256sum -- "$asset" > "$asset.sha256")
 mv -f -- "$work/$asset" "$work/$asset.sha256" "$out/"

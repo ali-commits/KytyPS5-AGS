@@ -17,9 +17,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         shell: bash
@@ -31,7 +32,7 @@ jobs:
             libxrandr-dev libxss-dev libxtst-dev lld ninja-build pkg-config wayland-protocols zstd
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4.5.0
         with:
           version: '6.10.3'
           host: linux
@@ -61,7 +62,6 @@ jobs:
           fi
           cmp ags-extension.toml _Build/linux/ags-extension.toml ||
             { echo "::error::ags-extension.toml is stale; copy _Build/linux/ags-extension.toml and commit it"; exit 1; }
-          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Build
         shell: bash
@@ -92,7 +92,7 @@ jobs:
         run: tools/package.sh _Build/linux ags-package
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ags-package
           path: ags-package/*
@@ -100,12 +100,13 @@ jobs:
 
   release:
     needs: build
+    if: github.repository == 'ali-commits/KytyPS5-AGS'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ags-package
           path: ags-package
@@ -120,8 +121,9 @@ jobs:
           files=(ags-package/kytyps5-ags-*-linux-*.tar.zst ags-package/kytyps5-ags-*-linux-*.tar.zst.sha256)
           [ "${#files[@]}" -eq 2 ] || { echo "::error::expected the package and its checksum, got ${#files[@]} files"; exit 1; }
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
               --title "KytyPS5 AGS ${GITHUB_REF_NAME#v}" \
               --notes "AGS extension package for KytyPS5. Install from AGS with https://github.com/$GITHUB_REPOSITORY"
           fi
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
