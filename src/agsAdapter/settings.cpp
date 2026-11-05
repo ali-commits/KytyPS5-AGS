@@ -155,15 +155,23 @@ bool IsGlobalKey(const QString& key) {
 	return false;
 }
 
-QJsonArray Options(const QJsonObject& field) {
+// Value that means "let the system choose" for a device-list field: "-1" for gpu_index
+// (Configuration's auto GPU), "" for audio_input_device (no microphone selected).
+bool IsAutoDeviceValue(const QString& key, const QString& value) {
+	return (key == QLatin1String("gpu_index") && value == QLatin1String("-1")) ||
+	       (key == QLatin1String("audio_input_device") && value.isEmpty());
+}
+
+QJsonArray Options(const QJsonObject& field, const QString& key) {
 	QJsonArray options;
 	if (field.contains(QStringLiteral("options"))) {
 		for (const auto& o: field[QStringLiteral("options")].toArray()) {
-			const auto obj = o.toObject();
-			const auto v   = obj[QStringLiteral("value")];
-			options.append(QJsonObject {
-			    {"value", v.isString() ? v.toString() : QString::number(v.toInteger())},
-			    {"label", obj[QStringLiteral("label")].toString().left(80)}});
+			const auto obj   = o.toObject();
+			const auto v     = obj[QStringLiteral("value")];
+			const auto value = v.isString() ? v.toString() : QString::number(v.toInteger());
+			auto       label = obj[QStringLiteral("label")].toString();
+			if (label.isEmpty() || IsAutoDeviceValue(key, value)) label = QStringLiteral("Default");
+			options.append(QJsonObject {{"value", value}, {"label", label.left(80)}});
 		}
 	} else {
 		for (const auto& c: field[QStringLiteral("choices")].toArray()) {
@@ -186,7 +194,7 @@ QJsonObject Convert(const QJsonObject& in) {
 	// Device lists (GPU, microphone) arrive as options on int/string fields: offer them as enums.
 	if (in.contains(QStringLiteral("options")) || type == QLatin1String("enum")) {
 		type                           = QStringLiteral("enum");
-		out[QStringLiteral("options")] = Options(in);
+		out[QStringLiteral("options")] = Options(in, key);
 	}
 	out[QStringLiteral("type")] = type;
 	if (type == QLatin1String("int")) {

@@ -340,8 +340,15 @@ void TestSchema(Session& s) {
 			EXPECT(!options.isEmpty());
 			bool found = false;
 			for (const auto& o: options) {
-				EXPECT(o.toObject()["value"].isString() &&
-				       !o.toObject()["label"].toString().isEmpty());
+				const auto value = o.toObject()["value"].toString();
+				const auto label = o.toObject()["label"].toString();
+				EXPECT(o.toObject()["value"].isString() && !label.isEmpty());
+				// gpu_index "-1" and audio_input_device "" mean "let the system choose": every
+				// option must carry a human label, and that one must read "Default".
+				if ((key == "gpu_index" && value == "-1") ||
+				    (key == "audio_input_device" && value.isEmpty())) {
+					EXPECT(label == "Default");
+				}
 				found = found || o.toObject()["value"] == d;
 			}
 			EXPECT(found);
