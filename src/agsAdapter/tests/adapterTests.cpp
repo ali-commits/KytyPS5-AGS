@@ -6,6 +6,7 @@
 #include "gameLibrary.h"
 #include "launchPlan.h"
 #include "library.h"
+#include "settings.h"
 #include "trophyItems.h"
 
 #include <QBuffer>
@@ -401,6 +402,21 @@ void TestSettings(Session& s, const Fixture& f, const QString& id) {
 	                                    {"game", id},
 	                                    {"values", QJsonObject {{"audio_master_volume", 10}}}}) ==
 	       "invalid-params");
+	// Raw launcher spellings are accepted, stored and read back as the schema option.
+	values = s.Result("settings.set", {{"scope", "game"},
+	                                   {"game", id},
+	                                   {"values", QJsonObject {{"present_mode", "Immediate"},
+	                                                           {"shader_optimization_type", "Size"}}}})
+	             ["values"]
+	             .toObject();
+	EXPECT(values["present_mode"] == "Immediate" && values["shader_optimization_type"] == "Size");
+	EXPECT(s.ErrorCode("settings.set", {{"scope", "game"},
+	                                    {"game", id},
+	                                    {"values", QJsonObject {{"shader_optimization_type", "Huge"},
+	                                                            {"present_mode", "Fifo"}}}}) ==
+	       "invalid-params");
+	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	EXPECT(values["present_mode"] == "Immediate"); // the rejected request wrote nothing
 	EXPECT(s.ErrorCode("settings.get", {{"scope", "game"}, {"game", "missing"}}) == "not-found");
 }
 
@@ -476,6 +492,16 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 		EXPECT(!plan["env"].toObject().contains(name));
 	EXPECT(ArgAfter(argv2, "--perf-overlay") == "false");
 	EXPECT(!env.contains("KYTY_STREAM_FRAMES")); // native plans leave the emulator its frame pool
+
+	plan = s.Result("launch.plan", {{"game", id},
+	                                {"player", QJsonObject {{"present_mode", "Fifo"},
+	                                                        {"shader_optimization_type", "Size"}}}});
+	const auto argv3 = Strings(plan["argv"]);
+	EXPECT(ArgAfter(argv3, "--present-mode") == "Fifo");
+	EXPECT(ArgAfter(argv3, "--shader-optimization-type") == "Size");
+	EXPECT(plan["applied"].toObject()["present_mode"] == "Fifo");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"player", QJsonObject {{"present_mode", "x"}}}}) ==
+	       "invalid-params");
 
 	EXPECT(s.ErrorCode("launch.plan", {{"game", "nope"}}) == "not-found");
 	EXPECT(s.ErrorCode("launch.plan",
@@ -817,6 +843,8 @@ void TestUnits(const Fixture& f) {
 		Common::Trophies::UnlockData unlocks;
 		unlocks.unlocked.insert(1);
 		unlocks.unlocked.insert(4);
+		// 2024-03-05T01:02:03Z as .NET ticks
+		unlocks.timestamps[1] = Common::Trophies::UnixEpochTick + 1709600523ULL * 10000000ULL;
 		const auto icons  = QDir(f.dir.path()).filePath("trophy-icons");
 		const auto items0 = AdapterTrophies::Items(package, unlocks, 0, icons);
 		const auto items1 = AdapterTrophies::Items(package, unlocks, 1, icons);
@@ -830,18 +858,40 @@ void TestUnits(const Fixture& f) {
 		EXPECT(QSet<QString>(ids.begin(), ids.end()).size() == ids.size());
 		const auto first = items0.at(0).toObject();
 		EXPECT(first["label"] == "First" && first["unlocked"].toBool());
-		EXPECT(first["description"].toString().startsWith("Gold"));
+		EXPECT(first["tier"] == "gold" && !first["hidden"].toBool() && !first.contains("description"));
+		EXPECT(first["unlocked_at"] == "2024-03-05T01:02:03Z");
 		EXPECT(first["icon"].toString() == QDir(icons).filePath("0-1.png"));
 		EXPECT(ReadAll(first["icon"].toString()) == png);
 		const auto plain = items0.at(1).toObject();
 		EXPECT(plain["id"] == "0-2" && !plain.contains("icon"));
-		EXPECT(plain["description"].toString().endsWith("No picture"));
+		EXPECT(plain["description"] == "No picture" && plain["tier"] == "bronze");
+		EXPECT(!plain.contains("unlocked_at"));
 		const auto secret = items0.at(2).toObject(); // hidden and locked: nothing revealed
 		EXPECT(secret["label"] == "Hidden trophy" && !secret.contains("icon"));
-		EXPECT(!secret["description"].toString().contains("tell"));
+		EXPECT(secret["hidden"].toBool() && !secret.contains("description"));
+		EXPECT(!secret.contains("unlocked_at"));
 		EXPECT(!QFileInfo::exists(QDir(icons).filePath("0-3.png")));
 		const auto opened = items0.at(3).toObject(); // hidden but unlocked: shown
-		EXPECT(opened["label"] == "Secret opened" && opened.contains("icon"));
+		EXPECT(opened["label"] == "Secret opened" && opened.contains("icon") &&
+		       opened["hidden"].toBool());
+	}
+
+	// Raw enum spellings are aliases of the schema options.
+	{
+		const QJsonObject resolution {
+		    {"type", "enum"},
+		    {"options", QJsonArray {QJsonObject {{"value", "1280x720"}}, QJsonObject {{"value", "1920x1080"}}}}};
+		const QJsonObject mode {
+		    {"type", "enum"},
+		    {"options", QJsonArray {QJsonObject {{"value", "auto"}}, QJsonObject {{"value", "2x2"}}}}};
+		QString out;
+		EXPECT(AdapterSettings::OptionValue(resolution, "R1920X1080", &out) && out == "1920x1080");
+		EXPECT(AdapterSettings::OptionValue(resolution, "1280x720", &out) && out == "1280x720");
+		EXPECT(AdapterSettings::OptionValue(mode, "R2X2", &out) && out == "2x2");
+		EXPECT(AdapterSettings::OptionValue(mode, "auto", &out) && out == "auto");
+		EXPECT(!AdapterSettings::OptionValue(resolution, "R640X480", &out));
+		EXPECT(AdapterSettings::Typed(resolution, "R1920X1080") == "1920x1080");
+		EXPECT(AdapterSettings::Typed(mode, "R2X2") == "2x2");
 	}
 
 	// M4: a game without art is remembered; art that changes is written again.

@@ -3,10 +3,12 @@
 #include "configuration.h"
 #include "gameContent.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QTimeZone>
 
 #include <algorithm>
 
@@ -14,13 +16,21 @@ namespace AdapterTrophies {
 
 namespace {
 
-QString GradeName(int grade) {
+QString TierName(int grade) {
 	switch (grade) {
-		case 1: return QStringLiteral("Platinum");
-		case 2: return QStringLiteral("Gold");
-		case 3: return QStringLiteral("Silver");
-		default: return QStringLiteral("Bronze");
+		case 1: return QStringLiteral("platinum");
+		case 2: return QStringLiteral("gold");
+		case 3: return QStringLiteral("silver");
+		default: return QStringLiteral("bronze");
 	}
+}
+
+// Unlock times are .NET ticks (100 ns since 0001-01-01); STANDARD.md wants UTC YYYY-MM-DDTHH:MM:SSZ.
+QString UnlockedAt(uint64_t tick) {
+	if (tick < Common::Trophies::UnixEpochTick) return {};
+	const auto secs = static_cast<qint64>((tick - Common::Trophies::UnixEpochTick) / 10000000ULL);
+	return QDateTime::fromSecsSinceEpoch(secs, QTimeZone::UTC)
+	    .toString(QStringLiteral("yyyy-MM-dd'T'HH:mm:ss'Z'"));
 }
 
 void WriteIcon(const QString& path, const std::vector<std::byte>& png) {
@@ -53,12 +63,18 @@ QJsonArray Items(const Common::Trophies::Package&    package,
 		const auto item_id  = ItemId(label, id);
 		auto name = hidden ? QStringLiteral("Hidden trophy") : QString::fromStdString(trophy.name);
 		if (name.isEmpty()) name = QStringLiteral("Trophy %1").arg(item_id);
-		auto description = GradeName(trophy.grade);
+		QJsonObject item {{"id", item_id},
+		                  {"label", name},
+		                  {"unlocked", unlocked},
+		                  {"tier", TierName(trophy.grade)},
+		                  {"hidden", trophy.hidden}};
 		if (!hidden && !trophy.description.empty()) {
-			description += QStringLiteral(". ") + QString::fromStdString(trophy.description);
+			item[QStringLiteral("description")] = QString::fromStdString(trophy.description);
 		}
-		QJsonObject item {
-		    {"id", item_id}, {"label", name}, {"description", description}, {"unlocked", unlocked}};
+		if (const auto at = unlocks.timestamps.find(id); unlocked && at != unlocks.timestamps.end()) {
+			if (const auto text = UnlockedAt(at->second); !text.isEmpty())
+				item[QStringLiteral("unlocked_at")] = text;
+		}
 		if (!hidden && !trophy.icon_png.empty()) {
 			const auto path = QDir(icons_dir).filePath(item_id + QStringLiteral(".png"));
 			WriteIcon(path, trophy.icon_png);
