@@ -497,7 +497,7 @@ void HostDaemon::Control(const QJsonObject& request, std::function<void(HostRepl
 	if (type == "check-emulator-update") {
 		if (request.size() != 1) return done(Json(Fail("Invalid update request.")));
 		auto*           network = new QNetworkAccessManager(this);
-		QNetworkRequest query(QUrl(UpdateRelease::LATEST_URL));
+		QNetworkRequest query {QUrl(UpdateRelease::LATEST_URL)};
 		query.setRawHeader("Accept", "application/vnd.github+json");
 		query.setRawHeader("User-Agent", "AGS-owner-update-check");
 		query.setTransferTimeout(15000);
