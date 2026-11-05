@@ -230,6 +230,12 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 		env.insert(QStringLiteral("KYTY_STREAM_HEIGHT"),
 		           QString::number(static_cast<int>(height * scale) & ~1));
 		env.insert(QStringLiteral("KYTY_STREAM_FPS"), QString::number(fps));
+	} else {
+		// Gamescope captures the frames: the emulator connects for metrics only.
+		for (const auto& key: env.keys()) {
+			if (key.startsWith(QLatin1String("KYTY_STREAM_"))) env.remove(key);
+		}
+		env.insert(QStringLiteral("KYTY_STREAM_FRAMES"), QStringLiteral("0"));
 	}
 	for (const auto& key: env.keys()) {
 		if (!IsReservedEnvName(key)) continue;

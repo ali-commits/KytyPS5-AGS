@@ -41,7 +41,8 @@ public:
 	void Publish(PendingFrame frame);
 	void Reconnect();
 	// Gives up frames on a connection that has not sent a pool (the pool could not be created).
-	void SetMetricsOnly() { m_metrics_only.store(true, std::memory_order_release); }
+	// Logs and does nothing once a pool is attached: the live session keeps its frames.
+	void     SetMetricsOnly();
 	uint64_t Dropped() const { return m_dropped.load(std::memory_order_relaxed); }
 	void     Drop() { m_dropped.fetch_add(1, std::memory_order_relaxed); }
 

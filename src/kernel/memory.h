@@ -31,6 +31,9 @@ struct DebugStats {
 	uint64_t page_entries_total  = 0; // Per side.
 };
 [[nodiscard]] DebugStats GetDebugStats();
+// Allocated guest memory in bytes (direct + pooled + flexible), cheaper than GetDebugStats().
+// Takes the physical-memory and flexible-memory locks: call it off the frame path.
+[[nodiscard]] uint64_t GetGuestMemoryUsedBytes();
 
 struct Lifecycle {
 	static constexpr const char* name       = "Memory";

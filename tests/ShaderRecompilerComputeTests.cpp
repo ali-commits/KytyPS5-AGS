@@ -1012,9 +1012,9 @@ struct RenderExecutorTestAccess {
 namespace {
 
 struct DebugCounterScope {
-  bool previous = Common::DebugCounters::MetricsCollecting();
-  DebugCounterScope() { Common::DebugCounters::SetMetricsCollecting(true); }
-  ~DebugCounterScope() { Common::DebugCounters::SetMetricsCollecting(previous); }
+	bool previous = Common::DebugCounters::MetricsCollecting();
+	DebugCounterScope() { Common::DebugCounters::SetMetricsCollecting(true); }
+	~DebugCounterScope() { Common::DebugCounters::SetMetricsCollecting(previous); }
 };
 
 struct DrawCounterSnapshot {

@@ -35,17 +35,16 @@ struct SessionSocketChoice {
 
 // The one environment lookup for every read site. Logs a protocol mismatch once.
 [[nodiscard]] inline SessionSocketChoice SessionSocketFromEnvironment() noexcept {
-	const auto choice = SelectSessionSocket(std::getenv("AGS_SESSION_SOCKET"),
-	                                        std::getenv("AGS_SESSION_PROTOCOL"),
-	                                        std::getenv("KYTY_STREAM_SOCKET"));
+	const auto choice =
+	    SelectSessionSocket(std::getenv("AGS_SESSION_SOCKET"), std::getenv("AGS_SESSION_PROTOCOL"),
+		                    std::getenv("KYTY_STREAM_SOCKET"));
 	if (choice.source == SessionSocketSource::ProtocolMismatch) {
 		static std::atomic_flag logged = ATOMIC_FLAG_INIT;
 		if (!logged.test_and_set(std::memory_order_relaxed))
-			std::fprintf(stderr,
-			             "AGS session socket ignored: AGS_SESSION_PROTOCOL is not 1 (got \"%s\")\n",
-			             std::getenv("AGS_SESSION_PROTOCOL") != nullptr
-			                 ? std::getenv("AGS_SESSION_PROTOCOL")
-			                 : "");
+			std::fprintf(
+			    stderr, "AGS session socket ignored: AGS_SESSION_PROTOCOL is not 1 (got \"%s\")\n",
+			    std::getenv("AGS_SESSION_PROTOCOL") != nullptr ? std::getenv("AGS_SESSION_PROTOCOL")
+				                                               : "");
 	}
 	return choice;
 }
@@ -55,15 +54,27 @@ struct SessionSocketChoice {
 	return SessionSocketFromEnvironment().path;
 }
 
-// KYTY_STREAM_FRAMES=0 asks for a metrics-only connection (Gamescope captures the frames). A
-// stream-only launch needs its frame pool, so the opt-out never applies there.
-[[nodiscard]] inline bool FramesRequested(const char* value, bool stream_only) noexcept {
-	return stream_only || value == nullptr || std::strcmp(value, "0") != 0;
+// A connection without a frame pool (hello marked "frames": false) is for AGS only. The legacy
+// KYTY_STREAM_SOCKET host rejects it and never subscribes, so there it keeps the old behaviour:
+// no connection without a pool.
+[[nodiscard]] inline constexpr bool MetricsOnlyAllowed(SessionSocketSource source) noexcept {
+	return source == SessionSocketSource::Ags;
 }
 
-// F2 / Shift+F2 do nothing while a session socket is set: the client draws its own overlay.
-[[nodiscard]] inline constexpr bool OverlayToggleAllowed(const SessionSocketChoice& choice) noexcept {
-	return choice.path == nullptr;
+// KYTY_STREAM_FRAMES=0 asks for a metrics-only connection (Gamescope captures the frames). A
+// stream-only launch needs its frame pool, so the opt-out never applies there, nor to a legacy
+// socket (which cannot take a metrics-only connection).
+[[nodiscard]] inline bool FramesRequested(const char* value, bool stream_only,
+                                          SessionSocketSource source) noexcept {
+	return stream_only || !MetricsOnlyAllowed(source) || value == nullptr ||
+	       std::strcmp(value, "0") != 0;
+}
+
+// F2 / Shift+F2 do nothing while an AGS session socket is set: the client draws its own overlay.
+// The legacy socket keeps the toggles.
+[[nodiscard]] inline constexpr bool
+OverlayToggleAllowed(const SessionSocketChoice& choice) noexcept {
+	return choice.source != SessionSocketSource::Ags;
 }
 
 } // namespace Streaming

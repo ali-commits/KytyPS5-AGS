@@ -856,8 +856,7 @@ static void WindowCreate(WindowContext& context) {
 	LOGF("WindowCreate(): width = %d, height = %d\n", width, height);
 
 #if defined(__linux__)
-	context.stream_only =
-	    StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), session_socket);
+	context.stream_only = StreamOnlyRequested(std::getenv("KYTY_STREAM_ONLY"), session_socket);
 #endif
 	const char* prepare_setting = std::getenv("KYTY_PIPELINE_LIST_PREPARE");
 	const bool  preparing =

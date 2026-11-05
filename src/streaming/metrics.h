@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 
 namespace Streaming {
 
@@ -48,8 +52,7 @@ struct MetricsSubscription {
 // non-integer interval counts as the minimum). Returns false, leaving `output` alone, when `keys`
 // is absent or not an array: the host's packet is malformed and the old subscription stays.
 inline bool ParseMetricsSubscribe(const Json& packet, MetricsSubscription& output) noexcept {
-	if (!packet.is_object() || !packet.contains("keys") || !packet["keys"].is_array())
-		return false;
+	if (!packet.is_object() || !packet.contains("keys") || !packet["keys"].is_array()) return false;
 	MetricsSubscription parsed;
 	for (const auto& key: packet["keys"]) {
 		if (!key.is_string()) continue;
@@ -60,7 +63,7 @@ inline bool ParseMetricsSubscribe(const Json& packet, MetricsSubscription& outpu
 	if (packet.contains("interval_ms") && packet["interval_ms"].is_number_integer()) {
 		const auto interval = packet["interval_ms"].get<int64_t>();
 		parsed.interval_ms  = static_cast<uint32_t>(
-            std::clamp<int64_t>(interval, MetricsMinIntervalMs, MetricsMaxIntervalMs));
+		    std::clamp<int64_t>(interval, MetricsMinIntervalMs, MetricsMaxIntervalMs));
 	}
 	output = parsed;
 	return true;
@@ -101,12 +104,87 @@ inline uint64_t MonotonicMs() noexcept {
 #endif
 }
 
+// When the next metrics message is due. The interval restarts after every attempt, whether or not
+// the send went through: under socket backpressure the source is read once per interval, not on
+// every pass of the 2 ms run loop.
+class MetricsPacer {
+public:
+	using Clock = std::chrono::steady_clock;
+	[[nodiscard]] bool Due(Clock::time_point now, uint32_t interval_ms) const {
+		return !m_last || now - *m_last >= std::chrono::milliseconds(interval_ms);
+	}
+	void Attempted(Clock::time_point now) { m_last = now; }
+	void Reset() { m_last.reset(); }
+
+private:
+	std::optional<Clock::time_point> m_last;
+};
+
+// A value that is slow or takes locks to read, refreshed off the transport thread by a thread that
+// runs only between Start() and Stop(). Latest() is a lock-free read.
+class PeriodicSampler {
+public:
+	explicit PeriodicSampler(std::function<double()>   read,
+	                         std::chrono::milliseconds period = std::chrono::seconds(1))
+	    : m_read(std::move(read)), m_period(period) {}
+	~PeriodicSampler() { Stop(); }
+	PeriodicSampler(const PeriodicSampler&)            = delete;
+	PeriodicSampler& operator=(const PeriodicSampler&) = delete;
+
+	void Start() {
+		if (m_thread.joinable()) return;
+		m_thread = std::jthread([this](std::stop_token stop) {
+			std::mutex                  mutex;
+			std::condition_variable_any wake;
+			while (!stop.stop_requested()) {
+				m_latest.store(m_read(), std::memory_order_release);
+				std::unique_lock lock(mutex);
+				wake.wait_for(lock, stop, m_period, [] { return false; });
+			}
+		});
+	}
+	void Stop() {
+		if (!m_thread.joinable()) return;
+		m_thread.request_stop();
+		m_thread.join();
+		m_latest.store(-1.0, std::memory_order_release);
+	}
+	[[nodiscard]] std::optional<double> Latest() const {
+		const double value = m_latest.load(std::memory_order_acquire);
+		return value < 0 ? std::nullopt : std::optional<double> {value};
+	}
+
+private:
+	std::function<double()>   m_read; // Returns a non-negative value.
+	std::chrono::milliseconds m_period;
+	std::atomic<double>       m_latest {-1.0};
+	std::jthread              m_thread;
+};
+
+// shader_compiles counts from the start of the subscription that includes it: a cumulative counter
+// is rebased at every subscribe (and again after an unsubscribe), so compiles that happened before
+// collection began or while it was off never show up.
+class CounterBaseline {
+public:
+	void Update(bool wanted, uint64_t current) {
+		if (wanted && !m_active) m_base = current;
+		m_active = wanted;
+	}
+	[[nodiscard]] uint64_t Since(uint64_t current) const {
+		return current > m_base ? current - m_base : 0;
+	}
+
+private:
+	bool     m_active = false;
+	uint64_t m_base   = 0;
+};
+
 // Emulator side of the metrics: `subscribed` runs on the transport thread whenever the effective
 // key set changes (including 0 on disconnect) so counter collection follows the subscription;
 // `sample` reads the values for the subscribed keys.
 struct MetricsHooks {
-	std::function<void(MetricMask)>               subscribed;
-	std::function<MetricValues(MetricMask)>       sample;
+	std::function<void(MetricMask)>         subscribed;
+	std::function<MetricValues(MetricMask)> sample;
 };
 
 } // namespace Streaming

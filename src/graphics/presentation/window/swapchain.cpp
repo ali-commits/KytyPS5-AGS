@@ -345,8 +345,9 @@ static bool PresentUnlocked();
 class NativeStreamExport final {
 public:
 	NativeStreamExport(GraphicContext& graphics, CommandScheduler& scheduler, const char* socket,
-	                   bool stream_only)
-	    : m_graphics(graphics), m_scheduler(scheduler), m_stream_only(stream_only) {
+	                   bool stream_only, bool metrics_fallback)
+	    : m_graphics(graphics), m_scheduler(scheduler), m_stream_only(stream_only),
+	      m_metrics_fallback(metrics_fallback) {
 		const auto dimension = [](const char* name) -> uint32_t {
 			const char* value = std::getenv(name);
 			if (value == nullptr || *value == '\0') return 0;
@@ -440,10 +441,15 @@ public:
 			                                    m_graphics.queue_family, width, height, ++m_epoch,
 			                                    error, m_aspect);
 			if (m_pool == nullptr) {
-				// Keep the connection for metrics; the host is told there are no frames.
-				LOGF("Streaming frames disabled (metrics only): %s\n", error.c_str());
-				m_metrics_only = true;
-				m_transport->SetMetricsOnly();
+				if (m_metrics_fallback) {
+					// AGS: keep the connection for metrics; the host is told there are no frames.
+					LOGF("Streaming frames disabled (metrics only): %s\n", error.c_str());
+					m_metrics_only = true;
+					m_transport->SetMetricsOnly();
+					return false;
+				}
+				LOGF("Streaming disabled: %s\n", error.c_str());
+				m_transport.reset();
 				return false;
 			}
 			m_generation = generation;
@@ -531,6 +537,7 @@ private:
 	std::unique_ptr<Streaming::Transport>            m_transport;
 	std::unique_ptr<SystemOverlay>                   m_system_overlay;
 	bool                                             m_stream_only = false, m_metrics_only = false;
+	bool                                             m_metrics_fallback = false;
 	uint64_t                                         m_generation = 0, m_epoch = 0, m_last_tick = 0;
 	uint32_t                                         m_width = 0, m_height = 0;
 	Streaming::AspectMode                            m_aspect = Streaming::AspectMode::Fit;
@@ -552,15 +559,20 @@ struct Presenter::Impl {
 		if (owner.stream_only && !owner.graphic_ctx.streaming_external_enabled) {
 			EXIT("Streaming-only: Vulkan external-memory streaming is unavailable\n");
 		}
-		if (const char* socket = Streaming::SessionSocket(); socket != nullptr) {
+		if (const auto choice = Streaming::SessionSocketFromEnvironment(); choice.path != nullptr) {
+			const char* socket          = choice.path;
+			const bool  metrics_only_ok = Streaming::MetricsOnlyAllowed(choice.source);
 			if (owner.graphic_ctx.streaming_external_enabled &&
-			    Streaming::FramesRequested(std::getenv("KYTY_STREAM_FRAMES"), owner.stream_only)) {
+			    Streaming::FramesRequested(std::getenv("KYTY_STREAM_FRAMES"), owner.stream_only,
+			                               choice.source)) {
 				stream_export = std::make_unique<NativeStreamExport>(
-				    owner.graphic_ctx, present_scheduler, socket, owner.stream_only);
+				    owner.graphic_ctx, present_scheduler, socket, owner.stream_only,
+				    metrics_only_ok);
 			}
-			if (stream_export == nullptr || !stream_export->HasTransport()) {
+			if (metrics_only_ok && (stream_export == nullptr || !stream_export->HasTransport())) {
 				// No frame pool is possible (Gamescope capture, or Vulkan external memory is
-				// missing): still connect so the client gets metrics.
+				// missing): still connect so the client gets metrics. Never for the legacy
+				// socket, whose host rejects a connection without a pool.
 				stream_export.reset();
 				metrics_only = std::make_unique<Streaming::Transport>(
 				    socket, [](const Streaming::Input*) {}, [](uint64_t) { return true; },

@@ -149,6 +149,13 @@ void Transport::Publish(PendingFrame frame) {
 void Transport::Reconnect() {
 	m_reconnect.store(true, std::memory_order_release);
 }
+void Transport::SetMetricsOnly() {
+	if (m_attached.load(std::memory_order_acquire)) {
+		std::fprintf(stderr, "AGS session: SetMetricsOnly ignored, the frame pool is attached\n");
+		return;
+	}
+	m_metrics_only.store(true, std::memory_order_release);
+}
 void Transport::Run(std::stop_token stop) {
 #if defined(__linux__)
 	int         socket     = -1;
@@ -165,17 +172,17 @@ void Transport::Run(std::stop_token stop) {
 	auto        last_status   = retry;
 	uint64_t    last_sequence = 0;
 	// Live metrics: the host's subscription and when the last message went out.
-	MetricsSubscription                                  subscription;
-	std::optional<std::chrono::steady_clock::time_point> last_metrics;
-	UnknownTypeLog                                       unknown_types;
-	const auto set_subscription = [&](const MetricsSubscription& next) {
+	MetricsSubscription subscription;
+	MetricsPacer        metrics_pacer;
+	UnknownTypeLog      unknown_types;
+	const auto          set_subscription = [&](const MetricsSubscription& next) {
 		const bool changed = next.keys != subscription.keys;
 		subscription       = next;
 		if (changed && m_metrics.subscribed) m_metrics.subscribed(subscription.keys);
 	};
 	const auto disconnect = [&] {
 		set_subscription({});
-		last_metrics.reset();
+		metrics_pacer.Reset();
 		ControllerAudio::Disable();
 		audio_generation     = 0;
 		audio_ready_proposed = false;
@@ -293,9 +300,9 @@ void Transport::Run(std::stop_token stop) {
 			if (!IsKnownPacketType(type)) {
 				// A newer host may send types this emulator does not know. Ignore, log once.
 				if (unknown_types.First(type)) {
-					const bool printable = std::all_of(type.begin(), type.end(), [](unsigned char c) {
-						return c >= 0x20 && c < 0x7f;
-					});
+					const bool printable =
+					    std::all_of(type.begin(), type.end(),
+						            [](unsigned char c) { return c >= 0x20 && c < 0x7f; });
 					std::fprintf(stderr, "AGS session: ignoring unknown packet type \"%.40s\"\n",
 					             printable ? type.c_str() : "<non-printable>");
 				}
@@ -474,13 +481,15 @@ void Transport::Run(std::stop_token stop) {
 				}
 			}
 		}
-		if (subscription.keys != 0 && m_metrics.sample && (m_attached || (hello_sent && m_metrics_only)) &&
-		    (!last_metrics ||
-		     now - *last_metrics >= std::chrono::milliseconds(subscription.interval_ms))) {
-			const auto message =
-			    BuildMetricsMessage(subscription.keys, m_metrics.sample(subscription.keys),
-			                        MonotonicMs());
-			if (!message || SendPacket(socket, *message)) last_metrics = now;
+		if (subscription.keys != 0 && m_metrics.sample &&
+		    (m_attached || (hello_sent && m_metrics_only)) &&
+		    metrics_pacer.Due(now, subscription.interval_ms)) {
+			// The interval restarts even if the send fails, so backpressure does not make this
+			// loop read the source every pass.
+			metrics_pacer.Attempted(now);
+			if (const auto message = BuildMetricsMessage(
+			        subscription.keys, m_metrics.sample(subscription.keys), MonotonicMs()))
+				SendPacket(socket, *message);
 		}
 	}
 	disconnect();

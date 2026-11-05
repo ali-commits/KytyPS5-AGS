@@ -5246,6 +5246,22 @@ int KYTY_SYSV_ABI KernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* outp
 	return OK;
 }
 
+uint64_t GetGuestMemoryUsedBytes() {
+	// The same sum as direct_allocated + pooled_allocated + flexible_used, without the mapping and
+	// page-table walks of GetDebugStats().
+	uint64_t used = 0;
+	if (g_physical_memory != nullptr) {
+		Common::LockGuard lock(g_physical_memory->GetMutex());
+		for (const auto& [start, block]: g_physical_memory->GetPhysicalBlocks()) {
+			used += block.size;
+		}
+	}
+	if (g_flexible_memory != nullptr) {
+		used += FlexibleMemory::Size() - g_flexible_memory->Available();
+	}
+	return used;
+}
+
 DebugStats GetDebugStats() {
 	DebugStats stats;
 	stats.direct_total       = PhysicalMemory::Size();

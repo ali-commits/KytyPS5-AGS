@@ -69,13 +69,20 @@ static void TestEnvSelection() {
 	Check(c.path == nullptr && c.source == SessionSocketSource::None, "nothing set");
 
 	Check(!OverlayToggleAllowed(SelectSessionSocket("/s", "1", nullptr)) &&
-	          !OverlayToggleAllowed(SelectSessionSocket(nullptr, nullptr, "/s")) &&
+	          OverlayToggleAllowed(SelectSessionSocket(nullptr, nullptr, "/s")) &&
 	          OverlayToggleAllowed(SelectSessionSocket(nullptr, nullptr, nullptr)) &&
 	          OverlayToggleAllowed(SelectSessionSocket("/s", "2", nullptr)),
-	      "F2 toggles are off exactly while a usable session socket is set");
-	Check(FramesRequested(nullptr, false) && FramesRequested("1", false) &&
-	          !FramesRequested("0", false) && FramesRequested("0", true),
+	      "F2 toggles are off exactly while an AGS session socket is in use");
+	const auto ags    = SessionSocketSource::Ags;
+	const auto legacy = SessionSocketSource::Legacy;
+	Check(FramesRequested(nullptr, false, ags) && FramesRequested("1", false, ags) &&
+	          !FramesRequested("0", false, ags) && FramesRequested("0", true, ags),
 	      "KYTY_STREAM_FRAMES=0 opts out of frames unless stream-only");
+	Check(FramesRequested("0", false, legacy), "the legacy socket ignores KYTY_STREAM_FRAMES");
+	Check(MetricsOnlyAllowed(ags) && !MetricsOnlyAllowed(legacy) &&
+	          !MetricsOnlyAllowed(SessionSocketSource::None) &&
+	          !MetricsOnlyAllowed(SessionSocketSource::ProtocolMismatch),
+	      "only an AGS socket may carry a connection without a frame pool");
 
 	// The real lookup used by all four read sites.
 	unsetenv("AGS_SESSION_SOCKET");
@@ -96,11 +103,11 @@ static void TestEnvSelection() {
 // ---- subscription parsing and the metrics message ----------------------------------------
 
 static void TestCatalog() {
-	const std::array<std::array<const char*, 3>, 4> expected {{{"game_fps", "fps", "number"},
-	                                                           {"frame_time_ms", "ms", "number"},
-	                                                           {"guest_memory_mb", "MB", "number"},
-	                                                           {"shader_compiles", "count",
-	                                                            "integer"}}};
+	const std::array<std::array<const char*, 3>, 4> expected {
+	    {{"game_fps", "fps", "number"},
+		 {"frame_time_ms", "ms", "number"},
+		 {"guest_memory_mb", "MB", "number"},
+		 {"shader_compiles", "count", "integer"}}};
 	for (size_t i = 0; i < MetricCount; i++)
 		Check(MetricCatalog[i].key == expected[i][0] && MetricCatalog[i].unit == expected[i][1] &&
 		          MetricCatalog[i].type == expected[i][2],
@@ -160,7 +167,8 @@ static void TestSubscribeParsing() {
 	s.keys = 5;
 	Check(!ParseMetricsSubscribe({{"keys", "game_fps"}}, s) && s.keys == 5,
 	      "keys that is not an array is rejected, old value kept");
-	Check(!ParseMetricsSubscribe({{"interval_ms", 1000}}, s) && s.keys == 5, "missing keys rejected");
+	Check(!ParseMetricsSubscribe({{"interval_ms", 1000}}, s) && s.keys == 5,
+	      "missing keys rejected");
 	Check(!ParseMetricsSubscribe(Json::array(), s), "non-object rejected");
 }
 
@@ -170,8 +178,8 @@ static void TestMetricsMessage() {
 	values.Set(Metric::FrameTimeMs, 16.7);
 	values.Set(Metric::GuestMemoryMb, 8123.5);
 	values.Set(Metric::ShaderCompiles, 42);
-	auto message = BuildMetricsMessage(MetricBit(Metric::GameFps) | MetricBit(Metric::ShaderCompiles),
-	                                   values, 123456);
+	auto message = BuildMetricsMessage(
+	    MetricBit(Metric::GameFps) | MetricBit(Metric::ShaderCompiles), values, 123456);
 	Check(message && (*message)["type"] == "metrics" && (*message)["t_ms"] == 123456 &&
 	          (*message)["values"].size() == 2 && (*message)["values"]["game_fps"] == 59.9 &&
 	          (*message)["values"]["shader_compiles"] == 42 &&
@@ -234,6 +242,48 @@ static void TestCounterOverlaySplit() {
 	SetMetricsCollecting(false);
 }
 
+static void TestPacerSamplerBaseline() {
+	using Clock = MetricsPacer::Clock;
+	MetricsPacer pacer;
+	const auto   t0 = Clock::now();
+	Check(pacer.Due(t0, 1000), "first message is due at once");
+	// A failed send (backpressure) still counts as an attempt: the source is not read again for
+	// the whole interval.
+	pacer.Attempted(t0);
+	Check(!pacer.Due(t0 + std::chrono::milliseconds(2), 1000) &&
+	          !pacer.Due(t0 + std::chrono::milliseconds(999), 1000),
+	      "no re-sampling every pass after an attempt");
+	Check(pacer.Due(t0 + std::chrono::milliseconds(1000), 1000), "due again after the interval");
+	pacer.Reset();
+	Check(pacer.Due(t0, 1000), "reset makes the next one due");
+
+	std::atomic<int> reads {0};
+	{
+		PeriodicSampler sampler([&] { return 100.0 + reads++; }, std::chrono::milliseconds(20));
+		Check(!sampler.Latest(), "no value before Start");
+		sampler.Start();
+		Check(Wait([&] { return sampler.Latest().has_value(); }), "first value arrives");
+		const int first = reads;
+		Check(Wait([&] { return reads > first + 1; }), "keeps refreshing off-thread");
+		sampler.Stop();
+		const int stopped = reads;
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		Check(reads == stopped && !sampler.Latest(), "Stop ends the thread and clears the value");
+		sampler.Start();
+		Check(Wait([&] { return sampler.Latest().has_value(); }), "restart works");
+	}
+
+	CounterBaseline baseline;
+	baseline.Update(true, 100);
+	Check(baseline.Since(100) == 0 && baseline.Since(130) == 30, "counts since the subscription");
+	baseline.Update(true, 150);
+	Check(baseline.Since(160) == 60, "a key-set change that keeps it does not rebase");
+	baseline.Update(false, 200);
+	baseline.Update(true, 500);
+	Check(baseline.Since(512) == 12, "a new subscription rebases past the unsubscribed gap");
+	Check(baseline.Since(10) == 0, "never negative");
+}
+
 // ---- transport over a real socket ---------------------------------------------------------
 
 struct Listener {
@@ -264,7 +314,7 @@ struct Listener {
 	bool Next(const char* type, Json& out, int milliseconds = 3000, size_t fds = 0) {
 		return Wait(
 		    [&] {
-			    Packet packet;
+			    Packet     packet;
 			    const auto result = ReceivePacket(peer, packet, fds);
 			    if (result == ReceiveResult::Packet && packet.json["type"] == type) {
 				    out = packet.json;
@@ -290,22 +340,22 @@ struct Hooks {
 	std::atomic<uint32_t> mask {0};
 	std::atomic<int>      changes {0}, samples {0};
 	MetricsHooks          Make() {
-        MetricsHooks hooks;
-        hooks.subscribed = [this](MetricMask keys) {
-            mask = keys;
-            changes++;
-        };
-        hooks.sample = [this](MetricMask keys) {
-            samples++;
-            MetricValues values;
-            values.Set(Metric::GameFps, 60.0);
-            values.Set(Metric::FrameTimeMs, 16.6);
-            values.Set(Metric::GuestMemoryMb, 1024.0);
-            values.Set(Metric::ShaderCompiles, 7);
-            (void)keys;
-            return values;
-        };
-        return hooks;
+		MetricsHooks hooks;
+		hooks.subscribed = [this](MetricMask keys) {
+			mask = keys;
+			changes++;
+		};
+		hooks.sample = [this](MetricMask keys) {
+			samples++;
+			MetricValues values;
+			values.Set(Metric::GameFps, 60.0);
+			values.Set(Metric::FrameTimeMs, 16.6);
+			values.Set(Metric::GuestMemoryMb, 1024.0);
+			values.Set(Metric::ShaderCompiles, 7);
+			(void)keys;
+			return values;
+		};
+		return hooks;
 	}
 };
 
@@ -317,12 +367,15 @@ static Json SubscribePacket(std::initializer_list<const char*> keys, int interva
 }
 
 static void TestUnknownPacketsIgnoredWithPool() {
-	Listener           listener;
-	Hooks              hooks;
-	std::atomic<int>   resets {0};
-	auto               transport = std::make_unique<Transport>(
-        listener.path, [&](const Input* i) { if (!i) resets++; }, [](uint64_t) { return true; },
-        Transport::MotionSink {}, hooks.Make());
+	Listener         listener;
+	Hooks            hooks;
+	std::atomic<int> resets {0};
+	auto             transport = std::make_unique<Transport>(
+	    listener.path,
+	    [&](const Input* i) {
+		    if (!i) resets++;
+	    },
+	    [](uint64_t) { return true; }, Transport::MotionSink {}, hooks.Make());
 	listener.Accept();
 	// Before the pool is accepted an unknown type is ignored, not fatal.
 	Check(SendPacket(listener.peer, {{"type", "welcome"}, {"version", 1}}), "welcome");
@@ -330,14 +383,14 @@ static void TestUnknownPacketsIgnoredWithPool() {
 	Check(SendPacket(listener.peer, {{"type", "future.thing"}, {"x", 1}}),
 	      "unknown type before attach");
 	Check(SendPacket(listener.peer, {{"type", "other"}}), "second unknown type before attach");
-	auto ring = std::make_shared<LeaseRing>(9);
+	auto           ring = std::make_shared<LeaseRing>(9);
 	PoolDescriptor descriptor;
-	descriptor.epoch = 9;
-	descriptor.width = 1920;
-	descriptor.height = 1080;
-	descriptor.stride = 8192;
+	descriptor.epoch            = 9;
+	descriptor.width            = 1920;
+	descriptor.height           = 1080;
+	descriptor.stride           = 8192;
 	descriptor.allocation_sizes = {8847360, 8847360, 8847360};
-	descriptor.gpu_uuid = "00112233445566778899aabbccddeeff";
+	descriptor.gpu_uuid         = "00112233445566778899aabbccddeeff";
 	std::array<int, 9> fds;
 	for (auto& fd: fds)
 		fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -345,7 +398,9 @@ static void TestUnknownPacketsIgnoredWithPool() {
 	Json hello;
 	Check(listener.Next("hello", hello, 3000, 9) && hello["epoch"] == 9, "hello with nine fds");
 	Check(!hello.contains("frames"), "a pool hello does not carry the frames marker");
-	Check(SendPacket(listener.peer, {{"type", "accepted"}, {"version", 1}, {"epoch", 9},
+	Check(SendPacket(listener.peer, {{"type", "accepted"},
+	                                 {"version", 1},
+	                                 {"epoch", 9},
 	                                 {"transport", "vulkan-buffer-fd"}}),
 	      "accept");
 	Check(Wait([&] { return transport->Attached(); }), "attached");
@@ -373,12 +428,66 @@ static void TestUnknownPacketsIgnoredWithPool() {
 		close(fd);
 }
 
+static std::array<int, 9> OpenFds() {
+	std::array<int, 9> fds;
+	for (auto& fd: fds)
+		fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	return fds;
+}
+
+static PoolDescriptor TestDescriptor(uint64_t epoch) {
+	PoolDescriptor descriptor;
+	descriptor.epoch            = epoch;
+	descriptor.width            = 1920;
+	descriptor.height           = 1080;
+	descriptor.stride           = 8192;
+	descriptor.allocation_sizes = {8847360, 8847360, 8847360};
+	descriptor.gpu_uuid         = "00112233445566778899aabbccddeeff";
+	return descriptor;
+}
+
+static void TestPoolModeMetricsWaitForAccepted() {
+	Listener listener;
+	Hooks    hooks;
+	auto     transport = std::make_unique<Transport>(
+	    listener.path, [](const Input*) {}, [](uint64_t) { return true; }, Transport::MotionSink {},
+	    hooks.Make());
+	listener.Accept();
+	Check(SendPacket(listener.peer, {{"type", "welcome"}, {"version", 1}}), "welcome");
+	Check(Wait([&] { return transport->Generation() > 0; }), "welcome observed");
+	auto ring = std::make_shared<LeaseRing>(11);
+	auto fds  = OpenFds();
+	transport->SetPool(TestDescriptor(11), fds, ring, transport->Generation());
+	Json hello;
+	Check(listener.Next("hello", hello, 3000, 9), "hello with nine fds");
+	// Subscribed before the pool is accepted: nothing is sent yet.
+	Check(SendPacket(listener.peer, SubscribePacket({"game_fps"}, 1000)), "early subscribe");
+	Check(Wait([&] { return hooks.mask != 0; }), "subscription stored");
+	Check(listener.Silent("metrics", 1300), "pool mode sends no metrics before accepted");
+	Check(hooks.samples == 0, "and the source is not read before accepted");
+	Check(SendPacket(listener.peer, {{"type", "accepted"},
+	                                 {"version", 1},
+	                                 {"epoch", 11},
+	                                 {"transport", "vulkan-buffer-fd"}}),
+	      "accept");
+	Json metrics;
+	Check(listener.Next("metrics", metrics), "metrics follow once accepted");
+	// SetMetricsOnly on an attached transport is ignored: a gated packet still drops the link,
+	// which a metrics-only connection would not do.
+	transport->SetMetricsOnly();
+	Check(SendPacket(listener.peer, {{"type", "motion"}}), "motion without capability");
+	Check(Wait([&] { return !transport->Attached(); }), "SetMetricsOnly while attached is ignored");
+	transport.reset();
+	for (int fd: fds)
+		close(fd);
+}
+
 static void TestUnsubscribeStopsMetrics() {
 	Listener listener;
 	Hooks    hooks;
 	auto     transport = std::make_unique<Transport>(
-        listener.path, [](const Input*) {}, [](uint64_t) { return true; }, Transport::MotionSink {},
-        hooks.Make(), true);
+	    listener.path, [](const Input*) {}, [](uint64_t) { return true; }, Transport::MotionSink {},
+	    hooks.Make(), true);
 	listener.Accept();
 	Check(SendPacket(listener.peer, {{"type", "welcome"}, {"version", 1}}), "welcome");
 	Json hello;
@@ -396,10 +505,13 @@ static void TestUnsubscribeStopsMetrics() {
 	Check(hooks.mask == (MetricBit(Metric::ShaderCompiles) | MetricBit(Metric::GuestMemoryMb)),
 	      "hook sees the key set");
 	// Frame and controller packets mean nothing here; they must not end the connection.
-	Check(SendPacket(listener.peer, {{"type", "accepted"}, {"version", 1}, {"epoch", 1},
+	Check(SendPacket(listener.peer, {{"type", "accepted"},
+	                                 {"version", 1},
+	                                 {"epoch", 1},
 	                                 {"transport", "vulkan-buffer-fd"}}),
 	      "accepted");
-	Check(SendPacket(listener.peer, {{"type", "release"}, {"epoch", 1}, {"slot", 0}, {"sequence", 1}}),
+	Check(SendPacket(listener.peer,
+	                 {{"type", "release"}, {"epoch", 1}, {"slot", 0}, {"sequence", 1}}),
 	      "release");
 	Check(SendPacket(listener.peer, {{"type", "future.thing"}}), "unknown");
 	Check(listener.Next("metrics", metrics, 2500), "still serving metrics after stray packets");
@@ -431,13 +543,18 @@ static void TestMetricsOnlyAfterPoolFailure() {
 	Listener listener;
 	Hooks    hooks;
 	auto     transport = std::make_unique<Transport>(
-        listener.path, [](const Input*) {}, [](uint64_t) { return true; }, Transport::MotionSink {},
-        hooks.Make());
+	    listener.path, [](const Input*) {}, [](uint64_t) { return true; }, Transport::MotionSink {},
+	    hooks.Make());
 	listener.Accept();
 	transport->SetMetricsOnly(); // The pool could not be created.
 	Check(SendPacket(listener.peer, {{"type", "welcome"}, {"version", 1}}), "welcome");
 	Json hello;
 	Check(listener.Next("hello", hello) && hello["frames"] == false, "metrics-only hello");
+	Check(SendPacket(listener.peer, SubscribePacket({"game_fps", "shader_compiles"}, 1000)),
+	      "subscribe");
+	Json metrics;
+	Check(listener.Next("metrics", metrics) && metrics["values"].size() == 2,
+	      "a metrics-only connection serves metrics after subscribe");
 	transport.reset();
 }
 
@@ -448,7 +565,9 @@ int main() {
 	TestMetricsMessage();
 	TestUnknownTypeLog();
 	TestCounterOverlaySplit();
+	TestPacerSamplerBaseline();
 	TestUnknownPacketsIgnoredWithPool();
+	TestPoolModeMetricsWaitForAccepted();
 	TestUnsubscribeStopsMetrics();
 	TestMetricsOnlyAfterPoolFailure();
 	std::puts("SessionMetricsTests passed");

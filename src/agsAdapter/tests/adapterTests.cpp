@@ -461,6 +461,12 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(ArgAfter(argv2, "--vblank-frequency") == "144");
 	EXPECT(!plan["native_frames"].toBool());
 	EXPECT(!plan["env"].toObject().contains("KYTY_STREAM_ONLY"));
+	EXPECT(plan["env"].toObject()["KYTY_STREAM_FRAMES"].toString() == "0");
+	for (const char* name: {"KYTY_STREAM_WIDTH", "KYTY_STREAM_HEIGHT", "KYTY_STREAM_FPS",
+	                        "KYTY_STREAM_ASPECT", "KYTY_STREAM_SOCKET"})
+		EXPECT(!plan["env"].toObject().contains(name));
+	EXPECT(ArgAfter(argv2, "--perf-overlay") == "false");
+	EXPECT(!env.contains("KYTY_STREAM_FRAMES")); // native plans leave the emulator its frame pool
 
 	EXPECT(s.ErrorCode("launch.plan", {{"game", "nope"}}) == "not-found");
 	EXPECT(s.ErrorCode("launch.plan",
