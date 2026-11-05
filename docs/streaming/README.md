@@ -1,5 +1,10 @@
 # Native AGS host integration
 
+> Historical note: this repository's launcher is standalone. The AGS host daemon, the Host
+> streaming and Remote hosts tabs, `kyty_launcher --host` and `tools/streaming/` were removed.
+> Streaming is driven by AGS through the extension adapter and the emulator's session socket.
+> The text below describes the removed design and is kept for reference only.
+
 The active launcher backend is the independent `streaming/ags` native host.
 `tools/streaming/build.sh` builds the launcher and Rust binaries; `package.py`
 installs `ags-host`, `ags-guardian`, `ags-hid-guard`, and `ags-capture-worker`

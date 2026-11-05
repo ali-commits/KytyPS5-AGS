@@ -1,5 +1,10 @@
 # Controller audio companion: provisioning and operation
 
+> Historical note: this repository's launcher is standalone. The AGS host daemon, the Host
+> streaming and Remote hosts tabs, `kyty_launcher --host` and `tools/streaming/` were removed.
+> Streaming is driven by AGS through the extension adapter and the emulator's session socket.
+> The text below describes the removed design and is kept for reference only.
+
 This candidate sends native actuator and PADSPK stereo PCM to a separate Linux USB
 companion alongside stock Moonlight. Ordinary game audio stays on the laptop's selected
 Moonlight output. The helper does not own the SDL gamepad or change the system default
