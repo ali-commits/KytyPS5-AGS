@@ -1,5 +1,6 @@
 #include "launchPlan.h"
 
+#include "actions.h"
 #include "cheatFile.h"
 #include "common/emulatorConfig.h"
 #include "common/u59Preset.h"
@@ -150,6 +151,16 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 			return Reply::Invalid(QStringLiteral("%1 must be an object.").arg(QLatin1String(key)));
 		}
 	}
+	// launch variant (STANDARD.md launch actions): only the ones actions.list offers.
+	bool no_cheats = false;
+	if (params.contains(QStringLiteral("action"))) {
+		const auto action = params[QStringLiteral("action")];
+		if (!action.isString() ||
+		    action.toString() != QLatin1String(AdapterActions::LAUNCH_WITHOUT_CHEATS)) {
+			return Reply::Invalid(QStringLiteral("Unknown launch action."));
+		}
+		no_cheats = true;
+	}
 	const auto standard = params[QStringLiteral("standard")].toObject();
 	const bool native   = params[QStringLiteral("capture")].toString() == QLatin1String("native");
 
@@ -209,7 +220,7 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	info.perf_overlay_enabled = false; // AGS draws the overlay (STANDARD.md section 8.2)
 
 	const auto plan_path = Cheats::PlanPath(runtime_root, info.title_id.trimmed().toUpper());
-	auto       args      = BuildEmulatorArgs(info, plan_path);
+	auto       args      = BuildEmulatorArgs(info, no_cheats ? QString {} : plan_path);
 	if (args.isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cannot build the emulator command for this game."));
 	}

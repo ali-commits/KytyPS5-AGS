@@ -93,6 +93,11 @@ struct Group {
 	std::vector<const char*> fields;
 };
 
+// Install-relative SVG under assets/ags/sections/ named after the group key.
+QString SectionIcon(const QString& group_key) {
+	return QStringLiteral("assets/ags/sections/%1.svg").arg(group_key.mid(6));
+}
+
 const std::vector<Group>& Groups() {
 	static const std::vector<Group> groups = {
 	    {"group.display",
@@ -296,7 +301,10 @@ QJsonArray BuildSchema() {
 			}
 		}
 		if (members.isEmpty()) continue;
-		fields.append(QJsonObject {{"key", group.key}, {"label", group.label}, {"type", "group"}});
+		fields.append(QJsonObject {{"key", group.key},
+		                           {"label", group.label},
+		                           {"type", "group"},
+		                           {"icon", SectionIcon(QString::fromLatin1(group.key))}});
 		for (const auto& m: members)
 			fields.append(m);
 	}
@@ -305,7 +313,10 @@ QJsonArray BuildSchema() {
 		if (!placed.contains(key)) other.append(by_key.value(key));
 	}
 	if (!other.isEmpty()) {
-		fields.append(QJsonObject {{"key", "group.other"}, {"label", "Other"}, {"type", "group"}});
+		fields.append(QJsonObject {{"key", "group.other"},
+		                           {"label", "Other"},
+		                           {"type", "group"},
+		                           {"icon", SectionIcon(QStringLiteral("group.other"))}});
 		for (const auto& m: other)
 			fields.append(m);
 	}

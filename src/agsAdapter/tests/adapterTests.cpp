@@ -306,6 +306,13 @@ QString TestLibrary(Session& s, const Fixture& f) {
 	return id;
 }
 
+// An icon is a safe relative path to a small SVG that ships in assets/ags.
+void ExpectIcon(const QString& icon) {
+	EXPECT(icon.startsWith("assets/ags/") && icon.endsWith(".svg") && !icon.contains(".."));
+	QFileInfo file(QDir(KYTY_TEST_SOURCE_ROOT).filePath(icon));
+	EXPECT(file.isFile() && !file.isSymLink() && file.size() > 0 && file.size() <= 256 * 1024);
+}
+
 void TestSchema(Session& s) {
 	const auto fields = s.Result("settings.schema")["fields"].toArray();
 	EXPECT(!fields.isEmpty() && fields.size() <= 512);
@@ -332,6 +339,7 @@ void TestSchema(Session& s) {
 		const auto d = f["default"];
 		if (type == "group") {
 			EXPECT(!f.contains("default") && !f.contains("fields") && !f.contains("title"));
+			ExpectIcon(f["icon"].toString());
 		} else if (type == "bool") {
 			EXPECT(d.isBool());
 		} else if (type == "int") {
@@ -537,6 +545,23 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	                   {{"game", id}, {"player", QJsonObject {{"trophy_duration_seconds", 99}}}}) ==
 	       "invalid-params");
 	EXPECT(s.Result("launch.ended", {{"game", id}, {"exit_code", 0}}).isEmpty());
+
+	// "Launch without cheats": offered only with a cheat plan, drops --game-patch, refused otherwise.
+	const auto plan_path = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", "bogus"}}) == "invalid-params");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", 5}}) == "invalid-params");
+	WriteFile(plan_path, "{}");
+	const auto with_plan = s.Result("actions.list", {{"game", id}})["actions"].toArray();
+	EXPECT(with_plan.size() == 6);
+	const auto variant = with_plan.at(5).toObject();
+	EXPECT(variant["id"] == "launch.nocheats" && variant["kind"] == "launch" &&
+	       !variant["label"].toString().isEmpty());
+	ExpectIcon(variant["icon"].toString());
+	EXPECT(Strings(s.Result("launch.plan", {{"game", id}})["argv"]).contains("--game-patch"));
+	const auto plain = Strings(s.Result("launch.plan", {{"game", id}, {"action", "launch.nocheats"}})["argv"]);
+	EXPECT(!plain.contains("--game-patch") && plain.contains("--game"));
+	CHECK(QFile::remove(plan_path));
+	EXPECT(s.Result("actions.list", {{"game", id}})["actions"].toArray().size() == 5);
 }
 
 void TestActions(Session& s, const QString& id) {
@@ -547,6 +572,8 @@ void TestActions(Session& s, const QString& id) {
 	EXPECT(ids == QStringList({"cheats", "cheats.fetch", "trophies", "info", "content"}));
 	EXPECT(actions.at(1).toObject()["kind"].toString() == "command");
 	EXPECT(actions.at(1).toObject()["confirm"].toBool());
+	for (const auto& a: actions) ExpectIcon(a.toObject()["icon"].toString());
+	EXPECT(actions.at(1).toObject()["menu"].toBool() && !actions.at(0).toObject()["menu"].toBool());
 	EXPECT(s.Result("actions.list")["actions"].toArray().isEmpty());
 	const auto info =
 	    s.Result("actions.run", {{"game", id}, {"action_id", "info"}})["items"].toArray();
@@ -558,7 +585,10 @@ void TestActions(Session& s, const QString& id) {
 	           .isEmpty());
 	EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", "nope"}}) == "not-found");
 	EXPECT(actions.at(4).toObject() ==
-	       QJsonObject({{"id", "content"}, {"kind", "list"}, {"label", "Additional content"}}));
+	       QJsonObject({{"id", "content"},
+	                                                {"kind", "list"},
+	                                                {"label", "Additional content"},
+	                                                {"icon", "assets/ags/actions/content.svg"}}));
 }
 
 void TestContent(Session& s, const Fixture& f, const QString& id) {

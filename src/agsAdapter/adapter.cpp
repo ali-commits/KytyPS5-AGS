@@ -207,7 +207,7 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	}
 	if (method == QLatin1String("actions.list")) {
 		if (!FindGame(params, false, &game, &reply)) return reply;
-		return AdapterActions::List(game);
+		return AdapterActions::List(game, m_runtime_root);
 	}
 	if (method == QLatin1String("actions.run")) {
 		if (!params[QStringLiteral("action_id")].isString()) {

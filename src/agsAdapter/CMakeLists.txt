@@ -52,7 +52,8 @@ if(BUILD_TESTING)
 	endif()
 	target_compile_definitions(kyty_ags_adapter_tests PRIVATE
 		KYTY_TEST_ADAPTER="$<TARGET_FILE:kyty-ags-adapter>"
-		KYTY_TEST_PRESET="${CMAKE_SOURCE_DIR}/tools/u59-preset.json")
+		KYTY_TEST_PRESET="${CMAKE_SOURCE_DIR}/tools/u59-preset.json"
+		KYTY_TEST_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 	add_dependencies(kyty_ags_adapter_tests kyty-ags-adapter)
 	add_test(NAME kyty_ags_adapter COMMAND kyty_ags_adapter_tests)
 	set_tests_properties(kyty_ags_adapter PROPERTIES TIMEOUT 120

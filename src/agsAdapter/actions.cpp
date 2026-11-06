@@ -220,20 +220,45 @@ std::optional<Cheats::RemoteFile> PickCheatFile(const QList<Cheats::RemoteFile>&
 	return std::nullopt;
 }
 
-Reply List(const GameEntry* game) {
+bool HasCheatPlan(const GameEntry& game, const QString& runtime_root) {
+	const auto plan = Cheats::PlanPath(runtime_root, game.info->title_id);
+	return !plan.isEmpty() && QFileInfo::exists(plan);
+}
+
+Reply List(const GameEntry* game, const QString& runtime_root) {
 	if (game == nullptr) return Reply::Success({{"actions", QJsonArray {}}});
-	return Reply::Success(
-	    {{"actions",
-		  QJsonArray {
-	          QJsonObject {{"id", "cheats"}, {"kind", "toggle_list"}, {"label", "Cheats"}},
-	          QJsonObject {{"id", "cheats.fetch"},
-			               {"kind", "command"},
-			               {"label", "Fetch cheats"},
-			               {"confirm", true}},
-	          QJsonObject {{"id", "trophies"}, {"kind", "progress_list"}, {"label", "Trophies"}},
-	          QJsonObject {{"id", "info"}, {"kind", "info"}, {"label", "Game info"}},
-	          QJsonObject {{"id", "content"}, {"kind", "list"}, {"label", "Additional content"}},
-	      }}});
+	QJsonArray actions {
+	    QJsonObject {{"id", "cheats"},
+	                 {"kind", "toggle_list"},
+	                 {"label", "Cheats"},
+	                 {"icon", "assets/ags/actions/cheats.svg"}},
+	    QJsonObject {{"id", "cheats.fetch"},
+	                 {"kind", "command"},
+	                 {"label", "Fetch cheats"},
+	                 {"confirm", true},
+	                 {"menu", true},
+	                 {"icon", "assets/ags/actions/fetch.svg"}},
+	    QJsonObject {{"id", "trophies"},
+	                 {"kind", "progress_list"},
+	                 {"label", "Trophies"},
+	                 {"icon", "assets/ags/actions/trophies.svg"}},
+	    QJsonObject {{"id", "info"},
+	                 {"kind", "info"},
+	                 {"label", "Game info"},
+	                 {"icon", "assets/ags/actions/info.svg"}},
+	    QJsonObject {{"id", "content"},
+	                 {"kind", "list"},
+	                 {"label", "Additional content"},
+	                 {"icon", "assets/ags/actions/content.svg"}},
+	};
+	// Only when a cheat plan exists: without one this would be the plain launch.
+	if (HasCheatPlan(*game, runtime_root)) {
+		actions.append(QJsonObject {{"id", LAUNCH_WITHOUT_CHEATS},
+		                            {"kind", "launch"},
+		                            {"label", "Launch without cheats"},
+		                            {"icon", "assets/ags/actions/launch-nocheats.svg"}});
+	}
+	return Reply::Success({{"actions", actions}});
 }
 
 Reply Run(const GameEntry& game, const QJsonObject& params, const QString& runtime_root,

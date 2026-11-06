@@ -51,7 +51,10 @@ namespace AdapterActions {
 [[nodiscard]] std::optional<Cheats::RemoteFile>
 PickCheatFile(const QList<Cheats::RemoteFile>& supported, const QString& version, QString* error);
 
-[[nodiscard]] Reply List(const GameEntry* game);
+// `launch` action id: launch.plan leaves out --game-patch (the cheat plan).
+inline constexpr const char* LAUNCH_WITHOUT_CHEATS = "launch.nocheats";
+
+[[nodiscard]] Reply List(const GameEntry* game, const QString& runtime_root);
 [[nodiscard]] Reply Run(const GameEntry& game, const QJsonObject& params,
                         const QString& runtime_root, const QString& data_dir,
                         CheatFetcher& fetcher);
