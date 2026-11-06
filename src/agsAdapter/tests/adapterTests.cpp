@@ -590,7 +590,7 @@ void TestInputMapping(Session& s) {
 	};
 	const auto set = [&](const QJsonValue& v) {
 		return s.ErrorCode("settings.set", {{"scope", "global"},
-	                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
+		                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
 	};
 	EXPECT(get()["host_input_mapping"].isArray() && get()["host_input_mapping"].toArray().isEmpty());
 	const QJsonArray mapping {"Cross=Key:Z", "Circle=Key:X, Shift", ""};
