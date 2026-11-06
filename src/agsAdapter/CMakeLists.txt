@@ -58,4 +58,10 @@ if(BUILD_TESTING)
 	add_test(NAME kyty_ags_adapter COMMAND kyty_ags_adapter_tests)
 	set_tests_properties(kyty_ags_adapter PROPERTIES TIMEOUT 120
 		ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+	# The same checks against a `cmake --install` tree: a package without the icons fails.
+	add_test(NAME kyty_ags_adapter_install COMMAND "${CMAKE_COMMAND}"
+		-DBUILD_DIR=${CMAKE_BINARY_DIR} -DTESTER=$<TARGET_FILE:kyty_ags_adapter_tests>
+		-P "${CMAKE_CURRENT_SOURCE_DIR}/tests/installedIcons.cmake")
+	set_tests_properties(kyty_ags_adapter_install PROPERTIES TIMEOUT 300
+		SKIP_REGULAR_EXPRESSION "SKIP: ")
 endif()

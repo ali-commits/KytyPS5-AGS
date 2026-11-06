@@ -219,7 +219,7 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	if (const auto v = standard[QStringLiteral("hdr")]; v.isBool()) info.hdr_enabled = v.toBool();
 	info.perf_overlay_enabled = false; // AGS draws the overlay (STANDARD.md section 8.2)
 
-	const auto plan_path = Cheats::PlanPath(runtime_root, info.title_id.trimmed().toUpper());
+	const auto plan_path = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(info));
 	auto       args      = BuildEmulatorArgs(info, no_cheats ? QString {} : plan_path);
 	if (args.isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cannot build the emulator command for this game."));

@@ -1,4 +1,5 @@
 #include "library.h"
+#include "actions.h"
 
 #include "cheatFile.h"
 #include "configuration.h"
@@ -142,7 +143,7 @@ QJsonArray Games(const GameLibrary& library, const QString& data_dir, const QStr
 		    !version.isEmpty()) {
 			entry["version"] = version;
 		}
-		if (const auto plan = Cheats::PlanPath(runtime_root, info.title_id);
+		if (const auto plan = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(info));
 		    !plan.isEmpty() && QFileInfo::exists(plan)) {
 			entry["badges"] = QJsonArray {"cheats"};
 		}

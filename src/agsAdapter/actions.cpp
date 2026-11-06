@@ -20,10 +20,6 @@
 
 namespace {
 
-QString CheatTitle(const Configuration& info) {
-	return info.title_id.trimmed().toUpper();
-}
-
 QJsonArray CheatItems(const QJsonObject& cheats) {
 	QJsonArray items;
 	for (const auto& v: cheats[QStringLiteral("mods")].toArray()) {
@@ -165,7 +161,7 @@ void CheatFetcher::Finish(const QString& error, const QString& message) {
 }
 
 Reply CheatFetcher::Run(const GameEntry& game, const QString& cheats_root, int wait_ms) {
-	if (Cheats::PlanPath(cheats_root, CheatTitle(*game.info)).isEmpty()) {
+	if (Cheats::PlanPath(cheats_root, AdapterActions::CheatTitleId(*game.info)).isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cheats are not available for this game."));
 	}
 	if (m_phase != Phase::Idle && m_game != game.id) {
@@ -185,7 +181,7 @@ Reply CheatFetcher::Run(const GameEntry& game, const QString& cheats_root, int w
 		m_cheats_root = cheats_root;
 		m_message.clear();
 		m_phase = Phase::Catalog;
-		m_repository.Load(CheatTitle(*game.info));
+		m_repository.Load(AdapterActions::CheatTitleId(*game.info));
 	}
 	if (m_phase != Phase::Idle) {
 		QEventLoop loop;
@@ -210,6 +206,10 @@ Reply CheatFetcher::Run(const GameEntry& game, const QString& cheats_root, int w
 
 namespace AdapterActions {
 
+QString CheatTitleId(const Configuration& info) {
+	return info.title_id.trimmed().toUpper();
+}
+
 std::optional<Cheats::RemoteFile> PickCheatFile(const QList<Cheats::RemoteFile>& supported,
                                                 const QString& version, QString* error) {
 	const auto pick = std::find_if(supported.begin(), supported.end(),
@@ -221,7 +221,7 @@ std::optional<Cheats::RemoteFile> PickCheatFile(const QList<Cheats::RemoteFile>&
 }
 
 bool HasCheatPlan(const GameEntry& game, const QString& runtime_root) {
-	const auto plan = Cheats::PlanPath(runtime_root, game.info->title_id);
+	const auto plan = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(*game.info));
 	return !plan.isEmpty() && QFileInfo::exists(plan);
 }
 

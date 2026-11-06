@@ -46,6 +46,9 @@ private:
 
 namespace AdapterActions {
 
+// The title id the cheat plan is keyed by: trimmed, upper case. Library, actions and launch.plan share it.
+[[nodiscard]] QString CheatTitleId(const Configuration& info);
+
 // The remote cheat file for exactly `version`. Empty with `error` set ("No cheat file for version
 // <v>.") when none matches; a file for another version would be refused on import.
 [[nodiscard]] std::optional<Cheats::RemoteFile>

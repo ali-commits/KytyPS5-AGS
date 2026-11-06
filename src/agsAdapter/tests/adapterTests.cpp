@@ -307,7 +307,10 @@ QString TestLibrary(Session& s, const Fixture& f) {
 }
 
 // An icon is a safe relative path to a small SVG that ships in assets/ags.
+QSet<QString> g_icons; // every icon the adapter published in this run
+
 void ExpectIcon(const QString& icon) {
+	g_icons.insert(icon);
 	EXPECT(icon.startsWith("assets/ags/") && icon.endsWith(".svg") && !icon.contains(".."));
 	QFileInfo file(QDir(KYTY_TEST_SOURCE_ROOT).filePath(icon));
 	EXPECT(file.isFile() && !file.isSymLink() && file.size() > 0 && file.size() <= 256 * 1024);
@@ -883,6 +886,10 @@ void TestFraming(const Fixture& f) {
 
 // In-process checks of the helpers behind M1, M2, M4, M5, M6, M7 and M9.
 void TestUnits(const Fixture& f) {
+	// The cheat plan key is the same trimmed upper-case id everywhere (library, actions, launch.plan).
+	Configuration padded;
+	padded.title_id = QStringLiteral("  ppsa01234\t");
+	EXPECT(AdapterActions::CheatTitleId(padded) == "PPSA01234");
 	// M9: control characters and code point cuts.
 	EXPECT(AdapterLibrary::DropControls(QString("a\x01") + "b" + QChar(0x7f) + QChar(0x85) +
 	                                    "c\n") == "abc");
@@ -1091,6 +1098,17 @@ int main(int argc, char* argv[]) {
 	TestMalformedIni(f);
 	TestFraming(f);
 	TestUnits(f);
+	// With KYTY_TEST_INSTALL_ROOT (a `cmake --install` tree) every icon published above must be in it.
+	if (const auto root = qEnvironmentVariable("KYTY_TEST_INSTALL_ROOT"); !root.isEmpty()) {
+		EXPECT(g_icons.size() >= 10);
+		for (const auto& icon: g_icons) {
+			QFileInfo file(QDir(root).filePath(icon));
+			if (!file.isFile() || file.isSymLink() || file.size() == 0) {
+				printf("missing from the installed tree: %s\n", qPrintable(icon));
+				EXPECT(false);
+			}
+		}
+	}
 	printf("kyty_ags_adapter: %d checks passed\n", g_checks);
 	return 0;
 }
