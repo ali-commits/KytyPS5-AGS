@@ -1,36 +1,56 @@
-# KytyPS5 experimental
+# KytyPS5-AGS
 
-This repository, [ali-commits/KytyPS5-AGS](https://github.com/ali-commits/KytyPS5-AGS), is an AGS
-extension fork of [Jetsku/KytyPS5](https://github.com/Jetsku/KytyPS5). Development happens on the
-`ags-main` branch; `upstream` is Jetsku/KytyPS5. Clone with submodules:
+A modified build of the [KytyPS5](https://github.com/Jetsku/KytyPS5) PlayStation 5 emulator,
+packaged as an emulator extension for [AGS](https://github.com/ali-commits) (a game host that
+streams to phones, laptops and TVs). It carries its own compatibility, stability and performance
+work on top of upstream, plus the adapter that lets AGS list, configure, launch and capture games.
+
+The emulator also runs on its own: the Qt launcher (`kyty_launcher`) is kept as a standalone app.
+
+## What this build adds
+
+- **Renderer and compatibility:** the U59 renderer, the Demon's Souls shader and compatibility
+  fixes, software ray tracing for compute kernels that use `IMAGE_BVH_INTERSECT_RAY` (Astro Bot
+  lighting), and selected upstream int20 and int21 ports.
+  See [U59 changes](docs/CHANGES-U59.md), [ported fixes](docs/PORTED-OCT25.md) and the
+  [change catalog](docs/CHANGE-CATALOG.md).
+- **Performance and stability:** profile-guided builds, pipeline look-ahead with fast-first
+  compilation, frame pacing and efficiency work, and crash and hang investigations.
+  See [gaming efficiency](docs/GAMING-EFFICIENCY-OCT26.md),
+  [pipeline prefetch](docs/PIPELINE-PREFETCH-FAST-FIRST.md),
+  [int21 stability](docs/INT21-STABILITY-OCT25.md) and the [hang watchdog](docs/HANG-WATCHDOG.md).
+- **Controllers:** DualSense audio, haptics and gyro through the virtual controller AGS provides
+  ([controller audio](docs/dualsense-controller-audio.md)).
+- **AGS integration:** the `kyty-ags-adapter` (library, settings, cheats, trophies, additional
+  content, metrics), frames shared with the AGS capture path, and the session socket
+  ([AGS session](docs/AGS_SESSION.md)). Resolution, frame rate, full screen, hide cursor and HDR
+  come from AGS settings. HDR stays off for now: the AGS stream is 8-bit SDR, and HDR output from
+  this emulator currently looks clipped.
+
+Release notes: [docs/release-notes.md](docs/release-notes.md).
+
+## Install
+
+In AGS open **Settings**, **Emulators**, **Add emulator**, paste
+`https://github.com/ali-commits/KytyPS5-AGS` and confirm. AGS installs the latest release package
+(Linux x86_64) and keeps your existing saves, trophies and settings when you point the
+`runtime_root` setting at an existing KytyPS5 folder. Details, source builds and the release steps
+are under [Install as an AGS extension](#install-as-an-ags-extension).
+
+To build it yourself, clone with submodules:
 
 ```bash
-git clone --recurse-submodules -b ags-main https://github.com/ali-commits/KytyPS5-AGS.git
+git clone --recurse-submodules https://github.com/ali-commits/KytyPS5-AGS.git
 ```
 
-The main branch contains the U59 renderer, the validated Demon's Souls shader and
-compatibility changes, and the U59 integration work: command-processor and VRAM
-improvements, profile-guided optimization, and upstream's newer changes. No 60 FPS
-result is claimed.
+and follow [Building](#building).
 
-- [U59 feature changes and performance evidence](docs/CHANGES-U59.md)
-- [Fork commit and file catalog through U59](docs/CHANGE-CATALOG.md)
-- [Current release: what is new, launch and build guide](docs/EXPERIMENTAL.md)
+## Upstream
 
-This fork retains sanitized development history and upstream attribution.
-The badges and general project description below refer to upstream. Packaged
-Windows builds are available under Releases.
-
-[![Build KytyPS5 (Windows)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28Windows%29&label=Build%20KytyPS5%20%28Windows%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
-[![Build KytyPS5 (Linux)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28Linux%29&label=Build%20KytyPS5%20%28Linux%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
-[![Build KytyPS5 (macOS)](https://img.shields.io/github/check-runs/KytyPS5/KytyPS5/main?nameFilter=Build%20KytyPS5%20%28macOS%29&label=Build%20KytyPS5%20%28macOS%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64%20%7C%20macOS%20x86__64-0078D4.svg)](#system-requirements)
-[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#current-status)
-[![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
-
-**[Weekly updates](https://github.com/KytyPS5/KytyPS5/discussions/862)** — game progress, recent fixes and ongoing development.
-
-**[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
+Development follows [Jetsku/KytyPS5](https://github.com/Jetsku/KytyPS5), which is based on
+[Kyty](https://github.com/InoriRus/Kyty). Upstream fixes are ported selectively and tested before
+they land here, so this build is not a copy of upstream `main`. The sections below come from the
+upstream project; its links (status, compatibility list, Discord) refer to upstream.
 
 KytyPS5 is a free and open-source PlayStation 5 emulator written in C++ for Windows and Linux,
 with experimental macOS support. It is based on a heavily modified version of
