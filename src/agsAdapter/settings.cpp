@@ -228,6 +228,20 @@ QJsonObject GlobalField(const GlobalDef& g) {
 	return out;
 }
 
+constexpr int MAPPING_MAX_ITEMS = 256;
+constexpr int MAPPING_MAX_LEN   = 1024;
+
+// A string_list value within the schema limits; false when it is not a value of the field.
+bool MappingList(const QJsonValue& value) {
+	if (!value.isArray() || value.toArray().size() > MAPPING_MAX_ITEMS) return false;
+	for (const auto& v: value.toArray()) {
+		if (!v.isString() || v.toString().size() > MAPPING_MAX_LEN ||
+		    v.toString().contains(QChar(u'\0')))
+			return false;
+	}
+	return true;
+}
+
 QJsonObject MachineField(const QString& key) {
 	QJsonObject out {{"key", key}, {"scope", "global"}, {"location", "machine"}};
 	if (key == QLatin1String("runtime_root")) {
@@ -245,10 +259,11 @@ QJsonObject MachineField(const QString& key) {
 		out[QStringLiteral("label")]   = "Additional content folder";
 		out[QStringLiteral("default")] = "";
 	} else {
-		out[QStringLiteral("type")]    = "string";
-		out[QStringLiteral("label")]   = "Keyboard and mouse mapping";
-		out[QStringLiteral("hint")]    = "Comma-separated Control=Input bindings.";
-		out[QStringLiteral("default")] = "";
+		out[QStringLiteral("type")]      = "string_list";
+		out[QStringLiteral("label")]     = "Input mapping";
+		out[QStringLiteral("default")]   = QJsonArray::fromStringList(Configuration().host_input_mapping);
+		out[QStringLiteral("max_items")] = MAPPING_MAX_ITEMS;
+		out[QStringLiteral("max_len")]   = MAPPING_MAX_LEN;
 	}
 	return out;
 }
@@ -306,13 +321,6 @@ void LoadGlobal(QSettings& s, Configuration& c) {
 	s.endGroup();
 }
 
-QStringList Mappings(const QString& text) {
-	QStringList out;
-	for (const auto& part: text.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
-		if (const auto t = part.trimmed(); !t.isEmpty()) out.append(t);
-	}
-	return out;
-}
 
 QString FieldScope(const QJsonObject& f) {
 	return f[QStringLiteral("scope")].toString(QStringLiteral("global"));
@@ -478,7 +486,7 @@ Reply Get(AdapterState& state, const QString& ini, const GameEntry* game) {
 	values.insert(QStringLiteral("addons_dir"),
 	              s->value(QStringLiteral("Launcher/addons_dir")).toString());
 	values.insert(QStringLiteral("host_input_mapping"),
-	              c.host_input_mapping.join(QStringLiteral(", ")));
+	              QJsonArray::fromStringList(c.host_input_mapping));
 	values.insert(QStringLiteral("runtime_root"), state.StoredRuntimeRoot());
 	return Reply::Success({{"values", values}});
 }
@@ -510,6 +518,13 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 			patch.insert(it.key(), it.value());
 			continue;
 		}
+		if (type == QLatin1String("string_list")) {
+			if (!MappingList(it.value())) {
+				return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
+			}
+			patch.insert(it.key(), it.value());
+			continue;
+		}
 		QString text;
 		if (!Stored(*field, it.value(), &text)) {
 			return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
@@ -527,8 +542,6 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 			set_runtime_root = true;
 		} else if (it.key() == QLatin1String("addons_dir")) {
 			patch.insert(it.key(), text);
-		} else if (it.key() == QLatin1String("host_input_mapping")) {
-			patch.insert(it.key(), QJsonArray::fromStringList(Mappings(text)));
 		} else if (IsGlobalKey(it.key())) {
 			globals.insert(it.key(), it.value());
 		} else if (IsGameKey(it.key())) {

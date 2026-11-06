@@ -1,7 +1,9 @@
 #include "actions.h"
 
 #include "cheatFile.h"
+#include "common/additionalContent.h"
 #include "configuration.h"
+#include "gameContent.h"
 #include "gameLibrary.h"
 #include "gameServices.h"
 #include "trophyItems.h"
@@ -80,6 +82,24 @@ Reply Trophies(const GameEntry& game, const QString& runtime_root, const QString
 	const auto folder = safe.match(info.title_id).hasMatch() ? info.title_id : game.id;
 	return AdapterTrophies::Run(info, runtime_root,
 	                            QDir(data_dir).filePath(QStringLiteral("trophies/%1").arg(folder)));
+}
+
+Reply Content(const GameEntry& game) {
+	const auto&  info = *game.info;
+	QJsonArray   items;
+	const auto   title_id = info.title_id.trimmed().toUpper();
+	const auto   folder   = info.addons_dir;
+	for (const auto& entry: Common::FindAddContent(GameContent::ToPath(folder), title_id.toStdString())) {
+		QJsonObject item {{"id", QString::fromStdString(entry.content_id)},
+		                  {"title", QString::fromStdString(entry.title.empty() ? entry.entitlement_label
+		                                                                       : entry.title)}};
+		if (!entry.entitlement_label.empty())
+			item[QStringLiteral("label")] = QString::fromStdString(entry.entitlement_label);
+		items.append(item);
+	}
+	QJsonObject result {{"items", items}};
+	if (!folder.isEmpty() && QDir(folder).exists()) result[QStringLiteral("folder")] = folder;
+	return Reply::Success(result);
 }
 
 Reply Info(const GameEntry& game) {
@@ -212,6 +232,7 @@ Reply List(const GameEntry* game) {
 			               {"confirm", true}},
 	          QJsonObject {{"id", "trophies"}, {"kind", "progress_list"}, {"label", "Trophies"}},
 	          QJsonObject {{"id", "info"}, {"kind", "info"}, {"label", "Game info"}},
+	          QJsonObject {{"id", "content"}, {"kind", "list"}, {"label", "Additional content"}},
 	      }}});
 }
 
@@ -222,6 +243,7 @@ Reply Run(const GameEntry& game, const QJsonObject& params, const QString& runti
 	if (action == QLatin1String("cheats.fetch")) return fetcher.Run(game, runtime_root, 3500);
 	if (action == QLatin1String("trophies")) return Trophies(game, runtime_root, data_dir);
 	if (action == QLatin1String("info")) return Info(game);
+	if (action == QLatin1String("content")) return Content(game);
 	return Reply::NotFound(QStringLiteral("Unknown action %1.").arg(action));
 }
 

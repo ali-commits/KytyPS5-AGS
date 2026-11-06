@@ -321,7 +321,8 @@ void TestSchema(Session& s) {
 		keys.append(key);
 		EXPECT(!label.isEmpty() && label.size() <= 80);
 		EXPECT(f["hint"].toString().size() <= 200 && !f["hint"].toString().contains('\n'));
-		EXPECT(QStringList({"bool", "enum", "int", "string", "path", "path_list", "group"})
+		EXPECT(QStringList({"bool", "enum", "int", "string", "path", "path_list", "string_list",
+	                         "group"})
 		           .contains(type));
 		EXPECT(QStringList({"", "global", "per_game", "both"}).contains(f["scope"].toString()));
 		EXPECT(QStringList({"", "player", "machine"}).contains(f["location"].toString()));
@@ -354,6 +355,9 @@ void TestSchema(Session& s) {
 			EXPECT(found);
 		} else if (type == "path_list") {
 			EXPECT(d.isArray());
+		} else if (type == "string_list") {
+			EXPECT(d.isArray() && f["max_items"].toInt() == 256 && f["max_len"].toInt() == 1024);
+			EXPECT(key == "host_input_mapping" && f["location"].toString() == "machine");
 		} else {
 			EXPECT(d.isString());
 		}
@@ -522,7 +526,7 @@ void TestActions(Session& s, const QString& id) {
 	QStringList ids;
 	for (const auto& a: actions)
 		ids.append(a.toObject()["id"].toString());
-	EXPECT(ids == QStringList({"cheats", "cheats.fetch", "trophies", "info"}));
+	EXPECT(ids == QStringList({"cheats", "cheats.fetch", "trophies", "info", "content"}));
 	EXPECT(actions.at(1).toObject()["kind"].toString() == "command");
 	EXPECT(actions.at(1).toObject()["confirm"].toBool());
 	EXPECT(s.Result("actions.list")["actions"].toArray().isEmpty());
@@ -535,6 +539,68 @@ void TestActions(Session& s, const QString& id) {
 	           .toArray()
 	           .isEmpty());
 	EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", "nope"}}) == "not-found");
+	EXPECT(actions.at(4).toObject() ==
+	       QJsonObject({{"id", "content"}, {"kind", "list"}, {"label", "Additional content"}}));
+}
+
+void TestContent(Session& s, const Fixture& f, const QString& id) {
+	const auto run = [&] { return s.Result("actions.run", {{"game", id}, {"action_id", "content"}}); };
+	auto       none = run();
+	EXPECT(none["items"].toArray().isEmpty() && !none.contains("folder"));
+	const auto addons = QDir(f.dir.path()).filePath("addons");
+	WriteFile(QDir(addons).filePath("dlc1/sce_sys/param.json"),
+	          R"({"contentId":"EP0000-PPSA01234_00-ABCDEFGH12345678","titleName":"Extra Pack"})");
+	// Another title, and an application, are not additional content for this game.
+	WriteFile(QDir(addons).filePath("other/sce_sys/param.json"),
+	          R"({"contentId":"EP0000-PPSA09999_00-ABCDEFGH12345678","titleName":"Other"})");
+	CHECK(s.Result("settings.set", {{"scope", "global"},
+	                                {"values", QJsonObject {{"addons_dir", addons}}}})
+	          .contains("values"));
+	const auto got   = run();
+	const auto items = got["items"].toArray();
+	EXPECT(items.size() == 1);
+	EXPECT(items.at(0).toObject() ==
+	       QJsonObject({{"id", "EP0000-PPSA01234_00-ABCDEFGH12345678"},
+	                    {"title", "Extra Pack"},
+	                    {"label", "ABCDEFGH12345678"}}));
+	EXPECT(got["folder"].toString() == addons);
+	CHECK(s.Result("settings.set", {{"scope", "global"},
+	                                {"values", QJsonObject {{"addons_dir", ""}}}})
+	          .contains("values"));
+}
+
+void TestInputMapping(Session& s) {
+	const auto get = [&] {
+		return s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+	};
+	const auto set = [&](const QJsonValue& v) {
+		return s.ErrorCode("settings.set", {{"scope", "global"},
+		                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
+	};
+	EXPECT(get()["host_input_mapping"].isArray() && get()["host_input_mapping"].toArray().isEmpty());
+	const QJsonArray mapping {"Cross=Key:Z", "Circle=Key:X, Shift", ""};
+	const auto       saved = s.Result("settings.set", {{"scope", "global"},
+	                                                   {"values", QJsonObject {{"host_input_mapping", mapping}}}})["values"]
+	                       .toObject();
+	EXPECT(saved["host_input_mapping"].toArray() == mapping);
+	EXPECT(get()["host_input_mapping"].toArray() == mapping);
+	QJsonArray too_many;
+	for (int i = 0; i < 257; ++i)
+		too_many.append("a");
+	EXPECT(set(too_many) == "invalid-params");
+	EXPECT(set(QJsonArray {QString(1025, 'a')}) == "invalid-params");
+	EXPECT(set(QJsonArray {1}) == "invalid-params");
+	EXPECT(set("Cross=Key:Z") == "invalid-params");
+	EXPECT(get()["host_input_mapping"].toArray() == mapping); // rejected requests changed nothing
+	QJsonArray max_ok;
+	for (int i = 0; i < 256; ++i)
+		max_ok.append(QString(1024, 'b'));
+	EXPECT(s.Result("settings.set", {{"scope", "global"},
+	                                 {"values", QJsonObject {{"host_input_mapping", max_ok}}}})["values"]
+	           .toObject()["host_input_mapping"].toArray() == max_ok);
+	EXPECT(s.Result("settings.set", {{"scope", "global"},
+	                                 {"values", QJsonObject {{"host_input_mapping", QJsonArray {}}}}})
+	           .contains("values"));
 }
 
 void TestChangedAndEof(Session& s, const Fixture& f) {
@@ -950,6 +1016,8 @@ int main(int argc, char* argv[]) {
 		TestSettings(s, f, id);
 		TestLaunch(s, f, id);
 		TestActions(s, id);
+		TestContent(s, f, id);
+		TestInputMapping(s);
 		TestStaleCache(s, f, id);
 		TestSettingsAtomic(s, f);
 		TestChangedAndEof(s, f);
