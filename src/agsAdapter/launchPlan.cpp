@@ -202,6 +202,10 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	    !name.isEmpty()) {
 		info.user_name = name;
 	}
+	// fullscreen, hide_cursor, hdr: bool; the game's own setting when absent or not a bool.
+	if (const auto v = standard[QStringLiteral("fullscreen")]; v.isBool()) info.fullscreen_enabled = v.toBool();
+	if (const auto v = standard[QStringLiteral("hide_cursor")]; v.isBool()) info.hide_cursor_enabled = v.toBool();
+	if (const auto v = standard[QStringLiteral("hdr")]; v.isBool()) info.hdr_enabled = v.toBool();
 	info.perf_overlay_enabled = false; // AGS draws the overlay (STANDARD.md section 8.2)
 
 	const auto plan_path = Cheats::PlanPath(runtime_root, info.title_id.trimmed().toUpper());
@@ -260,6 +264,9 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	applied.insert(QStringLiteral("language"), LanguageTag(info.console_language));
 	applied.insert(QStringLiteral("player_name"), info.user_name);
 	applied.insert(QStringLiteral("controller"), QStringLiteral("dualsense"));
+	applied.insert(QStringLiteral("fullscreen"), info.fullscreen_enabled);
+	applied.insert(QStringLiteral("hide_cursor"), info.hide_cursor_enabled);
+	applied.insert(QStringLiteral("hdr"), info.hdr_enabled);
 
 	return Reply::Success({{"argv", argv},
 	                       {"env", env},

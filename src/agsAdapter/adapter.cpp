@@ -83,6 +83,9 @@ Reply Adapter::Hello(const QJsonObject& /*params*/) const {
 		              {"aspect", honoured},
 		              {"language", honoured},
 		              {"player_name", honoured},
+		              {"fullscreen", honoured},
+		              {"hide_cursor", honoured},
+		              {"hdr", honoured},
 		              {"controller", QJsonObject {{"level", "fixed"}, {"value", "dualsense"}}}}},
 	    {"controllers",
 		 QJsonArray {QJsonObject {

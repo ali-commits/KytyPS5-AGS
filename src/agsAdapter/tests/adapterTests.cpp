@@ -246,8 +246,9 @@ void TestHello(Session& s) {
 	EXPECT(Strings(hello["capabilities"]) ==
 	       QStringList({"library", "settings", "actions", "native_frames", "metrics"}));
 	const auto standard = hello["standard"].toObject();
-	EXPECT(standard.size() == 6);
-	for (const auto* key: {"resolution", "fps_limit", "aspect", "language", "player_name"}) {
+	EXPECT(standard.size() == 9);
+	for (const auto* key: {"resolution", "fps_limit", "aspect", "language", "player_name",
+	                           "fullscreen", "hide_cursor", "hdr"}) {
 		EXPECT(standard[key].toObject()["level"].toString() == "honoured");
 	}
 	EXPECT(standard["controller"].toObject() ==
@@ -363,7 +364,8 @@ void TestSchema(Session& s) {
 		}
 	}
 	for (const auto* omitted: {"screen_resolution", "vblank_frequency", "stream_aspect_mode",
-	                           "console_language", "user_name"}) {
+	                           "console_language", "user_name", "fullscreen_enabled",
+	                           "hide_cursor_enabled", "hdr_enabled"}) {
 		EXPECT(!keys.contains(omitted));
 	}
 	machine.sort();
@@ -446,8 +448,11 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	                                                      {"fps_limit", 144},
 	                                                      {"aspect", "fill"},
 	                                                      {"language", "de-DE"},
-	                                                      {"player_name", "Ünïcödé player name"}}},
-	                            {"player", QJsonObject {{"hdr_enabled", true}, {"gpu_index", "3"}}},
+	                                                      {"player_name", "Ünïcödé player name"},
+	                                                      {"fullscreen", true},
+	                                                      {"hide_cursor", true},
+	                                                      {"hdr", true}}},
+	                            {"player", QJsonObject {{"hdr_enabled", false}, {"gpu_index", "3"}}},
 	                            {"capture", "native"},
 	                            {"controllers", QJsonArray {"dualsense"}}});
 	const auto argv = Strings(plan["argv"]);
@@ -458,7 +463,8 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(ArgAfter(argv, "--stream-aspect") == "fill");
 	EXPECT(ArgAfter(argv, "--console-language") == "4");
 	EXPECT(ArgAfter(argv, "--perf-overlay") == "false");
-	EXPECT(argv.contains("--hdr"));  // player value applied
+	EXPECT(argv.contains("--hdr"));  // standard value applied
+	EXPECT(argv.contains("--fullscreen") && argv.contains("--hide-cursor"));
 	EXPECT(!argv.contains("--gpu")); // machine value from a player is ignored
 	const auto name = ArgAfter(argv, "--user-name");
 	EXPECT(!name.isEmpty() && name.toUtf8().size() <= 16 &&
@@ -492,7 +498,8 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(applied["language"].toString() == "de-DE");
 	EXPECT(applied["player_name"].toString() == name);
 	EXPECT(applied["controller"].toString() == "dualsense");
-	EXPECT(applied["hdr_enabled"].toBool());
+	EXPECT(applied["hdr"].toBool() && applied["fullscreen"].toBool() && applied["hide_cursor"].toBool());
+	EXPECT(!applied.contains("hdr_enabled"));
 	EXPECT(!applied.contains("gpu_index"));
 
 	plan = s.Result("launch.plan",
@@ -510,6 +517,9 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	                        "KYTY_STREAM_ASPECT", "KYTY_STREAM_SOCKET"})
 		EXPECT(!plan["env"].toObject().contains(name));
 	EXPECT(ArgAfter(argv2, "--perf-overlay") == "false");
+	// absent keys keep the game's own setting (default off)
+	EXPECT(!argv2.contains("--fullscreen") && !argv2.contains("--hide-cursor") && !argv2.contains("--hdr"));
+	EXPECT(!plan["applied"].toObject()["hdr"].toBool());
 	EXPECT(!env.contains("KYTY_STREAM_FRAMES")); // native plans leave the emulator its frame pool
 
 	plan = s.Result("launch.plan", {{"game", id},

@@ -97,7 +97,7 @@ const std::vector<Group>& Groups() {
 	static const std::vector<Group> groups = {
 	    {"group.display",
 		 "Display",
-		 {"present_mode", "gpu_index", "fullscreen_enabled", "hdr_enabled", "hide_cursor_enabled"}},
+		 {"present_mode", "gpu_index"}},
 	    {"group.user", "User", {"user_id"}},
 	    {"group.audio",
 		 "Audio",
@@ -331,7 +331,9 @@ QString FieldScope(const QJsonObject& f) {
 bool CoveredByStandard(const QString& key) {
 	return key == QLatin1String("screen_resolution") || key == QLatin1String("vblank_frequency") ||
 	       key == QLatin1String("stream_aspect_mode") || key == QLatin1String("console_language") ||
-	       key == QLatin1String("user_name");
+	       key == QLatin1String("user_name") ||
+	       key == QLatin1String("fullscreen_enabled") || key == QLatin1String("hide_cursor_enabled") ||
+	       key == QLatin1String("hdr_enabled");
 }
 
 const QJsonArray& Schema() {

@@ -2,7 +2,7 @@
 # The copy at the repository root is what AGS reads at the tagged commit (ctest -R ags_manifest checks it).
 id = "kytyps5"
 name = "KytyPS5"
-version = "0.4.0"
+version = "0.4.1"
 license = "GPL-2.0"
 protocol = 1
 adapter = "kyty-ags-adapter"
