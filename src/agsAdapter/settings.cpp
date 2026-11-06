@@ -235,7 +235,7 @@ constexpr int MAPPING_MAX_LEN   = 1024;
 bool MappingList(const QJsonValue& value) {
 	if (!value.isArray() || value.toArray().size() > MAPPING_MAX_ITEMS) return false;
 	for (const auto& v: value.toArray()) {
-		if (!v.isString() || v.toString().size() > MAPPING_MAX_LEN ||
+		if (!v.isString() || v.toString().toUcs4().size() > MAPPING_MAX_LEN ||
 		    v.toString().contains(QChar(u'\0')))
 			return false;
 	}
@@ -432,7 +432,7 @@ bool ApplyPlayer(Configuration& info, const QJsonObject& player, QJsonObject* ap
 			}
 			SetGlobalValue(info, it.key(), value);
 		} else {
-			game_values.insert(it.key(), PreferenceSchema::RawText(text));
+			game_values.insert(it.key(), IsClosedEnum(*field, it.key()) ? PreferenceSchema::RawText(text) : text);
 		}
 		applied->insert(it.key(), value);
 	}
@@ -545,7 +545,7 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 		} else if (IsGlobalKey(it.key())) {
 			globals.insert(it.key(), it.value());
 		} else if (IsGameKey(it.key())) {
-			settings.insert(it.key(), PreferenceSchema::RawText(text));
+			settings.insert(it.key(), IsClosedEnum(*field, it.key()) ? PreferenceSchema::RawText(text) : text);
 		}
 	}
 	if (game != nullptr) {

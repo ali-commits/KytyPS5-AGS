@@ -25,10 +25,10 @@ QString TierName(int grade) {
 	}
 }
 
-// Unlock times are .NET ticks (100 ns since 0001-01-01); STANDARD.md wants UTC YYYY-MM-DDTHH:MM:SSZ.
+// Unlock times are microseconds (since 0001-01-01); STANDARD.md wants UTC YYYY-MM-DDTHH:MM:SSZ.
 QString UnlockedAt(uint64_t tick) {
 	if (tick < Common::Trophies::UnixEpochTick) return {};
-	const auto secs = static_cast<qint64>((tick - Common::Trophies::UnixEpochTick) / 10000000ULL);
+	const auto secs = static_cast<qint64>((tick - Common::Trophies::UnixEpochTick) / 1000000ULL);
 	return QDateTime::fromSecsSinceEpoch(secs, QTimeZone::UTC)
 	    .toString(QStringLiteral("yyyy-MM-dd'T'HH:mm:ss'Z'"));
 }

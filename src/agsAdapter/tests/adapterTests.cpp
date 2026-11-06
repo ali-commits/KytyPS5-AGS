@@ -397,6 +397,14 @@ void TestSettings(Session& s, const Fixture& f, const QString& id) {
 	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
 	EXPECT(values["support_zmask"].toBool());
 	EXPECT(!values.contains("audio_master_volume")); // global only
+	// Digit-leading non-enum values are stored as they are, not as RawText ("R10").
+	values = s.Result("settings.set", {{"scope", "game"},
+	                                   {"game", id},
+	                                   {"values", QJsonObject {{"user_id", 10}}}})["values"]
+	             .toObject();
+	EXPECT(values["user_id"].toInt() == 10);
+	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	EXPECT(values["user_id"].toInt() == 10);
 	values = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
 	EXPECT(!values["support_zmask"].toBool());
 
@@ -564,6 +572,13 @@ void TestContent(Session& s, const Fixture& f, const QString& id) {
 	                    {"title", "Extra Pack"},
 	                    {"label", "ABCDEFGH12345678"}}));
 	EXPECT(got["folder"].toString() == addons);
+	// A param.json symlinked from outside the addons folder is ignored.
+	WriteFile(QDir(f.dir.path()).filePath("outside/param.json"),
+	          R"({"contentId":"EP0000-PPSA01234_00-ZZZZZZZZ12345678","titleName":"Escaped"})");
+	QDir().mkpath(QDir(addons).filePath("dlc2/sce_sys"));
+	CHECK(QFile::link(QDir(f.dir.path()).filePath("outside/param.json"),
+	                  QDir(addons).filePath("dlc2/sce_sys/param.json")));
+	EXPECT(run()["items"].toArray().size() == 1);
 	CHECK(s.Result("settings.set", {{"scope", "global"},
 	                                {"values", QJsonObject {{"addons_dir", ""}}}})
 	          .contains("values"));
@@ -575,7 +590,7 @@ void TestInputMapping(Session& s) {
 	};
 	const auto set = [&](const QJsonValue& v) {
 		return s.ErrorCode("settings.set", {{"scope", "global"},
-		                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
+	                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
 	};
 	EXPECT(get()["host_input_mapping"].isArray() && get()["host_input_mapping"].toArray().isEmpty());
 	const QJsonArray mapping {"Cross=Key:Z", "Circle=Key:X, Shift", ""};
@@ -590,8 +605,14 @@ void TestInputMapping(Session& s) {
 	EXPECT(set(too_many) == "invalid-params");
 	EXPECT(set(QJsonArray {QString(1025, 'a')}) == "invalid-params");
 	EXPECT(set(QJsonArray {1}) == "invalid-params");
+	// max_len counts characters: 600 non-BMP characters are 1200 UTF-16 units but fit.
+	const auto emoji = [](int n) { return QString::fromUcs4(std::u32string(n, U'\U0001F600').c_str()); };
+	EXPECT(set(QJsonArray {emoji(1025)}) == "invalid-params");
 	EXPECT(set("Cross=Key:Z") == "invalid-params");
 	EXPECT(get()["host_input_mapping"].toArray() == mapping); // rejected requests changed nothing
+	CHECK(s.Result("settings.set", {{"scope", "global"},
+	                                {"values", QJsonObject {{"host_input_mapping", QJsonArray {emoji(600)}}}}})
+	          .contains("values"));
 	QJsonArray max_ok;
 	for (int i = 0; i < 256; ++i)
 		max_ok.append(QString(1024, 'b'));
@@ -916,8 +937,11 @@ void TestUnits(const Fixture& f) {
 		Common::Trophies::UnlockData unlocks;
 		unlocks.unlocked.insert(1);
 		unlocks.unlocked.insert(4);
-		// 2024-03-05T01:02:03Z as .NET ticks
-		unlocks.timestamps[1] = Common::Trophies::UnixEpochTick + 1709600523ULL * 10000000ULL;
+		// 2024-03-05T01:02:03Z, stored as microseconds since 0001-01-01
+		unlocks.timestamps[1] = Common::Trophies::UnixEpochTick + 1709600523ULL * 1000000ULL;
+		unlocks.timestamps[4] = Common::Trophies::UnixEpochTick + 1709600523ULL * 1000000ULL + 999999ULL;
+		unlocks.timestamps[2] = Common::Trophies::UnixEpochTick - 1ULL;
+		unlocks.unlocked.insert(2);
 		const auto icons  = QDir(f.dir.path()).filePath("trophy-icons");
 		const auto items0 = AdapterTrophies::Items(package, unlocks, 0, icons);
 		const auto items1 = AdapterTrophies::Items(package, unlocks, 1, icons);
@@ -938,7 +962,7 @@ void TestUnits(const Fixture& f) {
 		const auto plain = items0.at(1).toObject();
 		EXPECT(plain["id"] == "0-2" && !plain.contains("icon"));
 		EXPECT(plain["description"] == "No picture" && plain["tier"] == "bronze");
-		EXPECT(!plain.contains("unlocked_at"));
+		EXPECT(!plain.contains("unlocked_at")); // tick below the epoch: omitted
 		const auto secret = items0.at(2).toObject(); // hidden and locked: nothing revealed
 		EXPECT(secret["label"] == "Hidden trophy" && !secret.contains("icon"));
 		EXPECT(secret["hidden"].toBool() && !secret.contains("description"));
@@ -947,6 +971,7 @@ void TestUnits(const Fixture& f) {
 		const auto opened = items0.at(3).toObject(); // hidden but unlocked: shown
 		EXPECT(opened["label"] == "Secret opened" && opened.contains("icon") &&
 		       opened["hidden"].toBool());
+		EXPECT(opened["unlocked_at"] == "2024-03-05T01:02:03Z"); // sub-second part truncates
 	}
 
 	// Raw enum spellings are aliases of the schema options.

@@ -75,7 +75,17 @@ std::vector<AddContentEntry> FindAddContent(const std::filesystem::path& dir,
 	static const std::regex content_id_pattern(
 	    "^[A-Z]{2}[0-9]{4}-[A-Z]{4}[0-9]{5}_[0-9]{2}-[A-Z0-9]{16}$");
 	std::map<std::string, AddContentEntry> by_label;
+	const auto real_root = std::filesystem::canonical(root, ec);
+	if (ec) {
+		return {};
+	}
 	for (const auto& file: params) {
+		// A symlinked param.json must not read from outside the content root.
+		const auto real = std::filesystem::canonical(file, ec);
+		if (ec || std::mismatch(real_root.begin(), real_root.end(), real.begin(), real.end()).first !=
+		              real_root.end()) {
+			continue;
+		}
 		const auto size = std::filesystem::file_size(file, ec);
 		if (ec || size > 1024 * 1024) {
 			continue;
