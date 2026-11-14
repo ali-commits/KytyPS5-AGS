@@ -181,9 +181,11 @@ bool OwnerPreferences::Write(QSettings& s, const QJsonObject& patch, QString& er
 		for (auto i = values.begin(); i != values.end(); ++i) {
 			if (!global.contains(i.key())) return fail("Unknown global preference: " + i.key());
 			if (i.key() == "controller_color") {
-				if (!i.value().isString() ||
-				    (!i.value().toString().isEmpty() && !QColor(i.value().toString()).isValid()))
+				QString color;
+				if (!i.value().isString() || !NormalControllerColor(i.value().toString(), &color))
 					return fail("Invalid controller color.");
+				global[i.key()] = color;
+				continue;
 			} else if (global[i.key()].isBool()) {
 				if (!i.value().isBool()) return fail("Expected boolean: " + i.key());
 			} else {

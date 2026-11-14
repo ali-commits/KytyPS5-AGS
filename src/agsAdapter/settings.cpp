@@ -6,7 +6,6 @@
 #include "ownerPreferences.h"
 #include "preferenceSchema.h"
 
-#include <QColor>
 #include <QDir>
 #include <QFileInfo>
 #include <QHash>
@@ -23,32 +22,51 @@ namespace {
 struct GlobalDef {
 	const char* key;
 	const char* label;
-	const char* type; // bool, int or string
+	const char* type; // bool, int, enum or string
 	int         max;
+	const char* unit; // int only: a percentage is drawn as a slider
 };
 
+constexpr char PERCENT[]         = "%";
+constexpr char KEYBOARD_PLAYER[] = "controller_keyboard_player";
+
 const GlobalDef GLOBALS[] = {
-    {"controller_color", "Controller light bar colour", "string", 0},
-    {"controller_speaker_volume", "Controller speaker volume", "int", 100},
-    {"controller_vibration_intensity", "Controller vibration", "int", 100},
-    {"controller_keyboard_player", "Keyboard player", "int", Config::MAX_PLAYERS},
-    {"audio_master_volume", "Master volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME)},
-    {"audio_main_volume", "Main volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME)},
-    {"audio_music_volume", "Music volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME)},
+    {"controller_color", "Controller light bar colour", "string", 0, nullptr},
+    {"controller_speaker_volume", "Controller speaker volume", "int", 100, PERCENT},
+    {"controller_vibration_intensity", "Controller vibration", "int", 100, PERCENT},
+    // Stored as the player number (0 shares player 1); offered as an enum of that number's text.
+    {KEYBOARD_PLAYER, "Keyboard player", "enum", Config::MAX_PLAYERS, nullptr},
+    {"audio_master_volume", "Master volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME),
+     PERCENT},
+    {"audio_main_volume", "Main volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME), PERCENT},
+    {"audio_music_volume", "Music volume", "int", static_cast<int>(Config::MAX_AUDIO_VOLUME),
+     PERCENT},
     {"audio_pad_speaker_main_volume", "Controller speaker on main output", "int",
-	 static_cast<int>(Config::MAX_AUDIO_VOLUME)},
+	 static_cast<int>(Config::MAX_AUDIO_VOLUME), PERCENT},
     {"audio_objects_volume", "Audio objects volume", "int",
-	 static_cast<int>(Config::MAX_AUDIO_VOLUME)},
-    {"audio_objects_enabled", "Audio objects", "bool", 0},
-    {"gpu_occlusion_accurate", "Accurate GPU occlusion", "bool", 0},
+	 static_cast<int>(Config::MAX_AUDIO_VOLUME), PERCENT},
+    {"audio_objects_enabled", "Audio objects", "bool", 0, nullptr},
+    {"gpu_occlusion_accurate", "Accurate GPU occlusion", "bool", 0, nullptr},
 };
+
+// Suggested light bar colours (STANDARD.md section 6.2 `palette`); any #rrggbb is allowed.
+const char* const PALETTE[][2] = {
+    {"#0030ff", "Blue"},  {"#ff0000", "Red"},    {"#00ff00", "Green"},  {"#ff40a0", "Pink"},
+    {"#ffffff", "White"}, {"#ffa000", "Orange"}, {"#8000ff", "Purple"}, {"#00e0ff", "Cyan"},
+};
+
+// Enums drawn as a segmented control (2 to 4 short options).
+bool Segmented(const QString& key) {
+	return key == QLatin1String("present_mode") || key == QLatin1String("amd_cpu_mode");
+}
 
 QJsonValue GlobalValue(const Configuration& c, const QString& key) {
 	if (key == QLatin1String("controller_color")) return c.controller.color;
 	if (key == QLatin1String("controller_speaker_volume")) return c.controller.speaker_volume;
 	if (key == QLatin1String("controller_vibration_intensity"))
 		return c.controller.vibration_intensity;
-	if (key == QLatin1String("controller_keyboard_player")) return c.controller.keyboard_player;
+	if (key == QLatin1String(KEYBOARD_PLAYER))
+		return QString::number(c.controller.keyboard_player);
 	if (key == QLatin1String("audio_master_volume")) return c.audio_mix.master;
 	if (key == QLatin1String("audio_main_volume")) return c.audio_mix.main;
 	if (key == QLatin1String("audio_music_volume")) return c.audio_mix.music;
@@ -67,8 +85,8 @@ void SetGlobalValue(Configuration& c, const QString& key, const QJsonValue& v) {
 		c.controller.speaker_volume = n;
 	else if (key == QLatin1String("controller_vibration_intensity"))
 		c.controller.vibration_intensity = n;
-	else if (key == QLatin1String("controller_keyboard_player"))
-		c.controller.keyboard_player = n;
+	else if (key == QLatin1String(KEYBOARD_PLAYER))
+		c.controller.keyboard_player = v.isString() ? v.toString().toInt() : n;
 	else if (key == QLatin1String("audio_master_volume"))
 		c.audio_mix.master = n;
 	else if (key == QLatin1String("audio_main_volume"))
@@ -211,6 +229,10 @@ QJsonObject Convert(const QJsonObject& in) {
 		out[QStringLiteral("scope")] = "global";
 		out[QStringLiteral("hint")]  = "Vulkan device the emulator renders on.";
 	}
+	if (key == QLatin1String("trophy_duration_seconds")) out[QStringLiteral("unit")] = "s";
+	const auto count = out[QStringLiteral("options")].toArray().size();
+	if (type == QLatin1String("enum") && Segmented(key) && count >= 2 && count <= 4)
+		out[QStringLiteral("control")] = "segmented";
 	out[QStringLiteral("default")] = Typed(out, raw);
 	return out;
 }
@@ -225,9 +247,29 @@ QJsonObject GlobalField(const GlobalDef& g) {
 		out[QStringLiteral("min")]  = 0;
 		out[QStringLiteral("max")]  = g.max;
 		out[QStringLiteral("step")] = 1;
+		if (g.unit != nullptr) {
+			out[QStringLiteral("unit")]    = g.unit;
+			out[QStringLiteral("control")] = "slider";
+		}
+	}
+	if (QLatin1String(g.key) == QLatin1String(KEYBOARD_PLAYER)) {
+		// The labels of the Qt launcher's dialog and the old daemon.
+		QJsonArray options {QJsonObject {{"value", "0"}, {"label", "Shared with player 1"}}};
+		for (int player = 1; player <= g.max; ++player) {
+			options.append(QJsonObject {{"value", QString::number(player)},
+			                            {"label", QStringLiteral("Player %1").arg(player)}});
+		}
+		out[QStringLiteral("options")] = options;
 	}
 	if (QLatin1String(g.key) == QLatin1String("controller_color")) {
-		out[QStringLiteral("hint")] = "Hex colour such as #3060ff; empty keeps the default.";
+		out[QStringLiteral("hint")]       = "Empty lets the game set the colour.";
+		out[QStringLiteral("format")]     = "colour";
+		out[QStringLiteral("nullable")]   = true;
+		out[QStringLiteral("null_label")] = "Game default";
+		QJsonArray palette;
+		for (const auto& p: PALETTE)
+			palette.append(QJsonObject {{"value", p[0]}, {"label", p[1]}});
+		out[QStringLiteral("palette")] = palette;
 	}
 	out[QStringLiteral("default")] = GlobalValue(Configuration(), QString::fromLatin1(g.key));
 	return out;
@@ -352,6 +394,36 @@ const QJsonArray& Schema() {
 	return schema;
 }
 
+QStringList HostFieldTypes(const QJsonObject& hello_params) {
+	// A host that predates field_types knows the protocol 1 originals only.
+	static const QStringList ORIGINAL {"bool", "enum", "int", "string", "path", "path_list",
+	                                   "string_list", "group"};
+	const auto listed = hello_params[QStringLiteral("field_types")];
+	if (!listed.isArray()) return ORIGINAL;
+	QStringList types;
+	for (const auto& t: listed.toArray()) {
+		if (t.isString()) types.append(t.toString());
+	}
+	return types;
+}
+
+QJsonArray SchemaFor(const QStringList& host_types) {
+	QJsonArray fields;
+	QJsonValue heading(QJsonValue::Undefined); // a group heading waits for its first field
+	for (const auto& v: Schema()) {
+		const auto type = v.toObject()[QStringLiteral("type")].toString();
+		if (type == QLatin1String("group")) {
+			heading = v;
+			continue;
+		}
+		if (!host_types.contains(type)) continue; // an older host would refuse the whole schema
+		if (!heading.isUndefined()) fields.append(heading);
+		heading = QJsonValue(QJsonValue::Undefined);
+		fields.append(v);
+	}
+	return fields;
+}
+
 const QJsonObject* FindField(const QString& key) {
 	static const QHash<QString, QJsonObject> index = [] {
 		QHash<QString, QJsonObject> h;
@@ -438,10 +510,13 @@ bool ApplyPlayer(Configuration& info, const QJsonObject& player, QJsonObject* ap
 			value = text;
 		}
 		if (IsGlobalKey(it.key())) {
-			if (it.key() == QLatin1String("controller_color") && !text.isEmpty() &&
-			    !QColor(text).isValid()) {
-				*error = QStringLiteral("Invalid controller colour.");
-				return false;
+			if (it.key() == QLatin1String("controller_color")) {
+				// --controller-color takes exactly #rrggbb; anything else stops the emulator.
+				if (!NormalControllerColor(text, &text)) {
+					*error = QStringLiteral("Invalid controller colour.");
+					return false;
+				}
+				value = text;
 			}
 			SetGlobalValue(info, it.key(), value);
 		} else {
@@ -555,6 +630,13 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 			set_runtime_root = true;
 		} else if (it.key() == QLatin1String("addons_dir")) {
 			patch.insert(it.key(), text);
+		} else if (it.key() == QLatin1String("controller_color")) {
+			if (!NormalControllerColor(text, &text)) {
+				return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
+			}
+			globals.insert(it.key(), text);
+		} else if (it.key() == QLatin1String(KEYBOARD_PLAYER)) {
+			globals.insert(it.key(), text.toInt()); // Kyty.ini keeps the player number
 		} else if (IsGlobalKey(it.key())) {
 			globals.insert(it.key(), it.value());
 		} else if (IsGameKey(it.key())) {

@@ -9,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 class AdapterState;
 class Configuration;
@@ -22,6 +23,11 @@ namespace AdapterSettings {
 
 // The schema fields, in order, with groups as flat headings.
 [[nodiscard]] const QJsonArray&  Schema();
+// The field types a host understands, from its hello params (`field_types`); the protocol 1
+// originals when it sends none.
+[[nodiscard]] QStringList HostFieldTypes(const QJsonObject& hello_params);
+// Schema() without the fields whose type `host_types` lacks, and without headings left empty.
+[[nodiscard]] QJsonArray SchemaFor(const QStringList& host_types);
 [[nodiscard]] const QJsonObject* FindField(const QString& key);
 
 // The schema option that `text` names, taking the launcher's raw enum spelling ("R1920X1080")

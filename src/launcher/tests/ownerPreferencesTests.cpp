@@ -53,6 +53,14 @@ int main(int argc, char** argv) {
 	CHECK(!OwnerPreferences::Write(s, {{"unknown", true}}, error));
 	CHECK(!OwnerPreferences::Write(s, {{"global", QJsonObject {{"audio_objects_enabled", "true"}}}},
 	                               error));
+	// The light bar colour is stored as #rrggbb in lower case; other spellings are refused.
+	CHECK(OwnerPreferences::Write(s, {{"global", QJsonObject {{"controller_color", "#0030FF"}}}}, error));
+	CHECK(OwnerPreferences::Read(s)["global"].toObject()["controller_color"] == "#0030ff");
+	for (const auto* bad: {"#fff", "red", "#80ff0000", "0030ff"})
+		CHECK(!OwnerPreferences::Write(s, {{"global", QJsonObject {{"controller_color", bad}}}}, error));
+	CHECK(OwnerPreferences::Read(s)["global"].toObject()["controller_color"] == "#0030ff");
+	CHECK(OwnerPreferences::Write(s, {{"global", QJsonObject {{"controller_color", ""}}}}, error));
+	CHECK(OwnerPreferences::Read(s)["global"].toObject()["controller_color"] == "");
 	const auto fields = before["fields"].toArray();
     CHECK(!fields.isEmpty());
     QSet<QString> declared;

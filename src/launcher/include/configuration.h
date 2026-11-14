@@ -44,6 +44,24 @@ QString EnumToText(T value) {
 	                                                                     : key);
 }
 
+// A light bar colour as stored and passed to --controller-color: `#rrggbb` in lower case when
+// `text` is `#` and six hex digits (either case), "" for empty (the game sets the colour). False
+// for anything else (short forms, names, alpha), which kyty_emulator would refuse at start.
+inline bool NormalControllerColor(const QString& text, QString* out) {
+	if (text.isEmpty()) {
+		*out = QString {};
+		return true;
+	}
+	if (text.size() != 7 || text.at(0) != QChar(u'#')) return false;
+	for (int i = 1; i < 7; ++i) {
+		const auto c = text.at(i).unicode();
+		if (!((c >= u'0' && c <= u'9') || (c >= u'a' && c <= u'f') || (c >= u'A' && c <= u'F')))
+			return false;
+	}
+	*out = text.toLower();
+	return true;
+}
+
 struct ControllerSettings {
 	QString color;
 	int     speaker_volume      = 50;

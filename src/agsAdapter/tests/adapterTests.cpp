@@ -16,6 +16,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -316,6 +317,8 @@ void ExpectIcon(const QString& icon) {
 	EXPECT(file.isFile() && !file.isSymLink() && file.size() > 0 && file.size() <= 256 * 1024);
 }
 
+void TestRicherKeys(const QJsonArray& fields);
+
 void TestSchema(Session& s) {
 	const auto fields = s.Result("settings.schema")["fields"].toArray();
 	EXPECT(!fields.isEmpty() && fields.size() <= 512);
@@ -383,6 +386,133 @@ void TestSchema(Session& s) {
 	EXPECT(machine == QStringList({"addons_dir", "game_dirs", "gpu_index", "host_input_mapping",
 	                               "runtime_root"}));
 	EXPECT(keys.contains("present_mode") && keys.contains("controller_color"));
+	for (const auto* hidden: {"shader_log_folder", "command_buffer_dump_folder", "printf_output_file",
+	                          "perf_overlay_enabled"}) {
+		EXPECT(!keys.contains(hidden));
+	}
+	TestRicherKeys(fields);
+}
+
+// Presentation keys (STANDARD.md section 6.2) that the app reads instead of guessing by key name.
+void TestRicherKeys(const QJsonArray& fields) {
+	QHash<QString, QJsonObject> by_key;
+	for (const auto& v: fields)
+		by_key.insert(v.toObject()["key"].toString(), v.toObject());
+	static const QRegularExpression colour(QStringLiteral("^#[0-9a-f]{6}$"));
+	const auto light = by_key.value("controller_color");
+	EXPECT(light["type"] == "string" && light["default"] == "");
+	EXPECT(light["format"] == "colour" && light["nullable"] == true &&
+	       light["null_label"] == "Game default");
+	const auto palette = light["palette"].toArray();
+	EXPECT(palette.size() >= 5 && palette.size() <= 32);
+	EXPECT(palette.at(0).toObject() == QJsonObject({{"value", "#0030ff"}, {"label", "Blue"}}));
+	QSet<QString> swatches;
+	for (const auto& p: palette) {
+		const auto value = p.toObject()["value"].toString();
+		EXPECT(colour.match(value).hasMatch() && !swatches.contains(value));
+		swatches.insert(value);
+		EXPECT(!p.toObject()["label"].toString().isEmpty());
+	}
+	for (const auto* volume: {"controller_speaker_volume", "controller_vibration_intensity",
+	                          "audio_master_volume", "audio_main_volume", "audio_music_volume",
+	                          "audio_pad_speaker_main_volume", "audio_objects_volume"}) {
+		const auto f = by_key.value(volume);
+		EXPECT(f["type"] == "int" && f["unit"] == "%" && f["control"] == "slider");
+		EXPECT(f.contains("min") && f.contains("max"));
+	}
+	EXPECT(by_key.value("trophy_duration_seconds")["unit"] == "s");
+	const auto keyboard = by_key.value("controller_keyboard_player");
+	EXPECT(keyboard["type"] == "enum" && keyboard["default"] == "0");
+	const auto players = keyboard["options"].toArray();
+	EXPECT(players.size() == Config::MAX_PLAYERS + 1);
+	EXPECT(players.at(0).toObject() == QJsonObject({{"value", "0"}, {"label", "Shared with player 1"}}));
+	EXPECT(players.at(2).toObject() == QJsonObject({{"value", "2"}, {"label", "Player 2"}}));
+	int segmented = 0;
+	for (const auto& f: by_key) {
+		if (f.contains("control") && f["type"] != "int") {
+			EXPECT(f["type"] == "enum" && f["control"] == "segmented");
+			EXPECT(f["options"].toArray().size() >= 2 && f["options"].toArray().size() <= 4);
+			++segmented;
+		}
+		if (f.contains("unit")) EXPECT(f["type"] == "int");
+	}
+	EXPECT(by_key.value("present_mode")["control"] == "segmented");
+	EXPECT(segmented >= 1);
+}
+
+// The schema keeps to the field types the host's hello listed; a host without the list gets the
+// protocol 1 originals.
+void TestHostVocabulary(Session& s) {
+	const auto full = s.Result("settings.schema")["fields"].toArray();
+	(void)s.Result("hello", {{"protocol", 1}, {"field_types", QJsonArray {"bool", "group"}}});
+	const auto narrow = s.Result("settings.schema")["fields"].toArray();
+	EXPECT(!narrow.isEmpty() && narrow.size() < full.size());
+	for (const auto& v: narrow) {
+		const auto type = v.toObject()["type"].toString();
+		EXPECT(type == "bool" || type == "group");
+	}
+	EXPECT(narrow.last().toObject()["type"] == "bool"); // no heading left without fields
+	for (int i = 1; i < narrow.size(); ++i) {
+		EXPECT(!(narrow.at(i)["type"] == "group" && narrow.at(i - 1)["type"] == "group"));
+	}
+	(void)s.Result("hello", {{"protocol", 1}});
+	EXPECT(s.Result("settings.schema")["fields"].toArray() == full);
+	(void)s.Result("hello", {{"protocol", 1},
+	                         {"field_types", QJsonArray {"bool", "enum", "int", "string", "path",
+	                                                     "path_list", "string_list", "group",
+	                                                     "multi", "int_range"}}});
+	EXPECT(s.Result("settings.schema")["fields"].toArray() == full);
+}
+
+// The light bar colour is #rrggbb in lower case on every path, or empty; the keyboard player is
+// an enum on the wire and a number in Kyty.ini.
+void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
+	const auto set = [&s](const QJsonObject& values) {
+		return s.Result("settings.set", {{"scope", "global"}, {"values", values}})["values"]
+		    .toObject();
+	};
+	auto values = set({{"controller_color", "#0030FF"}, {"controller_keyboard_player", "2"}});
+	EXPECT(values["controller_color"] == "#0030ff");
+	EXPECT(values["controller_keyboard_player"] == "2");
+	{
+		QSettings ini(QDir(f.runtime).filePath("Kyty.ini"), QSettings::IniFormat);
+		EXPECT(ini.value("GlobalConfiguration/controller_color").toString() == "#0030ff");
+		EXPECT(ini.value("GlobalConfiguration/controller_keyboard_player").toString() == "2");
+	}
+	for (const auto& bad: {QJsonValue("#fff"), QJsonValue("red"), QJsonValue("#80ff0000"),
+	                       QJsonValue("0030ff"), QJsonValue(5)}) {
+		EXPECT(s.ErrorCode("settings.set", {{"scope", "global"},
+		                                    {"values", QJsonObject {{"controller_color", bad}}}}) ==
+		       "invalid-params");
+	}
+	for (const auto& bad: {QJsonValue("5"), QJsonValue(2), QJsonValue("Player 2")}) {
+		EXPECT(s.ErrorCode("settings.set",
+		                   {{"scope", "global"},
+		                    {"values", QJsonObject {{"controller_keyboard_player", bad}}}}) ==
+		       "invalid-params");
+	}
+	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"].toObject()["controller_color"] ==
+	       "#0030ff");
+
+	auto plan = s.Result("launch.plan",
+	                     {{"game", id},
+	                      {"player", QJsonObject {{"controller_color", "#A0B0C0"},
+	                                              {"controller_keyboard_player", "3"}}}});
+	auto argv = Strings(plan["argv"]);
+	EXPECT(ArgAfter(argv, "--controller-color") == "#a0b0c0");
+	EXPECT(ArgAfter(argv, "--keyboard-player") == "3");
+	EXPECT(plan["applied"].toObject()["controller_color"] == "#a0b0c0");
+	EXPECT(plan["applied"].toObject()["controller_keyboard_player"] == "3");
+	for (const auto* bad: {"#fff", "blue", "#80ff0000"}) {
+		EXPECT(s.ErrorCode("launch.plan", {{"game", id},
+		                                   {"player", QJsonObject {{"controller_color", bad}}}}) ==
+		       "invalid-params");
+	}
+	// Empty lets the game set the colour: no --controller-color at all.
+	plan = s.Result("launch.plan", {{"game", id}, {"player", QJsonObject {{"controller_color", ""}}}});
+	EXPECT(!Strings(plan["argv"]).contains("--controller-color"));
+	values = set({{"controller_color", ""}, {"controller_keyboard_player", "0"}});
+	EXPECT(values["controller_color"] == "" && values["controller_keyboard_player"] == "0");
 }
 
 void TestSettings(Session& s, const Fixture& f, const QString& id) {
@@ -1085,7 +1215,9 @@ int main(int argc, char* argv[]) {
 		TestHello(s);
 		const auto id = TestLibrary(s, f);
 		TestSchema(s);
+		TestHostVocabulary(s);
 		TestSettings(s, f, id);
+		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
 		TestActions(s, id);
 		TestContent(s, f, id);

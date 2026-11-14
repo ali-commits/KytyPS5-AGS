@@ -146,9 +146,12 @@ bool Adapter::FindGame(const QJsonObject& params, bool required, const GameEntry
 }
 
 Reply Adapter::Call(const QString& method, const QJsonObject& params) {
-	if (method == QLatin1String("hello")) return Hello(params);
+	if (method == QLatin1String("hello")) {
+		m_host_field_types = AdapterSettings::HostFieldTypes(params);
+		return Hello(params);
+	}
 	if (method == QLatin1String("settings.schema")) {
-		return Reply::Success({{"fields", AdapterSettings::Schema()}});
+		return Reply::Success({{"fields", AdapterSettings::SchemaFor(m_host_field_types)}});
 	}
 	if (method == QLatin1String("launch.ended")) return Reply::Success();
 	const bool known =

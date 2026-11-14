@@ -7,6 +7,7 @@
 #include "adapterState.h"
 #include "library.h"
 #include "reply.h"
+#include "settings.h"
 
 #include <QFileSystemWatcher>
 #include <QJsonObject>
@@ -48,6 +49,8 @@ private:
 	QTimer                                  m_debounce;
 	CheatFetcher                            m_fetcher;
 	AdapterLibrary::ArtCache                m_art_cache;
+	// The field types the host's hello listed; settings.schema leaves out the rest.
+	QStringList m_host_field_types = AdapterSettings::HostFieldTypes(QJsonObject {});
 };
 
 #endif
