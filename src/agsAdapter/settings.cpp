@@ -230,7 +230,7 @@ QJsonObject Convert(const QJsonObject& in) {
 		out[QStringLiteral("hint")]  = "Vulkan device the emulator renders on.";
 	}
 	if (key == QLatin1String("trophy_duration_seconds")) out[QStringLiteral("unit")] = "s";
-	const auto count = out[QStringLiteral("options")].toArray().size();
+	const auto count = out.value(QStringLiteral("options")).toArray().size();
 	if (type == QLatin1String("enum") && Segmented(key) && count >= 2 && count <= 4)
 		out[QStringLiteral("control")] = "segmented";
 	out[QStringLiteral("default")] = Typed(out, raw);

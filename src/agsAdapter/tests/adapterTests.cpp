@@ -396,8 +396,13 @@ void TestSchema(Session& s) {
 // Presentation keys (STANDARD.md section 6.2) that the app reads instead of guessing by key name.
 void TestRicherKeys(const QJsonArray& fields) {
 	QHash<QString, QJsonObject> by_key;
-	for (const auto& v: fields)
+	for (const auto& v: fields) {
 		by_key.insert(v.toObject()["key"].toString(), v.toObject());
+		// The host refuses a schema with a null where it expects a list or a string.
+		const auto field = v.toObject();
+		for (auto it = field.begin(); it != field.end(); ++it)
+			EXPECT(!it.value().isNull());
+	}
 	static const QRegularExpression colour(QStringLiteral("^#[0-9a-f]{6}$"));
 	const auto light = by_key.value("controller_color");
 	EXPECT(light["type"] == "string" && light["default"] == "");
