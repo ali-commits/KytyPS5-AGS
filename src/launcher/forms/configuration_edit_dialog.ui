@@ -500,6 +500,34 @@
               </property>
              </widget>
             </item>
+            <item row="10" column="0">
+             <widget class="QLabel" name="label_upscaler">
+              <property name="text">
+               <string>Upscaler:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="10" column="1">
+             <widget class="QComboBox" name="comboBox_upscaler">
+              <property name="toolTip">
+               <string>Replaces the game's own upscaling with DLSS when the game has an upscaler profile, the build includes DLSS and the GPU supports it. Otherwise the game's own upscaling runs.</string>
+              </property>
+             </widget>
+            </item>
+            <item row="11" column="0">
+             <widget class="QLabel" name="label_dlss_mode">
+              <property name="text">
+               <string>DLSS mode:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="11" column="1">
+             <widget class="QComboBox" name="comboBox_dlss_mode">
+              <property name="toolTip">
+               <string>DLSS quality mode. The game keeps its own render resolution.</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </widget>
          </item>

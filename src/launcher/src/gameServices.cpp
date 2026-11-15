@@ -179,6 +179,30 @@ QString CheatPlanPath(const Configuration& info, const QString& cheats_root) {
 	                                  ContentVersion(info));
 }
 
+QString UpscalerProfilePath(const Configuration& info, const QString& runtime_root,
+                            const QString& install_dir) {
+	const auto title_id = TitleId(info);
+	if (!Cheats::IsSupportedTitleId(title_id)) {
+		return {};
+	}
+	const auto version = ContentVersion(info);
+	for (const auto& dir:
+	     {runtime_root.isEmpty() ? QString {}
+	                             : QDir(runtime_root).filePath(QStringLiteral("_Upscalers")),
+	      install_dir.isEmpty() ? QString {}
+	                            : QDir(install_dir).filePath(QStringLiteral("upscalers"))}) {
+		if (dir.isEmpty()) {
+			continue;
+		}
+		const auto path = Cheats::PlanPathForVersion(
+		    QDir(dir).filePath(QStringLiteral("%1.json").arg(title_id)), version);
+		if (!path.isEmpty() && QFileInfo::exists(path)) {
+			return path;
+		}
+	}
+	return {};
+}
+
 QJsonObject GetCheats(const Configuration& info, const QString& cheats_root) {
 	const auto path = CheatPlanPath(info, cheats_root);
 	if (path.isEmpty()) {

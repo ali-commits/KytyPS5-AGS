@@ -108,6 +108,44 @@ static void CheatChecks() {
 	CHECK(GameServices::CheatPlanPath(other, root) == path);
 }
 
+static void UpscalerProfileChecks() {
+	QTemporaryDir root_dir;
+	QTemporaryDir install_dir;
+	CHECK(root_dir.isValid() && install_dir.isValid());
+	const auto    root    = root_dir.path();
+	const auto    install = install_dir.path();
+	Configuration info;
+	info.title_id    = QStringLiteral("PPSA99997");
+	info.gameVersion = QStringLiteral("01.001.000");
+	CHECK(GameServices::UpscalerProfilePath(info, root, install).isEmpty()); // none yet
+
+	const auto write = [](const QString& path, const QByteArray& data) {
+		CHECK(QDir().mkpath(QFileInfo(path).path()));
+		QFile file(path);
+		CHECK(file.open(QIODevice::WriteOnly));
+		file.write(data);
+	};
+	// A shipped profile without "version" applies to every version.
+	const auto shipped = QDir(install).filePath(QStringLiteral("upscalers/PPSA99997.json"));
+	write(shipped, R"({"format":1,"id":"PPSA99997"})");
+	CHECK(GameServices::UpscalerProfilePath(info, root, install) == shipped);
+	// The user's _Upscalers take precedence.
+	const auto own = QDir(root).filePath(QStringLiteral("_Upscalers/PPSA99997.json"));
+	write(own, R"({"format":1,"id":"PPSA99997"})");
+	CHECK(GameServices::UpscalerProfilePath(info, root, install) == own);
+	// A profile for another version is passed over for <TITLE>-<version>.json.
+	write(own, R"({"format":1,"id":"PPSA99997","version":"01.000.000"})");
+	CHECK(GameServices::UpscalerProfilePath(info, root, install) == shipped);
+	const auto own_version =
+	    QDir(root).filePath(QStringLiteral("_Upscalers/PPSA99997-01.001.000.json"));
+	write(own_version, R"({"format":1,"id":"PPSA99997","version":"01.001.000"})");
+	CHECK(GameServices::UpscalerProfilePath(info, root, install) == own_version);
+
+	Configuration unsupported;
+	unsupported.title_id = QStringLiteral("CUSA00001");
+	CHECK(GameServices::UpscalerProfilePath(unsupported, root, install).isEmpty());
+}
+
 static void RemoteCheatListChecks() {
 	QTemporaryDir root_dir;
 	CHECK(root_dir.isValid());
@@ -199,6 +237,7 @@ int main(int argc, char** argv) {
 	QCoreApplication app(argc, argv);
 	SafeRuntimeChecks();
 	CheatChecks();
+	UpscalerProfileChecks();
 	RemoteCheatListChecks();
 	ImportRemoteCheatChecks();
 	TrophyAndArtChecks();

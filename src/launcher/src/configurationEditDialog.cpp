@@ -264,6 +264,8 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	microphone->setCurrentIndex(microphone->findData(info.audio_input_device));
 	ListInit(m_ui->comboBox_screen_resolution, info.screen_resolution);
 	ListInit(m_ui->comboBox_present_mode, info.present_mode);
+	ListInit(m_ui->comboBox_upscaler, info.upscaler);
+	ListInit(m_ui->comboBox_dlss_mode, info.dlss_mode);
 	m_ui->comboBox_gpu->clear();
 	m_ui->comboBox_gpu->addItem(tr("Auto"));
 	// Keep Auto when Qt is built without Vulkan support.
@@ -505,6 +507,8 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	    TextToEnum<Configuration::Resolution>(ui.comboBox_screen_resolution->currentText());
 	info.present_mode =
 	    TextToEnum<Configuration::PresentMode>(ui.comboBox_present_mode->currentText());
+	info.upscaler  = TextToEnum<Configuration::Upscaler>(ui.comboBox_upscaler->currentText());
+	info.dlss_mode = TextToEnum<Configuration::DlssMode>(ui.comboBox_dlss_mode->currentText());
 	info.gpu_index                 = ui.comboBox_gpu->currentIndex() - 1;
 	info.fullscreen_enabled        = ui.checkBox_fullscreen->isChecked();
 	info.hdr_enabled               = ui.checkBox_hdr->isChecked();

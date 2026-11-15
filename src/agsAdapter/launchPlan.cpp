@@ -45,7 +45,8 @@ int EvenClamp(int n, int max) {
 // emulator's working directory) so the plan names absolute paths only.
 bool PathFlag(const QString& flag) {
 	return flag == QLatin1String("--game") || flag == QLatin1String("--addcont-dir") ||
-	       flag == QLatin1String("--game-patch") || flag == QLatin1String("--shader-log-folder") ||
+	       flag == QLatin1String("--game-patch") || flag == QLatin1String("--upscaler-profile") ||
+	       flag == QLatin1String("--shader-log-folder") ||
 	       flag == QLatin1String("--command-buffer-dump-folder") ||
 	       flag == QLatin1String("--printf-output-file");
 }
@@ -227,7 +228,10 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 		fprintf(stderr, "kyty-ags-adapter: cheat plan %s%s\n", qPrintable(plan_path),
 		        QFileInfo::exists(plan_path) ? "" : " (missing: launching without cheats)");
 	}
-	auto       args      = BuildEmulatorArgs(info, no_cheats ? QString {} : plan_path);
+	// The upscaler profile: the user's _Upscalers in the runtime root, then the shipped ones.
+	const auto upscaler_profile =
+	    GameServices::UpscalerProfilePath(info, runtime_root, adapter_dir);
+	auto args = BuildEmulatorArgs(info, no_cheats ? QString {} : plan_path, upscaler_profile);
 	if (args.isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cannot build the emulator command for this game."));
 	}

@@ -40,6 +40,11 @@ struct TrophyIconResult {
 // The plan for this game's version: Cheats::PlanPathForVersion with the contentVersion of
 // <basedir>/sce_sys/param.json (gameVersion when unreadable). Empty for an unsupported title id.
 [[nodiscard]] QString CheatPlanPath(const Configuration& info, const QString& cheats_root);
+// The game's upscaler profile (common/upscalerProfile.h): <runtime_root>/_Upscalers/<TITLE>.json,
+// then <install_dir>/upscalers/<TITLE>.json, each with the cheat file's version rule
+// (Cheats::PlanPathForVersion); the first that exists, else empty.
+[[nodiscard]] QString UpscalerProfilePath(const Configuration& info, const QString& runtime_root,
+                                          const QString& install_dir);
 // {"supported","revision","mods":[{index,name,enabled}],"error"?}
 [[nodiscard]] QJsonObject GetCheats(const Configuration& info, const QString& cheats_root);
 // body: {"revision":"...","enabled":[bool,...]}; replaces the whole selection.

@@ -59,6 +59,8 @@ constexpr Field FIELDS[] = {
     {"native_resolution_enabled", "Native resolution on scaled desktops", "bool", 0, 0},
     {"low_latency_enabled", "Low latency (NVIDIA Reflex)", "bool", 0, 0},
     {"low_latency_fps_limit", "Low-latency frame limit (0 = none)", "int", 0, 360},
+    {"upscaler", "Upscaler", "enum", 0, 0},
+    {"dlss_mode", "DLSS mode", "enum", 0, 0},
     {"readback_linear_images", "Read back linear images", "bool", 0, 0},
     {"readback_tiled_images", "Read back tiled images", "bool", 0, 0},
     {"sync_raw_image_buffers", "Sync raw image buffers", "bool", 0, 0},
@@ -97,6 +99,12 @@ inline QStringList Choices(const QString& key) {
 	}
 	if (key == QLatin1String("present_mode")) {
 		return EnumToList<Configuration::PresentMode>();
+	}
+	if (key == QLatin1String("upscaler")) {
+		return EnumToList<Configuration::Upscaler>();
+	}
+	if (key == QLatin1String("dlss_mode")) {
+		return EnumToList<Configuration::DlssMode>();
 	}
 	if (key == QLatin1String("shader_optimization_type")) {
 		return EnumToList<Configuration::ShaderOptimizationType>();

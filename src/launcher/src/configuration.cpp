@@ -16,6 +16,8 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(native_resolution_enabled);
 	KYTY_CFG_SET(low_latency_enabled);
 	KYTY_CFG_SET(low_latency_fps_limit);
+	KYTY_CFG_SET(upscaler);
+	KYTY_CFG_SET(dlss_mode);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(readback_tiled_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
@@ -78,6 +80,14 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 		bool       limit_ok = false;
 		const auto limit = s.value("low_latency_fps_limit", low_latency_fps_limit).toInt(&limit_ok);
 		low_latency_fps_limit = limit_ok ? qBound(0, limit, 360) : 0;
+	}
+	KYTY_CFG_GET(upscaler);
+	if (EnumToText(upscaler).isEmpty()) {
+		upscaler = Upscaler::Off;
+	}
+	KYTY_CFG_GET(dlss_mode);
+	if (EnumToText(dlss_mode).isEmpty()) {
+		dlss_mode = DlssMode::Quality;
 	}
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(readback_tiled_images);

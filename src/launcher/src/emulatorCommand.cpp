@@ -3,7 +3,9 @@
 #include "cheatFile.h"
 #include "configuration.h"
 #include "gameContent.h"
+#include "gameServices.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 
@@ -12,7 +14,8 @@ static QString BoolArg(bool value) {
 }
 
 QStringList BuildEmulatorArgs(const Configuration&          info,
-                              const std::optional<QString>& patch_plan_override) {
+                              const std::optional<QString>& patch_plan_override,
+                              const std::optional<QString>& upscaler_profile_override) {
 	QStringList args;
 	auto        r = EnumToText(info.screen_resolution).split('x');
 
@@ -71,6 +74,8 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	args << "--native-resolution" << BoolArg(info.native_resolution_enabled);
 	args << "--low-latency" << BoolArg(info.low_latency_enabled);
 	args << "--low-latency-fps-limit" << QString::number(info.low_latency_fps_limit);
+	args << "--upscaler" << EnumToText(info.upscaler);
+	args << "--dlss-mode" << EnumToText(info.dlss_mode);
 	if (info.tessellation_enabled) {
 		args << "--tessellation";
 	}
@@ -123,6 +128,15 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	    patch_plan_override.has_value() ? *patch_plan_override : Cheats::PlanPath(info.title_id);
 	if (!patch_plan.isEmpty() && QFileInfo::exists(patch_plan)) {
 		args << "--game-patch" << patch_plan;
+	}
+	if (info.upscaler != Configuration::Upscaler::Off) {
+		const auto root    = QCoreApplication::applicationDirPath();
+		const auto profile = upscaler_profile_override.has_value()
+		                         ? *upscaler_profile_override
+		                         : GameServices::UpscalerProfilePath(info, root, root);
+		if (!profile.isEmpty() && QFileInfo::exists(profile)) {
+			args << "--upscaler-profile" << profile;
+		}
 	}
 
 	return args;

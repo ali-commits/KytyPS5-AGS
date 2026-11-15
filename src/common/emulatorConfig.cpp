@@ -142,6 +142,18 @@ bool LowLatencyEnabled() {
 	return g_config->low_latency_enabled;
 }
 
+Upscaler GetUpscaler() {
+	return g_config->upscaler;
+}
+
+DlssMode GetDlssMode() {
+	return g_config->dlss_mode;
+}
+
+const std::filesystem::path& UpscalerProfilePath() {
+	return g_config->upscaler_profile;
+}
+
 uint32_t LowLatencyFpsLimit() {
 	const auto limit = g_config->low_latency_fps_limit;
 	return limit == 0 ? 0 : std::clamp(limit, 10u, 360u);

@@ -2744,6 +2744,30 @@ if (CLANG AND NOT KYTY_CLANG_CL)
 endif()
 # dlopen/dlsym/dladdr for RenderDoc.
 target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
+# DLSS upscaler (host_gpu/renderer/upscaler.h) through NVIDIA's NGX SDK. KYTY_NGX_SDK_DIR is the
+# SDK folder (github.com/NVIDIA/DLSS: include/, lib/); empty builds without DLSS. The SDK is under
+# the NVIDIA RTX SDKs licence, which does not allow it in a GPL-licensed distribution: such a build
+# is for the person who built it and is not packaged for release.
+set(KYTY_NGX_SDK_DIR "" CACHE PATH "NVIDIA NGX/DLSS SDK folder; empty to build without DLSS")
+if(KYTY_NGX_SDK_DIR)
+	if(WIN32)
+		set(kyty_ngx_library "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
+		file(GLOB kyty_ngx_runtime "${KYTY_NGX_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
+	else()
+		set(kyty_ngx_library "${KYTY_NGX_SDK_DIR}/lib/Linux_x86_64/libnvsdk_ngx.a")
+		file(GLOB kyty_ngx_runtime "${KYTY_NGX_SDK_DIR}/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*")
+	endif()
+	if(NOT EXISTS "${KYTY_NGX_SDK_DIR}/include/nvsdk_ngx_vk.h" OR NOT EXISTS "${kyty_ngx_library}")
+		message(FATAL_ERROR "KYTY_NGX_SDK_DIR=${KYTY_NGX_SDK_DIR} is not an NGX SDK folder "
+		                    "(no include/nvsdk_ngx_vk.h or ${kyty_ngx_library})")
+	endif()
+	target_compile_definitions(kyty_emulator PRIVATE KYTY_NGX=1)
+	target_include_directories(kyty_emulator SYSTEM PRIVATE "${KYTY_NGX_SDK_DIR}/include")
+	target_link_libraries(kyty_emulator "${kyty_ngx_library}")
+	# NGX loads its runtime from <install>/ngx (upscaler.cpp).
+	install(FILES ${kyty_ngx_runtime} "${KYTY_NGX_SDK_DIR}/LICENSE.txt" DESTINATION ngx)
+	message(STATUS "DLSS: built in with the NGX SDK in ${KYTY_NGX_SDK_DIR}")
+endif()
 target_include_directories(kyty_emulator PRIVATE ${inc_headers})
 
 clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")
@@ -2789,6 +2813,8 @@ if(APPLE)
 endif()
 
 install(TARGETS kyty_emulator DESTINATION .)
+# Upscaler profiles shipped with the emulator (common/upscalerProfile.h).
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/upscalers" DESTINATION .)
 if(KYTY_BUILD_LAUNCHER)
 	add_subdirectory("${KYTY_SOURCE_DIR}/launcher" "${CMAKE_CURRENT_BINARY_DIR}/launcher")
 

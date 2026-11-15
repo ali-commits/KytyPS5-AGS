@@ -34,6 +34,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/upscaler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
@@ -3840,6 +3841,23 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		DrawRunRecallFallback();
 	}
 	CommitStats::StepMark(CommitStats::Step::LateCheck);
+
+	// Upscaler (upscaler.h): depth attachments by colour target, and the game's upscale pass
+	// replaced. A replaced draw records nothing else; like a skipped one (KYTY_PIPELINE_SKIP
+	// below) no run record may be continued across it.
+	if (Upscaler::Active()) [[unlikely]] {
+		NoteUpscalerTargets(std::span<const RenderColorInfo> {state.color_info, state.color_count},
+		                    state.depth_info.image_id);
+		if (state.ps_active && bindings.pixel.has_value() && state.color_count != 0 &&
+		    TryUpscalePass(buffer, *bindings.pixel, state.color_info[0].image_id)) {
+			m_run.valid  = false;
+			m_run_active = false;
+			for (auto& record: m_run_kept) {
+				record.valid = false;
+			}
+			return;
+		}
+	}
 
 	// KYTY_LOD_STATS_PLAIN_VARIANT: without a mip-statistics counter on any image the pixel
 	// program's feedback records nothing; its feedback-free variant then gives the same results

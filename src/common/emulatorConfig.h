@@ -28,6 +28,13 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
+// Replaces a game's own temporal upscale pass, described by an upscaler profile
+// (common/upscalerProfile.h, host_gpu/renderer/upscaler.h).
+enum class Upscaler { Off, DLSS };
+
+// NVIDIA DLSS Super Resolution quality mode (the render size is the game's own).
+enum class DlssMode { Quality, Balanced, Performance, UltraPerformance, DLAA };
+
 using Keymap          = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -78,6 +85,9 @@ struct ConfigOptions {
 	bool                   native_resolution_enabled = false;
 	bool                   low_latency_enabled       = false;
 	uint32_t               low_latency_fps_limit     = 0;
+	Upscaler               upscaler                  = Upscaler::Off;
+	DlssMode               dlss_mode                 = DlssMode::Quality;
+	std::filesystem::path  upscaler_profile; // empty: none
 	bool                   vr_enabled            = false;
 	bool                   amd_cpu_enabled       = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
@@ -141,6 +151,9 @@ bool                                  NativeResolutionEnabled();
 // NVIDIA low-latency mode and its frame limit (0: none, else 10-360), window/lowLatency.h.
 bool                                  LowLatencyEnabled();
 uint32_t                              LowLatencyFpsLimit();
+Upscaler                              GetUpscaler();
+DlssMode                              GetDlssMode();
+const std::filesystem::path&          UpscalerProfilePath();
 bool                                  VrEnabled();
 bool                                  AmdCpuEnabled();
 const std::string&                    GetAmdCpuDecision();

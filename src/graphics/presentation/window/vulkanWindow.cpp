@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/upscaler.h"
 #include "graphics/host_gpu/spirvLocalArrays.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/openxrHeadset.h"
@@ -1613,6 +1614,19 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 		r.required_extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 	}
 
+	// Upscaler (renderer/upscaler.h): the instance extensions it needs, where available.
+	{
+		std::vector<const char*> instance;
+		std::vector<const char*> device;
+		Upscaler::RequiredExtensions(instance, device);
+		for (const auto* name: instance) {
+			if (HasExtension(r.available_extensions, name) &&
+			    !HasExtension(r.required_extensions, name)) {
+				r.required_extensions.push_back(name);
+			}
+		}
+	}
+
 	if (HasExtension(r.available_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
 		r.required_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	} else {
@@ -2145,6 +2159,22 @@ void WindowContext::CreateVulkan() {
 			if ((all == nullptr || std::strcmp(all, "0") != 0) &&
 			    (m8 == nullptr || std::strcmp(m8, "0") != 0)) {
 				device_extensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+			}
+		}
+		// Upscaler (renderer/upscaler.h): the device extensions it needs, where available.
+		{
+			std::vector<const char*> instance;
+			std::vector<const char*> device;
+			Upscaler::RequiredExtensions(instance, device);
+			for (const auto* name: device) {
+				// Core in Vulkan 1.2, which this device uses.
+				if (std::strcmp(name, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
+					continue;
+				}
+				if (HasExtension(available_extensions, name) &&
+				    !HasExtension(device_extensions, name)) {
+					device_extensions.push_back(name);
+				}
 			}
 		}
 		// Low-latency mode (lowLatency.h): VK_NV_low_latency2 with present IDs.

@@ -110,6 +110,7 @@ static void PrintUsage() {
 	::printf("  --perf-overlay <true|false>         Show performance panel.\n");
 	::printf("  --game <dir|elf|zar>                 Game directory, ELF, or ZArchive to load.\n");
 	::printf("  --game-patch <json>                  ETAHen cheat file.\n");
+	::printf("  --upscaler-profile <json>            The game's upscale pass, for --upscaler.\n");
 	::printf("  --addcont-dir <dir>                  Add-ons (DLC) folder (default: none).\n");
 	::printf("  --screen-width <num>                 Window width. Default: 1280.\n");
 	::printf("  --screen-height <num>                Window height. Default: 720.\n");
@@ -150,6 +151,11 @@ static void PrintUsage() {
 	::printf(
 	    "  --native-resolution <true|false>     Linux: render at the display's real resolution\n"
 	    "                                      under Wayland desktop scaling. Default: false.\n");
+	::printf(
+	    "  --upscaler <Off|DLSS>                Replace the game's temporal upscale pass\n"
+	    "                                      described by --upscaler-profile. Default: Off.\n");
+	::printf("  --dlss-mode <Quality|Balanced|Performance|UltraPerformance|DLAA>\n"
+	         "                                      DLSS quality mode. Default: Quality.\n");
 	::printf(
 	    "  --low-latency <true|false>           NVIDIA low-latency mode (VK_NV_low_latency2) when\n"
 	    "                                      the GPU supports it. Default: false.\n");
@@ -456,6 +462,28 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.game_patch = path;
+		} else if (arg == "--upscaler-profile") {
+			if (!options.config.upscaler_profile.empty()) {
+				::printf("--upscaler-profile can only be specified once\n");
+				return false;
+			}
+			value           = Common::FixFilenameSlash(value);
+			const auto path = Common::PathFromUtf8(value);
+			if (!Common::File::IsFileExisting(path)) {
+				::printf("--upscaler-profile must point to an existing file: %s\n", value.c_str());
+				return false;
+			}
+			options.config.upscaler_profile = path;
+		} else if (arg == "--upscaler") {
+			if (!ParseEnum(value, options.config.upscaler)) {
+				::printf("invalid upscaler: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--dlss-mode") {
+			if (!ParseEnum(value, options.config.dlss_mode)) {
+				::printf("invalid DLSS mode: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--addcont-dir") {
 			if (!options.addcont_dir.empty()) {
 				::printf("--addcont-dir can only be specified once\n");

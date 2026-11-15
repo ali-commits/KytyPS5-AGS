@@ -354,6 +354,14 @@ public:
 	void PushConstants(vk::PipelineLayout layout, vk::ShaderStageFlags stages, uint32_t size,
 	                   const void* data);
 	void InvalidatePushConstants() const { m_push_constants.valid = false; }
+	// A foreign recorder (NGX, upscaler.cpp) bound pipelines, descriptors and push constants
+	// through the native handle: nothing bound before may be assumed in effect.
+	void ForgetBoundState() {
+		m_bound_pipelines = {};
+		InvalidateDescriptors(vk::PipelineBindPoint::eCompute);
+		InvalidateDescriptors(vk::PipelineBindPoint::eGraphics);
+		m_push_constants.valid = false;
+	}
 
 	// Native handle for recording any command. Records pending batched barriers first.
 	[[nodiscard]] vk::CommandBuffer Handle() const;
@@ -1116,6 +1124,11 @@ private:
 	                                                 uint32_t       render_target_slice_offset);
 	void               BindImage(ImageId id, bool storage);
 	void               BindRenderTarget(ImageId id);
+	// Upscaler (upscaler.h): every draw's colour targets and depth attachment; and the game's
+	// upscale pass replaced (true: recorded, the draw is done).
+	void               NoteUpscalerTargets(std::span<const RenderColorInfo> colors, ImageId depth);
+	[[nodiscard]] bool TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pixel,
+	                                  ImageId output);
 	void               ResetBindings();
 	// `site` names the caller's stage and table kind; it only selects the entry checked first.
 	// *fresh (optional): set when the returned range was allocated by this call (no earlier upload
