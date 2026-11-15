@@ -163,6 +163,8 @@ static void PrintUsage() {
 	    "  --low-latency-fps-limit <fps>        With --low-latency: the driver paces frames to\n"
 	    "                                      this rate, 0-360 (0: none). Default: 0.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
+	::printf("  --trinity                            Enable experimental PS5 Pro mode for supported titles\n"
+	         "                                       (PSSR uses linear scaling). Default: off.\n");
 	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
 	         "AMD-only\n"
 	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS "
@@ -375,6 +377,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--vr") {
 			options.config.vr_enabled = true;
+			continue;
+		}
+
+		if (arg == "--trinity") {
+			options.config.pro_enabled = true;
 			continue;
 		}
 

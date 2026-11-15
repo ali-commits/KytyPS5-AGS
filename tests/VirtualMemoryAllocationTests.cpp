@@ -5222,7 +5222,12 @@ void TestTlsStubsPreserveFlags() {
 }
 #endif
 
+int RunTrinityTests();
+
 int main(int argc, char** argv) {
+	if (argc == 2 && std::strcmp(argv[1], "--trinity-only") == 0) {
+		return RunTrinityTests();
+	}
 	InitSubsystems();
 	if (argc == 2 && std::strcmp(argv[1], "--committed-range-only") == 0) {
 		RunTest(TestCommittedRangeProbeFollowsMappings);

@@ -41,6 +41,7 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(printf_output_file);
 	KYTY_CFG_SET(profiler_enabled);
 	KYTY_CFG_SET(renderdoc_enabled);
+	KYTY_CFG_SET(pro_enabled);
 	KYTY_CFG_SET(amd_cpu_mode);
 #if defined(_WIN32)
 	KYTY_CFG_SET(red_zone_protection_enabled);
@@ -119,6 +120,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(printf_output_file);
 	KYTY_CFG_GET(profiler_enabled);
 	KYTY_CFG_GET(renderdoc_enabled);
+	KYTY_CFG_GET(pro_enabled);
 	// "auto" (on unless the CPU is an AMD), "on" or "off". Before "auto", only amd_cpu_enabled was
 	// saved, and false for everyone who never touched it: true stays on, false becomes auto.
 	amd_cpu_mode = s.contains("amd_cpu_mode")                   ? s.value("amd_cpu_mode").toString()

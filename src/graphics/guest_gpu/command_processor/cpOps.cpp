@@ -101,6 +101,7 @@ const char* OpKindName(OpKind kind) noexcept {
 		case OpKind::WaitRegMem: return "WaitRegMem";
 		case OpKind::WaitFlipDone: return "WaitFlipDone";
 		case OpKind::DumpConstRam: return "DumpConstRam";
+		case OpKind::Pssr: return "Pssr";
 		case OpKind::Predication: return "Predication";
 		case OpKind::CondExec: return "CondExec";
 		case OpKind::Branch: return "Branch";
@@ -135,6 +136,7 @@ uint32_t PayloadSize(OpKind kind) noexcept {
 		case OpKind::WaitRegMem: return sizeof(WaitRegMemOp);
 		case OpKind::WaitFlipDone: return sizeof(WaitFlipDoneOp);
 		case OpKind::DumpConstRam: return sizeof(DumpConstRamOp);
+		case OpKind::Pssr: return sizeof(PssrOp);
 		case OpKind::Predication: return sizeof(PredicationOp);
 		case OpKind::CondExec: return sizeof(CondExecOp);
 		case OpKind::Branch: return sizeof(BranchOp);

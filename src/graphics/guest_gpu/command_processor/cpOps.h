@@ -44,6 +44,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/commandStream.h"
 
 #include <atomic>
@@ -91,6 +92,7 @@ enum class OpKind : uint16_t {
 	WaitRegMem,
 	WaitFlipDone,
 	DumpConstRam,
+	Pssr,
 	// Lockstep ops: their result decides the front's parse (Result::value, Result::suspended).
 	Predication,
 	CondExec,
@@ -352,6 +354,11 @@ struct WaitFlipDoneOp {
 	uint32_t display_buffer_index = 0;
 };
 
+// A PSSR request (graphics/guest_gpu/pssr.h), as the packet's dwords.
+struct PssrOp {
+	uint32_t request[Pssr::RequestDwords] = {};
+};
+
 // DUMP_CONST_RAM: dw_num dwords of the front's constant RAM follow as inline data.
 struct DumpConstRamOp {
 	uint64_t dst    = 0;
@@ -436,7 +443,7 @@ static_assert(IsPayload<DrawIndexOp> && IsPayload<DrawAutoOp> && IsPayload<DrawI
               IsPayload<WaitFlipDoneOp> && IsPayload<DumpConstRamOp> && IsPayload<PredicationOp> &&
               IsPayload<CondExecOp> && IsPayload<BranchOp> && IsPayload<ReadCheckOp> &&
               IsPayload<StreamBeginOp> && IsPayload<StreamEndOp> && IsPayload<HandoffOp> &&
-              IsPayload<LockstepReadOp> && IsPayload<SkipSlotsOp>);
+              IsPayload<LockstepReadOp> && IsPayload<SkipSlotsOp> && IsPayload<PssrOp>);
 
 // The kind of each payload type (compile-time dispatch for Emit/Submit).
 template <typename T>
@@ -461,6 +468,7 @@ KYTY_CPSEQ_PAYLOAD(Flip, FlipOp)
 KYTY_CPSEQ_PAYLOAD(WaitRegMem, WaitRegMemOp)
 KYTY_CPSEQ_PAYLOAD(WaitFlipDone, WaitFlipDoneOp)
 KYTY_CPSEQ_PAYLOAD(DumpConstRam, DumpConstRamOp)
+KYTY_CPSEQ_PAYLOAD(Pssr, PssrOp)
 KYTY_CPSEQ_PAYLOAD(Predication, PredicationOp)
 KYTY_CPSEQ_PAYLOAD(CondExec, CondExecOp)
 KYTY_CPSEQ_PAYLOAD(Branch, BranchOp)

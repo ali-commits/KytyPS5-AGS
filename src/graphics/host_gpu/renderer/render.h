@@ -997,6 +997,10 @@ struct GraphicsDynamicStateShadow {
 [[nodiscard]] bool RebindAfterJoinEnabled();
 void               NoteRebindAfterJoin(const char* kind, const char* name);
 
+namespace Pssr {
+struct Request;
+}
+
 class RenderExecutor {
 public:
 	explicit RenderExecutor(RenderContext& context);
@@ -1005,6 +1009,8 @@ public:
 
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
 	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
+	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
+	void DestroyPssr(); // renderPssr.cpp: the PSSR pipeline and its layouts
 	void DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr,
 	                      uint32_t mode);
 
@@ -1166,6 +1172,9 @@ private:
 	std::vector<vk::DescriptorBufferInfo> m_descriptor_buffers;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
+	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;
+	vk::PipelineLayout                    m_pssr_pipeline_layout   = nullptr;
+	vk::Pipeline                          m_pssr_pipeline          = nullptr;
 	std::vector<uint32_t>                 m_image_occurrences;
 	struct ShaderUploadEntry {
 		uint64_t                 tick = 0;

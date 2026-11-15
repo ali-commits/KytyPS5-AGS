@@ -96,6 +96,9 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	if (info.profiler_enabled) {
 		args << "--profile";
 	}
+	if (info.pro_enabled) {
+		args << "--trinity";
+	}
 	args << "--spirv-debug-printf" << "false";
 	// Neither flag: the emulator decides from the CPU vendor.
 	if (info.amd_cpu_mode == QStringLiteral("on")) {

@@ -235,6 +235,7 @@ public:
 	QString                printf_output_file          = "_kyty.txt";
 	bool                   profiler_enabled            = false;
 	bool                   renderdoc_enabled           = false;
+	bool                   pro_enabled                 = false;
 	QString                amd_cpu_mode                = QStringLiteral("auto"); // or "on", "off"
 #if defined(_WIN32)
 	bool red_zone_protection_enabled = false;
@@ -282,6 +283,7 @@ public:
 		printf_output_file          = other.printf_output_file;
 		profiler_enabled            = other.profiler_enabled;
 		renderdoc_enabled           = other.renderdoc_enabled;
+		pro_enabled                 = other.pro_enabled;
 		amd_cpu_mode                = other.amd_cpu_mode;
 #if defined(_WIN32)
 		red_zone_protection_enabled = other.red_zone_protection_enabled;

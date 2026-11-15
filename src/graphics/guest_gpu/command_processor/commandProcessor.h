@@ -5,6 +5,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/cpOps.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
@@ -192,6 +193,7 @@ public:
 	                    uint32_t mode);
 	void DispatchIndirect(uint64_t args_addr, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
+	void ProcessPssr(const Pssr::Request& request);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
 	// COND_EXEC: whether the condition dword at `address` is non-zero (read in order).
 	[[nodiscard]] bool CondExec(uint64_t address);
@@ -352,6 +354,7 @@ private:
 	void          ExecDmaData(const CpSeq::DmaDataOp& op);
 	void          ExecLodStats(const CpSeq::LodStatsOp& op);
 	void          ExecFlip(const CpSeq::FlipOp& op);
+	void          ExecPssr(const CpSeq::PssrOp& op);
 	CpSeq::Result ExecWaitRegMem(const CpSeq::WaitRegMemOp& op);
 	template <typename T>
 	CpSeq::Result ExecWaitRegMemSized(const CpSeq::WaitRegMemOp& op);

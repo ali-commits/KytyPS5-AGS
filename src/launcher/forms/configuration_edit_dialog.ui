@@ -598,6 +598,12 @@
            </property>
            <layout class="QVBoxLayout" name="generalLayout">
             <item>
+             <widget class="QCheckBox" name="checkBox_pro">
+              <property name="toolTip"><string>Enable experimental Pro mode for supported titles. PSSR uses linear scaling. Disabled by default.</string></property>
+              <property name="text"><string>Pro mode (experimental)</string></property>
+             </widget>
+            </item>
+            <item>
              <widget class="QCheckBox" name="checkBox_fullscreen">
               <property name="toolTip">
                <string>Run in borderless desktop fullscreen</string>

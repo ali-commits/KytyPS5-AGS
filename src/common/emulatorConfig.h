@@ -89,6 +89,7 @@ struct ConfigOptions {
 	DlssMode               dlss_mode                 = DlssMode::Quality;
 	std::filesystem::path  upscaler_profile; // empty: none
 	bool                   vr_enabled            = false;
+	bool                   pro_enabled           = false;
 	bool                   amd_cpu_enabled       = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
 	bool                   network_connected               = false;
@@ -155,6 +156,7 @@ Upscaler                              GetUpscaler();
 DlssMode                              GetDlssMode();
 const std::filesystem::path&          UpscalerProfilePath();
 bool                                  VrEnabled();
+bool                                  Ps5ProEnabled();
 bool                                  AmdCpuEnabled();
 const std::string&                    GetAmdCpuDecision();
 bool                                  IsNetworkConnected();

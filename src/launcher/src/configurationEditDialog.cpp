@@ -324,6 +324,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_shader_validation->setChecked(info.shader_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(info.vulkan_validation_enabled);
 	m_ui->checkBox_renderdoc_capture->setChecked(info.renderdoc_enabled);
+	m_ui->checkBox_pro->setChecked(info.pro_enabled);
 	// Partly checked: automatic (on unless the CPU is an AMD).
 	m_ui->checkBox_amd_cpu->setTristate(true);
 	m_ui->checkBox_amd_cpu->setCheckState(info.amd_cpu_mode == QStringLiteral("on") ? Qt::Checked
@@ -531,6 +532,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.vulkan_validation_enabled = ui.checkBox_vulkan_validation->isChecked();
 	info.shader_validation_enabled = ui.checkBox_shader_validation->isChecked();
 	info.renderdoc_enabled         = ui.checkBox_renderdoc_capture->isChecked();
+	info.pro_enabled               = ui.checkBox_pro->isChecked();
 	const auto amd_cpu             = ui.checkBox_amd_cpu->checkState();
 	info.amd_cpu_mode              = amd_cpu == Qt::Checked     ? QStringLiteral("on")
 	                                 : amd_cpu == Qt::Unchecked ? QStringLiteral("off")

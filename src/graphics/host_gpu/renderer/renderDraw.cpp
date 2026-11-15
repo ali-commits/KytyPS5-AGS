@@ -879,7 +879,9 @@ struct DrawRenderState {
 RenderExecutor::RenderExecutor(RenderContext& context)
     : m_context(context), m_draw_state(std::make_unique<DrawRenderState>()) {}
 
-RenderExecutor::~RenderExecutor() = default;
+RenderExecutor::~RenderExecutor() {
+	DestroyPssr();
+}
 
 struct DrawCallInfo {
 	CommandBufferDebugOp debug_op       = CommandBufferDebugOp::DrawIndex;

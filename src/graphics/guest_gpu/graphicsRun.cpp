@@ -3093,6 +3093,20 @@ void CommandProcessor::ExecDispatchDirect(const CpSeq::DispatchDirectOp& op) {
 	}
 }
 
+void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
+	EXIT_NOT_IMPLEMENTED(IsAsyncComputeQueue());
+	CpSeq::PssrOp op;
+	static_assert(sizeof(op.request) == sizeof(request));
+	std::memcpy(op.request, &request, sizeof(request));
+	(void)Submit(op);
+}
+
+void CommandProcessor::ExecPssr(const CpSeq::PssrOp& op) {
+	Pssr::Request request {};
+	std::memcpy(&request, op.request, sizeof(request));
+	m_renderer.GetRenderExecutor().ProcessPssr(CurrentBuffer(), request);
+}
+
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
@@ -4596,7 +4610,8 @@ static CpGaps::Cat OpGapCat(CpSeq::OpKind kind) {
 		case OpKind::DrawIndirectMulti:
 		case OpKind::DrawIndirectMultiIndex: return CpGaps::Cat::DrawOp;
 		case OpKind::DispatchDirect:
-		case OpKind::DispatchIndirect: return CpGaps::Cat::DispatchOp;
+		case OpKind::DispatchIndirect:
+		case OpKind::Pssr: return CpGaps::Cat::DispatchOp;
 		case OpKind::EndOfPipe:
 		case OpKind::ReleaseMem: return CpGaps::Cat::EndOfPipe;
 		case OpKind::EventWrite: return CpGaps::Cat::EventWrite;
@@ -4686,6 +4701,7 @@ CpSeq::Result CommandProcessor::ExecuteOp(CpSeq::OpKind kind, const void* payloa
 		case OpKind::DmaData: ExecDmaData(*static_cast<const CpSeq::DmaDataOp*>(payload)); break;
 		case OpKind::LodStats: ExecLodStats(*static_cast<const CpSeq::LodStatsOp*>(payload)); break;
 		case OpKind::Flip: ExecFlip(*static_cast<const CpSeq::FlipOp*>(payload)); break;
+		case OpKind::Pssr: ExecPssr(*static_cast<const CpSeq::PssrOp*>(payload)); break;
 		case OpKind::WaitRegMem:
 			return ExecWaitRegMem(*static_cast<const CpSeq::WaitRegMemOp*>(payload));
 		case OpKind::WaitFlipDone:
