@@ -719,6 +719,18 @@ add_executable(game_patch_filter_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(game_patch_filter_tests PRIVATE ${inc_headers})
 
+# Upscaler profiles (common/upscalerProfile.h): the parser and every shipped assets/upscalers file.
+add_executable(upscaler_profile_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UpscalerProfileTests.cpp"
+)
+target_link_libraries(upscaler_profile_tests common)
+target_include_directories(upscaler_profile_tests PRIVATE ${inc_headers})
+target_compile_definitions(upscaler_profile_tests PRIVATE
+	KYTY_UPSCALER_PROFILE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/upscalers")
+if(LINUX)
+	target_link_libraries(upscaler_profile_tests Threads::Threads)
+endif()
+
 # u59-preset.json (common/u59Preset.h): parsing and lookup for the launcher, the emulator's startup
 # warnings, the shipped tools/u59-preset.json, and the code defaults that make it optional.
 add_executable(u59_preset_tests EXCLUDE_FROM_ALL
@@ -1333,6 +1345,7 @@ if(BUILD_TESTING)
 	add_test(NAME lod_stats_report COMMAND $<TARGET_FILE:lod_stats_report_tests>)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
 	add_test(NAME u59_preset COMMAND $<TARGET_FILE:u59_preset_tests>)
+	add_test(NAME upscaler_profile COMMAND $<TARGET_FILE:upscaler_profile_tests>)
 	add_test(NAME lod_stats_codegen
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --lod-stats-codegen-only)
 	add_test(NAME gi_probe_codegen
@@ -2619,6 +2632,7 @@ if(BUILD_TESTING)
 		occlusion_query_state_tests
 		game_patch_filter_tests
 		u59_preset_tests
+		upscaler_profile_tests
 		lru_cache_tests
 		spirv_local_arrays_tests
 		pipeline_fast_first_tests

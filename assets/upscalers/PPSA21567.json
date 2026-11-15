@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "id": "PPSA21567",
+  "pass": {
+    "pixel_shader": "2936e5eca99d75e7",
+    "color_image": 1,
+    "motion_vector_image": 0,
+    "constant_buffer": 0
+  },
+  "constants": {
+    "jitter_x": 0,
+    "jitter_y": 1,
+    "output_width": 4,
+    "output_height": 5,
+    "input_width": 6,
+    "input_height": 7,
+    "frame_index": 11,
+    "motion_vectors_enabled": 13
+  },
+  "jitter": {
+    "units": "uv",
+    "sign": 1
+  },
+  "motion_vectors": {
+    "units": "uv",
+    "direction": "previous_to_current"
+  },
+  "depth": {
+    "source": "motion_vector_target",
+    "inverted": true
+  },
+  "hdr": true
+}
