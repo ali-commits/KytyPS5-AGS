@@ -13,10 +13,18 @@
 #ifndef KYTY_NGX
 #define KYTY_NGX 0
 #endif
+#ifndef KYTY_FSR2
+#define KYTY_FSR2 0
+#endif
 
 #if KYTY_NGX
 #include <nvsdk_ngx_helpers_vk.h>
 #include <nvsdk_ngx_vk.h>
+#endif
+#if KYTY_FSR2
+#include <ffx_fsr2.h>
+#include <ffx_fsr2_vk.h>
+#include <kytyFsr2.h>
 #endif
 
 #ifdef _WIN32
@@ -31,16 +39,21 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace Libs::Graphics {
 
 namespace {
+
+using Config::Upscaler;
 
 enum class Fallback {
 	InitFailed,
@@ -61,8 +74,16 @@ struct DepthPair {
 	ImageId depth;
 };
 
+#if KYTY_FSR2
+// One FSR2 context, for one input and output size.
+struct FsrContext {
+	std::vector<uint8_t> scratch;
+	FfxFsr2Context       context {};
+};
+#endif
+
 struct State {
-	bool                             active = false;
+	Upscaler                         upscaler = Upscaler::Off; // Off: inactive
 	Common::UpscalerProfile::Profile profile;
 	std::array<DepthPair, 16>        depth_pairs {};
 	uint32_t                         depth_next = 0;
@@ -72,35 +93,50 @@ struct State {
 	NVSDK_NGX_Parameter* params  = nullptr;
 	NVSDK_NGX_Handle*    feature = nullptr;
 #endif
-	uint32_t                                                   feature_in_w  = 0;
-	uint32_t                                                   feature_in_h  = 0;
-	uint32_t                                                   feature_out_w = 0;
-	uint32_t                                                   feature_out_h = 0;
-	uint32_t                                                   last_frame    = 0;
-	uint64_t                                                   evaluations   = 0;
+#if KYTY_FSR2
+	std::unique_ptr<FsrContext> fsr;
+	int64_t                     fsr_frame_ns = 0;
+#endif
+	bool                                                       created     = false;
+	uint32_t                                                   in_w        = 0;
+	uint32_t                                                   in_h        = 0;
+	uint32_t                                                   out_w       = 0;
+	uint32_t                                                   out_h       = 0;
+	uint32_t                                                   last_frame  = 0;
+	uint64_t                                                   evaluations = 0;
 	std::array<uint64_t, static_cast<size_t>(Fallback::Count)> fallbacks {};
 	int64_t                                                    print_ns = 0;
 };
 
+const char* Name(Upscaler upscaler) {
+	return upscaler == Upscaler::DLSS ? "DLSS" : "FSR";
+}
+
+bool BuiltIn(Upscaler upscaler) {
+	return upscaler == Upscaler::DLSS ? KYTY_NGX != 0 : KYTY_FSR2 != 0;
+}
+
 State& Get() {
 	static State state = [] {
-		State s;
-		if (Config::GetUpscaler() == Config::Upscaler::Off) {
+		State      s;
+		const auto upscaler = Config::GetUpscaler();
+		if (upscaler == Upscaler::Off) {
 			return s;
 		}
 		const auto& path = Config::UpscalerProfilePath();
 		std::string error;
 		if (path.empty()) {
 			std::printf("Upscaler: no upscaler profile for this game: the game's pass runs\n");
-		} else if (!KYTY_NGX) {
-			std::printf("Upscaler: this build has no DLSS (configured without KYTY_NGX_SDK_DIR): "
-			            "the game's pass runs\n");
+		} else if (!BuiltIn(upscaler)) {
+			std::printf("Upscaler: this build has no %s%s: the game's pass runs\n", Name(upscaler),
+			            upscaler == Upscaler::DLSS ? " (configured without KYTY_NGX_SDK_DIR)"
+			                                       : " (configured with KYTY_FSR2=OFF)");
 		} else if (!Common::UpscalerProfile::Load(path, s.profile, error)) {
 			std::printf("Upscaler: %s: %s: the game's pass runs\n", path.string().c_str(),
 			            error.c_str());
 		} else {
-			s.active = true;
-			std::printf("Upscaler: DLSS for pass %016llx (%s)\n",
+			s.upscaler = upscaler;
+			std::printf("Upscaler: %s for pass %016llx (%s)\n", Name(upscaler),
 			            static_cast<unsigned long long>(s.profile.pixel_shader),
 			            path.string().c_str());
 		}
@@ -132,9 +168,9 @@ void Summary(State& s) {
 			kept += " " + std::string(FALLBACK_NAMES[i]) + "=" + std::to_string(s.fallbacks[i]);
 		}
 	}
-	std::printf("Upscaler 10s: DLSS %llu draws (%ux%u -> %ux%u) | game pass kept:%s\n",
-	            static_cast<unsigned long long>(s.evaluations), s.feature_in_w, s.feature_in_h,
-	            s.feature_out_w, s.feature_out_h, kept.empty() ? " none" : kept.c_str());
+	std::printf("Upscaler 10s: %s %llu draws (%ux%u -> %ux%u) | game pass kept:%s\n",
+	            Name(s.upscaler), static_cast<unsigned long long>(s.evaluations), s.in_w, s.in_h,
+	            s.out_w, s.out_h, kept.empty() ? " none" : kept.c_str());
 	std::fflush(stdout);
 	s.evaluations = 0;
 	s.fallbacks   = {};
@@ -146,9 +182,8 @@ bool Fail(State& s, Fallback reason) {
 	return false;
 }
 
-#if KYTY_NGX
 // The folder holding the emulator executable (empty when unknown).
-std::filesystem::path ExecutableDir() {
+[[maybe_unused]] std::filesystem::path ExecutableDir() {
 #ifdef _WIN32
 	std::wstring name(32768, L'\0');
 	const auto   size = GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
@@ -164,6 +199,24 @@ std::filesystem::path ExecutableDir() {
 #endif
 }
 
+// What one evaluation of either upscaler reads and writes (upscalerProfile.h).
+struct Frame {
+	Image*   color          = nullptr;
+	Image*   motion_vectors = nullptr;
+	Image*   depth          = nullptr;
+	Image*   output         = nullptr;
+	uint32_t in_w           = 0;
+	uint32_t in_h           = 0;
+	uint32_t out_w          = 0;
+	uint32_t out_h          = 0;
+	float    jitter_x       = 0.0f; // input pixels
+	float    jitter_y       = 0.0f;
+	float mv_scale_x = 0.0f; // to input pixels, pointing from the current to the previous position
+	float mv_scale_y = 0.0f;
+	bool  reset      = false;
+};
+
+#if KYTY_NGX
 NVSDK_NGX_PerfQuality_Value Quality() {
 	switch (Config::GetDlssMode()) {
 		case Config::DlssMode::Balanced: return NVSDK_NGX_PerfQuality_Value_Balanced;
@@ -176,10 +229,9 @@ NVSDK_NGX_PerfQuality_Value Quality() {
 	}
 }
 
-// NGX initialisation, once: whether DLSS Super Resolution is available.
-void Init(State& s, GraphicContext& graphics) {
-	s.init_tried = true;
-	// NGX's runtime search paths; its log and cache folder.
+// NGX initialisation, once: whether DLSS Super Resolution is available. NGX looks for its
+// runtime in <emulator>/ngx, then next to the emulator.
+void InitDlss(State& s, GraphicContext& graphics) {
 	const auto         dir     = ExecutableDir();
 	const std::wstring ngx_dir = (dir / "ngx").wstring();
 	const std::wstring exe_dir = dir.wstring();
@@ -202,7 +254,6 @@ void Init(State& s, GraphicContext& graphics) {
 		s.params = nullptr;
 		std::printf("Upscaler: NGX initialisation failed (0x%08x): the game's pass runs\n",
 		            static_cast<unsigned>(result));
-		std::fflush(stdout);
 		return;
 	}
 	int available    = 0;
@@ -213,7 +264,158 @@ void Init(State& s, GraphicContext& graphics) {
 	s.ready = available != 0;
 	std::printf("Upscaler: DLSS Super Resolution %s%s\n", s.ready ? "available" : "unavailable",
 	            needs_driver != 0 ? " (the driver needs an update)" : "");
-	std::fflush(stdout);
+}
+
+bool CreateDlss(State& s, vk::CommandBuffer cmd) {
+	if (s.feature != nullptr) {
+		NVSDK_NGX_VULKAN_ReleaseFeature(s.feature);
+		s.feature = nullptr;
+	}
+	const auto&                  p = s.profile;
+	NVSDK_NGX_DLSS_Create_Params create {};
+	create.Feature.InWidth            = s.in_w;
+	create.Feature.InHeight           = s.in_h;
+	create.Feature.InTargetWidth      = s.out_w;
+	create.Feature.InTargetHeight     = s.out_h;
+	create.Feature.InPerfQualityValue = Quality();
+	create.InFeatureCreateFlags =
+	    NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+	    NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+	    (p.hdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0) |
+	    (p.depth_inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0);
+	const auto result = NGX_VULKAN_CREATE_DLSS_EXT(static_cast<VkCommandBuffer>(cmd), 1, 1,
+	                                               &s.feature, s.params, &create);
+	if (NVSDK_NGX_FAILED(result) || s.feature == nullptr) {
+		std::printf("Upscaler: DLSS creation failed (0x%08x)\n", static_cast<unsigned>(result));
+		s.feature = nullptr;
+		return false;
+	}
+	return true;
+}
+
+bool EvaluateDlss(State& s, vk::CommandBuffer cmd, const Frame& f,
+                  const std::array<vk::ImageView, 4>& views) {
+	const auto resource = [](const Image& image, vk::ImageView view, vk::ImageAspectFlags aspect,
+	                         bool write) {
+		const VkImageSubresourceRange range {static_cast<VkImageAspectFlags>(aspect), 0, 1, 0, 1};
+		return NVSDK_NGX_Create_ImageView_Resource_VK(
+		    static_cast<VkImageView>(view), static_cast<VkImage>(image.backing.image), range,
+		    static_cast<VkFormat>(image.backing.format), image.info.extent.width,
+		    image.info.extent.height, write);
+	};
+	auto color_res = resource(*f.color, views[0], vk::ImageAspectFlagBits::eColor, false);
+	auto mv_res    = resource(*f.motion_vectors, views[1], vk::ImageAspectFlagBits::eColor, false);
+	auto depth_res = resource(*f.depth, views[2], vk::ImageAspectFlagBits::eDepth, false);
+	auto out_res   = resource(*f.output, views[3], vk::ImageAspectFlagBits::eColor, true);
+	NVSDK_NGX_VK_DLSS_Eval_Params eval {};
+	eval.Feature.pInColor          = &color_res;
+	eval.Feature.pInOutput         = &out_res;
+	eval.pInDepth                  = &depth_res;
+	eval.pInMotionVectors          = &mv_res;
+	eval.InJitterOffsetX           = f.jitter_x;
+	eval.InJitterOffsetY           = f.jitter_y;
+	eval.InMVScaleX                = f.mv_scale_x;
+	eval.InMVScaleY                = f.mv_scale_y;
+	eval.InRenderSubrectDimensions = {f.in_w, f.in_h};
+	eval.InReset                   = f.reset ? 1 : 0;
+	return !NVSDK_NGX_FAILED(NGX_VULKAN_EVALUATE_DLSS_EXT(static_cast<VkCommandBuffer>(cmd),
+	                                                      s.feature, s.params, &eval));
+}
+#endif
+
+#if KYTY_FSR2
+// FSR2 initialisation, once: its Vulkan functions and shaders (installed as <emulator>/fsr2).
+void InitFsr(State& s, GraphicContext& graphics) {
+	KytyFsr2::LoadVulkanFunctions(VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
+	                              static_cast<VkInstance>(graphics.instance),
+	                              VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr);
+	std::string missing;
+	if (!KytyFsr2::SetShaderDirectory(ExecutableDir() / "fsr2", missing)) {
+		std::printf("Upscaler: FSR shader %s is missing: the game's pass runs\n", missing.c_str());
+		return;
+	}
+	s.ready = true;
+	std::printf("Upscaler: FSR 2 available\n");
+}
+
+// A context for the current sizes. One of other sizes is destroyed once the command buffer being
+// recorded completed, after every earlier one that used it.
+bool CreateFsr(State& s, GraphicContext& graphics, CommandScheduler& scheduler) {
+	if (s.fsr != nullptr) {
+		auto* old = s.fsr.release();
+		scheduler.DeferOperation([old]() {
+			ffxFsr2ContextDestroy(&old->context);
+			delete old;
+		});
+	}
+	const auto& p        = s.profile;
+	const auto  physical = static_cast<VkPhysicalDevice>(graphics.physical_device);
+	auto        fsr      = std::make_unique<FsrContext>();
+	fsr->scratch.resize(ffxFsr2GetScratchMemorySizeVK(physical));
+	FfxFsr2ContextDescription description {};
+	if (ffxFsr2GetInterfaceVK(&description.callbacks, fsr->scratch.data(), fsr->scratch.size(),
+	                          physical,
+	                          VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr) != FFX_OK) {
+		return false;
+	}
+	description.device        = ffxGetDeviceVK(static_cast<VkDevice>(graphics.device));
+	description.maxRenderSize = {s.in_w, s.in_h};
+	description.displaySize   = {s.out_w, s.out_h};
+	// The profile's conventions; the depth's far plane is unknown, so it is taken as infinite.
+	description.flags = FFX_FSR2_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION |
+	                    FFX_FSR2_ENABLE_AUTO_EXPOSURE | FFX_FSR2_ENABLE_DEPTH_INFINITE |
+	                    (p.hdr ? FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE : 0) |
+	                    (p.depth_inverted ? FFX_FSR2_ENABLE_DEPTH_INVERTED : 0);
+	if (ffxFsr2ContextCreate(&fsr->context, &description) != FFX_OK) {
+		return false;
+	}
+	s.fsr          = std::move(fsr);
+	s.fsr_frame_ns = 0;
+	return true;
+}
+
+bool EvaluateFsr(State& s, vk::CommandBuffer cmd, const Frame& f,
+                 const std::array<vk::ImageView, 4>& views) {
+	auto*      context  = &s.fsr->context;
+	const auto resource = [&](const Image& image, vk::ImageView view, const wchar_t* name,
+	                          FfxResourceStates state) {
+		return ffxGetTextureResourceVK(context, static_cast<VkImage>(image.backing.image),
+		                               static_cast<VkImageView>(view), image.info.extent.width,
+		                               image.info.extent.height,
+		                               static_cast<VkFormat>(image.backing.format), name, state);
+	};
+	const auto none = [&](const wchar_t* name) {
+		return ffxGetTextureResourceVK(context, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, 1,
+		                               VK_FORMAT_UNDEFINED, name);
+	};
+	const auto now = NowNs();
+	const auto delta =
+	    s.fsr_frame_ns != 0 ? static_cast<float>(now - s.fsr_frame_ns) / 1e6f : 1000.0f / 30.0f;
+	s.fsr_frame_ns = now;
+
+	FfxFsr2DispatchDescription d {};
+	d.commandList = ffxGetCommandListVK(static_cast<VkCommandBuffer>(cmd));
+	d.color = resource(*f.color, views[0], L"FSR2_InputColor", FFX_RESOURCE_STATE_COMPUTE_READ);
+	d.motionVectors = resource(*f.motion_vectors, views[1], L"FSR2_InputMotionVectors",
+	                           FFX_RESOURCE_STATE_COMPUTE_READ);
+	d.depth    = resource(*f.depth, views[2], L"FSR2_InputDepth", FFX_RESOURCE_STATE_COMPUTE_READ);
+	d.output   = resource(*f.output, views[3], L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+	d.exposure = none(L"FSR2_EmptyExposure");
+	d.reactive = none(L"FSR2_EmptyReactive");
+	d.transparencyAndComposition = none(L"FSR2_EmptyTransparencyAndComposition");
+	d.jitterOffset               = {f.jitter_x, f.jitter_y};
+	d.motionVectorScale          = {f.mv_scale_x, f.mv_scale_y};
+	d.renderSize                 = {f.in_w, f.in_h};
+	d.enableSharpening           = false;
+	d.frameTimeDelta             = delta;
+	d.preExposure                = 1.0f;
+	d.reset                      = f.reset;
+	// Only the depth clip uses the camera; the game's is unknown, so these are typical values.
+	d.cameraNear              = 0.1f;
+	d.cameraFar               = FLT_MAX;
+	d.cameraFovAngleVertical  = 1.0f;
+	d.viewSpaceToMetersFactor = 1.0f;
+	return ffxFsr2ContextDispatch(context, &d) == FFX_OK;
 }
 #endif
 
@@ -222,12 +424,12 @@ void Init(State& s, GraphicContext& graphics) {
 namespace Upscaler {
 
 bool Active() {
-	return Get().active;
+	return Get().upscaler != Config::Upscaler::Off;
 }
 
 void RequiredExtensions(std::vector<const char*>& instance, std::vector<const char*>& device) {
 #if KYTY_NGX
-	if (!Active()) {
+	if (Get().upscaler != Config::Upscaler::DLSS) {
 		return;
 	}
 	unsigned int instance_count = 0;
@@ -280,11 +482,6 @@ bool RenderExecutor::TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pix
 	    pixel.runtime->program->shader_hash != s.profile.pixel_shader) {
 		return false;
 	}
-#if !KYTY_NGX
-	(void)buffer;
-	(void)output;
-	return false;
-#else
 	const auto& p = s.profile;
 	// The pass's colour and motion vectors, and the constants (upscalerProfile.h).
 	if (pixel.images.size() <= std::max(p.color_image, p.motion_vector_image) || !output ||
@@ -295,16 +492,14 @@ bool RenderExecutor::TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pix
 	}
 	const auto* cb =
 	    reinterpret_cast<const uint32_t*>(pixel.buffer_sources[p.constant_buffer].address);
-	float jitter[2];
-	std::memcpy(&jitter[0], cb + p.jitter_x, sizeof(float));
-	std::memcpy(&jitter[1], cb + p.jitter_y, sizeof(float));
-	const uint32_t out_w = cb[p.output_width];
-	const uint32_t out_h = cb[p.output_height];
-	const uint32_t in_w  = cb[p.input_width];
-	const uint32_t in_h  = cb[p.input_height];
 	if (p.motion_vectors_enabled.has_value() && cb[*p.motion_vectors_enabled] == 0) {
 		return Fail(s, Fallback::NoMotionVectors);
 	}
+	Frame f;
+	f.in_w              = cb[p.input_width];
+	f.in_h              = cb[p.input_height];
+	f.out_w             = cb[p.output_width];
+	f.out_h             = cb[p.output_height];
 	auto&      cache    = m_context.GetTextureCache();
 	const auto mv_id    = pixel.images[p.motion_vector_image].image_id;
 	const auto color_id = pixel.images[p.color_image].image_id;
@@ -317,82 +512,104 @@ bool RenderExecutor::TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pix
 	if (!depth_id || cache.TryGetImage(depth_id) == nullptr) {
 		return Fail(s, Fallback::NoDepth);
 	}
-	auto&      mv    = cache.GetImage(mv_id);
-	auto&      color = cache.GetImage(color_id);
-	auto&      depth = cache.GetImage(depth_id);
-	auto&      out   = cache.GetImage(output);
+	f.motion_vectors = &cache.GetImage(mv_id);
+	f.color          = &cache.GetImage(color_id);
+	f.depth          = &cache.GetImage(depth_id);
+	f.output         = &cache.GetImage(output);
 	const auto sized = [](const Image& image, uint32_t w, uint32_t h) {
 		return image.info.extent.width == w && image.info.extent.height == h &&
 		       image.backing.image != nullptr && image.info.samples == 1;
 	};
-	if (!sized(mv, in_w, in_h) || !sized(color, in_w, in_h) || !sized(depth, in_w, in_h) ||
-	    !sized(out, out_w, out_h) || !depth.info.IsDepth() ||
-	    !(out.backing.usage & vk::ImageUsageFlagBits::eStorage)) {
+	if (!sized(*f.motion_vectors, f.in_w, f.in_h) || !sized(*f.color, f.in_w, f.in_h) ||
+	    !sized(*f.depth, f.in_w, f.in_h) || !sized(*f.output, f.out_w, f.out_h) ||
+	    !f.depth->info.IsDepth() || !(f.output->backing.usage & vk::ImageUsageFlagBits::eStorage)) {
 		return Fail(s, Fallback::Sizes);
 	}
+	// Jitter in input pixels; motion vectors scaled to input pixels, pointing from the current
+	// position to the previous one (the convention of both upscalers).
+	float jitter[2];
+	std::memcpy(&jitter[0], cb + p.jitter_x, sizeof(float));
+	std::memcpy(&jitter[1], cb + p.jitter_y, sizeof(float));
+	const bool  jitter_uv = p.jitter_units == Common::UpscalerProfile::Units::Uv;
+	const bool  motion_uv = p.motion_units == Common::UpscalerProfile::Units::Uv;
+	const float mv_sign   = p.motion_to_current ? -1.0f : 1.0f;
+	f.jitter_x   = p.jitter_sign * jitter[0] * (jitter_uv ? static_cast<float>(f.in_w) : 1.0f);
+	f.jitter_y   = p.jitter_sign * jitter[1] * (jitter_uv ? static_cast<float>(f.in_h) : 1.0f);
+	f.mv_scale_x = mv_sign * (motion_uv ? static_cast<float>(f.in_w) : 1.0f);
+	f.mv_scale_y = mv_sign * (motion_uv ? static_cast<float>(f.in_h) : 1.0f);
+	if (p.frame_index.has_value()) {
+		const uint32_t frame = cb[*p.frame_index];
+		f.reset              = s.last_frame != 0 && frame != s.last_frame + 1;
+		s.last_frame         = frame;
+	}
+
 	auto& graphics = m_context.GetGraphics();
 	if (!s.init_tried) {
-		Init(s, graphics);
-	}
-	if (s.params == nullptr) {
-		return Fail(s, Fallback::InitFailed);
+		s.init_tried = true;
+#if KYTY_NGX
+		if (s.upscaler == Config::Upscaler::DLSS) {
+			InitDlss(s, graphics);
+		}
+#endif
+#if KYTY_FSR2
+		if (s.upscaler == Config::Upscaler::FSR) {
+			InitFsr(s, graphics);
+		}
+#endif
+		std::fflush(stdout);
 	}
 	if (!s.ready) {
 		return Fail(s, Fallback::Unavailable);
 	}
 
-	// NGX records through the native handle, outside rendering.
+	// Both upscalers record through the native handle, outside rendering, and bind their own
+	// pipelines and descriptors.
 	buffer.EndRendering();
 	const auto cmd = buffer.Handle();
-	if (s.feature == nullptr || s.feature_in_w != in_w || s.feature_in_h != in_h ||
-	    s.feature_out_w != out_w || s.feature_out_h != out_h) {
-		if (s.feature != nullptr) {
-			NVSDK_NGX_VULKAN_ReleaseFeature(s.feature);
-			s.feature = nullptr;
+	if (!s.created || s.in_w != f.in_w || s.in_h != f.in_h || s.out_w != f.out_w ||
+	    s.out_h != f.out_h) {
+		s.in_w    = f.in_w;
+		s.in_h    = f.in_h;
+		s.out_w   = f.out_w;
+		s.out_h   = f.out_h;
+		s.created = false;
+#if KYTY_NGX
+		if (s.upscaler == Config::Upscaler::DLSS) {
+			s.created = CreateDlss(s, cmd);
+			buffer.ForgetBoundState();
 		}
-		NVSDK_NGX_DLSS_Create_Params create {};
-		create.Feature.InWidth            = in_w;
-		create.Feature.InHeight           = in_h;
-		create.Feature.InTargetWidth      = out_w;
-		create.Feature.InTargetHeight     = out_h;
-		create.Feature.InPerfQualityValue = Quality();
-		create.InFeatureCreateFlags =
-		    NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
-		    NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-		    (p.hdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0) |
-		    (p.depth_inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0);
-		const auto result = NGX_VULKAN_CREATE_DLSS_EXT(static_cast<VkCommandBuffer>(cmd), 1, 1,
-		                                               &s.feature, s.params, &create);
-		buffer.ForgetBoundState();
-		if (NVSDK_NGX_FAILED(result) || s.feature == nullptr) {
-			std::printf("Upscaler: DLSS creation failed (0x%08x) for %ux%u -> %ux%u: the game's "
-			            "pass runs\n",
-			            static_cast<unsigned>(result), in_w, in_h, out_w, out_h);
+#endif
+#if KYTY_FSR2
+		if (s.upscaler == Config::Upscaler::FSR) {
+			s.created = CreateFsr(s, graphics, m_context.GetCommandScheduler());
+		}
+#endif
+		if (!s.created) {
+			s.ready = false;
+			std::printf("Upscaler: %s %ux%u -> %ux%u could not be created: the game's pass runs\n",
+			            Name(s.upscaler), f.in_w, f.in_h, f.out_w, f.out_h);
 			std::fflush(stdout);
-			s.ready   = false;
-			s.feature = nullptr;
 			return Fail(s, Fallback::CreateFailed);
 		}
-		s.feature_in_w  = in_w;
-		s.feature_in_h  = in_h;
-		s.feature_out_w = out_w;
-		s.feature_out_h = out_h;
-		std::printf("Upscaler: DLSS %ux%u -> %ux%u\n", in_w, in_h, out_w, out_h);
+		std::printf("Upscaler: %s %ux%u -> %ux%u\n", Name(s.upscaler), f.in_w, f.in_h, f.out_w,
+		            f.out_h);
 		std::fflush(stdout);
 	}
 
-	// Inputs sampled, output storage.
-	mv.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead, {},
-	           cmd);
-	color.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead,
-	              {}, cmd);
-	depth.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderSampledRead,
-	              {}, cmd);
-	out.Transit(vk::ImageLayout::eGeneral,
-	            vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite,
-	            {}, cmd);
+	// Inputs sampled, output storage; the upscalers keep these layouts.
+	f.motion_vectors->Transit(vk::ImageLayout::eShaderReadOnlyOptimal,
+	                          vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
+	f.color->Transit(vk::ImageLayout::eShaderReadOnlyOptimal,
+	                 vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
+	f.depth->Transit(vk::ImageLayout::eShaderReadOnlyOptimal,
+	                 vk::AccessFlagBits2::eShaderSampledRead, {}, cmd);
+	f.output->Transit(vk::ImageLayout::eGeneral,
+	                  vk::AccessFlagBits2::eShaderStorageRead |
+	                      vk::AccessFlagBits2::eShaderStorageWrite,
+	                  {}, cmd);
 
-	// Views for this evaluation, destroyed once the command buffer completed.
+	// Views for this evaluation (colour, motion vectors, depth, output), destroyed once the
+	// command buffer completed.
 	const auto                   device = graphics.device;
 	std::array<vk::ImageView, 4> views {};
 	const auto                   make_view = [&](const Image& image, vk::ImageAspectFlags aspect) {
@@ -406,48 +623,10 @@ bool RenderExecutor::TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pix
 		           ? view
 				   : vk::ImageView {};
 	};
-	views[0]            = make_view(color, vk::ImageAspectFlagBits::eColor);
-	views[1]            = make_view(mv, vk::ImageAspectFlagBits::eColor);
-	views[2]            = make_view(depth, vk::ImageAspectFlagBits::eDepth);
-	views[3]            = make_view(out, vk::ImageAspectFlagBits::eColor);
-	const auto resource = [](const Image& image, vk::ImageView view, vk::ImageAspectFlags aspect,
-	                         bool write) {
-		const VkImageSubresourceRange range {static_cast<VkImageAspectFlags>(aspect), 0, 1, 0, 1};
-		return NVSDK_NGX_Create_ImageView_Resource_VK(
-		    static_cast<VkImageView>(view), static_cast<VkImage>(image.backing.image), range,
-		    static_cast<VkFormat>(image.backing.format), image.info.extent.width,
-		    image.info.extent.height, write);
-	};
-	auto color_res = resource(color, views[0], vk::ImageAspectFlagBits::eColor, false);
-	auto mv_res    = resource(mv, views[1], vk::ImageAspectFlagBits::eColor, false);
-	auto depth_res = resource(depth, views[2], vk::ImageAspectFlagBits::eDepth, false);
-	auto out_res   = resource(out, views[3], vk::ImageAspectFlagBits::eColor, true);
-
-	// Jitter in input pixels. DLSS wants motion vectors pointing from the current position to
-	// the previous one, in input pixels after scaling.
-	const auto                    uv_x      = static_cast<float>(in_w);
-	const auto                    uv_y      = static_cast<float>(in_h);
-	const bool                    jitter_uv = p.jitter_units == Common::UpscalerProfile::Units::Uv;
-	const bool                    motion_uv = p.motion_units == Common::UpscalerProfile::Units::Uv;
-	const float                   mv_sign   = p.motion_to_current ? -1.0f : 1.0f;
-	NVSDK_NGX_VK_DLSS_Eval_Params eval {};
-	eval.Feature.pInColor          = &color_res;
-	eval.Feature.pInOutput         = &out_res;
-	eval.pInDepth                  = &depth_res;
-	eval.pInMotionVectors          = &mv_res;
-	eval.InJitterOffsetX           = p.jitter_sign * jitter[0] * (jitter_uv ? uv_x : 1.0f);
-	eval.InJitterOffsetY           = p.jitter_sign * jitter[1] * (jitter_uv ? uv_y : 1.0f);
-	eval.InMVScaleX                = mv_sign * (motion_uv ? uv_x : 1.0f);
-	eval.InMVScaleY                = mv_sign * (motion_uv ? uv_y : 1.0f);
-	eval.InRenderSubrectDimensions = {in_w, in_h};
-	if (p.frame_index.has_value()) {
-		const uint32_t frame = cb[*p.frame_index];
-		eval.InReset         = s.last_frame != 0 && frame != s.last_frame + 1 ? 1 : 0;
-		s.last_frame         = frame;
-	}
-	const auto result =
-	    NGX_VULKAN_EVALUATE_DLSS_EXT(static_cast<VkCommandBuffer>(cmd), s.feature, s.params, &eval);
-	buffer.ForgetBoundState();
+	views[0] = make_view(*f.color, vk::ImageAspectFlagBits::eColor);
+	views[1] = make_view(*f.motion_vectors, vk::ImageAspectFlagBits::eColor);
+	views[2] = make_view(*f.depth, vk::ImageAspectFlagBits::eDepth);
+	views[3] = make_view(*f.output, vk::ImageAspectFlagBits::eColor);
 	m_context.GetCommandScheduler().DeferOperation([device, views]() {
 		for (const auto view: views) {
 			if (view) {
@@ -455,16 +634,31 @@ bool RenderExecutor::TryUpscalePass(CommandBuffer& buffer, PreparedBindings& pix
 			}
 		}
 	});
-	if (NVSDK_NGX_FAILED(result)) {
+	if (std::any_of(views.begin(), views.end(), [](vk::ImageView v) { return !v; })) {
 		return Fail(s, Fallback::EvaluateFailed);
 	}
-	// The output now holds DLSS's image: a GPU write of the target, as the draw's would be.
-	out.NoteContentWrite();
-	cache.CommitGpuWrite(out);
+
+	bool evaluated = false;
+#if KYTY_NGX
+	if (s.upscaler == Config::Upscaler::DLSS) {
+		evaluated = EvaluateDlss(s, cmd, f, views);
+	}
+#endif
+#if KYTY_FSR2
+	if (s.upscaler == Config::Upscaler::FSR) {
+		evaluated = EvaluateFsr(s, cmd, f, views);
+	}
+#endif
+	buffer.ForgetBoundState();
+	if (!evaluated) {
+		return Fail(s, Fallback::EvaluateFailed);
+	}
+	// The output now holds the upscaler's image: a GPU write of the target, as the draw's would be.
+	f.output->NoteContentWrite();
+	cache.CommitGpuWrite(*f.output);
 	s.evaluations++;
 	Summary(s);
 	return true;
-#endif
 }
 
 } // namespace Libs::Graphics

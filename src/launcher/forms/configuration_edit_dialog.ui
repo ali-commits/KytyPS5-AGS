@@ -510,7 +510,7 @@
             <item row="10" column="1">
              <widget class="QComboBox" name="comboBox_upscaler">
               <property name="toolTip">
-               <string>Replaces the game's own upscaling with DLSS when the game has an upscaler profile, the build includes DLSS and the GPU supports it. Otherwise the game's own upscaling runs.</string>
+               <string>Replaces the game's own upscaling when the game has an upscaler profile. FSR 2 runs on any GPU; DLSS needs an NVIDIA RTX GPU and a build that includes it. Otherwise the game's own upscaling runs.</string>
               </property>
              </widget>
             </item>

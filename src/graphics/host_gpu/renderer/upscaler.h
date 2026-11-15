@@ -9,6 +9,9 @@
 // each colour target was rendered with; RenderExecutor::TryUpscalePass (upscaler.cpp) records
 // the replacement in place of the pass's draw.
 //
+// FSR: AMD FidelityFX Super Resolution 2 (3rdparty/fidelityfx-fsr2, built unless KYTY_FSR2=OFF),
+// with the same inputs and conventions; its compiled shaders are installed as <emulator>/fsr2.
+//
 // DLSS: NVIDIA DLSS Super Resolution through NGX, in builds configured with KYTY_NGX_SDK_DIR.
 // It is created for the pass's own input and output sizes (it writes the game's output target,
 // which every later pass reads), with the profile's jitter, motion-vector and depth conventions,
@@ -22,7 +25,7 @@
 // others were kept.
 namespace Libs::Graphics::Upscaler {
 
-// The upscaler is selected and a valid profile is loaded (read once).
+// An upscaler built into this executable is selected and a valid profile is loaded (read once).
 [[nodiscard]] bool Active();
 // Device creation: the instance and device extensions the upscaler needs (none when inactive).
 void RequiredExtensions(std::vector<const char*>& instance, std::vector<const char*>& device);

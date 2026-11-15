@@ -152,7 +152,7 @@ static void PrintUsage() {
 	    "  --native-resolution <true|false>     Linux: render at the display's real resolution\n"
 	    "                                      under Wayland desktop scaling. Default: false.\n");
 	::printf(
-	    "  --upscaler <Off|DLSS>                Replace the game's temporal upscale pass\n"
+	    "  --upscaler <Off|DLSS|FSR>            Replace the game's temporal upscale pass\n"
 	    "                                      described by --upscaler-profile. Default: Off.\n");
 	::printf("  --dlss-mode <Quality|Balanced|Performance|UltraPerformance|DLAA>\n"
 	         "                                      DLSS quality mode. Default: Quality.\n");

@@ -437,13 +437,14 @@ With low latency on, one `LowLatency 10s:` line every 10 s reports the driver's 
 (simulation start to GPU end). `KYTY_LOW_LATENCY_MEASURE=1` with the setting off records the same
 timings without the low-latency mode, for comparison.
 
-### Upscaler (DLSS)
+### Upscaler (FSR, DLSS)
 
-**Upscaler** (`--upscaler Off|DLSS`) and **DLSS mode** (`--dlss-mode`) replace a game's own
-temporal upscale pass with NVIDIA DLSS Super Resolution. The game keeps its own render resolution
-and its own upscaled size: DLSS writes the image the game's pass would have written, and the
-emulator presents it at the output resolution as before. This needs three things, and the game's
-own upscaling runs when any of them is missing:
+**Upscaler** (`--upscaler Off|FSR|DLSS`) replaces a game's own temporal upscale pass with AMD
+FidelityFX Super Resolution 2 (FSR) or NVIDIA DLSS Super Resolution, and **DLSS mode**
+(`--dlss-mode`) picks DLSS's quality mode. The game keeps its own render resolution and its own
+upscaled size: the upscaler writes the image the game's pass would have written, and the emulator
+presents it at the output resolution as before. The game's own upscaling runs when anything below
+is missing:
 
 - **An upscaler profile for the game.** It describes the game's pass: its pixel shader, which
   bindings hold the colour and the motion vectors, where the jitter and sizes are in its constants,
@@ -451,15 +452,17 @@ own upscaling runs when any of them is missing:
   `src/common/upscalerProfile.h`. Profiles shipped with the emulator are in `assets/upscalers`
   (installed as `upscalers/`). Your own go in `_Upscalers` under the runtime root and take
   precedence. The file for a game version follows the same rule as cheat files (below).
-- **A build with DLSS.** Configure with `-DKYTY_NGX_SDK_DIR=<folder>`, where the folder holds
-  NVIDIA's DLSS SDK (`git clone https://github.com/NVIDIA/DLSS`). The build then installs the DLSS
-  runtime and NVIDIA's licence into `ngx/`. Release packages are built without it: the SDK is under
-  the NVIDIA RTX SDKs licence, which does not allow it in this GPL-licensed program's distribution,
-  so a DLSS build is for the person who builds it.
-- **An NVIDIA RTX GPU** with a driver that supports DLSS. On other GPUs the setting is ignored.
+- **FSR** is built by default (`-DKYTY_FSR2=OFF` leaves it out) and runs on any Vulkan GPU. CMake
+  downloads FSR 2.2.1 (MIT, `LICENSES/FidelityFX-FSR2-MIT.txt`) and compiles its shader
+  permutations with `glslangValidator`; they are installed as `fsr2/`.
+- **DLSS** needs an NVIDIA RTX GPU and a build configured with `-DKYTY_NGX_SDK_DIR=<folder>`, where
+  the folder holds NVIDIA's DLSS SDK (`git clone https://github.com/NVIDIA/DLSS`). The build then
+  installs the DLSS runtime and NVIDIA's licence into `ngx/`. Release packages are built without
+  it: the SDK is under the NVIDIA RTX SDKs licence, which does not allow it in this GPL-licensed
+  program's distribution, so a DLSS build is for the person who builds it.
 
-The log says which profile was used. One `Upscaler 10s:` line every 10 s gives the draws DLSS
-replaced and why any others kept the game's pass.
+The log says which profile was used. One `Upscaler 10s:` line every 10 s gives the draws the
+upscaler replaced and why any others kept the game's pass.
 
 | Game | Profile | Checked on |
 | --- | --- | --- |

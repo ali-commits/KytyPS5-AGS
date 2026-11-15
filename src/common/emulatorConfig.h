@@ -30,7 +30,7 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 
 // Replaces a game's own temporal upscale pass, described by an upscaler profile
 // (common/upscalerProfile.h, host_gpu/renderer/upscaler.h).
-enum class Upscaler { Off, DLSS };
+enum class Upscaler { Off, DLSS, FSR };
 
 // NVIDIA DLSS Super Resolution quality mode (the render size is the game's own).
 enum class DlssMode { Quality, Balanced, Performance, UltraPerformance, DLAA };

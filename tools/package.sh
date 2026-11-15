@@ -39,8 +39,12 @@ cmake --install "$build" --prefix "$tree" >&2
 root=$(realpath -e -- "$tree")
 
 # A build with DLSS (KYTY_NGX_SDK_DIR) is not distributable: the NVIDIA RTX SDKs licence does not
-# allow the SDK in this GPL-licensed program's distribution (README, "Upscaler (DLSS)").
+# allow the SDK in this GPL-licensed program's distribution (README, "Upscaler (FSR, DLSS)").
 [ ! -e "$root/ngx" ] || { echo "error: $build was configured with KYTY_NGX_SDK_DIR; release packages are built without DLSS" >&2; exit 1; }
+
+# The FSR upscaler's shaders (KYTY_FSR2, on by default) ship with every release.
+[ "$(find "$root/fsr2" -name '*.spv' 2>/dev/null | wc -l)" -eq 512 ] ||
+	{ echo "error: $root/fsr2 does not hold the 512 FSR shader permutations (configure with KYTY_FSR2=ON)" >&2; exit 1; }
 
 # Only regular files, directories and relative links that resolve inside the tree.
 special=$(find "$root" ! -type f ! -type d ! -type l)

@@ -147,7 +147,7 @@ public:
 	enum class PresentMode { Fifo, Mailbox, Immediate };
 	Q_ENUM(PresentMode)
 
-	enum class Upscaler { Off, DLSS };
+	enum class Upscaler { Off, DLSS, FSR };
 	Q_ENUM(Upscaler)
 
 	enum class DlssMode { Quality, Balanced, Performance, UltraPerformance, DLAA };
