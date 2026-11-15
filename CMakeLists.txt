@@ -144,6 +144,19 @@ endif()
 
 project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.7.0)
 
+# AGS extension version: the project version plus an optional suffix. Stable releases leave it empty;
+# testing pre-releases (tag v<X.Y.Z>-testing.<N>, built from the testing branch) pass -testing.<N>.
+# The manifest and the adapter's hello both report this string, so AGS's install check matches.
+set(AGS_VERSION_SUFFIX "" CACHE STRING "Suffix appended to the AGS extension version (e.g. -testing.1)")
+set(KYTY_AGS_VERSION "${PROJECT_VERSION}${AGS_VERSION_SUFFIX}")
+if(NOT AGS_VERSION_SUFFIX STREQUAL "" AND NOT AGS_VERSION_SUFFIX MATCHES "^-[0-9A-Za-z][0-9A-Za-z.+-]*$")
+	message(FATAL_ERROR "AGS_VERSION_SUFFIX must be empty or start with '-' (got '${AGS_VERSION_SUFFIX}')")
+endif()
+string(LENGTH "${KYTY_AGS_VERSION}" kyty_ags_version_length)
+if(NOT KYTY_AGS_VERSION MATCHES "^[0-9A-Za-z][0-9A-Za-z.+-]*$" OR kyty_ags_version_length GREATER 32)
+	message(FATAL_ERROR "AGS extension version '${KYTY_AGS_VERSION}' is not a valid AGS version (at most 32 of [0-9A-Za-z.+-])")
+endif()
+
 include_directories(
 	${KYTY_THIRD_PARTY_DIR}/gtest/include
 	${KYTY_THIRD_PARTY_DIR}/gtest
@@ -2846,11 +2859,18 @@ if(KYTY_BUILD_LAUNCHER)
 	if(UNIX)
 		add_subdirectory("${KYTY_SOURCE_DIR}/agsAdapter" "${CMAKE_CURRENT_BINARY_DIR}/agsAdapter")
 
-		# AGS extension package: the manifest (rendered with PROJECT_VERSION), its assets, the licenses and
-		# libFont's fallback fonts. AGS reads ags-extension.toml from the repository at the tagged commit, so
-		# a rendered copy is committed at the root; the ags_manifest test fails when it is stale.
+		# AGS extension package: the manifest (rendered with PROJECT_VERSION and AGS_VERSION_SUFFIX), its
+		# assets, the licenses and libFont's fallback fonts. AGS reads ags-extension.toml from the repository
+		# at the tagged commit, so a rendered stable copy (no suffix) is committed at the root; the
+		# ags_manifest test compares it with the suffix-free render and fails when it is stale.
 		configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml.in"
 			"${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml")
+		function(kyty_render_stable_ags_manifest)
+			set(AGS_VERSION_SUFFIX "")
+			configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml.in"
+				"${CMAKE_CURRENT_BINARY_DIR}/ags-extension.stable.toml")
+		endfunction()
+		kyty_render_stable_ags_manifest()
 		install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml" DESTINATION .)
 		install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/ags" DESTINATION assets)
 		install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION .)
@@ -2863,7 +2883,7 @@ if(KYTY_BUILD_LAUNCHER)
 		endif()
 		if(BUILD_TESTING)
 			add_test(NAME ags_manifest COMMAND ${CMAKE_COMMAND} -E compare_files
-				"${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml" "${CMAKE_CURRENT_BINARY_DIR}/ags-extension.toml")
+				"${CMAKE_CURRENT_SOURCE_DIR}/ags-extension.toml" "${CMAKE_CURRENT_BINARY_DIR}/ags-extension.stable.toml")
 		endif()
 	endif()
 endif()

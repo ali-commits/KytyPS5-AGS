@@ -1,8 +1,13 @@
 name: AGS extension release
 
-# Pushing a tag vX.Y.Z builds the Linux package for the AGS extension (ags-extension.toml) and attaches
+# Pushing a tag builds the Linux package for the AGS extension (ags-extension.toml) and attaches
 # kytyps5-ags-<version>-linux-<arch>.tar.zst plus its .sha256 to the GitHub release for that tag.
-# The tag must equal v<project version> (CMake project VERSION, rendered into ags-extension.toml).
+#   vX.Y.Z            stable release; the tagged commit must be on main. A full GitHub release
+#                     (AGS Stable channel).
+#   vX.Y.Z-testing.N  testing version; the tagged commit must be on testing. Built with
+#                     -DAGS_VERSION_SUFFIX=-testing.N and published as a GitHub pre-release
+#                     (AGS Beta channel).
+# The tag must equal v<version> as rendered into ags-extension.toml (CMake project VERSION plus suffix).
 on:
   push:
     tags:
@@ -15,12 +20,38 @@ jobs:
   build:
     if: github.repository == 'ali-commits/KytyPS5-AGS'
     runs-on: ubuntu-24.04
+    outputs:
+      prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           submodules: recursive
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check the tag and its branch
+        id: channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            branch=main suffix= prerelease=false
+          elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-testing\.[0-9]+)$ ]]; then
+            branch=testing suffix="${BASH_REMATCH[1]}" prerelease=true
+          else
+            echo "::error::Tag $GITHUB_REF_NAME is neither vX.Y.Z (stable, from main) nor vX.Y.Z-testing.N (testing, from testing)"
+            exit 1
+          fi
+          git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" ||
+            { echo "::error::Could not fetch branch $branch"; exit 1; }
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
+            echo "::error::Tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on $branch; $([ "$branch" = main ] && echo stable || echo testing) releases are built from $branch only"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME: branch $branch, suffix '${suffix}', prerelease $prerelease"
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         shell: bash
@@ -42,6 +73,8 @@ jobs:
 
       - name: Configure Release
         shell: bash
+        env:
+          AGS_VERSION_SUFFIX: ${{ steps.channel.outputs.suffix }}
         run: |
           cmake -S . -B _Build/linux -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -50,7 +83,8 @@ jobs:
             -DKYTY_BUILD_REPOSITORY="$GITHUB_REPOSITORY" \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
+            -DAGS_VERSION_SUFFIX="$AGS_VERSION_SUFFIX"
 
       - name: Check the tag and the committed manifest
         shell: bash
@@ -60,8 +94,9 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match project version v$version"
             exit 1
           fi
-          cmp ags-extension.toml _Build/linux/ags-extension.toml ||
-            { echo "::error::ags-extension.toml is stale; copy _Build/linux/ags-extension.toml and commit it"; exit 1; }
+          # The committed manifest is the stable (suffix-free) render, also for testing tags.
+          cmp ags-extension.toml _Build/linux/ags-extension.stable.toml ||
+            { echo "::error::ags-extension.toml is stale; copy _Build/linux/ags-extension.stable.toml and commit it"; exit 1; }
 
       - name: Build
         shell: bash
@@ -116,15 +151,21 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=(ags-package/kytyps5-ags-*-linux-*.tar.zst ags-package/kytyps5-ags-*-linux-*.tar.zst.sha256)
           [ "${#files[@]}" -eq 2 ] || { echo "::error::expected the package and its checksum, got ${#files[@]} files"; exit 1; }
+          case "$PRERELEASE" in
+            true) channel=(--prerelease) title_suffix=" (testing)" ;;
+            false) channel=() title_suffix= ;;
+            *) echo "::error::unknown release channel '$PRERELEASE'"; exit 1 ;;
+          esac
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-              --title "KytyPS5 AGS ${GITHUB_REF_NAME#v}" \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft "${channel[@]}" \
+              --title "KytyPS5 AGS ${GITHUB_REF_NAME#v}${title_suffix}" \
               --notes "AGS extension package for KytyPS5. Install from AGS with https://github.com/$GITHUB_REPOSITORY"
           fi
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-          gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease="$PRERELEASE" --repo "$GITHUB_REPOSITORY"
