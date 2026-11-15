@@ -68,6 +68,7 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	args << "--trophy-duration" << QString::number(info.trophy_duration_seconds);
 	args << "--network-connected" << BoolArg(info.network_connected);
 	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
+	args << "--native-resolution" << BoolArg(info.native_resolution_enabled);
 	if (info.tessellation_enabled) {
 		args << "--tessellation";
 	}

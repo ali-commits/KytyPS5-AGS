@@ -134,6 +134,10 @@ bool HideCursorEnabled() {
 	return g_config->hide_cursor_enabled;
 }
 
+bool NativeResolutionEnabled() {
+	return g_config->native_resolution_enabled;
+}
+
 bool VrEnabled() {
 	return g_config->vr_enabled;
 }

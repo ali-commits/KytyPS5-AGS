@@ -75,6 +75,7 @@ struct ConfigOptions {
 	bool                   fullscreen_enabled    = false;
 	bool                   hdr_enabled           = false;
 	bool                   hide_cursor_enabled   = false;
+	bool                   native_resolution_enabled = false;
 	bool                   vr_enabled            = false;
 	bool                   amd_cpu_enabled       = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
@@ -133,6 +134,8 @@ int32_t                               GetGpuIndex();
 bool                                  FullscreenEnabled();
 bool                                  HdrEnabled();
 bool                                  HideCursorEnabled();
+// Linux: a Wayland window at the display's real pixel size under desktop scaling (window.cpp).
+bool                                  NativeResolutionEnabled();
 bool                                  VrEnabled();
 bool                                  AmdCpuEnabled();
 const std::string&                    GetAmdCpuDecision();

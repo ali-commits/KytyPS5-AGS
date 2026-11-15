@@ -841,6 +841,12 @@ static void WindowCreate(WindowContext& context) {
 	// RenderDoc can hide Wayland Vulkan surface support; prefer X11 for captures.
 	if (Config::RenderDocEnabled()) {
 		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+	} else if (Config::NativeResolutionEnabled()) {
+		// Under desktop scaling (150% on a 3840x2160 display) a Wayland window otherwise gets a
+		// 2560x1440 surface that the compositor stretches. Variables set in the environment still
+		// take precedence over both hints.
+		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+		SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
 	}
 #endif
 	// A streamed game's window is hidden and never focused, and SDL drops controller input

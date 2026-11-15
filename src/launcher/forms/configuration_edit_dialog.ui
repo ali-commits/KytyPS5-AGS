@@ -590,6 +590,16 @@
              </widget>
             </item>
             <item>
+             <widget class="QCheckBox" name="checkBox_native_resolution">
+              <property name="toolTip">
+               <string>Linux with Wayland desktop scaling (for example 150%): render at the display's real resolution instead of the scaled size the compositor stretches.</string>
+              </property>
+              <property name="text">
+               <string>Native resolution on scaled desktops</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <widget class="QCheckBox" name="checkBox_perf_overlay">
               <property name="toolTip">
                <string>Show FPS, frame times, CPU/GPU usage, RAM and memory pressure in the game window. Press F2 (Cmd+P on macOS) to toggle it, and add Shift for the detailed view.</string>

@@ -147,6 +147,9 @@ static void PrintUsage() {
 	::printf("  --hdr                                Enable HDR10 output when supported.\n");
 	::printf(
 	    "  --hide-cursor                        Hide the cursor after 2 s idle. Default: off.\n");
+	::printf(
+	    "  --native-resolution <true|false>     Linux: render at the display's real resolution\n"
+	    "                                      under Wayland desktop scaling. Default: false.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
 	         "AMD-only\n"
@@ -651,6 +654,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--trophy-notifications") {
 			if (!ParseBool(value, options.config.trophy_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--native-resolution") {
+			if (!ParseBool(value, options.config.native_resolution_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
