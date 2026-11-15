@@ -416,6 +416,27 @@ SDL_VULKAN_LIBRARY=/path/to/libMoltenVK.dylib ./kyty_emulator --game "/games/Exa
 Run `kyty_emulator --help` to see the available graphics, logging, validation, profiling, and
 debugging options.
 
+### Display and latency settings
+
+These are game settings in the launcher and in the AGS adapter, all off by default:
+
+- **Native resolution on scaled desktops** (`--native-resolution`, Linux): with Wayland desktop
+  scaling the window otherwise gets a scaled surface that the compositor stretches (2560x1440 for
+  a 3840x2160 display at 150%). On, SDL's Wayland driver is preferred and the swapchain matches
+  the display (3840x2160).
+- **Low latency (NVIDIA Reflex)** (`--low-latency`): NVIDIA's low-latency mode through
+  `VK_NV_low_latency2`. The driver holds back the start of each game frame, so the frame spends
+  less time waiting for the GPU. GPUs without the extension ignore it and log that it is
+  unavailable.
+- **Low-latency frame limit** (`--low-latency-fps-limit`, 0 = none): with low latency on, the
+  driver paces frames to this rate before the game starts each one. A frame cap set this way adds
+  less latency than one that waits after the frame was simulated, such as a game's own limiter or
+  a frame-cap patch, so use it instead of those rather than together with them.
+
+With low latency on, one `LowLatency 10s:` line every 10 s reports the driver's own timings
+(simulation start to GPU end). `KYTY_LOW_LATENCY_MEASURE=1` with the setting off records the same
+timings without the low-latency mode, for comparison.
+
 ## Install as an AGS extension
 
 This repository is an AGS emulator extension (`ags-extension.toml`,
