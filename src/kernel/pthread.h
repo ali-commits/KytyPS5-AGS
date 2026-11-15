@@ -114,6 +114,7 @@ uint64_t              PthreadGetHostThreadId(Pthread thread);
 void                  PthreadWakeForSignal(Pthread thread);
 void                  PthreadQueuePendingSignal(Pthread thread, int signum);
 bool                  PthreadHasPendingSignal(Pthread thread, int signum);
+bool                  PthreadHasAnyPendingSignal(Pthread thread);
 bool                  PthreadTakePendingSignal(Pthread thread, int signum);
 // The lowest pending signal below `limit`, taken; -1 when none (one load in that case).
 int PthreadTakeLowestPendingSignal(Pthread thread, int limit);
