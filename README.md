@@ -453,6 +453,21 @@ To cut a release:
 To build the package locally: `tools/package.sh _Build/linux out` after building `launcher`,
 `kyty_emulator` and `kyty-ags-adapter`.
 
+### Cheat files
+
+Cheat files (patch plans) live in `_Patches` under the runtime root. Each is made for one game
+version, given by its `"version"` field; on any other version its writes land in the wrong code.
+For a game whose `sce_sys/param.json` `contentVersion` is `<version>`:
+
+- `_Patches/<TITLE>.json` is used when its `"version"` is `<version>` or it has no `"version"`;
+- otherwise `_Patches/<TITLE>-<version>.json` is used, for example `PPSA21567-01.019.000.json`
+  next to a `PPSA21567.json` made for `01.018.000`;
+- when that file does not exist the game starts without cheats.
+
+The adapter's launch plan, the **Cheats** list, **Fetch cheats** and **Launch without cheats** all
+follow this rule, so two installed versions of a game keep separate cheat files and selections. The
+adapter logs the file it passes as `kyty-ags-adapter: cheat plan <path>`.
+
 ### AI Use
 
 AI tools may be used for research, reverse engineering, and development assistance. Contributors
