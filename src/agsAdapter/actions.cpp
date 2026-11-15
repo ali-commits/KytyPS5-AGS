@@ -221,7 +221,7 @@ std::optional<Cheats::RemoteFile> PickCheatFile(const QList<Cheats::RemoteFile>&
 }
 
 bool HasCheatPlan(const GameEntry& game, const QString& runtime_root) {
-	const auto plan = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(*game.info));
+	const auto plan = GameServices::CheatPlanPath(*game.info, runtime_root);
 	return !plan.isEmpty() && QFileInfo::exists(plan);
 }
 

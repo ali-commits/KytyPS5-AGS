@@ -93,11 +93,35 @@ static void PlanPathUsesTheGivenRoot() {
 	          .filePath(QStringLiteral("_Patches/PPSA99997.json")));
 }
 
+static void PlanPathForVersionPicksTheVersionFile() {
+	QTemporaryDir dir;
+	CHECK(dir.isValid());
+	const auto base = QDir(dir.path()).filePath(QStringLiteral("PPSA99997.json"));
+	const auto v19  = QDir(dir.path()).filePath(QStringLiteral("PPSA99997-01.019.000.json"));
+	// No file yet: the plain path (an import creates it there).
+	CHECK(Cheats::PlanPathForVersion(base, QStringLiteral("01.019.000")) == base);
+	QFile file(base);
+	CHECK(file.open(QIODevice::WriteOnly));
+	file.write(R"({"version":"01.018.000","mods":[]})");
+	file.close();
+	CHECK(Cheats::PlanPathForVersion(base, QStringLiteral("01.018.000")) == base);
+	CHECK(Cheats::PlanPathForVersion(base, QStringLiteral("01.019.000")) == v19);
+	CHECK(Cheats::PlanPathForVersion(base, QString {}) == base);
+	CHECK(Cheats::PlanPathForVersion(base, QStringLiteral("../x")).isEmpty());
+	CHECK(Cheats::PlanPathForVersion(QString {}, QStringLiteral("01.019.000")).isEmpty());
+	// A plan without a version is used for every version.
+	CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+	file.write(R"({"mods":[]})");
+	file.close();
+	CHECK(Cheats::PlanPathForVersion(base, QStringLiteral("01.019.000")) == base);
+}
+
 int main(int argc, char** argv) {
 	QCoreApplication app(argc, argv);
 	OpenSettingsReadsTheGivenFile();
 	GameLibraryLoadsFromAnExplicitFile();
 	PlanPathUsesTheGivenRoot();
+	PlanPathForVersionPicksTheVersionFile();
 	puts("core checks passed");
 	return 0;
 }

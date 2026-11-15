@@ -37,6 +37,19 @@ QByteArray ReadCheatBytes(const QString& path) {
 	return !path.isEmpty() && file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray {};
 }
 
+QString ContentVersion(const Configuration& info) {
+	QFile file(QDir(info.basedir).filePath(QStringLiteral("sce_sys/param.json")));
+	if (info.basedir.isEmpty() || !file.open(QIODevice::ReadOnly)) {
+		return info.gameVersion.trimmed();
+	}
+	const auto version = QJsonDocument::fromJson(file.readAll())
+	                         .object()
+	                         .value(QStringLiteral("contentVersion"))
+	                         .toString()
+	                         .trimmed();
+	return version.isEmpty() ? info.gameVersion.trimmed() : version;
+}
+
 QString CheatRevision(const QByteArray& bytes) {
 	return bytes.isEmpty() ? QString {} :
 	                         QString::fromLatin1(QCryptographicHash::hash(
@@ -161,8 +174,13 @@ TrophyIconResult TrophyIcon(const Configuration& info, const QString& runtime_di
 	return {{}, QStringLiteral("no-icon")};
 }
 
+QString CheatPlanPath(const Configuration& info, const QString& cheats_root) {
+	return Cheats::PlanPathForVersion(Cheats::PlanPath(cheats_root, TitleId(info)),
+	                                  ContentVersion(info));
+}
+
 QJsonObject GetCheats(const Configuration& info, const QString& cheats_root) {
-	const auto path = Cheats::PlanPath(cheats_root, TitleId(info));
+	const auto path = CheatPlanPath(info, cheats_root);
 	if (path.isEmpty()) {
 		return {{"supported", false}, {"revision", ""}, {"mods", QJsonArray {}}};
 	}
@@ -189,7 +207,7 @@ QJsonObject GetCheats(const Configuration& info, const QString& cheats_root) {
 
 QString PutCheats(const Configuration& info, const QString& cheats_root, const QJsonObject& body,
                   QString* revision) {
-	const auto path = Cheats::PlanPath(cheats_root, TitleId(info));
+	const auto path = CheatPlanPath(info, cheats_root);
 	if (path.isEmpty()) {
 		return QStringLiteral("unsupported-title-id");
 	}
@@ -225,7 +243,7 @@ QString PutCheats(const Configuration& info, const QString& cheats_root, const Q
 
 QJsonObject RemoteCheatList(const Configuration& info, const QString& cheats_root,
                             const QList<Cheats::RemoteFile>& files, const QString& error) {
-	const auto path = Cheats::PlanPath(cheats_root, TitleId(info));
+	const auto path = CheatPlanPath(info, cheats_root);
 	if (path.isEmpty()) {
 		return {{"files", QJsonArray {}}, {"error", QStringLiteral("unsupported-title-id")}};
 	}
@@ -262,7 +280,7 @@ QString ImportRemoteCheat(const Configuration& info, const QString& cheats_root,
 	if (!error.isEmpty()) {
 		return error;
 	}
-	const auto path  = Cheats::PlanPath(cheats_root, title_id);
+	const auto path  = CheatPlanPath(info, cheats_root);
 	const auto mods  = document.object().value(QStringLiteral("mods")).toArray();
 	const auto saved = Cheats::WithSelection(document, QList<bool>(mods.size(), false));
 	if (const auto save_error = Cheats::SaveDocument(path, saved, ReadCheatBytes(path));

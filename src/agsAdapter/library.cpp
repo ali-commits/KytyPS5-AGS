@@ -143,7 +143,7 @@ QJsonArray Games(const GameLibrary& library, const QString& data_dir, const QStr
 		    !version.isEmpty()) {
 			entry["version"] = version;
 		}
-		if (const auto plan = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(info));
+		if (const auto plan = GameServices::CheatPlanPath(info, runtime_root);
 		    !plan.isEmpty() && QFileInfo::exists(plan)) {
 			entry["badges"] = QJsonArray {"cheats"};
 		}

@@ -55,6 +55,27 @@ QString PlanPath(const QString& title_id) {
 	return PlanPath(QCoreApplication::applicationDirPath(), title_id);
 }
 
+QString PlanPathForVersion(const QString& plan_path, const QString& version) {
+	static const QRegularExpression safe(QStringLiteral("\\A[0-9A-Za-z._-]{1,32}\\z"));
+	if (plan_path.isEmpty() || version.isEmpty()) {
+		return plan_path;
+	}
+	if (!safe.match(version).hasMatch() || version.startsWith(QLatin1Char('.'))) {
+		return {};
+	}
+	QFile file(plan_path);
+	if (!file.open(QIODevice::ReadOnly)) {
+		return plan_path;
+	}
+	const auto plan_version =
+	    QJsonDocument::fromJson(file.readAll()).object().value(QStringLiteral("version")).toString();
+	if (plan_version.isEmpty() || plan_version == version) {
+		return plan_path;
+	}
+	const QFileInfo plan(plan_path);
+	return plan.dir().filePath(QStringLiteral("%1-%2.json").arg(plan.completeBaseName(), version));
+}
+
 QString ParseDocument(const QByteArray& data, QJsonDocument* document) {
 	const auto parsed = QJsonDocument::fromJson(data);
 	const auto error  = ValidateDocument(parsed);

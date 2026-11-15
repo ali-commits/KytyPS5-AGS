@@ -87,6 +87,25 @@ static void CheatChecks() {
 	const auto mods = reply.value("mods").toArray();
 	CHECK(mods[0].toObject().value("enabled").toBool());
 	CHECK(!mods[1].toObject().value("enabled").toBool());
+
+	// Another version of the game uses <TITLE>-<version>.json, not the 01.000.000 plan.
+	CHECK(GameServices::CheatPlanPath(info, root) == path);
+	Configuration other;
+	other.title_id    = info.title_id;
+	other.gameVersion = QStringLiteral("01.001.000");
+	const auto other_path =
+	    QDir(root).filePath(QStringLiteral("_Patches/PPSA99997-01.001.000.json"));
+	CHECK(GameServices::CheatPlanPath(other, root) == other_path);
+	CHECK(GameServices::GetCheats(other, root).value("mods").toArray().isEmpty());
+	// param.json contentVersion wins over gameVersion.
+	QTemporaryDir game_dir;
+	CHECK(game_dir.isValid() && QDir(game_dir.path()).mkpath("sce_sys"));
+	QFile param(QDir(game_dir.path()).filePath("sce_sys/param.json"));
+	CHECK(param.open(QIODevice::WriteOnly));
+	param.write(R"({"contentVersion":"01.000.000"})");
+	param.close();
+	other.basedir = game_dir.path();
+	CHECK(GameServices::CheatPlanPath(other, root) == path);
 }
 
 static void RemoteCheatListChecks() {

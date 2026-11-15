@@ -35,7 +35,11 @@ struct TrophyIconResult {
 [[nodiscard]] TrophyIconResult TrophyIcon(const Configuration& info,
                                           const QString& runtime_directory, int label, int id);
 
-// Cheat plans live in <cheats_root>/_Patches/<TITLE>.json (Cheats::PlanPath).
+// Cheat plans live in <cheats_root>/_Patches/<TITLE>.json (Cheats::PlanPath), or in
+// <TITLE>-<version>.json when that file holds another version of the game.
+// The plan for this game's version: Cheats::PlanPathForVersion with the contentVersion of
+// <basedir>/sce_sys/param.json (gameVersion when unreadable). Empty for an unsupported title id.
+[[nodiscard]] QString CheatPlanPath(const Configuration& info, const QString& cheats_root);
 // {"supported","revision","mods":[{index,name,enabled}],"error"?}
 [[nodiscard]] QJsonObject GetCheats(const Configuration& info, const QString& cheats_root);
 // body: {"revision":"...","enabled":[bool,...]}; replaces the whole selection.

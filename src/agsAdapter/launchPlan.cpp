@@ -7,6 +7,7 @@
 #include "configuration.h"
 #include "emulatorCommand.h"
 #include "gameLibrary.h"
+#include "gameServices.h"
 #include "settings.h"
 
 #include <QDir>
@@ -219,7 +220,13 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	if (const auto v = standard[QStringLiteral("hdr")]; v.isBool()) info.hdr_enabled = v.toBool();
 	info.perf_overlay_enabled = false; // AGS draws the overlay (STANDARD.md section 8.2)
 
-	const auto plan_path = Cheats::PlanPath(runtime_root, AdapterActions::CheatTitleId(info));
+	// The plan for this game's contentVersion: <TITLE>-<version>.json when <TITLE>.json holds
+	// another version (its patches would write into the wrong code).
+	const auto plan_path = GameServices::CheatPlanPath(info, runtime_root);
+	if (!no_cheats && !plan_path.isEmpty()) {
+		fprintf(stderr, "kyty-ags-adapter: cheat plan %s%s\n", qPrintable(plan_path),
+		        QFileInfo::exists(plan_path) ? "" : " (missing: launching without cheats)");
+	}
 	auto       args      = BuildEmulatorArgs(info, no_cheats ? QString {} : plan_path);
 	if (args.isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cannot build the emulator command for this game."));
