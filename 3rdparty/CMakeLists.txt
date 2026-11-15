@@ -94,6 +94,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zstd zarchive_source)
 
+# AMD FidelityFX Super Resolution 2 (MIT): the FSR upscaler (renderer/upscaler.h). Only the
+# sources are fetched; fidelityfx-fsr2/fsr2.cmake builds the API, its Vulkan backend and the
+# shader permutations with glslangValidator.
+FetchContent_Declare(
+	fidelityfx_fsr2
+	URL https://codeload.github.com/GPUOpen-Effects/FidelityFX-FSR2/tar.gz/1680d1edd5c034f88ebbbb793d8b88f8842cf804
+	URL_HASH SHA256=19df8378ea882d437a6d61eeaa1c50b7e091fe409dd3029be8f0d819c7a89d75
+	SOURCE_SUBDIR kyty-sources-only
+)
+FetchContent_MakeAvailable(fidelityfx_fsr2)
+set(KYTY_FSR2_SOURCE_DIR "${fidelityfx_fsr2_SOURCE_DIR}" PARENT_SCOPE)
+
 add_library(zarchive STATIC
 	"${zarchive_source_SOURCE_DIR}/src/zarchivereader.cpp"
 	"${zarchive_source_SOURCE_DIR}/src/zarchivewriter.cpp"

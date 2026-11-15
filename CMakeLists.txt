@@ -344,6 +344,11 @@ if(KYTY_BUILD_LAUNCHER AND NOT KYTY_LAUNCHER_BUILD_EMULATOR AND NOT BUILD_TESTIN
 else()
     find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
 endif()
+# FSR upscaler (host_gpu/renderer/upscaler.h): AMD FidelityFX FSR2, MIT, built by default.
+option(KYTY_FSR2 "Build the FSR upscaler (AMD FidelityFX FSR2)" ON)
+if(KYTY_FSR2 AND KYTY_GLSLANG_VALIDATOR)
+	include("${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr2/fsr2.cmake")
+endif()
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
 set(gpu_tiler_generated_dir "${PROJECT_BINARY_DIR}/gpu_tiler_shaders")
 set(gpu_tiler_shader_names
@@ -2744,6 +2749,22 @@ if (CLANG AND NOT KYTY_CLANG_CL)
 endif()
 # dlopen/dlsym/dladdr for RenderDoc.
 target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
+if(TARGET ffx_fsr2)
+	# The FSR shader loader (3rdparty/fidelityfx-fsr2/shaderBlobs.cpp) against the compiled shaders.
+	add_executable(fsr2_shader_blobs_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/Fsr2ShaderBlobsTests.cpp")
+	target_link_libraries(fsr2_shader_blobs_tests ffx_fsr2)
+	target_include_directories(fsr2_shader_blobs_tests PRIVATE "${KYTY_FSR2_SOURCE_DIR}/src/ffx-fsr2-api/vk/shaders")
+	target_compile_definitions(fsr2_shader_blobs_tests PRIVATE
+		KYTY_FSR2_SHADER_DIR="${CMAKE_BINARY_DIR}/fsr2")
+	add_dependencies(fsr2_shader_blobs_tests ffx_fsr2_shaders)
+	if(BUILD_TESTING)
+		add_test(NAME fsr2_shader_blobs COMMAND $<TARGET_FILE:fsr2_shader_blobs_tests>)
+	endif()
+
+	target_compile_definitions(kyty_emulator PRIVATE KYTY_FSR2=1)
+	target_link_libraries(kyty_emulator ffx_fsr2)
+	add_dependencies(kyty_emulator ffx_fsr2_shaders)
+endif()
 # DLSS upscaler (host_gpu/renderer/upscaler.h) through NVIDIA's NGX SDK. KYTY_NGX_SDK_DIR is the
 # SDK folder (github.com/NVIDIA/DLSS: include/, lib/); empty builds without DLSS. The SDK is under
 # the NVIDIA RTX SDKs licence, which does not allow it in a GPL-licensed distribution: such a build
