@@ -163,8 +163,12 @@ static void PrintUsage() {
 	    "  --low-latency-fps-limit <fps>        With --low-latency: the driver paces frames to\n"
 	    "                                      this rate, 0-360 (0: none). Default: 0.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
-	::printf("  --trinity                            Enable experimental PS5 Pro mode for supported titles\n"
-	         "                                       (PSSR uses linear scaling). Default: off.\n");
+	::printf("  --trinity                            Enable experimental PS5 Pro mode for\n"
+	         "                                       supported titles. Default: off.\n");
+	::printf("  --dlss-folder <folder>               With --trinity and --upscaler DLSS, upscale PSSR\n"
+	         "                                       with the DLSS model in <folder> instead of\n"
+	         "                                       linearly.\n");
+	::printf("  --dlss-preset <A-O>                  DLSS preset. Default: the model's own.\n");
 	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
 	         "AMD-only\n"
 	         "                                       instructions (EXTRQ/INSERTQ, AMD VRSQRTPS "
@@ -491,6 +495,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid DLSS mode: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--dlss-folder") {
+			options.config.dlss_folder = Common::PathFromUtf8(value);
+		} else if (arg == "--dlss-preset") {
+			if (value.size() != 1 || value[0] < 'A' || value[0] > 'O') {
+				::printf("invalid DLSS preset: %s\n", value.c_str());
+				return false;
+			}
+			options.config.dlss_preset = static_cast<uint32_t>(value[0] - 'A' + 1);
 		} else if (arg == "--addcont-dir") {
 			if (!options.addcont_dir.empty()) {
 				::printf("--addcont-dir can only be specified once\n");

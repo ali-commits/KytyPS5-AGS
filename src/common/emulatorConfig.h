@@ -88,6 +88,9 @@ struct ConfigOptions {
 	Upscaler               upscaler                  = Upscaler::Off;
 	DlssMode               dlss_mode                 = DlssMode::Quality;
 	std::filesystem::path  upscaler_profile; // empty: none
+	// Folder with the user's DLSS model: with upscaler DLSS, DLSS upscales PSSR in Pro mode.
+	std::filesystem::path  dlss_folder;
+	uint32_t               dlss_preset = 0; // 0 is the model default
 	bool                   vr_enabled            = false;
 	bool                   pro_enabled           = false;
 	bool                   amd_cpu_enabled       = false;
@@ -155,6 +158,8 @@ uint32_t                              LowLatencyFpsLimit();
 Upscaler                              GetUpscaler();
 DlssMode                              GetDlssMode();
 const std::filesystem::path&          UpscalerProfilePath();
+const std::filesystem::path&          GetDlssFolder();
+uint32_t                              GetDlssPreset();
 bool                                  VrEnabled();
 bool                                  Ps5ProEnabled();
 bool                                  AmdCpuEnabled();

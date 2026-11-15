@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/queueSubmission.h"
 #include "graphics/host_gpu/renderer/commandStream.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorSetReuse.h"
+#include "graphics/host_gpu/renderer/dlss.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/textureBindingMemo.h"
@@ -1010,7 +1011,16 @@ public:
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
 	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
-	void DestroyPssr(); // renderPssr.cpp: the PSSR pipeline and its layouts
+	void DestroyPssr(); // renderPssr.cpp: the PSSR pipeline, its layouts and the DLSS features
+	[[nodiscard]] bool Upscale(vk::CommandBuffer command, const Pssr::Request& request,
+	                           Dlss::Inputs& inputs);
+
+	// DLSS history of a PSSR context; a null feature is one DLSS refused or failed.
+	struct DlssContext {
+		uint64_t       context;
+		Dlss::Creation creation;
+		Dlss::Feature* feature;
+	};
 	void DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr,
 	                      uint32_t mode);
 
@@ -1175,6 +1185,7 @@ private:
 	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;
 	vk::PipelineLayout                    m_pssr_pipeline_layout   = nullptr;
 	vk::Pipeline                          m_pssr_pipeline          = nullptr;
+	std::vector<DlssContext>              m_dlss_contexts;
 	std::vector<uint32_t>                 m_image_occurrences;
 	struct ShaderUploadEntry {
 		uint64_t                 tick = 0;
