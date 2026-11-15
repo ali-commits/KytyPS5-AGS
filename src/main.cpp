@@ -150,6 +150,12 @@ static void PrintUsage() {
 	::printf(
 	    "  --native-resolution <true|false>     Linux: render at the display's real resolution\n"
 	    "                                      under Wayland desktop scaling. Default: false.\n");
+	::printf(
+	    "  --low-latency <true|false>           NVIDIA low-latency mode (VK_NV_low_latency2) when\n"
+	    "                                      the GPU supports it. Default: false.\n");
+	::printf(
+	    "  --low-latency-fps-limit <fps>        With --low-latency: the driver paces frames to\n"
+	    "                                      this rate, 0-360 (0: none). Default: 0.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --amd-cpu                            Intel CPU compatibility: emulate the PS5's "
 	         "AMD-only\n"
@@ -655,6 +661,17 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--trophy-notifications") {
 			if (!ParseBool(value, options.config.trophy_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--low-latency") {
+			if (!ParseBool(value, options.config.low_latency_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--low-latency-fps-limit") {
+			if (!ParseUint32(value, options.config.low_latency_fps_limit) ||
+			    options.config.low_latency_fps_limit > 360) {
+				::printf("invalid low-latency frame limit: %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--native-resolution") {

@@ -17,6 +17,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "libs/controller.h"
 #include "streaming/captureOptions.h"
@@ -767,9 +768,11 @@ void Swapchain::Create() {
 		create_info.presentMode = vk::PresentModeKHR::eFifo;
 	}
 	create_info.clipped = VK_TRUE;
+	create_info.pNext   = LowLatency::SwapchainCreateNext(create_info.pNext);
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
 	                     "vkCreateSwapchainKHR");
 	EXIT_IF(m_handle == nullptr);
+	LowLatency::OnSwapchainCreated(static_cast<VkSwapchainKHR>(m_handle));
 	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
 
 	m_images = EnumerateVulkan<vk::Image>(
@@ -865,6 +868,7 @@ void Swapchain::Destroy() {
 		}
 	}
 	if (m_handle != nullptr) {
+		LowLatency::OnSwapchainDestroyed(static_cast<VkSwapchainKHR>(m_handle));
 		graphics.device.destroySwapchainKHR(m_handle, nullptr);
 	}
 
@@ -1444,6 +1448,15 @@ Swapchain::Status Swapchain::Present() {
 
 	vk::Result result;
 	{
+		// Low-latency mode (lowLatency.h): the presented flip's frame number as present ID.
+		const LowLatency::PresentScope latency(static_cast<VkSwapchainKHR>(m_handle));
+		const uint64_t                 latency_id = latency.PresentId();
+		vk::PresentIdKHR               present_id {};
+		if (latency_id != 0) {
+			present_id.swapchainCount = 1;
+			present_id.pPresentIds    = &latency_id;
+			present.pNext             = &present_id;
+		}
 		// The blit this present waits for goes ahead of game batches still waiting for their
 		// texture copies: the present never waits for them, nor for a signal not yet submitted.
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);

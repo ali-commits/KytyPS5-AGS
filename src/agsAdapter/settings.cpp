@@ -120,7 +120,7 @@ const std::vector<Group>& Groups() {
 	static const std::vector<Group> groups = {
 	    {"group.display",
 		 "Display",
-		 {"present_mode", "gpu_index"}},
+		 {"present_mode", "gpu_index", "low_latency_enabled", "low_latency_fps_limit"}},
 	    {"group.user", "User", {"user_id"}},
 	    {"group.audio",
 		 "Audio",
@@ -230,6 +230,12 @@ QJsonObject Convert(const QJsonObject& in) {
 		out[QStringLiteral("hint")]  = "Vulkan device the emulator renders on.";
 	}
 	if (key == QLatin1String("trophy_duration_seconds")) out[QStringLiteral("unit")] = "s";
+	if (key == QLatin1String("low_latency_fps_limit")) {
+		out[QStringLiteral("unit")] = "FPS";
+		out[QStringLiteral("hint")] =
+		    "With low latency on: the driver paces frames to this rate before "
+		    "the game starts each one. 0 for no limit.";
+	}
 	const auto count = out.value(QStringLiteral("options")).toArray().size();
 	if (type == QLatin1String("enum") && Segmented(key) && count >= 2 && count <= 4)
 		out[QStringLiteral("control")] = "segmented";

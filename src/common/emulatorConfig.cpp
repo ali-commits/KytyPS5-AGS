@@ -138,6 +138,15 @@ bool NativeResolutionEnabled() {
 	return g_config->native_resolution_enabled;
 }
 
+bool LowLatencyEnabled() {
+	return g_config->low_latency_enabled;
+}
+
+uint32_t LowLatencyFpsLimit() {
+	const auto limit = g_config->low_latency_fps_limit;
+	return limit == 0 ? 0 : std::clamp(limit, 10u, 360u);
+}
+
 bool VrEnabled() {
 	return g_config->vr_enabled;
 }

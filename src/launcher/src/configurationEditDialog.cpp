@@ -300,6 +300,8 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_hdr->setChecked(info.hdr_enabled);
 	m_ui->checkBox_hide_cursor->setChecked(info.hide_cursor_enabled);
 	m_ui->checkBox_native_resolution->setChecked(info.native_resolution_enabled);
+	m_ui->checkBox_low_latency->setChecked(info.low_latency_enabled);
+	m_ui->spinBox_low_latency_fps_limit->setValue(info.low_latency_fps_limit);
 	m_ui->checkBox_readback->setChecked(info.readback_linear_images);
 	m_ui->checkBox_readback_tiled->setChecked(info.readback_tiled_images);
 	m_ui->checkBox_sync_raw_image_buffers->setChecked(info.sync_raw_image_buffers);
@@ -508,6 +510,8 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.hdr_enabled               = ui.checkBox_hdr->isChecked();
 	info.hide_cursor_enabled       = ui.checkBox_hide_cursor->isChecked();
 	info.native_resolution_enabled = ui.checkBox_native_resolution->isChecked();
+	info.low_latency_enabled       = ui.checkBox_low_latency->isChecked();
+	info.low_latency_fps_limit     = ui.spinBox_low_latency_fps_limit->value();
 	info.readback_linear_images    = ui.checkBox_readback->isChecked();
 	info.readback_tiled_images     = ui.checkBox_readback_tiled->isChecked();
 	info.sync_raw_image_buffers    = ui.checkBox_sync_raw_image_buffers->isChecked();

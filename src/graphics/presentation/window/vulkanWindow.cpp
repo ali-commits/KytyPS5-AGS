@@ -30,6 +30,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
+#include "graphics/presentation/window/lowLatency.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -860,6 +861,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	const bool conditional_rendering_extension =
 	    HasExtension(device_extensions, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
 	vk::PhysicalDeviceConditionalRenderingFeaturesEXT conditional_rendering {};
+	vk::PhysicalDevicePresentIdFeaturesKHR            present_id {};
 	if (conditional_rendering_extension) {
 		conditional_rendering.pNext = supported_features2.pNext;
 		supported_features2.pNext   = &conditional_rendering;
@@ -1447,6 +1449,12 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	if (graphics.conditional_rendering_enabled) {
 		conditional_rendering.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext           = &conditional_rendering;
+	}
+	// Low-latency mode (lowLatency.h) numbers presents.
+	if (HasExtension(device_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+		present_id.presentId = VK_TRUE;
+		present_id.pNext     = const_cast<void*>(create_info.pNext);
+		create_info.pNext    = &present_id;
 	}
 	create_info.pQueueCreateInfos       = queue_create_infos.data();
 	create_info.queueCreateInfoCount    = queue_create_count;
@@ -2139,6 +2147,13 @@ void WindowContext::CreateVulkan() {
 				device_extensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
 			}
 		}
+		// Low-latency mode (lowLatency.h): VK_NV_low_latency2 with present IDs.
+		if (LowLatency::WantExtensions(
+		        HasExtension(available_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME),
+		        HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME))) {
+			device_extensions.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+			device_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+		}
 		// Graphics pipeline libraries (KYTY_PIPELINE_LIBRARY, pipeline/pipelineLibrary.h): only
 		// enabled when requested, so the default device is unchanged.
 		if (PipelineLibraryRequested() &&
@@ -2171,6 +2186,9 @@ void WindowContext::CreateVulkan() {
 		EXIT("Could not create device");
 	}
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
+	if (HasExtension(device_extensions, VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) {
+		LowLatency::OnDeviceCreated(static_cast<VkDevice>(graphic_ctx.device));
+	}
 	// Diagnostic only (KYTY_GPU_OP_PROFILE / KYTY_GPU_OP_COUNTERS): wraps dispatcher entries.
 	GpuOpProfiler::InstallHooks(graphic_ctx);
 	// KYTY_CP_RECORDER_VERIFY ownership hooks wrap the GpuOpProfiler's.

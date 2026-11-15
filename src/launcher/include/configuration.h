@@ -202,6 +202,8 @@ public:
 	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
 	bool                   native_resolution_enabled   = false;
+	bool                   low_latency_enabled         = false;
+	int                    low_latency_fps_limit       = 0;
 	bool                   readback_linear_images      = false;
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
@@ -245,6 +247,8 @@ public:
 		hdr_enabled                 = other.hdr_enabled;
 		hide_cursor_enabled         = other.hide_cursor_enabled;
 		native_resolution_enabled   = other.native_resolution_enabled;
+		low_latency_enabled         = other.low_latency_enabled;
+		low_latency_fps_limit       = other.low_latency_fps_limit;
 		readback_linear_images      = other.readback_linear_images;
 		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;

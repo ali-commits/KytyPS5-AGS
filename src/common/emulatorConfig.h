@@ -76,6 +76,8 @@ struct ConfigOptions {
 	bool                   hdr_enabled           = false;
 	bool                   hide_cursor_enabled   = false;
 	bool                   native_resolution_enabled = false;
+	bool                   low_latency_enabled       = false;
+	uint32_t               low_latency_fps_limit     = 0;
 	bool                   vr_enabled            = false;
 	bool                   amd_cpu_enabled       = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
@@ -136,6 +138,9 @@ bool                                  HdrEnabled();
 bool                                  HideCursorEnabled();
 // Linux: a Wayland window at the display's real pixel size under desktop scaling (window.cpp).
 bool                                  NativeResolutionEnabled();
+// NVIDIA low-latency mode and its frame limit (0: none, else 10-360), window/lowLatency.h.
+bool                                  LowLatencyEnabled();
+uint32_t                              LowLatencyFpsLimit();
 bool                                  VrEnabled();
 bool                                  AmdCpuEnabled();
 const std::string&                    GetAmdCpuDecision();

@@ -14,6 +14,8 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(hdr_enabled);
 	KYTY_CFG_SET(hide_cursor_enabled);
 	KYTY_CFG_SET(native_resolution_enabled);
+	KYTY_CFG_SET(low_latency_enabled);
+	KYTY_CFG_SET(low_latency_fps_limit);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(readback_tiled_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
@@ -71,6 +73,12 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(hdr_enabled);
 	KYTY_CFG_GET(hide_cursor_enabled);
 	KYTY_CFG_GET(native_resolution_enabled);
+	KYTY_CFG_GET(low_latency_enabled);
+	{
+		bool       limit_ok = false;
+		const auto limit = s.value("low_latency_fps_limit", low_latency_fps_limit).toInt(&limit_ok);
+		low_latency_fps_limit = limit_ok ? qBound(0, limit, 360) : 0;
+	}
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(readback_tiled_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
@@ -180,6 +188,9 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	}
 	if (trophy_duration_seconds < 5 || trophy_duration_seconds > 10) {
 		return fail(tr("Trophy notification duration must be between 5 and 10 seconds."));
+	}
+	if (low_latency_fps_limit < 0 || low_latency_fps_limit > 360) {
+		return fail(tr("Low-latency frame limit must be between 0 and 360."));
 	}
 	if (vblank_frequency < 30 || vblank_frequency > 360) {
 		return fail(tr("Vblank frequency must be between 30 and 360."));

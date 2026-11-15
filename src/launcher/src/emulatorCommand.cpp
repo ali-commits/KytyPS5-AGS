@@ -69,6 +69,8 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	args << "--network-connected" << BoolArg(info.network_connected);
 	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
 	args << "--native-resolution" << BoolArg(info.native_resolution_enabled);
+	args << "--low-latency" << BoolArg(info.low_latency_enabled);
+	args << "--low-latency-fps-limit" << QString::number(info.low_latency_fps_limit);
 	if (info.tessellation_enabled) {
 		args << "--tessellation";
 	}

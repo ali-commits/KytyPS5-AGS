@@ -600,6 +600,56 @@
              </widget>
             </item>
             <item>
+             <widget class="QCheckBox" name="checkBox_low_latency">
+              <property name="toolTip">
+               <string>NVIDIA low-latency mode (Reflex, VK_NV_low_latency2): the driver holds back the start of each game frame so it waits less for the GPU. Ignored on GPUs without it.</string>
+              </property>
+              <property name="text">
+               <string>Low latency (NVIDIA Reflex)</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="lowLatencyFpsLimitLayout">
+              <item>
+               <widget class="QLabel" name="label_low_latency_fps_limit">
+                <property name="text">
+                 <string>Low-latency frame limit:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="spinBox_low_latency_fps_limit">
+                <property name="toolTip">
+                 <string>With low latency on, the driver paces frames to this rate before the game starts each one. 0 for no limit; values below 10 count as 10.</string>
+                </property>
+                <property name="specialValueText">
+                 <string>None</string>
+                </property>
+                <property name="suffix">
+                 <string> FPS</string>
+                </property>
+                <property name="minimum">
+                 <number>0</number>
+                </property>
+                <property name="maximum">
+                 <number>360</number>
+                </property>
+                <property name="value">
+                 <number>0</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <spacer name="lowLatencyFpsLimitSpacer">
+                <property name="orientation">
+                 <enum>Qt::Horizontal</enum>
+                </property>
+               </spacer>
+              </item>
+             </layout>
+            </item>
+            <item>
              <widget class="QCheckBox" name="checkBox_perf_overlay">
               <property name="toolTip">
                <string>Show FPS, frame times, CPU/GPU usage, RAM and memory pressure in the game window. Press F2 (Cmd+P on macOS) to toggle it, and add Shift for the detailed view.</string>

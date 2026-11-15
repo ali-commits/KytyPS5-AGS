@@ -57,6 +57,8 @@ constexpr Field FIELDS[] = {
     {"hdr_enabled", "HDR", "bool", 0, 0},
     {"hide_cursor_enabled", "Hide cursor", "bool", 0, 0},
     {"native_resolution_enabled", "Native resolution on scaled desktops", "bool", 0, 0},
+    {"low_latency_enabled", "Low latency (NVIDIA Reflex)", "bool", 0, 0},
+    {"low_latency_fps_limit", "Low-latency frame limit (0 = none)", "int", 0, 360},
     {"readback_linear_images", "Read back linear images", "bool", 0, 0},
     {"readback_tiled_images", "Read back tiled images", "bool", 0, 0},
     {"sync_raw_image_buffers", "Sync raw image buffers", "bool", 0, 0},
