@@ -34,8 +34,9 @@ Release notes: [docs/release-notes.md](docs/release-notes.md).
 In AGS open **Settings**, **Emulators**, **Add emulator**, paste
 `https://github.com/ali-commits/KytyPS5-AGS` and confirm. AGS installs the latest release package
 (Linux x86_64) and keeps your existing saves, trophies and settings when you point the
-`runtime_root` setting at an existing KytyPS5 folder. Details, source builds and the release steps
-are under [Install as an AGS extension](#install-as-an-ags-extension).
+`runtime_root` setting at an existing KytyPS5 folder. Stable releases are built from `main`; testing
+versions from the `testing` branch are GitHub pre-releases and show in AGS's Testing channel. Details,
+source builds and the release steps are under [Install as an AGS extension](#install-as-an-ags-extension).
 
 To build it yourself, clone with submodules:
 
@@ -512,16 +513,49 @@ Building from source (the AGS fallback) needs:
 - Network access during configure: CMake clones several third-party libraries (SHA-pinned) with git.
 - AGS runs the build with only `PATH`, `HOME` and `LANG` in the environment.
 
-To cut a release:
+### Releases: stable and testing
 
-1. Bump `project(... VERSION x.y.z)` in `CMakeLists.txt`.
+Two branches feed releases. `main` holds the stable versions; `testing` is ahead of `main` and holds
+versions that are not yet tested. The tag name selects the channel, and the `ags-release.yml` workflow
+refuses a tag whose commit is not on the matching branch:
+
+| Tag | Built from | GitHub release | AGS channel | Manifest version |
+| --- | --- | --- | --- | --- |
+| `vX.Y.Z` | `main` | full release | Stable | `X.Y.Z` |
+| `vX.Y.Z-testing.N` | `testing` | pre-release | Testing | `X.Y.Z-testing.N` |
+
+`ags-extension.toml` declares both channels in `[[channels]]`: Stable takes full releases tagged
+`vX.Y.Z`, Testing takes pre-releases tagged `vX.Y.Z-testing.N`, and AGS shows exactly these two. AGS
+reads the channels from the manifest at the newest release tag. A testing version therefore shows in
+AGS's Testing channel, and its version `X.Y.Z-testing.N` differs from the later stable `X.Y.Z`, so AGS sees them as
+different versions. Number testing builds of the same `X.Y.Z` from 1 upwards.
+
+To cut a stable release from `main`:
+
+1. Bump `project(... VERSION x.y.z)` in `CMakeLists.txt` (numbers only).
 2. Configure, then copy the rendered manifest to the repository root and commit it:
    `cp _Build/linux/ags-extension.toml ags-extension.toml`. `ctest --test-dir _Build/linux -R ags_manifest`
-   fails while the committed copy differs from the manifest rendered from `ags-extension.toml.in`.
-   The template is rendered by `configure_file`, so it must not contain other `${...}` or `@VAR@` text.
-3. Tag the commit `vx.y.z` (the tag must equal `v` plus the project version) and push the tag. The
-   `ags-release.yml` workflow builds, tests and packages the release and uploads
-   `kytyps5-ags-<version>-linux-<arch>.tar.zst` and its `.sha256`.
+   fails while the committed copy differs from the stable manifest rendered from `ags-extension.toml.in`.
+   The template is rendered by `configure_file`; the only variables in it are `PROJECT_VERSION` and
+   `AGS_VERSION_SUFFIX`, and it must not contain other `${...}` or `@VAR@` text.
+3. Push `main`, tag the commit on `main` `vx.y.z` (the tag must equal `v` plus the project version) and
+   push the tag. The workflow builds, tests and packages the release and uploads
+   `kytyps5-ags-<version>-linux-<arch>.tar.zst` and its `.sha256` to a full GitHub release.
+
+To cut a testing release from `testing`:
+
+1. Bump the project version on `testing` to the version the testing build leads up to, and commit the
+   rendered stable manifest as above (the committed `ags-extension.toml` never carries the suffix).
+2. Push `testing`, tag the commit on `testing` `vx.y.z-testing.n` and push the tag. The workflow
+   configures with `-DAGS_VERSION_SUFFIX=-testing.n`, so the packaged manifest and the adapter's `hello`
+   both report `x.y.z-testing.n`, uploads `kytyps5-ags-x.y.z-testing.n-linux-<arch>.tar.zst` and its
+   `.sha256`, and publishes the GitHub release as a pre-release.
+
+The workflow refuses a tag whose committed `ags-extension.toml` declares no `[[channels]]`, or none
+that takes the tag (with its pre-release flag). `testing` must therefore carry `main`'s `[[channels]]`
+(merge `main` into `testing`) before a testing tag is cut.
+
+To build a testing version locally, add `-DAGS_VERSION_SUFFIX=-testing.n` to the configure command.
 
 To build the package locally: `tools/package.sh _Build/linux out` after building `launcher`,
 `kyty_emulator` and `kyty-ags-adapter`.

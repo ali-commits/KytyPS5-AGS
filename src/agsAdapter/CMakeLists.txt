@@ -19,8 +19,9 @@ add_library(kyty_ags_adapter_core STATIC ${ags_adapter_lib_sources})
 set_target_properties(kyty_ags_adapter_core PROPERTIES AUTOMOC ON)
 target_include_directories(kyty_ags_adapter_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(kyty_ags_adapter_core PUBLIC kyty_launcher_core)
-# hello.version, and (P2-6) the manifest version, come from the CMake project version.
-target_compile_definitions(kyty_ags_adapter_core PUBLIC KYTY_AGS_ADAPTER_VERSION="${PROJECT_VERSION}")
+# hello.version, and (P2-6) the manifest version, come from the CMake project version plus
+# AGS_VERSION_SUFFIX (KYTY_AGS_VERSION, set in the top-level CMakeLists.txt).
+target_compile_definitions(kyty_ags_adapter_core PUBLIC KYTY_AGS_ADAPTER_VERSION="${KYTY_AGS_VERSION}")
 if (CLANG AND NOT KYTY_CLANG_CL)
 	target_compile_options(kyty_ags_adapter_core PRIVATE -frtti)
 endif()
