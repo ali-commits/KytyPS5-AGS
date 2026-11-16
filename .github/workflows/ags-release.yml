@@ -98,6 +98,28 @@ jobs:
           cmp ags-extension.toml _Build/linux/ags-extension.stable.toml ||
             { echo "::error::ags-extension.toml is stale; copy _Build/linux/ags-extension.stable.toml and commit it"; exit 1; }
 
+      - name: Check the manifest's AGS channels take the tag
+        shell: bash
+        env:
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
+        run: |
+          # AGS reads the channels from ags-extension.toml at the newest tag; a release whose
+          # manifest declares none, or no channel taking its tag, hides the Testing channel.
+          python3 - ags-extension.toml "$GITHUB_REF_NAME" "$PRERELEASE" <<'PY'
+          import re, sys, tomllib
+          path, tag, prerelease = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          with open(path, "rb") as f:
+              channels = tomllib.load(f).get("channels", [])
+          if not channels:
+              sys.exit(f"::error::{path} declares no [[channels]]; merge main's channels before tagging")
+          for c in channels:
+              if re.search(c.get("tag", ""), tag) and c.get("prerelease", prerelease) == prerelease:
+                  print(f"Tag {tag} belongs to the AGS channel {c['name']} ({c['id']})")
+                  break
+          else:
+              sys.exit(f"::error::No [[channels]] entry in {path} takes {tag} (prerelease {str(prerelease).lower()})")
+          PY
+
       - name: Build
         shell: bash
         run: |

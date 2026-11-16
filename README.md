@@ -530,6 +530,10 @@ To cut a testing release from `testing`:
    both report `x.y.z-testing.n`, uploads `kytyps5-ags-x.y.z-testing.n-linux-<arch>.tar.zst` and its
    `.sha256`, and publishes the GitHub release as a pre-release.
 
+The workflow refuses a tag whose committed `ags-extension.toml` declares no `[[channels]]`, or none
+that takes the tag (with its pre-release flag). `testing` must therefore carry `main`'s `[[channels]]`
+(merge `main` into `testing`) before a testing tag is cut.
+
 To build a testing version locally, add `-DAGS_VERSION_SUFFIX=-testing.n` to the configure command.
 
 To build the package locally: `tools/package.sh _Build/linux out` after building `launcher`,
