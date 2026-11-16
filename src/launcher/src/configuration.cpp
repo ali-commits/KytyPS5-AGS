@@ -18,6 +18,9 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(low_latency_fps_limit);
 	KYTY_CFG_SET(upscaler);
 	KYTY_CFG_SET(dlss_mode);
+	KYTY_CFG_SET(frame_generation);
+	KYTY_CFG_SET(frame_generation_flow_scale);
+	KYTY_CFG_SET(frame_generation_performance_mode);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(readback_tiled_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
@@ -90,6 +93,17 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	if (EnumToText(dlss_mode).isEmpty()) {
 		dlss_mode = DlssMode::Quality;
 	}
+	KYTY_CFG_GET(frame_generation);
+	if (EnumToText(frame_generation).isEmpty()) {
+		frame_generation = FrameGeneration::Off;
+	}
+	{
+		bool       scale_ok = false;
+		const auto scale =
+		    s.value("frame_generation_flow_scale", frame_generation_flow_scale).toInt(&scale_ok);
+		frame_generation_flow_scale = scale_ok ? qBound(25, scale, 100) : 100;
+	}
+	KYTY_CFG_GET(frame_generation_performance_mode);
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(readback_tiled_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
@@ -203,6 +217,9 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	}
 	if (low_latency_fps_limit < 0 || low_latency_fps_limit > 360) {
 		return fail(tr("Low-latency frame limit must be between 0 and 360."));
+	}
+	if (frame_generation_flow_scale < 25 || frame_generation_flow_scale > 100) {
+		return fail(tr("Frame generation flow scale must be between 25 and 100%."));
 	}
 	if (vblank_frequency < 30 || vblank_frequency > 360) {
 		return fail(tr("Vblank frequency must be between 30 and 360."));

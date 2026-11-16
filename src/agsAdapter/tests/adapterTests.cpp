@@ -443,6 +443,16 @@ void TestRicherKeys(const QJsonArray& fields) {
 	}
 	EXPECT(by_key.value("present_mode")["control"] == "segmented");
 	EXPECT(segmented >= 1);
+	const auto frame_generation = by_key.value("frame_generation");
+	EXPECT(frame_generation["type"] == "enum" && frame_generation["default"] == "Off");
+	QStringList multipliers;
+	for (const auto& o: frame_generation["options"].toArray())
+		multipliers << o.toObject()["value"].toString();
+	EXPECT(multipliers == QStringList({"Off", "Double", "Triple", "Quadruple"}));
+	const auto flow_scale = by_key.value("frame_generation_flow_scale");
+	EXPECT(flow_scale["type"] == "int" && flow_scale["min"] == 25 && flow_scale["max"] == 100 &&
+	       flow_scale["default"] == 100 && flow_scale["control"] == "slider");
+	EXPECT(by_key.value("frame_generation_performance_mode")["type"] == "bool");
 }
 
 // The schema keeps to the field types the host's hello listed; a host without the list gets the
@@ -676,6 +686,21 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(ArgAfter(argv3, "--shader-optimization-type") == "Size");
 	EXPECT(plan["applied"].toObject()["present_mode"] == "Fifo");
 	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"player", QJsonObject {{"present_mode", "x"}}}}) ==
+	       "invalid-params");
+
+	plan = s.Result("launch.plan",
+	                {{"game", id},
+	                 {"player", QJsonObject {{"frame_generation", "Double"},
+	                                         {"frame_generation_flow_scale", 80},
+	                                         {"frame_generation_performance_mode", true}}}});
+	const auto argv4 = Strings(plan["argv"]);
+	EXPECT(ArgAfter(argv4, "--frame-generation") == "Double");
+	EXPECT(ArgAfter(argv4, "--frame-generation-flow-scale") == "80");
+	EXPECT(ArgAfter(argv4, "--frame-generation-performance") == "true");
+	EXPECT(ArgAfter(argv3, "--frame-generation") == "Off"); // the default
+	EXPECT(s.ErrorCode(
+	           "launch.plan",
+	           {{"game", id}, {"player", QJsonObject {{"frame_generation_flow_scale", 10}}}}) ==
 	       "invalid-params");
 
 	EXPECT(s.ErrorCode("launch.plan", {{"game", "nope"}}) == "not-found");

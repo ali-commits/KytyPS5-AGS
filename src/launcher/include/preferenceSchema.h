@@ -61,6 +61,9 @@ constexpr Field FIELDS[] = {
     {"low_latency_fps_limit", "Low-latency frame limit (0 = none)", "int", 0, 360},
     {"upscaler", "Upscaler", "enum", 0, 0},
     {"dlss_mode", "DLSS mode", "enum", 0, 0},
+    {"frame_generation", "Frame generation (lsfg-vk)", "enum", 0, 0},
+    {"frame_generation_flow_scale", "Frame generation flow scale", "int", 25, 100},
+    {"frame_generation_performance_mode", "Frame generation performance mode", "bool", 0, 0},
     {"readback_linear_images", "Read back linear images", "bool", 0, 0},
     {"readback_tiled_images", "Read back tiled images", "bool", 0, 0},
     {"sync_raw_image_buffers", "Sync raw image buffers", "bool", 0, 0},
@@ -105,6 +108,9 @@ inline QStringList Choices(const QString& key) {
 	}
 	if (key == QLatin1String("dlss_mode")) {
 		return EnumToList<Configuration::DlssMode>();
+	}
+	if (key == QLatin1String("frame_generation")) {
+		return EnumToList<Configuration::FrameGeneration>();
 	}
 	if (key == QLatin1String("shader_optimization_type")) {
 		return EnumToList<Configuration::ShaderOptimizationType>();

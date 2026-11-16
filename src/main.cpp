@@ -3,6 +3,7 @@
 #include "common/dateTime.h"
 #include "common/debug.h"
 #include "common/file.h"
+#include "common/frameGeneration.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
@@ -162,6 +163,17 @@ static void PrintUsage() {
 	::printf(
 	    "  --low-latency-fps-limit <fps>        With --low-latency: the driver paces frames to\n"
 	    "                                      this rate, 0-360 (0: none). Default: 0.\n");
+	::printf(
+	    "  --frame-generation <Off|Double|Triple|Quadruple>\n"
+	    "                                      Linux: lsfg-vk frame generation, presented frames\n"
+	    "                                      per game frame. Off also turns off an lsfg-vk\n"
+	    "                                      profile. Default: Off.\n");
+	::printf("  --frame-generation-flow-scale <25-100>\n"
+	         "                                      Optical flow resolution in percent. Default: "
+	         "100.\n");
+	::printf(
+	    "  --frame-generation-performance <true|false>\n"
+	    "                                      lsfg-vk's lighter frame model. Default: false.\n");
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --trinity                            Enable experimental PS5 Pro mode for\n"
 	         "                                       supported titles. Default: off.\n");
@@ -342,6 +354,30 @@ static void ResolveAmdCpu(AmdCpuChoice choice, const std::string& source,
 	config.amd_cpu_decision =
 	    fmt::format("{} (automatic: CPU vendor {}{})", config.amd_cpu_enabled ? "on" : "off",
 	                vendor, config.amd_cpu_enabled ? " is not AMD" : "");
+#endif
+}
+
+// lsfg-vk reads its settings when the Vulkan instance is created; set them while the process is
+// still single-threaded. vulkanWindow.cpp logs the result.
+static void ApplyFrameGeneration(const Config::ConfigOptions& config) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	uint32_t multiplier = 1;
+	switch (config.frame_generation) {
+		case Config::FrameGeneration::Off: multiplier = 1; break;
+		case Config::FrameGeneration::Double: multiplier = 2; break;
+		case Config::FrameGeneration::Triple: multiplier = 3; break;
+		case Config::FrameGeneration::Quadruple: multiplier = 4; break;
+	}
+	const Common::FrameGeneration::Settings settings {
+	    .multiplier         = multiplier,
+	    .flow_scale_percent = config.frame_generation_flow_scale,
+	    .performance_mode   = config.frame_generation_performance_mode};
+	for (const auto& [name, value]: Common::FrameGeneration::LayerEnvironment(
+	         settings, [](const char* name) { return std::getenv(name); })) {
+		setenv(name.c_str(), value.c_str(), 1);
+	}
+#else
+	(void)config;
 #endif
 }
 
@@ -721,6 +757,25 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid low-latency frame limit: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--frame-generation") {
+			if (!ParseEnum(value, options.config.frame_generation)) {
+				::printf("invalid frame generation: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--frame-generation-flow-scale") {
+			if (!ParseUint32(value, options.config.frame_generation_flow_scale) ||
+			    options.config.frame_generation_flow_scale <
+			        Common::FrameGeneration::MIN_FLOW_SCALE_PERCENT ||
+			    options.config.frame_generation_flow_scale >
+			        Common::FrameGeneration::MAX_FLOW_SCALE_PERCENT) {
+				::printf("invalid frame generation flow scale: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--frame-generation-performance") {
+			if (!ParseBool(value, options.config.frame_generation_performance_mode)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--native-resolution") {
 			if (!ParseBool(value, options.config.native_resolution_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
@@ -871,6 +926,7 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
+	ApplyFrameGeneration(options.config);
 	Run(options);
 
 	return 0;

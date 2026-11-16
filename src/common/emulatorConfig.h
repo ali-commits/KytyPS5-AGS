@@ -35,6 +35,9 @@ enum class Upscaler { Off, DLSS, FSR };
 // NVIDIA DLSS Super Resolution quality mode (the render size is the game's own).
 enum class DlssMode { Quality, Balanced, Performance, UltraPerformance, DLAA };
 
+// lsfg-vk frame generation (common/frameGeneration.h): presented frames per game frame.
+enum class FrameGeneration { Off, Double, Triple, Quadruple };
+
 using Keymap          = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -91,6 +94,9 @@ struct ConfigOptions {
 	// Folder with the user's DLSS model: with upscaler DLSS, DLSS upscales PSSR in Pro mode.
 	std::filesystem::path  dlss_folder;
 	uint32_t               dlss_preset = 0; // 0 is the model default
+	FrameGeneration        frame_generation                  = FrameGeneration::Off;
+	uint32_t               frame_generation_flow_scale       = 100; // percent, 25-100
+	bool                   frame_generation_performance_mode = false;
 	bool                   vr_enabled            = false;
 	bool                   pro_enabled           = false;
 	bool                   amd_cpu_enabled       = false;
@@ -160,6 +166,10 @@ DlssMode                              GetDlssMode();
 const std::filesystem::path&          UpscalerProfilePath();
 const std::filesystem::path&          GetDlssFolder();
 uint32_t                              GetDlssPreset();
+// lsfg-vk frame generation, common/frameGeneration.h (applied in window.cpp).
+FrameGeneration                       GetFrameGeneration();
+uint32_t                              GetFrameGenerationFlowScale();
+bool                                  FrameGenerationPerformanceMode();
 bool                                  VrEnabled();
 bool                                  Ps5ProEnabled();
 bool                                  AmdCpuEnabled();

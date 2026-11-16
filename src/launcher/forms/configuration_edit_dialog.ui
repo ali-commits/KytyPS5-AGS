@@ -528,6 +528,56 @@
               </property>
              </widget>
             </item>
+            <item row="12" column="0">
+             <widget class="QLabel" name="label_frame_generation">
+              <property name="text">
+               <string>Frame generation:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="12" column="1">
+             <widget class="QComboBox" name="comboBox_frame_generation">
+              <property name="toolTip">
+               <string>Linux: lsfg-vk adds generated frames between the game's own (Double: 30 to 60 FPS). Needs lsfg-vk and Lossless Scaling installed, and turns on V-Sync. Off also turns off an lsfg-vk profile for the emulator.</string>
+              </property>
+             </widget>
+            </item>
+            <item row="13" column="0">
+             <widget class="QLabel" name="label_frame_generation_flow_scale">
+              <property name="text">
+               <string>Frame generation flow scale:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="13" column="1">
+             <widget class="QSpinBox" name="spinBox_frame_generation_flow_scale">
+              <property name="toolTip">
+               <string>Resolution of the motion estimate lsfg-vk generates frames from. Lower is faster; at 4K, 50-80% usually looks the same.</string>
+              </property>
+              <property name="suffix">
+               <string>%</string>
+              </property>
+              <property name="minimum">
+               <number>25</number>
+              </property>
+              <property name="maximum">
+               <number>100</number>
+              </property>
+              <property name="value">
+               <number>100</number>
+              </property>
+             </widget>
+            </item>
+            <item row="14" column="1">
+             <widget class="QCheckBox" name="checkBox_frame_generation_performance">
+              <property name="toolTip">
+               <string>lsfg-vk's lighter frame model: faster, with more visible artefacts.</string>
+              </property>
+              <property name="text">
+               <string>Frame generation performance mode</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </widget>
          </item>

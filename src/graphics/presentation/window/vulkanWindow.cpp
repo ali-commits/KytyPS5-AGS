@@ -3,6 +3,7 @@
 #include "common/cpuPlacement.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/frameGeneration.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -15,13 +16,13 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/cache/uploadDma.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
+#include "graphics/host_gpu/renderer/dlss.h"
 #include "graphics/host_gpu/renderer/drawPrep/drawRun.h"
 #include "graphics/host_gpu/renderer/eopTimestamps.h"
 #include "graphics/host_gpu/renderer/gpuOpProfiler.h"
 #include "graphics/host_gpu/renderer/gpuTiming.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineFastFirst.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
-#include "graphics/host_gpu/renderer/dlss.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/upscaler.h"
@@ -51,6 +52,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
+#include <magic_enum.hpp>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1652,6 +1654,25 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 		LOGF("Vulkan available layer: %s, specVersion = %u, implVersion = %u, %s\n",
 		     l.layerName.data(), l.specVersion, l.implementationVersion, l.description.data());
 	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	// lsfg-vk loads itself (an implicit layer) with the variables main.cpp set.
+	{
+		const auto env = [](const char* name) {
+			const char* value = std::getenv(name);
+			return value != nullptr ? value : "";
+		};
+		const bool layer = HasLayer(r.available_layers, Common::FrameGeneration::LAYER_NAME);
+		LOGF("Frame generation: setting %s, lsfg-vk layer %s, DISABLE_LSFGVK=%s LSFGVK_ENV=%s "
+		     "LSFGVK_MULTIPLIER=%s LSFGVK_PROFILE=%s\n",
+		     std::string(magic_enum::enum_name(Config::GetFrameGeneration())).c_str(),
+		     layer ? "installed" : "not installed", env("DISABLE_LSFGVK"), env("LSFGVK_ENV"),
+		     env("LSFGVK_MULTIPLIER"), env("LSFGVK_PROFILE"));
+		if (!layer && Config::GetFrameGeneration() != Config::FrameGeneration::Off) {
+			LOGF("Frame generation is on but lsfg-vk is not installed: no frames are generated\n");
+		}
+	}
+#endif
 
 	r.required_layers = {"VK_LAYER_KHRONOS_validation"};
 

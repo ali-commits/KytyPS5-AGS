@@ -437,6 +437,27 @@ With low latency on, one `LowLatency 10s:` line every 10 s reports the driver's 
 (simulation start to GPU end). `KYTY_LOW_LATENCY_MEASURE=1` with the setting off records the same
 timings without the low-latency mode, for comparison.
 
+### Frame generation (lsfg-vk)
+
+**Frame generation** (`--frame-generation Off|Double|Triple|Quadruple`, Linux) adds generated
+frames between the game's own through [lsfg-vk](https://lsfg-vk.dev), a Vulkan layer that uses
+the frame generation of Lossless Scaling. Double turns a 30 FPS game into 60 presented frames.
+lsfg-vk 2.0 and Lossless Scaling (the Steam application) must be installed; the emulator does not
+include either. lsfg-vk presents with V-Sync, so cap the game at half (Double) or a third
+(Triple) of the display's refresh rate.
+
+- **Frame generation flow scale** (`--frame-generation-flow-scale`, 25-100%, default 100):
+  resolution of the motion estimate frames are generated from. Lower is faster.
+- **Frame generation performance mode** (`--frame-generation-performance`): lsfg-vk's lighter
+  frame model, faster with more visible artefacts.
+
+The emulator passes these to lsfg-vk through its environment variables (`LSFGVK_ENV`,
+`LSFGVK_MULTIPLIER`, ...). Off sets `DISABLE_LSFGVK=1`, so an lsfg-vk profile that matches
+`kyty_emulator` in `~/.config/lsfg-vk/conf.toml` is not applied either. If `DISABLE_LSFGVK`,
+`LSFGVK_ENV`, `LSFGVK_PROFILE` or `LSFGVK_CONFIG` is already set when the emulator starts, the
+setting is ignored and lsfg-vk is left to that environment. The log's `Frame generation:` line
+gives the setting, whether the layer is installed, and the variables in effect.
+
 ### Upscaler (FSR, DLSS)
 
 **Upscaler** (`--upscaler Off|FSR|DLSS`) replaces a game's own temporal upscale pass with AMD

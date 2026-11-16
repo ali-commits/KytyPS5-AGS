@@ -76,6 +76,9 @@ QStringList BuildEmulatorArgs(const Configuration&          info,
 	args << "--low-latency-fps-limit" << QString::number(info.low_latency_fps_limit);
 	args << "--upscaler" << EnumToText(info.upscaler);
 	args << "--dlss-mode" << EnumToText(info.dlss_mode);
+	args << "--frame-generation" << EnumToText(info.frame_generation);
+	args << "--frame-generation-flow-scale" << QString::number(info.frame_generation_flow_scale);
+	args << "--frame-generation-performance" << BoolArg(info.frame_generation_performance_mode);
 	if (info.tessellation_enabled) {
 		args << "--tessellation";
 	}

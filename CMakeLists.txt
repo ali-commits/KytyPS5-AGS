@@ -737,6 +737,16 @@ if(LINUX)
 	target_link_libraries(upscaler_profile_tests Threads::Threads)
 endif()
 
+# lsfg-vk frame generation (common/frameGeneration.h): the variables each setting sets.
+add_executable(frame_generation_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FrameGenerationTests.cpp"
+)
+target_link_libraries(frame_generation_tests common)
+target_include_directories(frame_generation_tests PRIVATE ${inc_headers})
+if(LINUX)
+	target_link_libraries(frame_generation_tests Threads::Threads)
+endif()
+
 # u59-preset.json (common/u59Preset.h): parsing and lookup for the launcher, the emulator's startup
 # warnings, the shipped tools/u59-preset.json, and the code defaults that make it optional.
 add_executable(u59_preset_tests EXCLUDE_FROM_ALL
@@ -1371,6 +1381,7 @@ if(BUILD_TESTING)
 	add_test(NAME game_patch_filter COMMAND $<TARGET_FILE:game_patch_filter_tests>)
 	add_test(NAME u59_preset COMMAND $<TARGET_FILE:u59_preset_tests>)
 	add_test(NAME upscaler_profile COMMAND $<TARGET_FILE:upscaler_profile_tests>)
+	add_test(NAME frame_generation COMMAND $<TARGET_FILE:frame_generation_tests>)
 	add_test(NAME lod_stats_codegen
 	         COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --lod-stats-codegen-only)
 	add_test(NAME gi_probe_codegen

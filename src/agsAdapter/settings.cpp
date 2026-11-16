@@ -132,9 +132,11 @@ const std::vector<Group>& Groups() {
 		  "controller_keyboard_player"}},
 	    {"group.graphics",
 		 "Graphics",
-		 {"upscaler", "dlss_mode", "native_resolution_enabled", "readback_linear_images",
-		  "readback_tiled_images", "sync_raw_image_buffers", "support_zmask",
-		  "tessellation_enabled", "gpu_occlusion_accurate", "shader_optimization_type"}},
+		 {"upscaler", "dlss_mode", "frame_generation", "frame_generation_flow_scale",
+		  "frame_generation_performance_mode", "native_resolution_enabled",
+		  "readback_linear_images", "readback_tiled_images", "sync_raw_image_buffers",
+		  "support_zmask", "tessellation_enabled", "gpu_occlusion_accurate",
+		  "shader_optimization_type"}},
 	    {"group.system",
 		 "System",
 		 {"trophy_enabled", "trophy_duration_seconds", "skip_notice_screen", "network_connected",
@@ -230,6 +232,21 @@ QJsonObject Convert(const QJsonObject& in) {
 		out[QStringLiteral("hint")]  = "Vulkan device the emulator renders on.";
 	}
 	if (key == QLatin1String("trophy_duration_seconds")) out[QStringLiteral("unit")] = "s";
+	if (key == QLatin1String("frame_generation")) {
+		out[QStringLiteral("hint")] =
+		    "Linux, with lsfg-vk and Lossless Scaling installed: generated frames between the "
+		    "game's own (Double: 30 to 60 FPS). Turns on V-Sync. Off also turns off an lsfg-vk "
+		    "profile for the emulator.";
+	}
+	if (key == QLatin1String("frame_generation_flow_scale")) {
+		out[QStringLiteral("unit")]    = "%";
+		out[QStringLiteral("control")] = "slider";
+		out[QStringLiteral("hint")] =
+		    "Resolution of the motion estimate frames are generated from. Lower is faster.";
+	}
+	if (key == QLatin1String("frame_generation_performance_mode")) {
+		out[QStringLiteral("hint")] = "A lighter frame model: faster, with more visible artefacts.";
+	}
 	if (key == QLatin1String("low_latency_fps_limit")) {
 		out[QStringLiteral("unit")] = "FPS";
 		out[QStringLiteral("hint")] =

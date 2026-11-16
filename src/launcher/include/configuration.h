@@ -153,6 +153,9 @@ public:
 	enum class DlssMode { Quality, Balanced, Performance, UltraPerformance, DLAA };
 	Q_ENUM(DlssMode)
 
+	enum class FrameGeneration { Off, Double, Triple, Quadruple };
+	Q_ENUM(FrameGeneration)
+
 	enum class LogDirection { Silent, Console, File };
 	Q_ENUM(LogDirection)
 
@@ -212,6 +215,9 @@ public:
 	int                    low_latency_fps_limit       = 0;
 	Upscaler               upscaler                    = Upscaler::Off;
 	DlssMode               dlss_mode                   = DlssMode::Quality;
+	FrameGeneration        frame_generation                  = FrameGeneration::Off;
+	int                    frame_generation_flow_scale       = 100;
+	bool                   frame_generation_performance_mode = false;
 	bool                   readback_linear_images      = false;
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
@@ -260,6 +266,9 @@ public:
 		low_latency_fps_limit       = other.low_latency_fps_limit;
 		upscaler                    = other.upscaler;
 		dlss_mode                   = other.dlss_mode;
+		frame_generation                  = other.frame_generation;
+		frame_generation_flow_scale       = other.frame_generation_flow_scale;
+		frame_generation_performance_mode = other.frame_generation_performance_mode;
 		readback_linear_images      = other.readback_linear_images;
 		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;

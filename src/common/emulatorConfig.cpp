@@ -150,6 +150,18 @@ DlssMode GetDlssMode() {
 	return g_config->dlss_mode;
 }
 
+FrameGeneration GetFrameGeneration() {
+	return g_config->frame_generation;
+}
+
+uint32_t GetFrameGenerationFlowScale() {
+	return g_config->frame_generation_flow_scale;
+}
+
+bool FrameGenerationPerformanceMode() {
+	return g_config->frame_generation_performance_mode;
+}
+
 const std::filesystem::path& UpscalerProfilePath() {
 	return g_config->upscaler_profile;
 }

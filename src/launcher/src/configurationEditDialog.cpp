@@ -266,6 +266,9 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	ListInit(m_ui->comboBox_present_mode, info.present_mode);
 	ListInit(m_ui->comboBox_upscaler, info.upscaler);
 	ListInit(m_ui->comboBox_dlss_mode, info.dlss_mode);
+	ListInit(m_ui->comboBox_frame_generation, info.frame_generation);
+	m_ui->spinBox_frame_generation_flow_scale->setValue(info.frame_generation_flow_scale);
+	m_ui->checkBox_frame_generation_performance->setChecked(info.frame_generation_performance_mode);
 	m_ui->comboBox_gpu->clear();
 	m_ui->comboBox_gpu->addItem(tr("Auto"));
 	// Keep Auto when Qt is built without Vulkan support.
@@ -510,6 +513,10 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	    TextToEnum<Configuration::PresentMode>(ui.comboBox_present_mode->currentText());
 	info.upscaler  = TextToEnum<Configuration::Upscaler>(ui.comboBox_upscaler->currentText());
 	info.dlss_mode = TextToEnum<Configuration::DlssMode>(ui.comboBox_dlss_mode->currentText());
+	info.frame_generation =
+	    TextToEnum<Configuration::FrameGeneration>(ui.comboBox_frame_generation->currentText());
+	info.frame_generation_flow_scale       = ui.spinBox_frame_generation_flow_scale->value();
+	info.frame_generation_performance_mode = ui.checkBox_frame_generation_performance->isChecked();
 	info.gpu_index                 = ui.comboBox_gpu->currentIndex() - 1;
 	info.fullscreen_enabled        = ui.checkBox_fullscreen->isChecked();
 	info.hdr_enabled               = ui.checkBox_hdr->isChecked();
