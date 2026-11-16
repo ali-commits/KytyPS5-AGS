@@ -12,6 +12,19 @@ icon = "assets/ags/icon.png"
 logo = "assets/ags/logo.png"
 badge = "assets/ags/badge.svg"
 
+[[channels]]
+id = "stable"
+name = "Stable"
+tag = '^v\d+\.\d+\.\d+$'
+prerelease = false
+default = true
+
+[[channels]]
+id = "testing"
+name = "Testing"
+tag = '^v\d+\.\d+\.\d+-testing\.\d+$'
+prerelease = true
+
 [install.release]
 asset = "kytyps5-ags-{version}-linux-{arch}.tar.zst"
 sha256_asset = "{asset}.sha256"

@@ -6,7 +6,7 @@ name: AGS extension release
 #                     (AGS Stable channel).
 #   vX.Y.Z-testing.N  testing version; the tagged commit must be on testing. Built with
 #                     -DAGS_VERSION_SUFFIX=-testing.N and published as a GitHub pre-release
-#                     (AGS Beta channel).
+#                     (AGS Testing channel).
 # The tag must equal v<version> as rendered into ags-extension.toml (CMake project VERSION plus suffix).
 on:
   push:

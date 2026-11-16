@@ -35,7 +35,7 @@ In AGS open **Settings**, **Emulators**, **Add emulator**, paste
 `https://github.com/ali-commits/KytyPS5-AGS` and confirm. AGS installs the latest release package
 (Linux x86_64) and keeps your existing saves, trophies and settings when you point the
 `runtime_root` setting at an existing KytyPS5 folder. Stable releases are built from `main`; testing
-versions from the `testing` branch are GitHub pre-releases and show in AGS's Beta channel. Details,
+versions from the `testing` branch are GitHub pre-releases and show in AGS's Testing channel. Details,
 source builds and the release steps are under [Install as an AGS extension](#install-as-an-ags-extension).
 
 To build it yourself, clone with submodules:
@@ -501,11 +501,12 @@ refuses a tag whose commit is not on the matching branch:
 | Tag | Built from | GitHub release | AGS channel | Manifest version |
 | --- | --- | --- | --- | --- |
 | `vX.Y.Z` | `main` | full release | Stable | `X.Y.Z` |
-| `vX.Y.Z-testing.N` | `testing` | pre-release | Beta | `X.Y.Z-testing.N` |
+| `vX.Y.Z-testing.N` | `testing` | pre-release | Testing | `X.Y.Z-testing.N` |
 
-AGS reads the channel from the GitHub release: Stable is the newest full release, Beta the newest
-pre-release (whose tag does not contain `nightly`). A testing version therefore shows in AGS's Beta
-channel, and its version `X.Y.Z-testing.N` differs from the later stable `X.Y.Z`, so AGS sees them as
+`ags-extension.toml` declares both channels in `[[channels]]`: Stable takes full releases tagged
+`vX.Y.Z`, Testing takes pre-releases tagged `vX.Y.Z-testing.N`, and AGS shows exactly these two. AGS
+reads the channels from the manifest at the newest release tag. A testing version therefore shows in
+AGS's Testing channel, and its version `X.Y.Z-testing.N` differs from the later stable `X.Y.Z`, so AGS sees them as
 different versions. Number testing builds of the same `X.Y.Z` from 1 upwards.
 
 To cut a stable release from `main`:
