@@ -23,8 +23,8 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr uint64_t MiB          = 1024ull * 1024;
-constexpr uint64_t Alignment    = 256;
+constexpr uint64_t MiB         = 1024ull * 1024;
+constexpr uint64_t Alignment   = 256;
 constexpr size_t   BatchBuffers = 16;
 
 uint64_t EnvU64(const char* name, uint64_t default_value) {
@@ -60,12 +60,18 @@ int64_t ParseWriteDrain(const char* value) {
 	if (value != nullptr && std::strcmp(value, "labels") == 0) {
 		return 4;
 	}
+	if (value != nullptr && std::strcmp(value, "frame") == 0) {
+		return 8;
+	}
+	if (value != nullptr && std::strcmp(value, "defer") == 0) {
+		return 16;
+	}
 	return Live::ParseDefaultOff(value);
 }
 Live::Switch g_write_drain("KYTY_UPLOAD_DMA_WRITE_DRAIN", ParseWriteDrain);
 
 uint64_t HashBytes(const uint8_t* data, uint64_t size) noexcept {
-	uint64_t hash  = 0xcbf29ce484222325ull ^ size;
+	uint64_t hash = 0xcbf29ce484222325ull ^ size;
 	uint64_t index = 0;
 	for (; index + 8 <= size; index += 8) {
 		uint64_t word = 0;
@@ -80,6 +86,7 @@ uint64_t HashBytes(const uint8_t* data, uint64_t size) noexcept {
 }
 std::atomic<uint64_t> g_late_checks {0};
 std::atomic<uint64_t> g_late_changes {0};
+std::atomic<uint64_t> g_helped {0}; // KYTY_UPLOAD_DMA_HELP: batches a waiter did itself
 } // namespace
 
 bool UploadDmaLateAuditEnabled() {
@@ -91,8 +98,14 @@ bool UploadDmaWriteDrainEnabled() {
 	return g_write_drain.On();
 }
 
-std::unique_ptr<UploadDma> UploadDma::Create(GraphicContext&   graphics,
-                                             CommandScheduler& scheduler) {
+// KYTY_UPLOAD_DMA_HELP=1 (default off; adapted from usa-ratt/KytyPS5-GT7 3307e49f3): see
+// UploadDma::WaitSubmittable.
+bool UploadDmaHelpEnabled() {
+	static const bool enabled = EnvU64("KYTY_UPLOAD_DMA_HELP", 0) != 0;
+	return enabled;
+}
+
+std::unique_ptr<UploadDma> UploadDma::Create(GraphicContext& graphics, CommandScheduler& scheduler) {
 	if (!UploadDmaRequested() || graphics.transfer_queue == nullptr) {
 		return nullptr;
 	}
@@ -109,10 +122,10 @@ UploadDma::UploadDma(GraphicContext& graphics, CommandScheduler& scheduler, uint
     : m_graphics(graphics), m_scheduler(scheduler), m_ring_size(ring_size),
       m_min_bytes(std::max<uint64_t>(min_bytes, 1)) {
 	EXIT_IF(m_graphics.transfer_queue == nullptr);
-	m_ring = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::DeviceLocal, 0,
-	                                  vk::BufferUsageFlagBits::eTransferSrc |
-	                                      vk::BufferUsageFlagBits::eTransferDst,
-	                                  ring_size, true);
+	m_ring = std::make_unique<Buffer>(
+	    graphics, scheduler, MemoryUsage::DeviceLocal, 0,
+	    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst, ring_size,
+	    true);
 	SetVulkanObjectNameF(m_graphics.device, m_ring->Handle(), "Kyty.UploadDmaRing");
 
 	vk::SemaphoreTypeCreateInfo type_info {};
@@ -215,7 +228,7 @@ std::optional<uint64_t> UploadDma::Allocate(uint64_t size) {
 }
 
 std::optional<uint64_t> UploadDma::Stage(vk::Buffer source, uint64_t source_offset, uint64_t size,
-                                         std::vector<UploadHostCopy>*  host_copies,
+                                         std::vector<UploadHostCopy>* host_copies,
                                          PageManager::PendingProtects* protects, bool allow_small) {
 	if (source == nullptr || (size < m_min_bytes && !allow_small)) {
 		return std::nullopt;
@@ -321,7 +334,7 @@ bool UploadDma::ClaimAndCopy(HostCopyTicket& ticket, bool cp) {
 	return true;
 }
 
-bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all) {
+bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all, bool frame) {
 	const auto mode = g_write_drain.Get();
 	if (mode == 0 || size == 0) {
 		return false;
@@ -334,7 +347,8 @@ bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all) {
 	}
 	// =labels: a write the guest may observe makes every queued host copy first; =all always does;
 	// otherwise (=1, or a GPU-only write) only the ones reading these bytes.
-	const bool every = mode == 2 || (mode == 4 && all);
+	// =frame: a flip makes every queued host copy too.
+	const bool every = mode == 2 || (mode == 4 && all) || ((mode == 8 || mode == 16) && frame);
 	const auto end   = address + size;
 	m_drain.checks++;
 	const auto start = std::chrono::steady_clock::now();
@@ -347,8 +361,8 @@ bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all) {
 			if (end <= ticket->lo || address >= ticket->hi) {
 				continue;
 			}
-			const bool overlaps = std::any_of(
-			    ticket->copies.begin(), ticket->copies.end(), [&](const UploadHostCopy& copy) {
+			const bool overlaps =
+			    std::any_of(ticket->copies.begin(), ticket->copies.end(), [&](const UploadHostCopy& copy) {
 				    return copy.guest != 0 && address < copy.guest + copy.size && copy.guest < end;
 			    });
 			if (!overlaps) {
@@ -363,16 +377,16 @@ bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all) {
 	if (!did) {
 		return false;
 	}
-	const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                                          std::chrono::steady_clock::now() - start)
-	                                          .count());
+	const auto ns = static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+	        .count());
 	m_drain.waits++;
 	m_drain.wait_ns += ns;
 	static const bool log = EnvU64("KYTY_UPLOAD_DMA_WRITE_DRAIN_LOG", 0) != 0;
 	if (log && m_drain.waits <= 16) {
 		std::printf("Upload DMA write drain: CP write [0x%016" PRIx64 ", +0x%" PRIx64
 		            ") made queued host copies first (%s, %" PRIu64 " ns)\n",
-		            address, size, every ? "all" : "overlapping", ns);
+		            address, size, frame ? "frame" : every ? "all" : "overlapping", ns);
 		std::fflush(stdout);
 	}
 	if (log && (m_drain.waits & 0xfffu) == 1) {
@@ -382,6 +396,16 @@ bool UploadDma::DrainHostCopies(uint64_t address, uint64_t size, bool all) {
 		std::fflush(stdout);
 	}
 	return true;
+}
+
+bool UploadDma::LabelsWaitForHostCopies() {
+	if (g_write_drain.Get() != 16) {
+		return false;
+	}
+	while (!m_tickets.empty() && m_tickets.front()->state.load(std::memory_order_acquire) == 2) {
+		m_tickets.pop_front();
+	}
+	return !m_tickets.empty();
 }
 
 uint64_t UploadDma::PendingValue() {
@@ -408,7 +432,38 @@ void UploadDma::WaitSubmittable(uint64_t value) {
 	}
 	HangWatchdog::Scope wait_scope("upload-dma-submit", reinterpret_cast<uint64_t>(this), value,
 	                               submitted);
+	// KYTY_UPLOAD_DMA_HELP (adapted from usa-ratt/KytyPS5-GT7 3307e49f3): a waiter that holds no
+	// lock (SubmitDependencyHelpScope: the submission broker) does a queued batch the worker has
+	// not started itself instead of waiting for the worker to wake up and do it. One batch at a
+	// time (m_processing), so the transfer submissions keep their order.
+	const bool help = UploadDmaHelpEnabled() && SubmitDependencyHelpScope::Active();
 	while (submitted < value) {
+		if (help) {
+			std::vector<Job> jobs;
+			{
+				std::scoped_lock lock(m_mutex);
+				if (!m_processing && !m_hold && !m_stopping && !m_jobs.empty()) {
+					jobs.swap(m_jobs);
+					m_processing = true;
+				}
+			}
+			if (!jobs.empty()) {
+				ProcessJobs(jobs);
+				{
+					std::scoped_lock lock(m_mutex);
+					m_processing = false;
+				}
+				m_available.notify_all();
+				if (const auto n = g_helped.fetch_add(1, std::memory_order_relaxed) + 1;
+				    (n & (n - 1)) == 0 && n >= 16) {
+					LOGF("Upload DMA: %" PRIu64 " batches done by a waiting submission thread "
+					     "instead of the worker (KYTY_UPLOAD_DMA_HELP)\n",
+					     n);
+				}
+				submitted = m_submitted.load(std::memory_order_acquire);
+				continue;
+			}
+		}
 		m_submitted.wait(submitted, std::memory_order_acquire);
 		submitted = m_submitted.load(std::memory_order_acquire);
 	}
@@ -426,7 +481,7 @@ void UploadDma::WaitHost(uint64_t value) {
 }
 
 void UploadDma::SubmitBatch(std::vector<Job>& jobs) {
-	auto& batch  = m_batches[m_next_batch];
+	auto& batch = m_batches[m_next_batch];
 	m_next_batch = (m_next_batch + 1) % m_batches.size();
 	if (batch.value != 0) {
 		// The command buffer's previous batch must have finished before it is reset.
@@ -455,19 +510,18 @@ void UploadDma::SubmitBatch(std::vector<Job>& jobs) {
 			reuse_tick = std::max(reuse_tick, jobs[last].reuse_tick);
 			last++;
 		}
-		command.copyBuffer(jobs[first].source, m_ring->Handle(),
-		                   static_cast<uint32_t>(regions.size()), regions.data());
+		command.copyBuffer(jobs[first].source, m_ring->Handle(), static_cast<uint32_t>(regions.size()),
+		                   regions.data());
 		first = last;
 	}
 	if (GpuBreadcrumbs::Active()) {
 		GpuBreadcrumbs::Write(command, GpuBreadcrumbs::Queue::Transfer,
 		                      GpuBreadcrumbs::Note(GpuBreadcrumbs::Queue::Transfer,
-		                                           {.op   = GpuBreadcrumbs::OpUploadDmaEnd,
-		                                            .arg4 = jobs.back().value}));
+		                                           {.op = GpuBreadcrumbs::OpUploadDmaEnd, .arg4 = jobs.back().value}));
 	}
 	RequireVulkanSuccess(command.end(), "end upload DMA command buffer");
 
-	const auto                  value = jobs.back().value;
+	const auto value = jobs.back().value;
 	vk::CommandBufferSubmitInfo command_info {};
 	command_info.commandBuffer = command;
 	vk::SemaphoreSubmitInfo signal {};
@@ -528,12 +582,31 @@ void UploadDma::Worker(std::stop_token stop) {
 	for (;;) {
 		{
 			std::unique_lock lock(m_mutex);
-			m_available.wait(lock, [this] { return m_stopping || (!m_hold && !m_jobs.empty()); });
+			// Not while a waiter does a batch (KYTY_UPLOAD_DMA_HELP; it notifies when done).
+			m_available.wait(lock, [this] {
+				return !m_processing && (m_stopping || (!m_hold && !m_jobs.empty()));
+			});
 			if (m_jobs.empty()) {
 				return; // stopping and drained
 			}
 			jobs.swap(m_jobs);
+			// KYTY_UPLOAD_DMA_HELP: a waiting submission thread must not start a batch while this
+			// one runs (both would use m_batches and submit to the transfer queue at once: GT7
+			// lost the device with "WriteInvalid at 0x0" while upload DMA work was unfinished).
+			m_processing = true;
 		}
+		ProcessJobs(jobs);
+		jobs.clear();
+		{
+			std::scoped_lock lock(m_mutex);
+			m_processing = false;
+		}
+		m_available.notify_all();
+	}
+}
+
+void UploadDma::ProcessJobs(std::vector<Job>& jobs) {
+	{
 		// KYTY_UPLOAD_DMA_HOST_COPY: the staged bytes the command processor left to this worker,
 		// written before the submission below makes them visible to the transfer.
 		// KYTY_DEFER_PROTECTS: the pages' write protections first, so a guest write landing before
@@ -553,8 +626,7 @@ void UploadDma::Worker(std::stop_token stop) {
 			                              [](const Job& job) { return !job.protects.empty(); })) {
 				return;
 			}
-			const auto until =
-			    std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
 			while (std::chrono::steady_clock::now() < until) {
 				std::this_thread::yield();
 			}
@@ -571,7 +643,6 @@ void UploadDma::Worker(std::stop_token stop) {
 			}
 		}
 		SubmitBatch(jobs);
-		jobs.clear();
 	}
 }
 

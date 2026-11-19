@@ -138,9 +138,9 @@ LiveSnapshot TakeLive(uint64_t frames, uint64_t now) {
 }
 
 std::atomic<uint32_t> g_frame {0};
-LiveSnapshot          g_log_base;   // command processor thread only
-LiveSnapshot          g_model_base; // command processor thread only
-uint64_t              g_log_period_ns   = 0;
+LiveSnapshot          g_log_base;     // command processor thread only
+LiveSnapshot          g_model_base;   // command processor thread only
+uint64_t              g_log_period_ns = 0;
 bool                  g_log_period_read = false;
 
 // Model inputs (relaxed doubles stored as bit patterns are overkill: a torn read is impossible for
@@ -153,13 +153,13 @@ std::atomic<double> g_live_tighten_fixed_us {-1.0};
 SlowLevelTracker g_slow_tracker;
 std::atomic<int> g_slow_level {0};
 
-Benchmark      g_benchmark;
-Benchmark      g_benchmark_uffd; // Linux with KYTY_UFFD_WP: the write-protection actually in use
+Benchmark g_benchmark;
+Benchmark g_benchmark_uffd; // Linux with KYTY_UFFD_WP: the write-protection actually in use
 std::once_flag g_benchmark_once;
 
 // ---- Simulation lock ---------------------------------------------------------------------------
 
-std::mutex        g_sim_protect_mutex;
+std::mutex g_sim_protect_mutex;
 thread_local bool t_sim_protect_locked = false;
 
 // ---- Fault map ---------------------------------------------------------------------------------
@@ -186,6 +186,9 @@ constexpr int         SplitParts = static_cast<int>(Split::Count);
 thread_local uint64_t t_split_ns[SplitParts] {};
 thread_local uint32_t t_split_calls      = 0;
 thread_local uint32_t t_split_concurrent = 0;
+constexpr int         FlushKinds         = static_cast<int>(FlushKind::Count);
+thread_local int      t_flush_kind       = FlushKinds; // none noted
+thread_local uint64_t t_flush_wait_ns    = 0;
 std::atomic<uint32_t> g_faults_in_flight {0};
 
 enum ThreadClass : int { Cp = 0, Guest = 1, Host = 2, ThreadClasses = 3 };
@@ -204,6 +207,9 @@ int CurrentThreadClass(char* name, uint64_t size) noexcept {
 
 uint64_t g_exe_begin = 0;
 uint64_t g_exe_end   = 0;
+
+// Wait attribution report (KYTY_WAIT_ATTRIB), defined with the attribution below.
+void AttribReport(uint32_t frame, uint64_t now);
 
 void InitExeRange() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -225,6 +231,8 @@ struct BlockStats {
 	uint32_t frames     = 0; // frames with a fault here
 	uint32_t last_frame = UINT32_MAX;
 	uint64_t rip        = 0;
+	uint64_t flushes    = 0; // write faults that flushed GPU data (NoteFlushKind)
+	uint64_t flush_ns   = 0;
 	char     thread[24] {};
 };
 
@@ -237,15 +245,15 @@ using ProtectTable = std::array<std::array<std::array<ProtectStats, 2>, 3>, Thre
 
 struct MapWindow {
 	std::unordered_map<uint64_t, BlockStats> blocks; // key: address >> 16
-	uint64_t                                 faults[ThreadClasses] {};
-	uint64_t                                 fault_ns[ThreadClasses] {};
+	uint64_t faults[ThreadClasses] {};
+	uint64_t fault_ns[ThreadClasses] {};
 	uint64_t part_ns[ThreadClasses][static_cast<int>(Part::Count)] {};
 	uint64_t read_faults = 0;
 	// Frames since the same page last faulted: 0 (same frame), 1, 2, 3, 4-7, 8+, first time.
 	uint64_t period[7] {};
 	// Time since the same page last faulted: <20 us, 20-200 us, 0.2-2 ms, 2-20 ms, longer.
 	uint64_t since[5] {};
-	uint64_t found_dirty  = 0;
+	uint64_t found_dirty = 0;
 	uint64_t emulator_rip = 0;
 	// Fault split, write faults only (SplitAdd).
 	uint64_t split_faults[ThreadClasses] {};
@@ -254,27 +262,33 @@ struct MapWindow {
 	uint64_t split_calls[ThreadClasses] {};
 	uint64_t split_concurrent[ThreadClasses] {};
 	uint64_t split_concurrent_any[ThreadClasses] {};
+	// Write faults that flushed GPU data: count, flush time, publication waits, by kind (the
+	// last slot: no kind noted).
+	uint64_t flush_faults[ThreadClasses] {};
+	uint64_t flush_ns[ThreadClasses] {};
+	uint64_t flush_wait_ns[ThreadClasses] {};
+	uint64_t flush_kinds[ThreadClasses][FlushKinds + 1] {};
 	// Fault handler time by thread name (guest threads by their names).
 	std::unordered_map<std::string, std::array<uint64_t, 2>> by_thread; // faults, ns
 	// Read faults by guest rip: faults, ns, last address.
 	std::unordered_map<uint64_t, std::array<uint64_t, 3>> read_rips;
 	std::unordered_map<uint64_t, std::string>             read_rip_thread;
 	// Host-call lock waits outside faults (NoteHostLockWait), by thread class.
-	uint64_t     lock_waits[ThreadClasses] {};
-	uint64_t     lock_wait_ns[ThreadClasses] {};
+	uint64_t lock_waits[ThreadClasses] {};
+	uint64_t lock_wait_ns[ThreadClasses] {};
 	ProtectTable protect {};
-	uint32_t     first_frame = 0;
+	uint32_t first_frame = 0;
 };
 
-std::mutex g_map_mutex;
-MapWindow  g_map;
+std::mutex                                g_map_mutex;
+MapWindow                                 g_map;
 struct PageLast {
 	uint32_t frame = 0;
 	uint64_t ns    = 0;
 };
-std::unordered_map<uint64_t, PageLast> g_page_last_frame; // page -> its last fault
-uint64_t                               g_map_last_dump = 0;
-uint64_t                               g_map_period_ns = 0;
+std::unordered_map<uint64_t, PageLast>    g_page_last_frame; // page -> its last fault
+uint64_t                                  g_map_last_dump = 0;
+uint64_t                                  g_map_period_ns = 0;
 
 void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 	const auto frames = std::max<uint32_t>(frame - window.first_frame, 1);
@@ -283,62 +297,59 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 	for (int c = 0; c < ThreadClasses; c++) {
 		total += window.faults[c];
 	}
-	std::printf(
-	    "FaultMap %.1f s, %u frames (%.1f fps): %.1f faults/frame (cp %.1f, guest %.1f, host %.1f; "
-	    "%.1f read), %.1f%% at emulator code\n",
-	    seconds, frames, frames / std::max(seconds, 0.001), per(total), per(window.faults[Cp]),
-	    per(window.faults[Guest]), per(window.faults[Host]), per(window.read_faults),
-	    total != 0 ? 100.0 * static_cast<double>(window.emulator_rip) / static_cast<double>(total)
-	               : 0.0);
+	std::printf("FaultMap %.1f s, %u frames (%.1f fps): %.1f faults/frame (cp %.1f, guest %.1f, host %.1f; "
+	            "%.1f read), %.1f%% at emulator code\n",
+	            seconds, frames, frames / std::max(seconds, 0.001), per(total), per(window.faults[Cp]),
+	            per(window.faults[Guest]), per(window.faults[Host]), per(window.read_faults),
+	            total != 0 ? 100.0 * static_cast<double>(window.emulator_rip) / static_cast<double>(total) : 0.0);
 	for (int c = 0; c < ThreadClasses; c++) {
 		if (window.faults[c] == 0) {
 			continue;
 		}
 		const auto n = static_cast<double>(window.faults[c]);
-		std::printf("FaultMap   %s faults: %.2f ms/frame in handler, %.1f us/fault (buffer %.1f, "
-		            "texture %.1f, "
+		std::printf("FaultMap   %s faults: %.2f ms/frame in handler, %.1f us/fault (buffer %.1f, texture %.1f, "
 		            "protection update %.1f)\n",
-		            kThreadNames[c], per(window.fault_ns[c]) / 1e6,
-		            static_cast<double>(window.fault_ns[c]) / n / 1e3,
+		            kThreadNames[c], per(window.fault_ns[c]) / 1e6, static_cast<double>(window.fault_ns[c]) / n / 1e3,
 		            static_cast<double>(window.part_ns[c][0]) / n / 1e3,
 		            static_cast<double>(window.part_ns[c][1]) / n / 1e3,
 		            static_cast<double>(window.part_ns[c][2]) / n / 1e3);
 		if (window.split_faults[c] != 0) {
-			const auto w  = static_cast<double>(window.split_faults[c]);
-			const auto us = [&](int part) {
-				return static_cast<double>(window.split_ns[c][part]) / w / 1e3;
-			};
-			double split = 0;
+			const auto w     = static_cast<double>(window.split_faults[c]);
+			const auto us    = [&](int part) { return static_cast<double>(window.split_ns[c][part]) / w / 1e3; };
+			double     split = 0;
 			for (int part = 0; part < SplitParts; part++) {
 				split += us(part);
 			}
 			const double handler = static_cast<double>(window.split_handler_ns[c]) / w / 1e3;
-			std::printf(
-			    "FaultMap   %s fault split (%.1f write faults/frame, %.1f us): tracker-lock wait "
-			    "%.1f, "
-			    "host-lock wait %.1f, count-lock wait %.1f, host calls %.1f (%.2f calls/fault), "
-			    "flush %.1f, "
-			    "rest %.1f us/fault; other faults in flight at entry %.2f avg, >0 in %.0f%%\n",
-			    kThreadNames[c], per(window.split_faults[c]), handler,
-			    us(static_cast<int>(Split::TrackerLock)), us(static_cast<int>(Split::HostLock)),
-			    us(static_cast<int>(Split::CountLock)), us(static_cast<int>(Split::HostCall)),
-			    static_cast<double>(window.split_calls[c]) / w, us(static_cast<int>(Split::Flush)),
-			    std::max(0.0, handler - split), static_cast<double>(window.split_concurrent[c]) / w,
-			    100.0 * static_cast<double>(window.split_concurrent_any[c]) / w);
+			std::printf("FaultMap   %s fault split (%.1f write faults/frame, %.1f us): tracker-lock wait %.1f, "
+			            "host-lock wait %.1f, count-lock wait %.1f, host calls %.1f (%.2f calls/fault), flush %.1f, "
+			            "rest %.1f us/fault; other faults in flight at entry %.2f avg, >0 in %.0f%%\n",
+			            kThreadNames[c], per(window.split_faults[c]), handler,
+			            us(static_cast<int>(Split::TrackerLock)), us(static_cast<int>(Split::HostLock)),
+			            us(static_cast<int>(Split::CountLock)), us(static_cast<int>(Split::HostCall)),
+			            static_cast<double>(window.split_calls[c]) / w, us(static_cast<int>(Split::Flush)),
+			            std::max(0.0, handler - split), static_cast<double>(window.split_concurrent[c]) / w,
+			            100.0 * static_cast<double>(window.split_concurrent_any[c]) / w);
+		}
+		if (window.flush_faults[c] != 0) {
+			const auto f    = static_cast<double>(window.flush_faults[c]);
+			const auto kind = [&](int k) { return per(window.flush_kinds[c][k]); };
+			std::printf("FaultMap   %s flushes: %.1f/frame, %.1f us each (%.1f us of it waiting for a copy); "
+			            "current %.1f, pending %.1f, side %.1f, drain %.1f, other %.1f, unnoted %.1f (per frame)\n",
+			            kThreadNames[c], per(window.flush_faults[c]),
+			            static_cast<double>(window.flush_ns[c]) / f / 1e3,
+			            static_cast<double>(window.flush_wait_ns[c]) / f / 1e3, kind(0), kind(1), kind(2), kind(3),
+			            kind(4), kind(5));
 		}
 	}
-	std::printf("FaultMap   same page faulted again after: same frame %.1f, 1 frame %.1f, 2 %.1f, "
-	            "3 %.1f, 4-7 %.1f, "
+	std::printf("FaultMap   same page faulted again after: same frame %.1f, 1 frame %.1f, 2 %.1f, 3 %.1f, 4-7 %.1f, "
 	            "8+ %.1f, first time %.1f (per frame)\n",
-	            per(window.period[0]), per(window.period[1]), per(window.period[2]),
-	            per(window.period[3]), per(window.period[4]), per(window.period[5]),
-	            per(window.period[6]));
-	std::printf(
-	    "FaultMap   ... after: <20 us %.1f, 20-200 us %.1f, 0.2-2 ms %.1f, 2-20 ms %.1f, longer "
-	    "%.1f; page "
-	    "already CPU-dirty (another thread's fault in flight, or an image) %.1f (per frame)\n",
-	    per(window.since[0]), per(window.since[1]), per(window.since[2]), per(window.since[3]),
-	    per(window.since[4]), per(window.found_dirty));
+	            per(window.period[0]), per(window.period[1]), per(window.period[2]), per(window.period[3]),
+	            per(window.period[4]), per(window.period[5]), per(window.period[6]));
+	std::printf("FaultMap   ... after: <20 us %.1f, 20-200 us %.1f, 0.2-2 ms %.1f, 2-20 ms %.1f, longer %.1f; page "
+	            "already CPU-dirty (another thread's fault in flight, or an image) %.1f (per frame)\n",
+	            per(window.since[0]), per(window.since[1]), per(window.since[2]), per(window.since[3]),
+	            per(window.since[4]), per(window.found_dirty));
 	static const char* const kinds[3] = {"read-only", "no-access", "read-write"};
 	for (int c = 0; c < ThreadClasses; c++) {
 		for (int k = 0; k < 3; k++) {
@@ -347,36 +358,32 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 				if (s.calls == 0) {
 					continue;
 				}
-				std::printf("FaultMap   protect %s %s%s: %.1f calls/frame, %.1f pages/frame, %.3f "
-				            "ms/frame, "
+				std::printf("FaultMap   protect %s %s%s: %.1f calls/frame, %.1f pages/frame, %.3f ms/frame, "
 				            "%.2f us/call\n",
-				            kThreadNames[c], kinds[k], f != 0 ? " (in fault)" : "", per(s.calls),
-				            per(s.pages), per(s.ns) / 1e6,
-				            static_cast<double>(s.ns) / static_cast<double>(s.calls) / 1e3);
+				            kThreadNames[c], kinds[k], f != 0 ? " (in fault)" : "", per(s.calls), per(s.pages),
+				            per(s.ns) / 1e6, static_cast<double>(s.ns) / static_cast<double>(s.calls) / 1e3);
 			}
 		}
 	}
 	{
-		std::vector<std::pair<std::string, std::array<uint64_t, 2>>> threads(
-		    window.by_thread.begin(), window.by_thread.end());
+		std::vector<std::pair<std::string, std::array<uint64_t, 2>>> threads(window.by_thread.begin(),
+		                                                                     window.by_thread.end());
 		std::sort(threads.begin(), threads.end(),
 		          [](const auto& a, const auto& b) { return a.second[1] > b.second[1]; });
 		std::string line = "FaultMap   by thread:";
 		char        text[128];
 		for (size_t i = 0; i < std::min<size_t>(threads.size(), 8); i++) {
-			std::snprintf(text, sizeof(text), " %s %.1f faults %.3f ms/frame;",
-			              threads[i].first.c_str(), per(threads[i].second[0]),
-			              per(threads[i].second[1]) / 1e6);
+			std::snprintf(text, sizeof(text), " %s %.1f faults %.3f ms/frame;", threads[i].first.c_str(),
+			              per(threads[i].second[0]), per(threads[i].second[1]) / 1e6);
 			line += text;
 		}
 		std::printf("%s\n", line.c_str());
 	}
-	std::printf("FaultMap   host-lock waits outside faults: cp %.1f/frame %.3f ms/frame, guest "
-	            "%.1f/frame %.3f "
+	std::printf("FaultMap   host-lock waits outside faults: cp %.1f/frame %.3f ms/frame, guest %.1f/frame %.3f "
 	            "ms/frame, host %.1f/frame %.3f ms/frame\n",
-	            per(window.lock_waits[Cp]), per(window.lock_wait_ns[Cp]) / 1e6,
-	            per(window.lock_waits[Guest]), per(window.lock_wait_ns[Guest]) / 1e6,
-	            per(window.lock_waits[Host]), per(window.lock_wait_ns[Host]) / 1e6);
+	            per(window.lock_waits[Cp]), per(window.lock_wait_ns[Cp]) / 1e6, per(window.lock_waits[Guest]),
+	            per(window.lock_wait_ns[Guest]) / 1e6, per(window.lock_waits[Host]),
+	            per(window.lock_wait_ns[Host]) / 1e6);
 	// Top 4 MiB regions, then top 64 KiB blocks.
 	std::unordered_map<uint64_t, std::array<uint64_t, 4>> regions; // faults by class + ns
 	for (const auto& [key, block]: window.blocks) {
@@ -386,20 +393,17 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 		}
 		r[3] += block.ns;
 	}
-	std::vector<std::pair<uint64_t, std::array<uint64_t, 4>>> region_list(regions.begin(),
-	                                                                      regions.end());
+	std::vector<std::pair<uint64_t, std::array<uint64_t, 4>>> region_list(regions.begin(), regions.end());
 	std::sort(region_list.begin(), region_list.end(), [](const auto& a, const auto& b) {
 		return a.second[0] + a.second[1] + a.second[2] > b.second[0] + b.second[1] + b.second[2];
 	});
 	const size_t region_count = std::min<size_t>(region_list.size(), 12);
 	for (size_t i = 0; i < region_count; i++) {
 		const auto& [key, r] = region_list[i];
-		std::printf("FaultMap   region 0x%010" PRIx64
-		            " (4 MiB): %.1f faults/frame (cp %.1f, guest %.1f, host %.1f), "
+		std::printf("FaultMap   region 0x%010" PRIx64 " (4 MiB): %.1f faults/frame (cp %.1f, guest %.1f, host %.1f), "
 		            "%.1f us/fault\n",
 		            key << 22u, per(r[0] + r[1] + r[2]), per(r[0]), per(r[1]), per(r[2]),
-		            static_cast<double>(r[3]) /
-		                std::max<double>(static_cast<double>(r[0] + r[1] + r[2]), 1.0) / 1e3);
+		            static_cast<double>(r[3]) / std::max<double>(static_cast<double>(r[0] + r[1] + r[2]), 1.0) / 1e3);
 	}
 	std::vector<std::pair<uint64_t, const BlockStats*>> blocks;
 	blocks.reserve(window.blocks.size());
@@ -407,9 +411,7 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 		blocks.emplace_back(key, &block);
 	}
 	std::sort(blocks.begin(), blocks.end(), [](const auto& a, const auto& b) {
-		const auto sum = [](const BlockStats& s) {
-			return s.faults[0] + s.faults[1] + s.faults[2];
-		};
+		const auto sum = [](const BlockStats& s) { return s.faults[0] + s.faults[1] + s.faults[2]; };
 		return sum(*a.second) > sum(*b.second);
 	});
 	const size_t block_count = std::min<size_t>(blocks.size(), 24);
@@ -417,48 +419,41 @@ void DumpMap(const MapWindow& window, uint32_t frame, double seconds) {
 		const auto& [key, s] = blocks[i];
 		const auto sum       = s->faults[0] + s->faults[1] + s->faults[2];
 		const bool emulator  = s->rip >= g_exe_begin && s->rip < g_exe_end;
-		std::printf(
-		    "FaultMap   block 0x%010" PRIx64
-		    " (64 KiB): %.2f faults/frame (cp %.2f, guest %.2f, host %.2f), "
-		    "%d pages, in %u of %u frames, %.1f us/fault, last rip %s0x%" PRIx64 " thread '%s'\n",
-		    key << 16u, per(sum), per(s->faults[0]), per(s->faults[1]), per(s->faults[2]),
-		    __builtin_popcountll(s->page_mask), s->frames, frames,
-		    static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) / 1e3,
-		    emulator ? "kyty+" : "", emulator ? s->rip - g_exe_begin : s->rip, s->thread);
+		std::printf("FaultMap   block 0x%010" PRIx64 " (64 KiB): %.2f faults/frame (cp %.2f, guest %.2f, host %.2f), "
+		            "%d pages, in %u of %u frames, %.1f us/fault, last rip %s0x%" PRIx64 " thread '%s'\n",
+		            key << 16u, per(sum), per(s->faults[0]), per(s->faults[1]), per(s->faults[2]),
+		            __builtin_popcountll(s->page_mask), s->frames, frames,
+		            static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) / 1e3,
+		            emulator ? "kyty+" : "", emulator ? s->rip - g_exe_begin : s->rip, s->thread);
 	}
 	{
-		std::vector<std::pair<uint64_t, std::array<uint64_t, 3>>> rr(window.read_rips.begin(),
-		                                                             window.read_rips.end());
-		std::sort(rr.begin(), rr.end(),
-		          [](const auto& a, const auto& b) { return a.second[0] > b.second[0]; });
+		std::vector<std::pair<uint64_t, std::array<uint64_t, 3>>> rr(window.read_rips.begin(), window.read_rips.end());
+		std::sort(rr.begin(), rr.end(), [](const auto& a, const auto& b) { return a.second[0] > b.second[0]; });
 		for (size_t i = 0; i < std::min<size_t>(rr.size(), 12); i++) {
 			const auto& [rip, r] = rr[i];
 			const bool emulator  = rip >= g_exe_begin && rip < g_exe_end;
-			std::printf(
-			    "FaultMap   read rip %s0x%" PRIx64
-			    ": %.2f faults/frame, %.1f us/fault, last address 0x%" PRIx64 " thread '%s'\n",
-			    emulator ? "kyty+" : "", emulator ? rip - g_exe_begin : rip, per(r[0]),
-			    static_cast<double>(r[1]) / std::max<double>(static_cast<double>(r[0]), 1.0) / 1e3,
-			    r[2], window.read_rip_thread.at(rip).c_str());
+			std::printf("FaultMap   read rip %s0x%" PRIx64 ": %.2f faults/frame, %.1f us/fault, last address 0x%" PRIx64
+			            " thread '%s'\n",
+			            emulator ? "kyty+" : "", emulator ? rip - g_exe_begin : rip, per(r[0]),
+			            static_cast<double>(r[1]) / std::max<double>(static_cast<double>(r[0]), 1.0) / 1e3, r[2],
+			            window.read_rip_thread.at(rip).c_str());
 		}
 	}
 	// The blocks whose faults cost most time in the handler.
-	std::sort(blocks.begin(), blocks.end(),
-	          [](const auto& a, const auto& b) { return a.second->ns > b.second->ns; });
+	std::sort(blocks.begin(), blocks.end(), [](const auto& a, const auto& b) { return a.second->ns > b.second->ns; });
 	for (size_t i = 0; i < std::min<size_t>(blocks.size(), 10); i++) {
 		const auto& [key, s] = blocks[i];
 		const auto sum       = s->faults[0] + s->faults[1] + s->faults[2];
 		const bool emulator  = s->rip >= g_exe_begin && s->rip < g_exe_end;
-		std::printf("FaultMap   slow block 0x%010" PRIx64
-		            ": %.2f faults/frame (guest %.2f), %.3f ms/frame, %.1f us/fault, "
-		            "last rip %s0x%" PRIx64 " thread '%s'\n",
+		std::printf("FaultMap   slow block 0x%010" PRIx64 ": %.2f faults/frame (guest %.2f), %.3f ms/frame, %.1f us/fault, "
+		            "%.2f flushes/frame %.1f us each, last rip %s0x%" PRIx64 " thread '%s'\n",
 		            key << 16u, per(sum), per(s->faults[1]), per(s->ns) / 1e6,
-		            static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) /
-		                1e3,
+		            static_cast<double>(s->ns) / std::max<double>(static_cast<double>(sum), 1.0) / 1e3,
+		            per(s->flushes),
+		            static_cast<double>(s->flush_ns) / std::max<double>(static_cast<double>(s->flushes), 1.0) / 1e3,
 		            emulator ? "kyty+" : "", emulator ? s->rip - g_exe_begin : s->rip, s->thread);
 	}
-	std::printf("FaultMap   %zu blocks, %zu regions with faults\n", window.blocks.size(),
-	            regions.size());
+	std::printf("FaultMap   %zu blocks, %zu regions with faults\n", window.blocks.size(), regions.size());
 	std::fflush(stdout);
 }
 
@@ -472,18 +467,18 @@ void MaybeDumpMap(uint32_t frame) {
 	{
 		std::scoped_lock lock(g_map_mutex);
 		if (g_map_period_ns == 0) {
-			g_map_period_ns   = MapPeriodNs();
-			g_map_last_dump   = now;
+			g_map_period_ns = MapPeriodNs();
+			g_map_last_dump = now;
 			g_map.first_frame = frame;
 			return;
 		}
 		if (now - g_map_last_dump < g_map_period_ns) {
 			return;
 		}
-		seconds           = static_cast<double>(now - g_map_last_dump) / 1e9;
-		g_map_last_dump   = now;
-		window            = std::move(g_map);
-		g_map             = MapWindow {};
+		seconds         = static_cast<double>(now - g_map_last_dump) / 1e9;
+		g_map_last_dump = now;
+		window          = std::move(g_map);
+		g_map           = MapWindow {};
 		g_map.first_frame = frame;
 		// Forget pages that have not faulted for a while (keeps the map small).
 		for (auto it = g_page_last_frame.begin(); it != g_page_last_frame.end();) {
@@ -503,8 +498,7 @@ using RtlGetVersionFn            = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
 DWORD ReadRegistryDword(const wchar_t* key, const wchar_t* value, DWORD fallback) {
 	DWORD data = 0;
 	DWORD size = sizeof(data);
-	if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_REG_DWORD, nullptr, &data, &size) !=
-	    ERROR_SUCCESS) {
+	if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_REG_DWORD, nullptr, &data, &size) != ERROR_SUCCESS) {
 		return fallback;
 	}
 	return data;
@@ -524,23 +518,22 @@ std::string DescribeEntry(HMODULE ntdll, const char* name, bool syscall_stub) {
 		         (code[0] == 0x48 && code[1] == 0xb8);
 	}
 	char text[96];
-	std::snprintf(text, sizeof(text), "%s %s (%02x %02x %02x %02x)", name, hooked ? "HOOKED" : "ok",
-	              code[0], code[1], code[2], code[3]);
+	std::snprintf(text, sizeof(text), "%s %s (%02x %02x %02x %02x)", name, hooked ? "HOOKED" : "ok", code[0],
+	              code[1], code[2], code[3]);
 	return text;
 }
 
 void LogPlatform() {
-	auto* ntdll  = GetModuleHandleW(L"ntdll.dll");
+	auto* ntdll = GetModuleHandleW(L"ntdll.dll");
 	char  os[64] = "Windows";
 	if (ntdll != nullptr) {
-		if (auto get_version =
-		        reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+		if (auto get_version = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
 		    get_version != nullptr) {
 			RTL_OSVERSIONINFOW info {};
 			info.dwOSVersionInfoSize = sizeof(info);
 			if (get_version(&info) == 0) {
-				std::snprintf(os, sizeof(os), "Windows %lu.%lu.%lu", info.dwMajorVersion,
-				              info.dwMinorVersion, info.dwBuildNumber);
+				std::snprintf(os, sizeof(os), "Windows %lu.%lu.%lu", info.dwMajorVersion, info.dwMinorVersion,
+				              info.dwBuildNumber);
 			}
 		}
 	}
@@ -554,13 +547,12 @@ void LogPlatform() {
 		std::memcpy(vendor + 4, &regs[2], 4);
 		std::memcpy(vendor + 8, &regs[3], 4);
 	}
-	// SystemCodeIntegrityInformation (103): CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED (0x400) is
-	// memory integrity running; 0x2000 is isolated user mode (VBS's secure kernel) running.
+	// SystemCodeIntegrityInformation (103): CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED (0x400) is memory
+	// integrity running; 0x2000 is isolated user mode (VBS's secure kernel) running.
 	uint32_t ci_options = 0;
 	bool     ci_valid   = false;
 	if (ntdll != nullptr) {
-		if (auto query = reinterpret_cast<NtQuerySystemInformationFn>(
-		        GetProcAddress(ntdll, "NtQuerySystemInformation"));
+		if (auto query = reinterpret_cast<NtQuerySystemInformationFn>(GetProcAddress(ntdll, "NtQuerySystemInformation"));
 		    query != nullptr) {
 			struct {
 				ULONG length;
@@ -571,31 +563,22 @@ void LogPlatform() {
 			ci_options     = info.options;
 		}
 	}
-	const auto vbs_config  = ReadRegistryDword(L"SYSTEM\\CurrentControlSet\\Control\\DeviceGuard",
-	                                           L"EnableVirtualizationBasedSecurity", 0xffffffffu);
-	const auto hvci_config = ReadRegistryDword(L"SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\S"
-	                                           L"cenarios\\HypervisorEnforcedCodeIntegrity",
-	                                           L"Enabled", 0xffffffffu);
+	const auto vbs_config =
+	    ReadRegistryDword(L"SYSTEM\\CurrentControlSet\\Control\\DeviceGuard", L"EnableVirtualizationBasedSecurity", 0xffffffffu);
+	const auto hvci_config = ReadRegistryDword(
+	    L"SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity", L"Enabled",
+	    0xffffffffu);
 	LARGE_INTEGER frequency {};
 	QueryPerformanceFrequency(&frequency);
-	std::printf(
-	    "Kyty platform: %s; hypervisor %s%s%s; memory integrity (HVCI) %s, VBS secure kernel %s "
-	    "(code integrity options 0x%08x%s); registry: VBS %s, HVCI %s; QPC %.3f MHz\n",
-	    os, hypervisor ? "present (" : "absent", vendor, hypervisor ? ")" : "",
-	    !ci_valid                    ? "unknown"
-	    : (ci_options & 0x400u) != 0 ? "RUNNING"
-	                                 : "off",
-	    !ci_valid                     ? "unknown"
-	    : (ci_options & 0x2000u) != 0 ? "running"
-	                                  : "off",
-	    ci_options, ci_valid ? "" : ", query failed",
-	    vbs_config == 0xffffffffu ? "unset"
-	    : vbs_config != 0         ? "enabled"
-	                              : "disabled",
-	    hvci_config == 0xffffffffu ? "unset"
-	    : hvci_config != 0         ? "enabled"
-	                               : "disabled",
-	    static_cast<double>(frequency.QuadPart) / 1e6);
+	std::printf("Kyty platform: %s; hypervisor %s%s%s; memory integrity (HVCI) %s, VBS secure kernel %s "
+	            "(code integrity options 0x%08x%s); registry: VBS %s, HVCI %s; QPC %.3f MHz\n",
+	            os, hypervisor ? "present (" : "absent", vendor, hypervisor ? ")" : "",
+	            !ci_valid ? "unknown" : (ci_options & 0x400u) != 0 ? "RUNNING" : "off",
+	            !ci_valid ? "unknown" : (ci_options & 0x2000u) != 0 ? "running" : "off", ci_options,
+	            ci_valid ? "" : ", query failed",
+	            vbs_config == 0xffffffffu ? "unset" : vbs_config != 0 ? "enabled" : "disabled",
+	            hvci_config == 0xffffffffu ? "unset" : hvci_config != 0 ? "enabled" : "disabled",
+	            static_cast<double>(frequency.QuadPart) / 1e6);
 	if (ntdll != nullptr) {
 		std::printf("Kyty platform: ntdll entry points: %s; %s; %s\n",
 		            DescribeEntry(ntdll, "NtProtectVirtualMemory", true).c_str(),
@@ -608,13 +591,12 @@ void LogPlatform() {
 	wchar_t exe_path[MAX_PATH] {};
 	GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
 	std::wstring exe_dir(exe_path);
-	exe_dir                = exe_dir.substr(0, exe_dir.find_last_of(L"\\/") + 1);
+	exe_dir = exe_dir.substr(0, exe_dir.find_last_of(L"\\/") + 1);
 	const auto starts_with = [](const std::wstring& text, const std::wstring& prefix) {
-		return text.size() >= prefix.size() &&
-		       _wcsnicmp(text.c_str(), prefix.c_str(), prefix.size()) == 0;
+		return text.size() >= prefix.size() && _wcsnicmp(text.c_str(), prefix.c_str(), prefix.size()) == 0;
 	};
-	HMODULE     modules[1024];
-	DWORD       needed = 0;
+	HMODULE modules[1024];
+	DWORD   needed = 0;
 	std::string list;
 	int         others = 0;
 	if (K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed) != 0) {
@@ -632,15 +614,14 @@ void LogPlatform() {
 			if (list.size() < 400) {
 				const auto file = name.substr(name.find_last_of(L"\\/") + 1);
 				char       narrow[MAX_PATH] {};
-				WideCharToMultiByte(CP_UTF8, 0, file.c_str(), -1, narrow, sizeof(narrow), nullptr,
-				                    nullptr);
+				WideCharToMultiByte(CP_UTF8, 0, file.c_str(), -1, narrow, sizeof(narrow), nullptr, nullptr);
 				list += list.empty() ? "" : ", ";
 				list += narrow;
 			}
 		}
 	}
-	std::printf("Kyty platform: %d module(s) from outside Windows and the emulator folder%s%s\n",
-	            others, others != 0 ? ": " : "", list.c_str());
+	std::printf("Kyty platform: %d module(s) from outside Windows and the emulator folder%s%s\n", others,
+	            others != 0 ? ": " : "", list.c_str());
 	std::fflush(stdout);
 }
 
@@ -683,8 +664,7 @@ size_t CountMappings() {
 #endif
 uint64_t ProbeUffdFeatures(int* error) {
 	*error = 0;
-	int fd =
-	    static_cast<int>(syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY));
+	int fd = static_cast<int>(syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY));
 	if (fd < 0) {
 		fd = static_cast<int>(syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK));
 	}
@@ -693,8 +673,8 @@ uint64_t ProbeUffdFeatures(int* error) {
 		return 0;
 	}
 	uffdio_api api {};
-	api.api           = UFFD_API;
-	api.features      = 0;
+	api.api      = UFFD_API;
+	api.features = 0;
 	uint64_t features = 0;
 	if (ioctl(fd, UFFDIO_API, &api) == 0) {
 		features = api.features;
@@ -711,8 +691,7 @@ void LogPlatform() {
 	uname(&name);
 	const auto max_map_count = ReadFirstLine("/proc/sys/vm/max_map_count");
 	const auto unprivileged  = ReadFirstLine("/proc/sys/vm/unprivileged_userfaultfd");
-	std::printf("Kyty platform: %s %s %s; vm.max_map_count %s; %zu mappings now; "
-	            "unprivileged_userfaultfd %s\n",
+	std::printf("Kyty platform: %s %s %s; vm.max_map_count %s; %zu mappings now; unprivileged_userfaultfd %s\n",
 	            name.sysname, name.release, name.machine, max_map_count.c_str(), CountMappings(),
 	            unprivileged.c_str());
 #if defined(KYTY_FAULT_COST_UFFD)
@@ -720,14 +699,10 @@ void LogPlatform() {
 	const auto features = ProbeUffdFeatures(&error);
 	// Bits from linux/userfaultfd.h (spelled out: older headers lack the newer names).
 	const auto has = [features](int bit) { return (features & (1ull << bit)) != 0; };
-	std::printf("Kyty platform: userfaultfd %s (features 0x%" PRIx64
-	            "): SIGBUS %s, write-protect on shmem %s, "
+	std::printf("Kyty platform: userfaultfd %s (features 0x%" PRIx64 "): SIGBUS %s, write-protect on shmem %s, "
 	            "WP_UNPOPULATED %s, WP_ASYNC %s\n",
-	            features != 0 ? "available"
-	            : error != 0  ? std::strerror(error)
-	                          : "unavailable",
-	            features, has(7) ? "yes" : "no", has(12) ? "yes" : "no", has(13) ? "yes" : "no",
-	            has(15) ? "yes" : "no");
+	            features != 0 ? "available" : error != 0 ? std::strerror(error) : "unavailable", features,
+	            has(7) ? "yes" : "no", has(12) ? "yes" : "no", has(13) ? "yes" : "no", has(15) ? "yes" : "no");
 #else
 	std::printf("Kyty platform: userfaultfd not compiled in\n");
 #endif
@@ -744,7 +719,7 @@ std::atomic<uint64_t> g_bench_begin {0};
 std::atomic<uint64_t> g_bench_end {0};
 std::atomic<uint64_t> g_bench_handler_ns {0};
 // Linux, KYTY_UFFD_WP: the second benchmark round uses userfaultfd write-protection.
-std::atomic<bool> g_bench_uffd {false};
+std::atomic<bool>     g_bench_uffd {false};
 
 bool BenchProtect(uint8_t* address, size_t bytes, bool writable) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -752,8 +727,7 @@ bool BenchProtect(uint8_t* address, size_t bytes, bool writable) {
 	return VirtualProtect(address, bytes, writable ? PAGE_READWRITE : PAGE_READONLY, &old) != 0;
 #else
 	if (g_bench_uffd.load(std::memory_order_relaxed)) {
-		return Common::UffdWriteWatch::WriteProtect(reinterpret_cast<uint64_t>(address), bytes,
-		                                            !writable);
+		return Common::UffdWriteWatch::WriteProtect(reinterpret_cast<uint64_t>(address), bytes, !writable);
 	}
 	return mprotect(address, bytes, writable ? PROT_READ | PROT_WRITE : PROT_READ) == 0;
 #endif
@@ -766,8 +740,7 @@ bool BenchResolve(uint64_t address) {
 		return false;
 	}
 	const auto start = NowNs();
-	const bool ok =
-	    BenchProtect(reinterpret_cast<uint8_t*>(address & ~(PageBytes - 1)), PageBytes, true);
+	const bool ok    = BenchProtect(reinterpret_cast<uint8_t*>(address & ~(PageBytes - 1)), PageBytes, true);
 	g_bench_handler_ns.fetch_add(NowNs() - start, std::memory_order_relaxed);
 	return ok;
 }
@@ -779,22 +752,20 @@ LONG CALLBACK BenchHandler(PEXCEPTION_POINTERS exception) {
 	    exception->ExceptionRecord->NumberParameters < 2) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-	return BenchResolve(exception->ExceptionRecord->ExceptionInformation[1])
-	           ? EXCEPTION_CONTINUE_EXECUTION
-	           : EXCEPTION_CONTINUE_SEARCH;
+	return BenchResolve(exception->ExceptionRecord->ExceptionInformation[1]) ? EXCEPTION_CONTINUE_EXECUTION
+	                                                                       : EXCEPTION_CONTINUE_SEARCH;
 }
 
 struct BenchArea {
 	HANDLE   mapping = nullptr;
 	uint8_t* base    = nullptr;
-	bool     Create() {
+	bool Create() {
 		mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
 		                             static_cast<DWORD>(BenchPages * PageBytes), nullptr);
 		if (mapping == nullptr) {
 			return false;
 		}
-		base = static_cast<uint8_t*>(
-		    MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BenchPages * PageBytes));
+		base = static_cast<uint8_t*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BenchPages * PageBytes));
 		return base != nullptr;
 	}
 	~BenchArea() {
@@ -829,8 +800,7 @@ void ChainSignal(int signal_number, siginfo_t* info, void* context) {
 		previous.sa_sigaction(signal_number, info, context);
 		return;
 	}
-	if ((previous.sa_flags & SA_SIGINFO) == 0 && previous.sa_handler != SIG_DFL &&
-	    previous.sa_handler != SIG_IGN) {
+	if ((previous.sa_flags & SA_SIGINFO) == 0 && previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN) {
 		previous.sa_handler(signal_number);
 		return;
 	}
@@ -847,22 +817,20 @@ void BenchSignal(int signal_number, siginfo_t* info, void* context) {
 struct BenchArea {
 	int      fd   = -1;
 	uint8_t* base = nullptr;
-	bool     Create() {
+	bool Create() {
 #if defined(__linux__)
 		fd = static_cast<int>(syscall(SYS_memfd_create, "KytyFaultBench", 0));
 #endif
 		if (fd < 0) {
-			auto* ptr = mmap(nullptr, BenchPages * PageBytes, PROT_READ | PROT_WRITE,
-			                 MAP_PRIVATE | MAP_ANON, -1, 0);
+			auto* ptr = mmap(nullptr, BenchPages * PageBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 			base      = ptr == MAP_FAILED ? nullptr : static_cast<uint8_t*>(ptr);
 			return base != nullptr;
 		}
 		if (ftruncate(fd, static_cast<off_t>(BenchPages * PageBytes)) != 0) {
 			return false;
 		}
-		auto* ptr =
-		    mmap(nullptr, BenchPages * PageBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-		base = ptr == MAP_FAILED ? nullptr : static_cast<uint8_t*>(ptr);
+		auto* ptr = mmap(nullptr, BenchPages * PageBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		base      = ptr == MAP_FAILED ? nullptr : static_cast<uint8_t*>(ptr);
 		return base != nullptr;
 	}
 	~BenchArea() {
@@ -882,8 +850,7 @@ struct BenchHandlerScope {
 		action.sa_sigaction = BenchSignal;
 		sigemptyset(&action.sa_mask);
 		action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-		ok              = sigaction(SIGSEGV, &action, &g_previous_segv) == 0 &&
-		                  sigaction(SIGBUS, &action, &g_previous_bus) == 0;
+		ok = sigaction(SIGSEGV, &action, &g_previous_segv) == 0 && sigaction(SIGBUS, &action, &g_previous_bus) == 0;
 	}
 	~BenchHandlerScope() {
 		sigaction(SIGSEGV, &g_previous_segv, nullptr);
@@ -924,11 +891,10 @@ Benchmark Measure(bool uffd) {
 	for (size_t page = 0; page < BenchPages; page++) {
 		area.base[page * PageBytes] = 1;
 	}
-	if (uffd && !Common::UffdWriteWatch::Register(reinterpret_cast<uint64_t>(area.base),
-	                                              BenchPages * PageBytes)) {
+	if (uffd && !Common::UffdWriteWatch::Register(reinterpret_cast<uint64_t>(area.base), BenchPages * PageBytes)) {
 		return result;
 	}
-	const UffdRound     round_mode(uffd);
+	const UffdRound round_mode(uffd);
 	std::vector<double> ro1, rw1, ro64, rw64, faults, handler;
 	for (int round = 0; round < 2; round++) {
 		for (size_t page = 0; page < BenchPages; page++) {
@@ -966,8 +932,7 @@ Benchmark Measure(bool uffd) {
 			return result;
 		}
 		g_bench_begin.store(reinterpret_cast<uint64_t>(area.base), std::memory_order_release);
-		g_bench_end.store(reinterpret_cast<uint64_t>(area.base) + BenchPages * PageBytes,
-		                  std::memory_order_release);
+		g_bench_end.store(reinterpret_cast<uint64_t>(area.base) + BenchPages * PageBytes, std::memory_order_release);
 		for (int round = 0; round < 2; round++) {
 			for (size_t page = 0; page < BenchPages; page++) {
 				auto* address = area.base + page * PageBytes;
@@ -979,35 +944,32 @@ Benchmark Measure(bool uffd) {
 				const auto start  = NowNs();
 				*reinterpret_cast<volatile uint32_t*>(address) = static_cast<uint32_t>(page);
 				faults.push_back(static_cast<double>(NowNs() - start));
-				handler.push_back(static_cast<double>(
-				    g_bench_handler_ns.load(std::memory_order_relaxed) - before));
+				handler.push_back(static_cast<double>(g_bench_handler_ns.load(std::memory_order_relaxed) - before));
 			}
 		}
 		g_bench_end.store(0, std::memory_order_release);
 		g_bench_begin.store(0, std::memory_order_release);
 	}
-	const auto ro1_us        = Median(ro1) / 1e3;
-	const auto rw1_us        = Median(rw1) / 1e3;
-	const auto ro64_us       = Median(ro64) / 1e3;
-	const auto rw64_us       = Median(rw64) / 1e3;
+	const auto ro1_us  = Median(ro1) / 1e3;
+	const auto rw1_us  = Median(rw1) / 1e3;
+	const auto ro64_us = Median(ro64) / 1e3;
+	const auto rw64_us = Median(rw64) / 1e3;
 	result.protect_call_us   = ro1_us;
 	result.unprotect_call_us = rw1_us;
-	result.protect_page_us =
-	    std::max(0.0, (ro64_us - ro1_us) / static_cast<double>(BenchPages - 1));
-	result.unprotect_page_us =
-	    std::max(0.0, (rw64_us - rw1_us) / static_cast<double>(BenchPages - 1));
-	result.fault_us         = Median(faults) / 1e3;
-	result.fault_handler_us = Median(handler) / 1e3;
-	result.valid            = true;
+	result.protect_page_us   = std::max(0.0, (ro64_us - ro1_us) / static_cast<double>(BenchPages - 1));
+	result.unprotect_page_us = std::max(0.0, (rw64_us - rw1_us) / static_cast<double>(BenchPages - 1));
+	result.fault_us          = Median(faults) / 1e3;
+	result.fault_handler_us  = Median(handler) / 1e3;
+	result.valid             = true;
 	return result;
 }
 
 } // namespace
 
 uint64_t NowNs() noexcept {
-	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                                 std::chrono::steady_clock::now().time_since_epoch())
-	                                 .count());
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	        .count());
 }
 
 void RunStartupBenchmark() {
@@ -1025,22 +987,19 @@ void RunStartupBenchmark() {
 		const auto& b = g_benchmark;
 		// A Sky Garden frame of Astro Bot: ~1,500 write faults, ~100 tightening calls over ~5,000
 		// pages, ~700 loosening calls (most inside the faults).
-		const double frame_ms = (1500 * (b.fault_us + b.unprotect_page_us * 2) +
-		                         100 * b.protect_call_us + 5000 * b.protect_page_us) /
+		const double frame_ms = (1500 * (b.fault_us + b.unprotect_page_us * 2) + 100 * b.protect_call_us +
+		                         5000 * b.protect_page_us) /
 		                        1e3;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		const char* call = "VirtualProtect";
 #else
 		const char* call = "mprotect";
 #endif
-		std::printf("Kyty fault cost: write fault round trip %.2f us (%.2f us of it the %s in the "
-		            "handler); %s "
-		            "read-only %.2f us/call + %.3f us/page, read-write %.2f us/call + %.3f "
-		            "us/page; clock read %.0f ns; "
+		std::printf("Kyty fault cost: write fault round trip %.2f us (%.2f us of it the %s in the handler); %s "
+		            "read-only %.2f us/call + %.3f us/page, read-write %.2f us/call + %.3f us/page; clock read %.0f ns; "
 		            "a frame with 1,500 faults would spend ~%.1f ms on them (benchmark %.1f ms)\n",
-		            b.fault_us, b.fault_handler_us, call, call, b.protect_call_us,
-		            b.protect_page_us, b.unprotect_call_us, b.unprotect_page_us, b.clock_ns,
-		            frame_ms, spent);
+		            b.fault_us, b.fault_handler_us, call, call, b.protect_call_us, b.protect_page_us,
+		            b.unprotect_call_us, b.unprotect_page_us, b.clock_ns, frame_ms, spent);
 		g_slow_tracker.Seed(b.protect_call_us, b.fault_us);
 		const char* why = "startup benchmark";
 #if defined(__linux__)
@@ -1060,13 +1019,11 @@ void RunStartupBenchmark() {
 			g_benchmark_uffd = Measure(true);
 			const auto& u    = g_benchmark_uffd;
 			if (u.valid) {
-				std::printf("Kyty fault cost (userfaultfd write-protection, KYTY_UFFD_WP): write "
-				            "fault round trip %.2f us "
-				            "(%.2f us of it the release in the handler); protect %.2f us/call + "
-				            "%.3f us/page, release "
+				std::printf("Kyty fault cost (userfaultfd write-protection, KYTY_UFFD_WP): write fault round trip %.2f us "
+				            "(%.2f us of it the release in the handler); protect %.2f us/call + %.3f us/page, release "
 				            "%.2f us/call + %.3f us/page\n",
-				            u.fault_us, u.fault_handler_us, u.protect_call_us, u.protect_page_us,
-				            u.unprotect_call_us, u.unprotect_page_us);
+				            u.fault_us, u.fault_handler_us, u.protect_call_us, u.protect_page_us, u.unprotect_call_us,
+				            u.unprotect_page_us);
 			} else {
 				std::printf("Kyty fault cost (userfaultfd write-protection): benchmark failed\n");
 			}
@@ -1081,7 +1038,7 @@ const Benchmark& StartupBenchmark() {
 }
 
 CostModel Model() {
-	CostModel   model;
+	CostModel model;
 	const auto& b = g_benchmark_uffd.valid ? g_benchmark_uffd : g_benchmark;
 	if (b.valid) {
 		model.fault_us        = b.fault_us;
@@ -1107,10 +1064,10 @@ int SlowLevel() noexcept {
 }
 
 void SlowLevelTracker::Seed(double tighten_call_us, double fault_round_trip_us) noexcept {
-	const int level = tighten_call_us > 5.0 || fault_round_trip_us > 20.0   ? 2
+	const int level = tighten_call_us > 5.0 || fault_round_trip_us > 20.0  ? 2
 	                  : tighten_call_us > 2.0 || fault_round_trip_us > 10.0 ? 1
-	                                                                        : 0;
-	m_level         = std::max(m_level, level);
+	                                                                         : 0;
+	m_level = std::max(m_level, level);
 }
 
 int SlowLevelTracker::Update(double tighten_fixed_us) noexcept {
@@ -1173,42 +1130,34 @@ void AdvanceFrame() noexcept {
 	if (now - g_model_base.time_ns >= 2'000'000'000ull) {
 		const auto current = TakeLive(frame, now);
 		const auto faults  = current.faults - g_model_base.faults;
-		const auto calls   = current.protect_calls + current.unprotect_calls -
-		                     g_model_base.protect_calls - g_model_base.unprotect_calls;
+		const auto calls   = current.protect_calls + current.unprotect_calls - g_model_base.protect_calls -
+		                   g_model_base.unprotect_calls;
 		if (faults >= 64) {
-			const auto value = static_cast<double>(current.fault_ns - g_model_base.fault_ns) /
-			                   static_cast<double>(faults) / 1e3;
+			const auto value = static_cast<double>(current.fault_ns - g_model_base.fault_ns) / static_cast<double>(faults) / 1e3;
 			const auto prev  = g_live_fault_us.load(std::memory_order_relaxed);
-			g_live_fault_us.store(prev < 0 ? value : prev * 0.5 + value * 0.5,
-			                      std::memory_order_relaxed);
+			g_live_fault_us.store(prev < 0 ? value : prev * 0.5 + value * 0.5, std::memory_order_relaxed);
 		}
 		if (calls >= 64) {
-			const auto ns    = current.protect_ns + current.unprotect_ns - g_model_base.protect_ns -
-			                   g_model_base.unprotect_ns;
+			const auto ns = current.protect_ns + current.unprotect_ns - g_model_base.protect_ns - g_model_base.unprotect_ns;
 			const auto value = static_cast<double>(ns) / static_cast<double>(calls) / 1e3;
 			const auto prev  = g_live_protect_call_us.load(std::memory_order_relaxed);
-			g_live_protect_call_us.store(prev < 0 ? value : prev * 0.5 + value * 0.5,
-			                             std::memory_order_relaxed);
+			g_live_protect_call_us.store(prev < 0 ? value : prev * 0.5 + value * 0.5, std::memory_order_relaxed);
 		}
 		// SlowLevel(): the tightening calls' cost beyond their pages, which the fault-ahead window
 		// does not change (the simulation's waits included, by design).
-		if (const auto tighten = current.protect_calls - g_model_base.protect_calls;
-		    tighten >= 32) {
-			const auto& b       = g_benchmark_uffd.valid ? g_benchmark_uffd : g_benchmark;
-			const auto  page_us = b.valid ? b.protect_page_us : 0.02;
-			const auto  calls_d = static_cast<double>(tighten);
-			const auto  per_call =
-			    static_cast<double>(current.protect_ns - g_model_base.protect_ns) / calls_d / 1e3;
-			const auto pages =
-			    static_cast<double>(current.protect_pages - g_model_base.protect_pages) / calls_d;
-			const auto fixed = std::max(0.0, per_call - page_us * pages);
+		if (const auto tighten = current.protect_calls - g_model_base.protect_calls; tighten >= 32) {
+			const auto& b        = g_benchmark_uffd.valid ? g_benchmark_uffd : g_benchmark;
+			const auto  page_us  = b.valid ? b.protect_page_us : 0.02;
+			const auto  calls_d  = static_cast<double>(tighten);
+			const auto  per_call = static_cast<double>(current.protect_ns - g_model_base.protect_ns) / calls_d / 1e3;
+			const auto  pages    = static_cast<double>(current.protect_pages - g_model_base.protect_pages) / calls_d;
+			const auto  fixed    = std::max(0.0, per_call - page_us * pages);
 			g_live_tighten_fixed_us.store(fixed, std::memory_order_relaxed);
 			const int before = g_slow_tracker.Level();
 			const int level  = g_slow_tracker.Update(fixed);
 			if (level != before) {
 				g_slow_level.store(level, std::memory_order_relaxed);
-				std::printf("Kyty fault cost: write tracking is slow on this PC (tightening "
-				            "protection calls %.1f us "
+				std::printf("Kyty fault cost: write tracking is slow on this PC (tightening protection calls %.1f us "
 				            "each beyond their pages for %d periods in a row): level %d\n",
 				            fixed, SlowLevelTracker::PeriodsNeeded, level);
 				std::fflush(stdout);
@@ -1217,21 +1166,18 @@ void AdvanceFrame() noexcept {
 		g_model_base = current;
 	}
 	if (g_log_period_ns != 0 && now - g_log_base.time_ns >= g_log_period_ns) {
-		const auto  c       = TakeLive(frame, now);
-		const auto& p       = g_log_base;
-		const auto  seconds = static_cast<double>(c.time_ns - p.time_ns) / 1e9;
-		const auto  frames  = std::max<uint64_t>(c.frames - p.frames, 1);
-		const auto  avg     = [](uint64_t ns, uint64_t n) {
-			return n != 0 ? static_cast<double>(ns) / static_cast<double>(n) / 1e3 : 0.0;
-		};
-		const auto faults = c.faults - p.faults;
-		const auto pcalls = c.protect_calls - p.protect_calls;
-		const auto ucalls = c.unprotect_calls - p.unprotect_calls;
-		const auto model  = Model();
+		const auto c       = TakeLive(frame, now);
+		const auto& p      = g_log_base;
+		const auto seconds = static_cast<double>(c.time_ns - p.time_ns) / 1e9;
+		const auto frames  = std::max<uint64_t>(c.frames - p.frames, 1);
+		const auto avg     = [](uint64_t ns, uint64_t n) { return n != 0 ? static_cast<double>(ns) / static_cast<double>(n) / 1e3 : 0.0; };
+		const auto faults  = c.faults - p.faults;
+		const auto pcalls  = c.protect_calls - p.protect_calls;
+		const auto ucalls  = c.unprotect_calls - p.unprotect_calls;
+		const auto model   = Model();
 		{
 			const auto f = static_cast<double>(frames);
-			std::printf("Kyty BDA passes: last %.0f s, per frame: idle %.1f, hot runs %.1f (%.2f "
-			            "MB), dirty log %.1f "
+			std::printf("Kyty BDA passes: last %.0f s, per frame: idle %.1f, hot runs %.1f (%.2f MB), dirty log %.1f "
 			            "(%.2f MB), full scan %.2f (%.2f MB)\n",
 			            seconds, static_cast<double>(c.bda_passes[0] - p.bda_passes[0]) / f,
 			            static_cast<double>(c.bda_passes[1] - p.bda_passes[1]) / f,
@@ -1241,42 +1187,33 @@ void AdvanceFrame() noexcept {
 			            static_cast<double>(c.bda_passes[3] - p.bda_passes[3]) / f,
 			            static_cast<double>(c.bda_bytes[3] - p.bda_bytes[3]) / f / 1e6);
 		}
-		std::printf(
-		    "Kyty fault cost: last %.0f s, %.1f fps: %.0f faults/frame at %.1f us in the handler "
-		    "(%.2f ms/frame); protect %.0f calls/frame at %.1f us (%.0f pages/call); unprotect "
-		    "%.0f "
-		    "calls/frame at %.1f us (%.0f pages/call); model %.1f us/fault, %.1f us/call, "
-		    "tightening %.1f us "
-		    "beyond its pages, slow level %d\n",
-		    seconds, static_cast<double>(frames) / seconds,
-		    static_cast<double>(faults) / static_cast<double>(frames),
-		    avg(c.fault_ns - p.fault_ns, faults),
-		    static_cast<double>(c.fault_ns - p.fault_ns) / static_cast<double>(frames) / 1e6,
-		    static_cast<double>(pcalls) / static_cast<double>(frames),
-		    avg(c.protect_ns - p.protect_ns, pcalls),
-		    pcalls != 0 ? static_cast<double>(c.protect_pages - p.protect_pages) /
-		                      static_cast<double>(pcalls)
-		                : 0.0,
-		    static_cast<double>(ucalls) / static_cast<double>(frames),
-		    avg(c.unprotect_ns - p.unprotect_ns, ucalls),
-		    ucalls != 0 ? static_cast<double>(c.unprotect_pages - p.unprotect_pages) /
-		                      static_cast<double>(ucalls)
-		                : 0.0,
-		    model.fault_us, model.protect_call_us, model.tighten_fixed_us, SlowLevel());
-		if (const auto reporter = g_periodic_reporter.load(std::memory_order_acquire);
-		    reporter != nullptr) {
+		std::printf("Kyty fault cost: last %.0f s, %.1f fps: %.0f faults/frame at %.1f us in the handler "
+		            "(%.2f ms/frame); protect %.0f calls/frame at %.1f us (%.0f pages/call); unprotect %.0f "
+		            "calls/frame at %.1f us (%.0f pages/call); model %.1f us/fault, %.1f us/call, tightening %.1f us "
+		            "beyond its pages, slow level %d\n",
+		            seconds, static_cast<double>(frames) / seconds, static_cast<double>(faults) / static_cast<double>(frames),
+		            avg(c.fault_ns - p.fault_ns, faults),
+		            static_cast<double>(c.fault_ns - p.fault_ns) / static_cast<double>(frames) / 1e6,
+		            static_cast<double>(pcalls) / static_cast<double>(frames), avg(c.protect_ns - p.protect_ns, pcalls),
+		            pcalls != 0 ? static_cast<double>(c.protect_pages - p.protect_pages) / static_cast<double>(pcalls) : 0.0,
+		            static_cast<double>(ucalls) / static_cast<double>(frames), avg(c.unprotect_ns - p.unprotect_ns, ucalls),
+		            ucalls != 0 ? static_cast<double>(c.unprotect_pages - p.unprotect_pages) / static_cast<double>(ucalls) : 0.0,
+		            model.fault_us, model.protect_call_us, model.tighten_fixed_us, SlowLevel());
+		if (const auto reporter = g_periodic_reporter.load(std::memory_order_acquire); reporter != nullptr) {
 			reporter(seconds, frames);
 		}
 		std::fflush(stdout);
 		g_log_base = c;
 	}
 	MaybeDumpMap(frame);
+	if (AttribEnabled()) {
+		AttribReport(frame, now);
+	}
 }
 
 bool SimEnabled() noexcept {
-	return g_sim_fault_us.Get() != 0 || g_sim_protect_us.Get() != 0 ||
-	       g_sim_protect_page_ns.Get() != 0 || g_sim_unprotect_us.Get() != 0 ||
-	       g_sim_unprotect_page_ns.Get() != 0;
+	return g_sim_fault_us.Get() != 0 || g_sim_protect_us.Get() != 0 || g_sim_protect_page_ns.Get() != 0 ||
+	       g_sim_unprotect_us.Get() != 0 || g_sim_unprotect_page_ns.Get() != 0;
 }
 
 void SimulateFault() noexcept {
@@ -1324,6 +1261,18 @@ void SetFaultInstruction(uint64_t rip) noexcept {
 	t_fault_rip = rip;
 }
 
+int DescribeThread(char* name, uint64_t size) noexcept {
+	return CurrentThreadClass(name, size);
+}
+
+uint64_t FaultInstruction() noexcept {
+	return t_fault_rip;
+}
+
+uint64_t ExeBase() noexcept {
+	return g_exe_begin;
+}
+
 namespace {
 thread_local bool t_retried_fault = false;
 } // namespace
@@ -1347,6 +1296,8 @@ void MapInFault(bool inside) noexcept {
 			ns = 0;
 		}
 		t_split_calls      = 0;
+		t_flush_kind       = FlushKinds;
+		t_flush_wait_ns    = 0;
 		t_split_concurrent = g_faults_in_flight.fetch_add(1, std::memory_order_relaxed);
 	} else {
 		g_faults_in_flight.fetch_sub(1, std::memory_order_relaxed);
@@ -1354,11 +1305,11 @@ void MapInFault(bool inside) noexcept {
 }
 
 bool SplitActive() noexcept {
-	return g_map_enabled && t_in_fault;
+	return (g_map_enabled || AttribEnabled()) && t_in_fault;
 }
 
 void SplitAdd(Split part, uint64_t ns) noexcept {
-	if (!g_map_enabled || !t_in_fault) {
+	if ((!g_map_enabled && !AttribEnabled()) || !t_in_fault) {
 		return;
 	}
 	t_split_ns[static_cast<int>(part)] += ns;
@@ -1367,14 +1318,22 @@ void SplitAdd(Split part, uint64_t ns) noexcept {
 	}
 }
 
+void NoteFlushKind(FlushKind kind, uint64_t wait_ns) noexcept {
+	if ((!g_map_enabled && !AttribEnabled()) || !t_in_fault) {
+		return;
+	}
+	t_flush_kind = static_cast<int>(kind);
+	t_flush_wait_ns += wait_ns;
+}
+
 void MapFault(const FaultRecord& record) noexcept {
 	if (!g_map_enabled) {
 		return;
 	}
-	char             name[24] {};
-	const int        thread = CurrentThreadClass(name, sizeof(name));
-	const auto       frame  = Frame();
-	const auto       page   = record.address & ~(PageBytes - 1);
+	char       name[24] {};
+	const int  thread = CurrentThreadClass(name, sizeof(name));
+	const auto frame  = Frame();
+	const auto page   = record.address & ~(PageBytes - 1);
 	std::scoped_lock lock(g_map_mutex);
 	auto&            window = g_map;
 	window.faults[thread]++;
@@ -1387,7 +1346,7 @@ void MapFault(const FaultRecord& record) noexcept {
 		auto& r = window.read_rips[t_fault_rip];
 		r[0]++;
 		r[1] += record.handler_ns;
-		r[2]                                = record.address;
+		r[2] = record.address;
 		window.read_rip_thread[t_fault_rip] = std::string(name, strnlen(name, sizeof(name)));
 	} else {
 		// MapInFault(false) ran just before: the thread-local split describes this fault.
@@ -1399,6 +1358,12 @@ void MapFault(const FaultRecord& record) noexcept {
 		window.split_calls[thread] += t_split_calls;
 		window.split_concurrent[thread] += t_split_concurrent;
 		window.split_concurrent_any[thread] += t_split_concurrent != 0 ? 1u : 0u;
+		if (const auto flush = t_split_ns[static_cast<int>(Split::Flush)]; flush != 0) {
+			window.flush_faults[thread]++;
+			window.flush_ns[thread] += flush;
+			window.flush_wait_ns[thread] += t_flush_wait_ns;
+			window.flush_kinds[thread][std::clamp(t_flush_kind, 0, FlushKinds)]++;
+		}
 	}
 	if (t_fault_rip >= g_exe_begin && t_fault_rip < g_exe_end) {
 		window.emulator_rip++;
@@ -1431,6 +1396,12 @@ void MapFault(const FaultRecord& record) noexcept {
 		block.frames++;
 	}
 	block.rip = t_fault_rip;
+	if (record.write) {
+		if (const auto flush = t_split_ns[static_cast<int>(Split::Flush)]; flush != 0) {
+			block.flushes++;
+			block.flush_ns += flush;
+		}
+	}
 	std::memcpy(block.thread, name, sizeof(block.thread));
 }
 
@@ -1455,6 +1426,470 @@ void MapProtect(bool unprotect, bool no_access, uint64_t pages, uint64_t ns) noe
 	stats.calls++;
 	stats.pages += pages;
 	stats.ns += ns;
+}
+
+// ---- Wait attribution (KYTY_WAIT_ATTRIB) -------------------------------------------------------
+
+namespace {
+
+bool AttribEnabledInit() {
+	const auto* value = std::getenv("KYTY_WAIT_ATTRIB");
+	return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+const bool g_attrib_enabled = AttribEnabledInit();
+
+std::atomic<OpDescriber>    g_op_describer {nullptr};
+std::atomic<RangeDescriber> g_range_describer {nullptr};
+
+thread_local AttribScope* t_attrib_top        = nullptr;
+thread_local uint64_t     t_attrib_rb_address = 0;
+thread_local AttribPath   t_attrib_rb_path    = AttribPath::None;
+thread_local int          t_attrib_is_cp      = -1;
+
+bool AttribOnCp() noexcept {
+	if (!g_attrib_enabled) {
+		return false;
+	}
+	// The describer answers 0 only on the GPU thread; ask until it is installed.
+	if (t_attrib_is_cp < 0) {
+		const auto describer = g_describer.load(std::memory_order_acquire);
+		if (describer == nullptr) {
+			return false;
+		}
+		t_attrib_is_cp = describer(nullptr, 0) == 0 ? 1 : 0;
+	}
+	return t_attrib_is_cp == 1;
+}
+
+// Producers: the newest GPU-ownership transition per 64 KiB block (large ranges: a short list).
+struct Producer {
+	uint64_t    ns    = 0;
+	const char* op    = nullptr;
+	uint32_t    frame = 0;
+	uint8_t     site  = 0;
+};
+struct BigProducer {
+	uint64_t begin = 0;
+	uint64_t end   = 0;
+	Producer producer;
+};
+constexpr uint64_t                     ProducerBlockBits = 16;
+constexpr uint64_t                     ProducerMaxBlocks = 256;
+std::mutex                             g_producer_mutex;
+std::unordered_map<uint64_t, Producer> g_producers;
+std::array<BigProducer, 32>            g_big_producers {};
+uint32_t                               g_big_next = 0;
+
+bool FindProducer(uint64_t address, Producer& out) {
+	std::scoped_lock lock(g_producer_mutex);
+	bool             found = false;
+	if (const auto it = g_producers.find(address >> ProducerBlockBits); it != g_producers.end()) {
+		out   = it->second;
+		found = true;
+	}
+	for (const auto& big: g_big_producers) {
+		if (address >= big.begin && address < big.end && (!found || big.producer.ns > out.ns)) {
+			out   = big.producer;
+			found = true;
+		}
+	}
+	return found;
+}
+
+constexpr const char* kAttribKinds[]   = {"fault-write", "fault-read", "gpu-wait", "side-wait"};
+constexpr const char* kAttribPaths[]   = {"-", "guest-write-drain", "guest-read-drain", "cp-write-drain",
+                                          "cp-read-drain", "cp-read-side"};
+constexpr const char* kProducerSites[] = {"binding", "binding-late", "other"};
+
+struct AttribRegion {
+	uint64_t region = 0;
+	uint64_t sample = 0;
+	uint64_t count  = 0;
+	uint64_t ns     = 0;
+};
+struct AttribProducerStat {
+	const char* op         = nullptr;
+	uint8_t     site       = 0;
+	uint64_t    count      = 0;
+	uint64_t    age_us_sum = 0;
+	uint64_t    same_frame = 0;
+	uint64_t    age_buckets[5] {}; // <1 ms, 1-5, 5-20, 20-100, longer
+};
+struct AttribEntry {
+	AttribKind            kind   = AttribKind::Count;
+	uint32_t              flags  = 0;
+	uint8_t               reason = 0;
+	AttribPath            path   = AttribPath::None;
+	std::vector<uint64_t> frames; // emulator offsets (other modules: absolute, high bit set)
+	uint64_t              count     = 0;
+	uint64_t              ns        = 0;
+	uint64_t              nested_ns = 0;
+	uint64_t              split_ns[static_cast<int>(Split::Count)] {};
+	uint64_t              flush_kinds[static_cast<int>(FlushKind::Count) + 1] {};
+	uint64_t              no_producer = 0;
+	std::vector<AttribRegion>       regions;
+	std::vector<AttribProducerStat> producers;
+};
+struct AttribTotals {
+	uint64_t count     = 0;
+	uint64_t ns        = 0;
+	uint64_t nested_ns = 0;
+};
+// GPU thread only (faults and waits of the command processor, and the report on its flip).
+std::unordered_map<uint64_t, AttribEntry>                        g_attrib_entries;
+std::array<AttribTotals, static_cast<size_t>(AttribKind::Count)> g_attrib_totals {};
+uint64_t                                                         g_attrib_period_start = 0;
+uint32_t                                                         g_attrib_period_frame = 0;
+uint64_t                                                         g_attrib_period_ns    = 0;
+
+void AttribRecord(const AttribScope& scope, uint64_t now);
+
+} // namespace
+
+struct AttribAccess {
+	static void Begin(AttribScope& s, bool in_exception) noexcept {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		void*      raw[64] {};
+		const auto n = RtlCaptureStackBackTrace(1, 64, raw, nullptr);
+		uint32_t   i = 0;
+		// A host exception: the faulting instruction first (the copy routine or emulator store).
+		if (in_exception && t_fault_rip != 0) {
+			s.m_frames[s.m_count++] = reinterpret_cast<void*>(t_fault_rip);
+		}
+		if (in_exception && g_exe_begin != 0) {
+			// The handler's own frames (emulator), the exception dispatch (system), then the faulting
+			// code: emulator code, or a system copy routine whose emulator caller follows.
+			const auto in_exe = [](void* f) {
+				const auto a = reinterpret_cast<uint64_t>(f);
+				return a >= g_exe_begin && a < g_exe_end;
+			};
+			uint32_t j = 0;
+			while (j < n && in_exe(raw[j])) j++;
+			const auto dispatch = j;
+			while (j < n && !in_exe(raw[j])) j++;
+			if (dispatch < n && j < n) {
+				i = j;
+			}
+		}
+		for (; i < n && s.m_count < AttribScope::Frames; i++) {
+			s.m_frames[s.m_count++] = raw[i];
+		}
+#else
+		(void)in_exception;
+#endif
+		s.m_start_ns = NowNs();
+	}
+	static void End(AttribScope& s) noexcept {
+		const auto now = NowNs();
+		if (s.m_parent != nullptr) {
+			s.m_parent->m_nested_ns += now - s.m_start_ns;
+		}
+		AttribRecord(s, now);
+	}
+	static uint64_t     Start(const AttribScope& s) { return s.m_start_ns; }
+	static uint64_t     Nested(const AttribScope& s) { return s.m_nested_ns; }
+	static uint64_t     Address(const AttribScope& s) { return s.m_address; }
+	static uint32_t     Flags(const AttribScope& s) { return s.m_flags; }
+	static uint8_t      Reason(const AttribScope& s) { return s.m_reason; }
+	static AttribKind   Kind(const AttribScope& s) { return s.m_kind; }
+	static uint16_t     Count(const AttribScope& s) { return s.m_count; }
+	static void* const* Frames(const AttribScope& s) { return s.m_frames; }
+};
+
+namespace {
+
+void AttribRecord(const AttribScope& scope, uint64_t now) {
+	const auto kind = AttribAccess::Kind(scope);
+	if (kind >= AttribKind::Count) {
+		return;
+	}
+	const auto ns     = now - AttribAccess::Start(scope);
+	const auto nested = std::min(ns, AttribAccess::Nested(scope));
+	const bool fault  = kind == AttribKind::FaultWrite || kind == AttribKind::FaultRead;
+	// GPU waits carry the readback they serve; faults their own address.
+	const auto path    = fault ? AttribPath::None : t_attrib_rb_path;
+	const auto address = AttribAccess::Address(scope) != 0 ? AttribAccess::Address(scope) : t_attrib_rb_address;
+	uint64_t   key     = (static_cast<uint64_t>(kind) << 56u) ^ (static_cast<uint64_t>(AttribAccess::Flags(scope)) << 40u) ^
+	               (static_cast<uint64_t>(AttribAccess::Reason(scope)) << 32u) ^ (static_cast<uint64_t>(path) << 24u);
+	const auto  count  = AttribAccess::Count(scope);
+	const auto* frames = AttribAccess::Frames(scope);
+	for (uint16_t i = 0; i < count; i++) {
+		key = (key ^ reinterpret_cast<uint64_t>(frames[i])) * 0x100000001b3ull;
+	}
+	auto& entry = g_attrib_entries[key];
+	if (entry.kind == AttribKind::Count) {
+		entry.kind   = kind;
+		entry.flags  = AttribAccess::Flags(scope);
+		entry.reason = AttribAccess::Reason(scope);
+		entry.path   = path;
+		for (uint16_t i = 0; i < count; i++) {
+			const auto a = reinterpret_cast<uint64_t>(frames[i]);
+			entry.frames.push_back(a >= g_exe_begin && a < g_exe_end ? a - g_exe_begin : (a | (1ull << 63u)));
+		}
+	}
+	entry.count++;
+	entry.ns += ns;
+	entry.nested_ns += nested;
+	auto& totals = g_attrib_totals[static_cast<size_t>(kind)];
+	totals.count++;
+	totals.ns += ns;
+	totals.nested_ns += nested;
+	if (fault && !t_in_fault) {
+		// MapInFault(false) ran: the thread-local split describes this fault.
+		for (int part = 0; part < static_cast<int>(Split::Count); part++) {
+			entry.split_ns[part] += t_split_ns[part];
+		}
+		entry.flush_kinds[std::clamp(t_flush_kind, 0, FlushKinds)]++;
+	}
+	if (address == 0) {
+		return;
+	}
+	const auto region = address >> 22u;
+	auto       it     = std::find_if(entry.regions.begin(), entry.regions.end(),
+	                                 [region](const AttribRegion& r) { return r.region == region; });
+	if (it == entry.regions.end() && entry.regions.size() < 16) {
+		entry.regions.push_back({region, address, 0, 0});
+		it = entry.regions.end() - 1;
+	}
+	if (it != entry.regions.end()) {
+		it->count++;
+		it->ns += ns;
+		it->sample = address;
+	}
+	Producer producer;
+	if (!FindProducer(address, producer)) {
+		entry.no_producer++;
+		return;
+	}
+	auto pit = std::find_if(entry.producers.begin(), entry.producers.end(), [&](const AttribProducerStat& p) {
+		return p.op == producer.op && p.site == producer.site;
+	});
+	if (pit == entry.producers.end() && entry.producers.size() < 12) {
+		entry.producers.push_back({producer.op, producer.site});
+		pit = entry.producers.end() - 1;
+	}
+	if (pit != entry.producers.end()) {
+		const auto age_us = now > producer.ns ? (now - producer.ns) / 1000u : 0;
+		pit->count++;
+		pit->age_us_sum += age_us;
+		pit->same_frame += producer.frame == Frame() ? 1u : 0u;
+		pit->age_buckets[age_us < 1000 ? 0 : age_us < 5000 ? 1 : age_us < 20000 ? 2 : age_us < 100000 ? 3 : 4]++;
+	}
+}
+
+void AttribReport(uint32_t frame, uint64_t now) {
+	if (g_attrib_period_ns == 0) {
+		const auto* value     = std::getenv("KYTY_WAIT_ATTRIB_SECONDS");
+		const auto  seconds   = value != nullptr ? std::strtoull(value, nullptr, 10) : 10ull;
+		g_attrib_period_ns    = std::max<uint64_t>(seconds, 1) * 1'000'000'000ull;
+		g_attrib_period_start = now;
+		g_attrib_period_frame = frame;
+		return;
+	}
+	if (now - g_attrib_period_start < g_attrib_period_ns) {
+		return;
+	}
+	const auto  frames  = static_cast<double>(std::max<uint32_t>(frame - g_attrib_period_frame, 1));
+	const auto  seconds = static_cast<double>(now - g_attrib_period_start) / 1e9;
+	std::string line;
+	char        text[512];
+	std::snprintf(text, sizeof(text), "WaitAttrib %.0fs: %.0f frames (%.1f fps) | cp per frame:", seconds, frames,
+	              frames / seconds);
+	line += text;
+	for (size_t k = 0; k < g_attrib_totals.size(); k++) {
+		const auto& t = g_attrib_totals[k];
+		std::snprintf(text, sizeof(text), " %s %.1f, %.2f ms (excl %.2f)%s", kAttribKinds[k],
+		              static_cast<double>(t.count) / frames, static_cast<double>(t.ns) / frames / 1e6,
+		              static_cast<double>(t.ns - t.nested_ns) / frames / 1e6, k + 1 < g_attrib_totals.size() ? ";" : "");
+		line += text;
+	}
+	std::printf("%s\n", line.c_str());
+	std::vector<const AttribEntry*> sorted;
+	for (const auto& [key, entry]: g_attrib_entries) {
+		if (entry.count != 0) sorted.push_back(&entry);
+	}
+	std::sort(sorted.begin(), sorted.end(), [](const AttribEntry* a, const AttribEntry* b) {
+		return a->ns - a->nested_ns > b->ns - b->nested_ns;
+	});
+	const auto range_describer = g_range_describer.load(std::memory_order_acquire);
+	for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); i++) {
+		const auto& e = *sorted[i];
+		const auto  n = static_cast<double>(e.count);
+		line.clear();
+		std::snprintf(text, sizeof(text),
+		              "WaitAttrib  #%zu %s flags %s%s%s%s reason %u path %s: %.2f/f, %.1f us each, %.3f ms/f excl (%.3f incl)",
+		              i, kAttribKinds[static_cast<size_t>(e.kind)], (e.flags & AttribBufferGpu) != 0 ? "B" : "",
+		              (e.flags & AttribImageGpu) != 0 ? "I" : "", (e.flags & AttribFoundDirty) != 0 ? "D" : "",
+		              (e.flags & AttribException) != 0 ? "X" : "", static_cast<unsigned>(e.reason),
+		              kAttribPaths[static_cast<size_t>(e.path)], n / frames, static_cast<double>(e.ns) / n / 1e3,
+		              static_cast<double>(e.ns - e.nested_ns) / frames / 1e6, static_cast<double>(e.ns) / frames / 1e6);
+		line += text;
+		if (e.kind == AttribKind::FaultWrite || e.kind == AttribKind::FaultRead) {
+			static constexpr const char* split_names[] = {"tracker-lock", "host-lock", "count-lock", "host-call", "flush"};
+			line += " | split us/each:";
+			for (int part = 0; part < static_cast<int>(Split::Count); part++) {
+				if (e.split_ns[part] == 0) continue;
+				std::snprintf(text, sizeof(text), " %s %.1f", split_names[part], static_cast<double>(e.split_ns[part]) / n / 1e3);
+				line += text;
+			}
+			static constexpr const char* flush_names[] = {"current", "pending", "side", "drain", "other", "none"};
+			line += " flush:";
+			for (int k = 0; k <= FlushKinds; k++) {
+				if (e.flush_kinds[k] == 0) continue;
+				std::snprintf(text, sizeof(text), " %s %.2f/f", flush_names[k], static_cast<double>(e.flush_kinds[k]) / frames);
+				line += text;
+			}
+		}
+		auto regions = e.regions;
+		std::sort(regions.begin(), regions.end(), [](const AttribRegion& a, const AttribRegion& b) { return a.ns > b.ns; });
+		if (!regions.empty()) line += " | regions:";
+		for (size_t r = 0; r < std::min<size_t>(regions.size(), 3); r++) {
+			char     name[40] {};
+			uint64_t start = 0, size = 0;
+			if (range_describer == nullptr || !range_describer(regions[r].sample, &start, &size, name, sizeof(name))) {
+				name[0] = '\0';
+			}
+			std::snprintf(text, sizeof(text), " 0x%" PRIx64 " %.2f/f %.3f ms/f [map 0x%" PRIx64 "+0x%" PRIx64 " '%s']",
+			              regions[r].region << 22u, static_cast<double>(regions[r].count) / frames,
+			              static_cast<double>(regions[r].ns) / frames / 1e6, start, size, name);
+			line += text;
+		}
+		if (!e.producers.empty() || e.no_producer != 0) {
+			line += " | producers:";
+			auto producers = e.producers;
+			std::sort(producers.begin(), producers.end(), [](const auto& a, const auto& b) { return a.count > b.count; });
+			for (size_t p = 0; p < std::min<size_t>(producers.size(), 3); p++) {
+				const auto& pr = producers[p];
+				const auto  c  = static_cast<double>(pr.count);
+				std::snprintf(text, sizeof(text),
+				              " %s/%s %.2f/f age avg %.1f ms (<1 %.0f%%, 1-5 %.0f%%, 5-20 %.0f%%, 20-100 %.0f%%, more %.0f%%) same-frame %.0f%%",
+				              kProducerSites[std::min<uint8_t>(pr.site, 2)], pr.op != nullptr ? pr.op : "?", c / frames,
+				              static_cast<double>(pr.age_us_sum) / c / 1e3, 100.0 * static_cast<double>(pr.age_buckets[0]) / c,
+				              100.0 * static_cast<double>(pr.age_buckets[1]) / c, 100.0 * static_cast<double>(pr.age_buckets[2]) / c,
+				              100.0 * static_cast<double>(pr.age_buckets[3]) / c, 100.0 * static_cast<double>(pr.age_buckets[4]) / c,
+				              100.0 * static_cast<double>(pr.same_frame) / c);
+				line += text;
+			}
+			if (e.no_producer != 0) {
+				std::snprintf(text, sizeof(text), " none %.2f/f", static_cast<double>(e.no_producer) / frames);
+				line += text;
+			}
+		}
+		line += " | stack:";
+		for (const auto f: e.frames) {
+			if ((f >> 63u) != 0) {
+				std::snprintf(text, sizeof(text), " 0x%" PRIx64, f & ~(1ull << 63u));
+			} else {
+				std::snprintf(text, sizeof(text), " +0x%" PRIx64, f);
+			}
+			line += text;
+		}
+		std::printf("%s\n", line.c_str());
+	}
+	std::fflush(stdout);
+	for (auto it = g_attrib_entries.begin(); it != g_attrib_entries.end();) {
+		if (it->second.count == 0) {
+			it = g_attrib_entries.erase(it);
+			continue;
+		}
+		auto& e     = it->second;
+		e.count     = 0;
+		e.ns        = 0;
+		e.nested_ns = 0;
+		std::fill(std::begin(e.split_ns), std::end(e.split_ns), 0);
+		std::fill(std::begin(e.flush_kinds), std::end(e.flush_kinds), 0);
+		e.no_producer = 0;
+		e.regions.clear();
+		e.producers.clear();
+		++it;
+	}
+	g_attrib_totals       = {};
+	g_attrib_period_start = now;
+	g_attrib_period_frame = frame;
+}
+
+} // namespace
+
+bool AttribEnabled() noexcept {
+	return g_attrib_enabled;
+}
+
+AttribScope::AttribScope(AttribKind kind, bool in_exception) noexcept: m_kind(kind) {
+	if (!AttribOnCp()) {
+		return;
+	}
+	if (g_exe_begin == 0) {
+		InitExeRange();
+	}
+	m_active     = true;
+	m_parent     = t_attrib_top;
+	t_attrib_top = this;
+	if (in_exception) {
+		m_flags |= AttribException;
+	}
+	AttribAccess::Begin(*this, in_exception);
+}
+
+AttribScope::~AttribScope() {
+	if (!m_active) {
+		return;
+	}
+	t_attrib_top = m_parent;
+	AttribAccess::End(*this);
+}
+
+AttribReadbackScope::AttribReadbackScope(uint64_t address, AttribPath path) noexcept {
+	if (!AttribOnCp()) {
+		return;
+	}
+	m_active            = true;
+	m_prev_address      = t_attrib_rb_address;
+	m_prev_path         = t_attrib_rb_path;
+	t_attrib_rb_address = address;
+	t_attrib_rb_path    = path;
+}
+
+AttribReadbackScope::~AttribReadbackScope() {
+	if (!m_active) {
+		return;
+	}
+	t_attrib_rb_address = m_prev_address;
+	t_attrib_rb_path    = m_prev_path;
+}
+
+void AttribNoteProducer(uint64_t vaddr, uint64_t size, uint8_t site) noexcept {
+	if (!g_attrib_enabled || size == 0) {
+		return;
+	}
+	Producer producer;
+	producer.ns    = NowNs();
+	producer.frame = Frame();
+	producer.site  = site;
+	if (AttribOnCp()) {
+		if (const auto describer = g_op_describer.load(std::memory_order_acquire); describer != nullptr) {
+			producer.op = describer();
+		}
+	} else {
+		producer.op = "off-cp";
+	}
+	const auto       first = vaddr >> ProducerBlockBits;
+	const auto       last  = (vaddr + size - 1) >> ProducerBlockBits;
+	std::scoped_lock lock(g_producer_mutex);
+	if (last - first < ProducerMaxBlocks) {
+		for (auto block = first; block <= last; block++) {
+			g_producers[block] = producer;
+		}
+		return;
+	}
+	g_big_producers[g_big_next++ % g_big_producers.size()] = {vaddr, vaddr + size, producer};
+}
+
+void SetOpDescriber(OpDescriber describer) noexcept {
+	g_op_describer.store(describer, std::memory_order_release);
+}
+
+void SetRangeDescriber(RangeDescriber describer) noexcept {
+	g_range_describer.store(describer, std::memory_order_release);
 }
 
 } // namespace Libs::Graphics::FaultCost

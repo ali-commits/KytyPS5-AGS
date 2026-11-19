@@ -171,7 +171,8 @@ the Vulkan/SPIR-V validation rules.
 ### System requirements
 
 - Windows 10 version 1803, a current Linux distribution, or macOS on Apple Silicon
-- A 64-bit x86 processor (on macOS, an Apple Silicon processor with Rosetta 2)
+- A 64-bit x86 processor (on macOS, an Apple Silicon processor with Rosetta 2).
+  Builds targeting x86-64-v3 check for AVX2, BMI2, FMA, and the other required CPU features at startup.
 - A Vulkan 1.3-capable GPU with current drivers (on macOS, Vulkan is provided by the bundled
   MoltenVK)
 
@@ -382,6 +383,11 @@ To use the graphical launcher:
 ```bash
 open _Build/macos/install/KytyPS5.app  # or double-click in Finder
 ```
+
+The launcher defaults to a 1920×1080 window. Per-game settings offer a **Recommended**
+button for titles with a bundled profile and an experimental **Faster GPU synchronisation**
+option. **Precompile** prepares shaders from an installed list. On Windows, **Export list**
+creates a shader list from recorded sessions after the game closes.
 
 On first launch, add one or more game folders in the global settings. The launcher searches those
 folders recursively for game directories containing `eboot.bin` and ZArchive (`.zar`) game dumps

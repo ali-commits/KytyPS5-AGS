@@ -17,6 +17,23 @@ struct TessellationInputInfo {
 	uint32_t output_topology       = 0;
 };
 
+struct ClipSpaceTransform {
+	float scale[2]       = {};
+	float offset[2]      = {};
+	float half_extent[2] = {};
+	bool  enabled        = false;
+};
+
+struct MeshInputInfo: ShaderWorkgroupInputInfo {
+	uint32_t input_primitive      = 0;
+	uint32_t primitives_per_group = 0;
+	uint32_t vertices_per_group   = 0;
+	uint32_t max_vertices         = 0;
+	uint32_t max_primitives       = 0;
+	uint32_t provoking_vertex     = 0;
+	uint32_t split_groups         = 0;
+};
+
 struct VertexInputInfo {
 	static constexpr int RES_MAX = 32;
 
@@ -32,8 +49,8 @@ struct VertexInputInfo {
 	uint32_t                 wave_size           = 64;
 	uint32_t                 scratch_size_dwords = 0;
 	uint32_t                 pa_cl_vs_out_cntl   = 0;
-	ShaderClipSpaceTransform clip_space;
-	ShaderMeshInputInfo      mesh;
+	ClipSpaceTransform       clip_space;
+	MeshInputInfo            mesh;
 	TessellationInputInfo    tess;
 	bool                     fetch_external = false;
 	bool                     fetch_embedded = false;
@@ -91,8 +108,8 @@ static_assert(sizeof(PixelInputInfo) == 224);
 static_assert(sizeof(ShaderComputeInputInfo) == 96);
 static_assert(sizeof(ShaderStageRuntime) == 16);
 static_assert(sizeof(ShaderWorkgroupInputInfo) == 28);
-static_assert(sizeof(ShaderMeshInputInfo) == 56);
-static_assert(sizeof(ShaderClipSpaceTransform) == 28);
+static_assert(sizeof(MeshInputInfo) == 56);
+static_assert(sizeof(ClipSpaceTransform) == 28);
 static_assert(sizeof(ShaderVertexInputBuffer) == 280);
 static_assert(sizeof(ShaderVertexDestination) == 16);
 static_assert(sizeof(TessellationInputInfo) == 28);

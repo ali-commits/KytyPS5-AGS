@@ -79,6 +79,7 @@ jobs:
           cmake -S . -B _Build/linux -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DKYTY_EMULATOR_IPO=ON \
+            -DKYTY_MARCH=x86-64-v3 \
             -DKYTY_BUILD_ORIGIN=Fork \
             -DKYTY_BUILD_REPOSITORY="$GITHUB_REPOSITORY" \
             -DCMAKE_C_COMPILER=clang \

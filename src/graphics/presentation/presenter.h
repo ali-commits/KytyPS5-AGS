@@ -20,6 +20,9 @@ public:
 		Frame* frame;
 		int    bus;
 		bool   premultiplied_alpha;
+		// KYTY_HOLD_SKIPPED_DRAWS: the bus keeps the frame it shows, and this one is released
+		// unshown.
+		bool hold = false;
 	};
 
 	explicit Presenter(WindowContext& window);
@@ -31,7 +34,6 @@ public:
 	[[nodiscard]] Frame&         PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,
 	                                               CommandBuffer* producer = nullptr);
 	[[nodiscard]] bool           PresentLastFrame();
-	[[nodiscard]] bool           IsGuestPaused() const noexcept;
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;

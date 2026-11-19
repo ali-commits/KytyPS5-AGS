@@ -4,10 +4,12 @@
 #include "common/abi.h"
 #include "common/common.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/guest_gpu/viewportTransform.h"
 #include "graphics/shader/recompiler/ir/ResourceSnapshot.h"
 #include "graphics/shader/shaderBindings.h"
 
 #include <array>
+#include <cstring>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -39,6 +41,8 @@ enum class ShaderType {
 	Unknown,
 	Vertex,
 	Pixel,
+	// Unused by our stages, kept so the values stored in shader journals and pipeline lists keep
+	// their meaning (upstream 45b35fafb dropped it).
 	Fetch,
 	Compute,
 	Mesh,
@@ -52,7 +56,7 @@ struct CompiledShaderInfo;
 } // namespace ShaderRecompiler::IR
 
 struct ShaderStageRuntime {
-	const ShaderRecompiler::IR::CompiledShaderInfo* program   = nullptr;
+	const ShaderRecompiler::IR::CompiledShaderInfo* program = nullptr;
 	const ShaderRecompiler::IR::ResourceSnapshot*   resources = nullptr;
 
 	[[nodiscard]] explicit operator bool() const {
@@ -69,7 +73,7 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel) {
 }
 
 [[nodiscard]] inline bool IsValidImageSwizzle(uint32_t swizzle,
-                                              uint32_t component_count = 4) noexcept {
+                                             uint32_t component_count = 4) noexcept {
 	if ((swizzle & ~0xfffu) != 0) {
 		return false;
 	}
@@ -85,6 +89,10 @@ struct ShaderClipSpaceTransform {
 	float offset[2]      = {};
 	float half_extent[2] = {};
 	bool  enabled        = false;
+	// KYTY_VTE_CNTL: PA_CL_VTE_CNTL's position format (ViewportTransform::PackPositionFormat; 0 is
+	// the default clip position). In padding: the struct keeps its size, and stored journals and
+	// pipeline lists read it as zero (ShaderSanitizeStoredInputInfo).
+	uint8_t vte_format = 0;
 };
 
 struct ShaderWorkgroupInputInfo {
@@ -106,8 +114,29 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	// more groups is split, and the program adds the part's first group, mesh draw dword
 	// IR::PushData::MeshFirstGroupDword, to WorkgroupId.x. 0 (NVIDIA: X equals the total) keeps
 	// the six draw dwords and the program as before.
-	uint32_t split_groups = 0;
+	uint32_t split_groups         = 0;
+	bool     fast_launch          = false;
+	// A subgroup larger than a host mesh workgroup may be (VK_EXT_mesh_shader limits) runs its
+	// waves in this many sequential passes of equal size, each on the whole workgroup.
+	uint32_t passes               = 1;
 
+	[[nodiscard]] constexpr uint32_t Waves() const {
+		return (threads_num[0] * threads_num[1] * threads_num[2] + wave_size - 1u) / wave_size;
+	}
+	// Host invocations for all waves at once: a wave64 on a 32-wide subgroup takes 32.
+	[[nodiscard]] constexpr uint32_t HostThreads() const {
+		return Waves() * (host_subgroup_size < wave_size ? host_subgroup_size : wave_size);
+	}
+	// The fewest passes of whole waves whose invocations fit max_invocations; 0 when none do.
+	[[nodiscard]] constexpr uint32_t PassesFor(uint32_t max_invocations) const {
+		const auto waves = Waves();
+		for (uint32_t count = 1; count <= waves; count++) {
+			if (waves % count == 0 && HostThreads() / count <= max_invocations) {
+				return count;
+			}
+		}
+		return waves == 0 ? 1u : 0u;
+	}
 	[[nodiscard]] constexpr uint32_t InputPrimitiveSize() const {
 		switch (static_cast<Prospero::PrimitiveType>(input_primitive)) {
 			case Prospero::PrimitiveType::kPointList: return 1u;
@@ -127,8 +156,7 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 		return vertices < size ? 0u : (vertices - size) / InputPrimitiveStep() + 1u;
 	}
 	[[nodiscard]] constexpr uint32_t InputVertexCount(uint32_t primitives) const {
-		return primitives == 0u ? 0u
-		                        : (primitives - 1u) * InputPrimitiveStep() + InputPrimitiveSize();
+		return primitives == 0u ? 0u : (primitives - 1u) * InputPrimitiveStep() + InputPrimitiveSize();
 	}
 };
 
@@ -142,6 +170,15 @@ struct ShaderTessellationInputInfo {
 	uint32_t domain                = 0;
 	uint32_t partitioning          = 0;
 	uint32_t output_topology       = 0;
+	// VGT_HOS_MIN/MAX_TESS_LEVEL as f32 bits: the hardware clamps every factor to them.
+	uint32_t min_tess_level        = 0;
+	uint32_t max_tess_level        = 0;
+	// KYTY_TESS_MERGED_CARRY (with KYTY_TESS_MERGED_HULL; based on Erlou93/KytyPS5-Yotei): the VGPRs
+	// the HS part of a split merged LS+HS program reads before writing them. On the hardware one
+	// wave runs both parts, so they still hold what the LS part left in the lane. The LS stage
+	// exports them after its outputs and the HS stage starts with them; bit k = v<k>. Empty for
+	// every other pair.
+	std::array<uint32_t, 8> carried_vgprs {};
 };
 
 struct ShaderVertexInputInfo {
@@ -151,7 +188,7 @@ struct ShaderVertexInputInfo {
 	ShaderVertexDestination resources_dst[RES_MAX];
 	ShaderVertexInputBuffer buffers[RES_MAX];
 	ShaderStageRuntime      stage;
-	ShaderType              logical_stage       = ShaderType::Vertex;
+	ShaderType                  logical_stage        = ShaderType::Vertex;
 	int                     resources_num       = 0;
 	int                     fetch_attrib_reg    = 0;
 	int                     fetch_buffer_reg    = 0;
@@ -159,23 +196,28 @@ struct ShaderVertexInputInfo {
 	uint32_t                wave_size           = 64;
 	uint32_t                scratch_size_dwords = 0;
 	// LDS_SIZE of the GS stage a non-NGG vertex shader runs on; usually zero.
-	uint32_t lds_size_dwords   = 0;
-	uint32_t pa_cl_vs_out_cntl = 0;
+	uint32_t                lds_size_dwords     = 0;
+	uint32_t                pa_cl_vs_out_cntl    = 0;
 	// PA_CL_CLIP_CNTL.UCP_ENA; set only on the last pre-rasterization stage.
-	uint32_t                    user_clip_planes = 0;
-	ShaderClipSpaceTransform    clip_space;
-	ShaderMeshInputInfo         mesh;
+	uint32_t                user_clip_planes     = 0;
+	ShaderClipSpaceTransform clip_space;
+	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
-	bool                        fetch_external = false;
-	bool                        fetch_embedded = false;
-	// The user SGPR (s8 + GS user data index) holding the draw's start instance, which an indirect
-	// draw has the CP write; -1: the user data value.
-	int32_t start_instance_sgpr = -1;
+	bool                    fetch_external      = false;
+	bool                    fetch_embedded      = false;
+	// The user SGPR (s8 + GS user data index) holding the draw's start instance, which an indirect draw
+	// has the CP write; -1: the user data value.
+	int32_t                 start_instance_sgpr = -1;
 	// PS flat/smooth groups may relocate a shared parameter to a spare location.
 	// Only mask-selected source entries are meaningful (including in cache keys).
 	// Last: journals and pipeline lists store the fields before them (ShaderStoredInputInfoSize).
-	uint32_t                 param_alias_mask = 0;
+	uint32_t                param_alias_mask = 0;
 	std::array<uint32_t, 32> param_alias_source {};
+	// KYTY_INDIRECT_VERTEX_BASE (upstream a833e1b73): an indirect draw's vertex index excludes its
+	// record's base vertex, which goes only to this user SGPR (s8 + GS user data index; -1: none).
+	// Not stored in journals and lists (a later build recompiles such a program).
+	bool                    indirect_vertex_base = false;
+	int32_t                 base_vertex_sgpr     = -1;
 };
 
 // Bytes of an input info that shader journals and pipeline lists store. A vertex input info is
@@ -200,52 +242,130 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 	int                thread_ids_num             = 0;
 	int                workgroup_register         = 0;
 	bool               tg_size_en                 = false;
+	// Last before the runtime field: the fields above keep the offsets older shader journals and
+	// pipeline lists stored.
+	bool               async_compute              = false;
+	// KYTY_INDIRECT_THREADS_GPU: a thread-dimension DISPATCH_INDIRECT whose thread counts the
+	// shader reads from GPU memory; the dispatch-thread shader data dwords hold their device
+	// address instead of the counts. In the padding before the runtime field (stored size kept).
+	bool               dispatch_dimensions_indirect = false;
 	ShaderStageRuntime stage;
 };
 
-enum class ShaderAlphaBlendSource : uint8_t { None, SourceAlpha, SourceAlphaOne, SourceAlphaZero };
+// OneAlphaZero (KYTY_BLEND_ALPHA_REMAP with KYTY_UI_TEXT_BLEND=1, usa-ratt/KytyPS5-GT7 429692dd3,
+// from Franseven): colour One, alpha Zero over a source-alpha destination factor (UI text).
+enum class ShaderAlphaBlendSource : uint8_t {
+	None,
+	SourceAlpha,
+	SourceAlphaOne,
+	SourceAlphaZero,
+	OneAlphaZero
+};
+enum class ShaderPixelParameterMode : uint8_t { FirstVertex, LastVertex, Rectangle };
 
 struct ShaderPixelInputInfo {
-	uint32_t interpolator_settings[32]    = {0};
-	uint32_t input_num                    = 0;
-	uint32_t wave_size                    = 64;
-	uint32_t ps_system_input_base         = 0;
-	uint32_t custom_interpolation_mask    = 0;
-	uint32_t ps_perspective_center_vgpr   = UINT32_MAX;
-	uint32_t ps_perspective_centroid_vgpr = UINT32_MAX;
+	uint32_t                                       interpolator_settings[32]    = {0};
+	uint32_t                                       input_num                    = 0;
+	uint32_t                                       wave_size                    = 64;
+	uint32_t                                       ps_system_input_base         = 0;
+	uint32_t                                       custom_interpolation_mask    = 0;
+	uint32_t                                       ps_perspective_center_vgpr   = UINT32_MAX;
+	uint32_t                                       ps_perspective_centroid_vgpr = UINT32_MAX;
 	// First VGPR of the other SPI_PS_INPUT I/J pairs, UINT32_MAX when not enabled.
-	uint32_t ps_perspective_sample_vgpr = UINT32_MAX;
-	uint32_t ps_linear_sample_vgpr      = UINT32_MAX;
-	uint32_t ps_linear_center_vgpr      = UINT32_MAX;
-	uint32_t ps_linear_centroid_vgpr    = UINT32_MAX;
-	uint8_t  target_output_mode[8]      = {};
+	uint32_t                                       ps_perspective_sample_vgpr   = UINT32_MAX;
+	uint32_t                                       ps_linear_sample_vgpr        = UINT32_MAX;
+	uint32_t                                       ps_linear_center_vgpr        = UINT32_MAX;
+	uint32_t                                       ps_linear_centroid_vgpr      = UINT32_MAX;
+	uint8_t                                        target_output_mode[8]        = {};
 	// CB_SHADER_MASK with KYTY_CB_SHADER_MASK_EXPORTS=1 (MRT export i goes to the i-th target
 	// with a non-zero nibble); UINT32_MAX otherwise (export i goes to target i).
-	uint32_t                                       target_shader_mask    = UINT32_MAX;
-	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping = {};
-	uint32_t                                       scratch_size_dwords   = 0;
-	// EXTRA_LDS_SIZE: LDS reserved beyond the interpolants (VGPR spills to LDS).
-	uint32_t lds_size_dwords              = 0;
-	bool     ps_pos_x                     = false;
-	bool     ps_pos_y                     = false;
-	bool     ps_pos_z                     = false;
-	bool     ps_pos_w                     = false;
-	bool     ps_front_face                = false;
-	bool     ps_ancillary                 = false;
-	bool     ps_no_perspective            = false;
-	bool     ps_pixel_kill_enable         = false;
-	bool     ps_depth_export_enable       = false;
-	bool     ps_sample_mask_export_enable = false;
-	bool     ps_sample_shading            = false;
-	bool     dual_source_blending         = false;
+	uint32_t                                       target_shader_mask           = UINT32_MAX;
+	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
+	uint32_t                                       scratch_size_dwords          = 0;
+	// EXTRA_LDS_SIZE: LDS reserved beyond the interpolants (VGPR spills to LDS); at most 255 * 128
+	// dwords, so 16 bits. The two bytes after it were its always-zero high half in stored journals
+	// and pipeline lists.
+	uint16_t                                       lds_size_dwords              = 0;
+	// KYTY_INT_MRT_OUTPUTS (upstream 26ca60923): exports to UINT and SINT targets, which take
+	// integer outputs of the same signedness. In the old high half of lds_size_dwords (the padding
+	// before `stage` holds the ObjPrimID fields); journals and pipeline lists read them as zero
+	// (ShaderSanitizeStoredInputInfo).
+	uint8_t                                        target_uint_mask             = 0;
+	uint8_t                                        target_sint_mask             = 0;
+	bool                                           ps_pos_x                     = false;
+	bool                                           ps_pos_y                     = false;
+	bool                                           ps_pos_z                     = false;
+	bool                                           ps_pos_w                     = false;
+	// One byte, as ps_front_face alone was: journals and pipeline lists keep their layout (stored
+	// values 0/1 read as all-bits off). all_bits: SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS selects
+	// uint masks instead of float +/-1.
+	bool                                           ps_front_face          : 1  = false;
+	bool                                           ps_front_face_all_bits : 1  = false;
+	bool                                           ps_ancillary                 = false;
+	bool                                           ps_no_perspective            = false;
+	bool                                           ps_pixel_kill_enable         = false;
+	bool                                           ps_depth_export_enable       = false;
+	bool                                           ps_sample_mask_export_enable = false;
+	bool                                           ps_sample_shading            = false;
+	bool                                           dual_source_blending         = false;
 	// Export logical alpha or per-channel source factors through MRT1 after channel swizzling.
-	ShaderAlphaBlendSource alpha_blend_source = ShaderAlphaBlendSource::None;
-	bool                   ps_early_z         = false;
-	bool                   ps_execute_on_noop = false;
-	ShaderStageRuntime     stage;
+	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
+	bool                                           ps_early_z                   = false;
+	bool                                           ps_execute_on_noop           = false;
+	// Last before the runtime field: the fields above keep the offsets older shader journals and
+	// pipeline lists stored.
+	ShaderPixelParameterMode                       parameter_mode = ShaderPixelParameterMode::FirstVertex;
+	// KYTY_FLOAT_STORE_CLAMP: MRT i goes to a 16-bit float render target (bit i); its 32-bit
+	// exports clamp to the half range. In padding before `stage`: the struct keeps its size, and
+	// stored journals and pipeline lists read it as zero (ShaderSanitizeStoredInputInfo).
+	uint8_t                                        target_half_float_mask = 0;
+	// KYTY_OBJPRIM_ID (based on Erlou93/KytyPS5-Yotei): the colour slot that receives the draw's
+	// hardware ObjPrimID write (VGT_OBJECT_ID, plus the primitive index with
+	// PA_CL_OBJPRIM_ID_CNTL.ADD_PIPED_PRIM_ID), 0xff for none. VGT_OBJECT_ID changes every draw, so
+	// the program reads it from push-constant dword objprim_push_dword. In the padding before
+	// `stage` (offsets 213..215): the struct keeps its size; stored journals read them as "none"
+	// (ShaderSanitizeStoredInputInfo).
+	uint8_t                                        objprim_slot           = 0xffu;
+	uint8_t                                        objprim_push_dword     = 0xffu;
+	bool                                           objprim_add_prim_id    = false;
+	ShaderStageRuntime                             stage;
 
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }
+	bool HasObjprimOutput() const { return objprim_slot < 8u; }
 };
+// Journals and pipeline lists store the whole pixel input info: the masks above must stay in padding.
+static_assert(offsetof(ShaderPixelInputInfo, target_uint_mask) == offsetof(ShaderPixelInputInfo, lds_size_dwords) + 2,
+              "ShaderPixelInputInfo: the integer target masks must stay in lds_size_dwords' old high half");
+static_assert(offsetof(ShaderPixelInputInfo, stage) == 216,
+              "ShaderPixelInputInfo layout changed: stored journals and pipeline lists would break");
+
+// Journals and pipeline lists written before async_compute / parameter_mode existed hold padding
+// bytes where those fields now sit (sizeof did not change). Called after a stored input info is
+// copied in: an out-of-range value becomes the default, so it never reaches the translator; the
+// replay's static-key check then skips entries whose stored key does not match.
+inline void ShaderSanitizeStoredInputInfo(ShaderPixelInputInfo& info) {
+	uint8_t mode = 0;
+	std::memcpy(&mode, &info.parameter_mode, 1);
+	if (mode > static_cast<uint8_t>(ShaderPixelParameterMode::Rectangle)) {
+		info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
+	}
+	info.target_half_float_mask = 0;
+	info.objprim_slot           = 0xffu;
+	info.objprim_push_dword     = 0xffu;
+	info.objprim_add_prim_id    = false;
+	info.target_uint_mask       = 0;
+	info.target_sint_mask       = 0;
+}
+inline void ShaderSanitizeStoredInputInfo(ShaderVertexInputInfo& info) {
+	info.clip_space.vte_format = 0;
+}
+inline void ShaderSanitizeStoredInputInfo(ShaderComputeInputInfo& info) {
+	uint8_t async = 0;
+	std::memcpy(&async, &info.async_compute, 1);
+	info.async_compute = async == 1;
+}
+template <typename InputInfo>
+inline void ShaderSanitizeStoredInputInfo(InputInfo& /*info*/) {}
 
 union ShaderStageInputInfo {
 	const ShaderVertexInputInfo*  vertex;
@@ -268,23 +388,26 @@ inline uint32_t ShaderLanesPerInvocation(ShaderType stage, uint32_t wave_size,
                                          ShaderStageInputInfo input) {
 	const auto* workgroup = ShaderWorkgroupInput(stage, input);
 	return workgroup != nullptr && wave_size == 64u && workgroup->host_subgroup_size == 32u ? 2u
-	                                                                                        : 1u;
+	                                                                                      : 1u;
 }
 
 uint32_t ShaderPixelParameterMappedLocation(const ShaderPixelInputInfo& info, uint32_t input);
 // KYTY_CB_SHADER_MASK_EXPORTS=1 (startup, default off; upstream 21a1346e2): colour exports are
 // compact, as on AMD hardware: MRT export i is written to the i-th colour target whose
 // CB_SHADER_MASK nibble is non-zero. Off: export i is written to target i.
-bool ShaderCbShaderMaskExports();
+bool     ShaderCbShaderMaskExports();
+// KYTY_OBJPRIM_ID=1 (startup, default off): the hardware ObjPrimID write (PipelineCache
+// ObjprimIdSlot, ShaderPixelInputInfo::objprim_slot).
+bool     ShaderObjprimIdEnabled();
 // The colour target of MRT export `export_index` under `shader_mask`; UINT32_MAX for none.
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
                                       std::span<const uint32_t> active_inputs, uint32_t input);
-void     ShaderLinkVertexPixelParameters(ShaderVertexInputInfo&      vertex,
-                                         const ShaderPixelInputInfo& pixel);
-void     ShaderLinkVertexPixelParameters(ShaderVertexInputInfo&      vertex,
-                                         const ShaderPixelInputInfo& pixel,
-                                         std::span<const uint32_t>   active_inputs);
+void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
+                                     const ShaderPixelInputInfo& pixel);
+void ShaderLinkVertexPixelParameters(ShaderVertexInputInfo& vertex,
+                                     const ShaderPixelInputInfo& pixel,
+                                     std::span<const uint32_t> active_inputs);
 bool     ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info, uint32_t input);
 bool     ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info, uint32_t input);
 
@@ -375,11 +498,11 @@ struct Shader {
 
 struct ShaderMappedData {
 	Prospero::ShaderBinaryType type {};
-	ShaderUserData*            user_data           = nullptr;
-	ShaderSemantic*            input_semantics     = nullptr;
-	uint32_t                   num_input_semantics = 0;
-	uint32_t                   code_size_bytes     = 0;
-	uint32_t                   scratch_size_dwords = 0;
+	ShaderUserData* user_data           = nullptr;
+	ShaderSemantic* input_semantics     = nullptr;
+	uint32_t        num_input_semantics = 0;
+	uint32_t        code_size_bytes     = 0;
+	uint32_t        scratch_size_dwords = 0;
 };
 
 void ShaderInit();
@@ -387,10 +510,16 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 void ShaderUnmapCode(uint64_t addr, uint64_t size);
 // Changes after every shader map update (draw-prep certificates compare it).
 [[nodiscard]] uint64_t ShaderMapGeneration();
+// GetDeclaredShaderHash for tests: the binary-info hash of the code at shader_addr, or 0.
+uint64_t ShaderDeclaredHashForTest(uint64_t shader_addr, uint32_t code_size_bytes);
+// KYTY_SKIP_INVALID: true (and cleared) when the last PrepareProgram on this thread found the
+// stage undescribable (null or uncommitted vertex tables, a GS that emits no vertex): the draw is
+// skipped. Already logged.
+bool ShaderTakePrepareFailed();
 
-void ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);
-void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info);
-void ShaderDbgDumpInputInfo(const ShaderComputeInputInfo& info);
+void     ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);
+void     ShaderDbgDumpInputInfo(const ShaderPixelInputInfo& info);
+void     ShaderDbgDumpInputInfo(const ShaderComputeInputInfo& info);
 
 } // namespace Libs::Graphics
 

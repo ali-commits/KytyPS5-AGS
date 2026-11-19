@@ -224,8 +224,7 @@ void SetEvaluation(Parameter& parameters, const Pssr::Request& request, Inputs& 
 }
 
 void Load() {
-	if (!Config::Ps5ProEnabled() || Config::GetUpscaler() != Config::Upscaler::DLSS ||
-	    Config::GetDlssFolder().empty()) {
+	if (!Config::PssrDlssEnabled()) {
 		return;
 	}
 	OpenCore();

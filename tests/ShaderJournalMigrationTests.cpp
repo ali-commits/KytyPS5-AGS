@@ -123,6 +123,10 @@ ShaderJournal::Source Vertex(bool mesh = false) {
   }
   std::vector<uint32_t> key;
   BuildStageStaticKey(*expected, key);
+  if (mesh) {
+    // int20 omitted fast_launch and passes before the zero tess count and three resource words.
+    key.erase(key.end() - 6, key.end() - 4);
+  }
   return Source(ShaderJournal::Kind::Vertex, old->logical_stage,
                 Bytes(*old, Legacy::VertexStoredBytes), std::move(key),
                 mesh ? std::vector<uint32_t>{0xd8000000u, 0, 0xbf810000u}

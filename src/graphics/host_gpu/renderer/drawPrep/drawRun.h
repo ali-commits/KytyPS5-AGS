@@ -3,6 +3,7 @@
 
 #include "common/liveSwitch.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -78,6 +79,9 @@ extern Live::Switch g_writes;  // KYTY_DRAW_RUN_WRITES
 extern Live::Switch g_recall;  // KYTY_DRAW_RUN_RECALL
 extern Live::Switch g_image_epoch; // KYTY_DRAW_RUN_IMAGE_EPOCH
 extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
+extern Live::Switch g_targets;       // KYTY_DRAW_RUN_TARGETS
+extern Live::Switch g_pipeswap;      // KYTY_DRAW_RUN_PIPESWAP
+extern Live::Switch g_texdelta;      // KYTY_DRAW_RUN_TEXDELTA (texDelta.h)
 } // namespace Detail
 
 [[nodiscard]] inline Mode GetMode() {
@@ -186,6 +190,56 @@ extern Live::Switch g_cont_eligible; // KYTY_DRAW_RUN_CONT_ELIGIBLE
 	return Detail::g_cont_eligible.Get();
 }
 
+// KYTY_DRAW_RUN_TARGETS (live, default 0; 1 on, verify, exit; with KYTY_DRAW_RUN=1 and
+// KYTY_DRAW_RUN_ACQUIRE, whose records keep their resolved targets): a committed draw that does not
+// continue the run keeps the record's resolved colour and depth targets instead of resolving them
+// again when the resolution's inputs are the record's:
+//  - the targets key (DrawRun::StructureKey's hash of every context register and the user-config
+//    registers but the index offset and object id, i.e. the structure key without the programs
+//    and the T#/S# words) equals the record's, as do the pixel stage's activity and program (its
+//    colour exports select the targets) and the render-target slice offset;
+//  - the run certificate holds as for a continuation: nothing else ran on the command processor
+//    since the record (ActivityEpoch), the same command buffer, tick and rendering instance, and the
+//    record's attachments are unchanged (identity and state, DrawRunImagesUnchanged attachments
+//    only), checked before and again after the draw's buffer work (a change then resolves the
+//    structure late, as a continuation's fallback does).
+// The kept attachments are marked bound as their resolution marks them (BindRenderTarget). At the
+// Sky Garden ~480k draws per 10 s differ from the record only in programs, T# or S# words (same
+// targets). verify: the targets are resolved and compared with the kept ones (DrawRunVerify line);
+// "exit" stops at the first difference.
+[[nodiscard]] inline int64_t TargetsKeepMode() {
+	return Detail::g_targets.Get();
+}
+
+// KYTY_DRAW_RUN_PIPESWAP (live, default 0; 1 on; with KYTY_DRAW_RUN=1 or verify): a draw whose
+// structure key differs from the record's only in the vertex program continues the run with a
+// pipeline swap. At the Sky Garden ~150k draws per 10 s differ from the record in the vertex
+// program alone (same registers, pixel program, T# and S# words).
+//  - the swap key (the structure key with the vertex program left out, DrawRun::StructureKey) equals
+//    the record's; the stage flags, pixel program and slice offset are the record's;
+//  - the two vertex programs declare the same images and samplers (every field of their
+//    descriptions but the user-data source and first use), so the kept vertex-stage texture and
+//    sampler bindings, resolved from the same words, are what the new program's resolution gives;
+//  - both or neither export a viewport index (the scissor union the attachments were claimed for);
+//  - the new vertex program is run-eligible (no address or image writes, GDS or fault buffer); its
+//    buffer writes, when KYTY_DRAW_RUN_WRITES allows them, must not lie over an image of the run;
+//  - the rest of the certificate is a continuation's (activity, command buffer, tick, instance,
+//    validation, images unchanged after the buffer work).
+// It then keeps the targets, textures, samplers, views, acquisition and transitions like a
+// continuation, and like any draw looks up its pipeline (the binding plan's), pushes all its
+// descriptors (no partial push) and records its dynamic state again. Its record eligibility is
+// computed in full (not taken from the record, KYTY_DRAW_RUN_CONT_ELIGIBLE), and the record takes
+// the new vertex program and pipeline layout. Verify mode (KYTY_DRAW_RUN=verify) compares a would-be
+// swap's normal path with the record as for any continuation.
+// KYTY_DRAW_RUN_TEXDELTA (live, default 0; 1 on, 2 verify): texDelta.h.
+[[nodiscard]] inline int64_t TexDeltaMode() {
+	return Detail::g_texdelta.Get();
+}
+
+[[nodiscard]] inline bool PipeSwapEnabled() {
+	return Detail::g_pipeswap.On();
+}
+
 // Command-processor work other than committed draws (GPU thread). Relaxed: written and read by the
 // GPU thread; other threads only bump it.
 // KYTY_DRAW_RUN_QUIET_OPS (default on): two kinds of command-processor work between draws do not
@@ -217,8 +271,13 @@ void NoteForeignActivity(const char* what = "other") noexcept;
 
 // The structure key of a prepared draw (any thread; the preparing thread in parallel mode). 0 when
 // the preparation failed.
+// targets_key (optional): the hash of the registers alone (KYTY_DRAW_RUN_TARGETS); swap_key
+// (optional): the key without the vertex program (KYTY_DRAW_RUN_PIPESWAP); texture_free_key (optional):
+// the key without the T#/S# words (KYTY_DRAW_RUN_TEXDELTA, texDelta.h); 0 with the key.
 [[nodiscard]] uint64_t StructureKey(const HW::Context& context, const HW::UserConfig& user_config,
-                                    const DrawPrep::PreparedDraw& prepared);
+                                    const DrawPrep::PreparedDraw& prepared,
+                                    uint64_t* targets_key = nullptr, uint64_t* swap_key = nullptr,
+                                    uint64_t* texture_free_key = nullptr);
 
 // Why a candidate did not continue its run (after the key matched).
 enum class Miss : uint8_t {
@@ -254,11 +313,92 @@ struct Totals {
 	std::atomic<uint64_t> epoch_skips {0};         // KYTY_DRAW_RUN_IMAGE_EPOCH: checks skipped
 	std::atomic<uint64_t> epoch_checks {0};        // verify: skips checked
 	std::atomic<uint64_t> epoch_mismatches {0};    // verify: a skip would have hidden a change
+	std::atomic<uint64_t> targets_kept {0};        // KYTY_DRAW_RUN_TARGETS (verify: would have)
+	std::atomic<uint64_t> targets_late {0};        // kept, then resolved late (attachments changed)
+	std::atomic<uint64_t> swap_matches {0};        // KYTY_DRAW_RUN_PIPESWAP: the swap key matched
+	std::atomic<uint64_t> swapped {0};             // continued with a pipeline swap (verify: would have)
+	std::atomic<uint64_t> swap_incompatible {0};   // vertex programs' bindings or outputs differ
 	std::atomic<uint64_t> verify_checks {0};
 	std::atomic<uint64_t> verify_mismatches {0};
 	std::atomic<uint64_t> misses[static_cast<uint32_t>(Miss::Count)] {};
 };
 [[nodiscard]] Totals& GetTotals();
+
+// KYTY_DRAW_RUN_KEY_DIAG (live, default 0; diagnostic only, with KYTY_DRAW_RUN on): why committed
+// draws do not continue the run, per 10 s ("DrawRunKeyDiag 10s: ..." line):
+//  - a draw whose predecessor left no record (m_run_prev_valid false): the predecessor's reason
+//    (ineligible for one of Inelig's reasons, returned before recording, ...), and whether its key
+//    equalled the predecessor's;
+//  - a draw whose key differs from the record's: which register groups / words differ (KeyPart,
+//    overlapping counts and the most frequent exact combinations), whether the key repeats one of
+//    the last 16 records of the same command buffer, tick and rendering instance (with and without
+//    activity in between), and, once the draw resolved its structure, whether its pipeline and
+//    resolved structure (programs, texture views and layouts, samplers, attachment views) are the
+//    previous record's anyway (a key difference that changed nothing the run reuses);
+//  - every ineligible draw by its first failing condition.
+// The structure key's parts are hashed by the preparing thread only while the switch is on.
+enum KeyPart : uint32_t {
+	KpTargets,     // colour targets but their clear words, and the target mask
+	KpClear,       // colour targets' clear words
+	KpDepth,       // depth target registers
+	KpBlend,       // blend controls, colour control
+	KpBlendColor,  // blend constant
+	KpDepthState,  // depth control, render control/override, count control, depth bounds
+	KpStencil,     // stencil control and masks (reference values)
+	KpClearValues, // depth and stencil clear values
+	KpViewport,    // viewports, scissors, guard bands, clip control
+	KpRaster,      // line width, primitive reset index, scan mode, AA, mode control, poly offset, EQAA
+	KpShRegs,      // shader stages and the context shader registers
+	KpUserConfig,  // user-config registers but the index offset and object id
+	KpVsProgram,   // vertex program (and stage flags)
+	KpPsProgram,   // pixel program
+	KpVsT,         // T# words of the vertex stage
+	KpVsS,         // S# words of the vertex stage
+	KpPsT,         // T# words of the pixel stage
+	KpPsS,         // S# words of the pixel stage
+	KpCount
+};
+using KeyParts = std::array<uint64_t, KpCount>;
+
+[[nodiscard]] bool KeyDiagEnabled();
+// The preparing thread, with the key: one hash per part.
+void StructureKeyParts(const HW::Context& context, const HW::UserConfig& user_config,
+                       const DrawPrep::PreparedDraw& prepared, KeyParts& parts);
+
+namespace KeyDiag {
+// The first failing condition of the record eligibility (renderDraw.cpp), or what left no record.
+enum class Inelig : uint8_t {
+	None,          // recorded
+	NotReached,    // the draw returned before the eligibility check (or no draw yet)
+	NotEngine,     // not an engine commit
+	NotValidated,  // the preparation was not validated
+	NoKey,         // structure key 0 (preparation failed)
+	Mesh,
+	Indirect,
+	VertexStages,  // more than one vertex stage
+	Writes,        // shader writes with KYTY_DRAW_RUN_WRITES off
+	Feedback,      // attachment feedback
+	NoRendering,   // no rendering instance
+	RenderState,   // RenderStateFast(Reset) off
+	DebugDump,
+	DepthClear,
+	StencilClear,
+	ColorClear,
+	Gds,
+	Program,       // program not eligible (BDA/image writes, GDS, fault buffer)
+	TexAttachment, // a texture is an attachment
+	Storage,       // a storage image binding
+	DepthPromotion,// DrawRunRecordDraw: depth promotion excluded
+	Alias,         // DrawRunRecordDraw: a texture over an attachment
+	Count
+};
+// GPU thread.
+void CountIneligible(Inelig reason) noexcept;
+void CountPrevInvalid(Inelig prev, bool same_key) noexcept;
+// A key difference; returns the combination's table index for CountResolved (-1: table full).
+int CountKeyMismatch(uint32_t mask, bool recallable, bool recallable_any_activity) noexcept;
+void CountResolved(int index, bool same_pipeline, bool same_structure) noexcept;
+} // namespace KeyDiag
 
 void CountMiss(Miss miss) noexcept;
 // Verify mode: one comparison, and a difference (counted, logged; exit mode stops).

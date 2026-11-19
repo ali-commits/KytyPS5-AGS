@@ -95,6 +95,29 @@ public:
 	// scratch) and a completion callback compares both results byte for byte (FrameEvent
 	// TilerImageVerifyChecks / TilerImageVerifyMismatches; the first mismatches are logged).
 	[[nodiscard]] static bool ImageDirectVerifyEnabled();
+	// KYTY_TILER_CAS (default 0): 8- and 16-bit elements are merged into their words with one
+	// compare-and-swap loop instead of an atomicAnd plus an atomicOr (strxno/KytyPS5-GT7
+	// c0afe8d27). The resulting words are the same; only the atomics differ. Read once, at the
+	// first pipeline creation (a specialization constant of the tiler shaders).
+	[[nodiscard]] static bool SubwordCas();
+	// Scratch lifetime: a scratch buffer (GetScratchBuffer, Detile, TransformColor, the internal
+	// passes) returns to the pool or is destroyed once the scheduler tick that last used it has
+	// completed. Without a ScratchHold that is the tick current at allocation, which is enough
+	// only when the caller is done with the buffer before anything can submit that tick.
+	// Inside a ScratchHold the releases wait for the outermost hold to end and are stamped with
+	// the tick current then. A TextureCache operation that keeps using a scratch buffer after
+	// further work that may submit the current tick (a tile pass's StreamBuffer::Map wrap, a
+	// buffer-cache upload's staging wrap, ...) must hold one for its whole duration; otherwise
+	// the buffer could be reused or freed while a later tick still reads or writes it.
+	class ScratchHold final {
+	public:
+		explicit ScratchHold(TileManager& tiler): m_tiler(tiler) { m_tiler.BeginScratchHold(); }
+		~ScratchHold() { m_tiler.EndScratchHold(); }
+		KYTY_CLASS_NO_COPY(ScratchHold);
+
+	private:
+		TileManager& m_tiler;
+	};
 	[[nodiscard]] Result GetScratchBuffer(uint64_t size);
 	// KYTY_VRAM_STATS: idle pooled scratch bytes and their limit.
 	[[nodiscard]] std::pair<uint64_t, uint64_t> ScratchPoolBytes();
@@ -163,8 +186,13 @@ private:
 	                                             uint64_t active, uint32_t remaining,
 	                                             uint64_t alignment, uint64_t max_range,
 	                                             uint32_t max_groups) noexcept;
+	// Hands `scratch` to the scheduler (or, inside a ScratchHold, to the hold) for release once
+	// its last tick completed; DeferRelease stamps the current tick.
 	void                          DeferDestroy(Scratch scratch);
+	void                          DeferRelease(Scratch scratch);
 	void                          ReleaseScratch(Scratch scratch);
+	void                          BeginScratchHold();
+	void                          EndScratchHold();
 	// image_regions (image variants): element (x, y) of infos[i] is view texel
 	// (imageOffset / image_texel + (x, y)) of image_regions[i]; with image_layer_views each region
 	// has its own single-layer view (layer 0 of the view), otherwise the view holds every layer.
@@ -223,6 +251,10 @@ private:
 	std::chrono::milliseconds               m_scratch_idle {0};
 	std::chrono::steady_clock::time_point   m_scratch_trim_next {};
 	bool                                    m_clear_detile_scratch = false;
+	// ScratchHold nesting depth and the scratch buffers whose release waits for its end.
+	std::mutex                              m_hold_mutex;
+	uint32_t                                m_hold_depth = 0;
+	std::vector<Scratch>                    m_held;
 };
 
 } // namespace Libs::Graphics

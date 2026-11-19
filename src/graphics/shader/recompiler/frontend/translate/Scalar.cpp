@@ -19,7 +19,21 @@ void Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_CMOV_B64: ScalarSelect64(inst, inst.dst); return;
 		case O::S_CMOV_B32:
 		case O::S_CMOVK_I32: S_CMOV_B32(inst); return;
-		case O::S_SETREG_B32: EmitControlNop(); return;
+		case O::S_GETREG_B32:
+			if (!graphics_compute || (inst.src0.value != 0x1818u && inst.src0.value != 0x0a18u))
+				EXIT("unsupported S_GETREG_B32 at pc 0x%08x: selector=0x%04x graphics_compute=%u",
+				     inst.pc, inst.src0.value, static_cast<unsigned>(graphics_compute));
+			// HW_ID2 identifies graphics compute as QUEUE=6, ME=0.
+			WriteOperand(inst.dst, IR::Value(inst.src0.value == 0x1818u ? 6u : 0u));
+			return;
+		case O::S_SETREG_B32:
+			// hwreg id = SIMM16[5:0]; 25 = POPS_PACKER opens a POPS (primitive-ordered pixel
+			// shading) section (KYTY_POPS_INTERLOCK, ShaderInfo::pops). The write itself stays a no-op.
+			if (program.stage == ShaderType::Pixel && (inst.src1.value & 0x3fu) == 25u) {
+				program.info.pops = true;
+			}
+			EmitControlNop();
+			return;
 		case O::S_WAITCNT_VSCNT: S_WAITCNT_VSCNT(inst); return;
 		case O::S_WAITCNT: S_WAITCNT(inst); return;
 
@@ -207,12 +221,29 @@ void Translator::EmitScalar(const Decoder::Instruction& inst) {
 			                        IR::U32(ir.Emit(IR::ValueOpcode::BitReverse32, {value[0]}))});
 			return;
 		}
+		case O::S_BCNT0_I32_B32:
+		case O::S_FF0_I32_B32: {
+			const auto value = ir.BitwiseNot(ReadU32(inst.src0));
+			const bool count = inst.opcode == O::S_BCNT0_I32_B32;
+			const auto result = IR::U32(ir.Emit(count ? IR::ValueOpcode::BitCount32
+			                                       : IR::ValueOpcode::FindILsb32, {value}));
+			WriteOperand(inst.dst, result);
+			if (count) {
+				ir.SetScc(ir.INotEqual(result, IR::U32(IR::Value(0u))));
+			}
+			return;
+		}
 		case O::S_BCNT1_I32_B32:
 			return SimpleInteger(inst, IR::ValueOpcode::BitCount32, IR::Type::U32, false, false,
 			                     true);
+		case O::S_BCNT0_I32_B64:
 		case O::S_BCNT1_I32_B64: {
 			// Vulkan bit counts operate on 32-bit words; avoid packing only to split again.
-			const auto value  = ReadU32Pair(inst.src0);
+			auto value = ReadU32Pair(inst.src0);
+			if (inst.opcode == O::S_BCNT0_I32_B64) {
+				value[0] = ir.BitwiseNot(value[0]);
+				value[1] = ir.BitwiseNot(value[1]);
+			}
 			const auto low    = IR::U32(ir.Emit(IR::ValueOpcode::BitCount32, {value[0]}));
 			const auto high   = IR::U32(ir.Emit(IR::ValueOpcode::BitCount32, {value[1]}));
 			const auto result = ir.IAdd(low, high);
@@ -250,16 +281,32 @@ void Translator::EmitScalar(const Decoder::Instruction& inst) {
 			return ComposedIntegerBinary(inst, IR::ValueOpcode::BitwiseOr32, false, true, true);
 		case O::S_XNOR_B32:
 			return ComposedIntegerBinary(inst, IR::ValueOpcode::BitwiseXor32, false, true, true);
+		case O::S_FF0_I32_B64: {
+			auto source = ReadU32Pair(inst.src0);
+			source[0] = ir.BitwiseNot(source[0]);
+			source[1] = ir.BitwiseNot(source[1]);
+			const auto low_lsb       = IR::U32(ir.Emit(IR::ValueOpcode::FindILsb32, {source[0]}));
+			const auto high_lsb      = IR::U32(ir.Emit(IR::ValueOpcode::FindILsb32, {source[1]}));
+			const auto high_position = ir.IAdd(high_lsb, IR::U32(IR::Value(32u)));
+			const auto result        = ir.Select(ir.INotEqual(source[0], IR::U32(IR::Value(0u))), low_lsb,
+			                                     ir.Select(ir.INotEqual(source[1], IR::U32(IR::Value(0u))),
+			                                               high_position, IR::U32(IR::Value(0xffffffffu))));
+			WriteOperand(DestinationOperand(inst), result);
+			return;
+		}
 		case O::S_FF1_I32_B64: return S_FF1_I32_B64(inst);
 		case O::S_FLBIT_I32_B32: return V_FFBH_32(inst, false);
 		case O::S_FLBIT_I32_B64: return S_FLBIT_I32_B64(inst);
+		case O::S_FLBIT_I32: return V_FFBH_32(inst, true);
+		case O::S_FLBIT_I32_I64: return S_FLBIT_I32_B64(inst, true);
 
 		case O::S_BITSET0_B32: return S_BITSET_B32(inst, false);
 		case O::S_BITSET1_B32: return S_BITSET_B32(inst, true);
 		case O::S_BITSET0_B64: return S_BITSET_B64(inst, false);
 		case O::S_BITSET1_B64: return S_BITSET_B64(inst, true);
 		case O::S_BITREPLICATE_B64_B32: return S_BITREPLICATE_B64_B32(inst);
-		case O::S_QUADMASK_B64: return S_QUADMASK_B64(inst);
+		case O::S_QUADMASK_B32: return S_QUADMASK(inst, false);
+		case O::S_QUADMASK_B64: return S_QUADMASK(inst, true);
 		case O::S_BFM_B32: return BFM_B32(inst);
 		case O::S_BFM_B64: return S_BFM_B64(inst);
 		case O::S_BFE_U32: return S_BFE_U32(inst, false);
@@ -291,8 +338,11 @@ void Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_CBRANCH_EXECZ:
 		case O::S_CBRANCH_EXECNZ:
 		case O::S_CBRANCH_CDBGSYS:
+		case O::S_CBRANCH_CDBGUSER:
 		case O::S_CBRANCH_CDBGSYS_OR_USER:
+		case O::S_CBRANCH_CDBGSYS_AND_USER:
 		case O::S_ENDPGM: return;
+		case O::S_KYTY_CALL_STATE: S_KYTY_CALL_STATE(inst); return;
 		default: return FailMissingTranslation(inst);
 	}
 }

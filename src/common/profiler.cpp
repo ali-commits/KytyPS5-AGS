@@ -5,6 +5,7 @@
 #include "common/hangTrace.h"
 #include "common/hangWatchdog.h"
 #include "common/stringUtils.h"
+#include "common/threads.h"
 
 #include <algorithm>
 #include <array>
@@ -535,6 +536,7 @@ constexpr std::array<const char*, kFrameEventCount> kFrameEventNames {
     "FrameEvent.EqueueCoalescedTriggers.Cumulative",
     "FrameEvent.EqueueCoalescedDataChanges.Cumulative",
     "FrameEvent.DrawPrepColdWakes.Cumulative",
+    "FrameEvent.DrawPrepServedInWait.Cumulative",
     "FrameEvent.RenderStateVertexPartialCopies.Cumulative",
     "FrameEvent.RenderStateVertexFullCopies.Cumulative",
     "FrameEvent.RenderStateMinimalResets.Cumulative",
@@ -717,6 +719,10 @@ constexpr std::array<const char*, kFrameEventCount> kFrameEventNames {
     "FrameEvent.BdaSettleCpuDirtyPages.Cumulative",
     "FrameEvent.VariantPlanSkips.Cumulative",
     "FrameEvent.BdaLoggedStores.Cumulative",
+    "FrameEvent.TextureDiscardedTargetSkips.Cumulative",
+    "FrameEvent.UnmapDrainSkips.Cumulative",
+    "FrameEvent.ClampRangeBitmapHits.Cumulative",
+    "FrameEvent.WriteDataGpuReleased.Cumulative",
 };
 static_assert(kFrameEventNames.back() != nullptr, "FrameEvent names must match the enum");
 
@@ -1288,10 +1294,12 @@ void EndBlock() {
 }
 
 void SetThreadName(const char* name) {
-	if (name == nullptr) return;
+	if (name == nullptr) {
+		return;
+	}
 	HangWatchdog::SetThreadName(name);
+	Common::NameCurrentThreadForOs(name);
 #if defined(__linux__)
-	// KYTY_CPU_RESERVE_LINUX (common/cpuPlacement.h): a thread the CP started inherited its core.
 	Common::PlaceNewThread();
 #endif
 	if (tracy::ProfilerAvailable()) {

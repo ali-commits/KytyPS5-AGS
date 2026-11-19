@@ -93,13 +93,23 @@ bool Store(ShaderJournal::Source& source, Info& info, std::string& reason) {
 	info.stage = {};
 	std::vector<uint32_t> key;
 	BuildStageStaticKey(info, key);
-	if (key != source.static_state) {
+	bool matches = key == source.static_state;
+	if constexpr (std::is_same_v<Info, ShaderVertexInputInfo>) {
+		if (info.mesh.threads_num[0] != 0) {
+			// int20 stored neither fast_launch nor passes. These two words come directly
+			// before the absent tessellation's control-point count and the resource keys.
+			auto legacy_key = key;
+			const auto new_fields = legacy_key.end() - (3 * info.resources_num + 3);
+			legacy_key.erase(new_fields, new_fields + 2);
+			matches = legacy_key == source.static_state;
+		}
+	}
+	if (!matches) {
 		reason = "stored input fields do not reconstruct the int20 static key";
 		return false;
 	}
 	const auto* bytes = reinterpret_cast<const uint8_t*>(&info);
 	source.input_info.assign(bytes, bytes + ShaderStoredInputInfoSize<Info>());
-	// Equal by construction: old pipeline-journal permutation identities remain valid.
 	source.static_state = std::move(key);
 	return true;
 }
@@ -225,8 +235,18 @@ bool ConvertInt20Source(ShaderJournal::Source& source, std::string& reason) {
 			COPY(wave_size);
 			COPY(scratch_size_dwords);
 			COPY(pa_cl_vs_out_cntl);
-			COPY(clip_space);
-			COPY(mesh);
+			COPY(clip_space.enabled);
+			std::ranges::copy(old->clip_space.scale, info->clip_space.scale);
+			std::ranges::copy(old->clip_space.offset, info->clip_space.offset);
+			std::ranges::copy(old->clip_space.half_extent, info->clip_space.half_extent);
+			static_cast<ShaderWorkgroupInputInfo&>(info->mesh) = old->mesh;
+			COPY(mesh.input_primitive);
+			COPY(mesh.primitives_per_group);
+			COPY(mesh.vertices_per_group);
+			COPY(mesh.max_vertices);
+			COPY(mesh.max_primitives);
+			COPY(mesh.provoking_vertex);
+			COPY(mesh.split_groups);
 			COPY(fetch_external);
 			COPY(fetch_embedded);
 			COPY(start_instance_sgpr);
@@ -287,6 +307,9 @@ bool ConvertInt20Source(ShaderJournal::Source& source, std::string& reason) {
 				return fail("unknown int20 compute layout or stage");
 			ShaderComputeInputInfo info {};
 			std::memcpy(&info, source.input_info.data(), sizeof(info));
+			// Both fields occupied padding in the int20 compute record.
+			info.async_compute = false;
+			info.dispatch_dimensions_indirect = false;
 			return Store(source, info, reason);
 		}
 	}

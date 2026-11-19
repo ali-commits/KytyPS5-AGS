@@ -44,6 +44,7 @@ constexpr Type AddressResource = Type::AddressResource;
 constexpr Type ImageResource   = Type::ImageResource;
 constexpr Type SamplerResource = Type::SamplerResource;
 constexpr Type ImageAddress    = Type::ImageAddress;
+constexpr Type Bvh8Result      = Type::Bvh8Result;
 
 constexpr std::array<OpcodeMeta, static_cast<size_t>(ValueOpcode::Count)> MetaTable = {{
 #define VALUE_OPCODE(name, ...) MakeMeta(#name __VA_OPT__(, ) __VA_ARGS__),
@@ -93,9 +94,25 @@ bool HasSideEffects(ValueOpcode opcode) {
 		case ValueOpcode::SetAttribute:
 		case ValueOpcode::SetTessellationAttribute:
 		case ValueOpcode::MeshAllocate:
-		case ValueOpcode::DataCacheInvalidate:
 		case ValueOpcode::StoreCompletion:
+		case ValueOpcode::DataCacheInvalidate:
+		case ValueOpcode::CallStateStore:
+		case ValueOpcode::CallStateStoreChanged:
+		case ValueOpcode::CallStateProbe:
+		case ValueOpcode::CallStateReport:
 		case ValueOpcode::Barrier:
+		// The ray queries keep per-lane state between these operations.
+		case ValueOpcode::RayQueryInit:
+		case ValueOpcode::RayQueryNext:
+		case ValueOpcode::RayQueryMatch:
+		case ValueOpcode::RayQueryCandidate:
+		case ValueOpcode::RayQueryFlag:
+		case ValueOpcode::RayQuerySave:
+		case ValueOpcode::RayQueryResolve:
+		case ValueOpcode::RayQueryExit:
+		case ValueOpcode::RayQueryKeep:
+		case ValueOpcode::RayQueryKept:
+		case ValueOpcode::RayQueryCount:
 		case ValueOpcode::SharedMemoryBarrier: return true;
 		default: return false;
 	}
@@ -194,6 +211,8 @@ SharedAccess SharedAccessOf(ValueOpcode opcode) {
 		case ValueOpcode::SharedAtomicSMin32:
 		case ValueOpcode::SharedAtomicUMin32:
 		case ValueOpcode::SharedAtomicSMax32:
+		case ValueOpcode::SharedAtomicUMax64:
+		case ValueOpcode::SharedAtomicCmpSwap64:
 		case ValueOpcode::SharedAtomicUMax32:
 		case ValueOpcode::SharedAtomicCmpSwap32:
 		case ValueOpcode::SharedAtomicAnd32:
@@ -211,6 +230,8 @@ uint32_t SharedComponentCount(ValueOpcode opcode) {
 	switch (opcode) {
 		case ValueOpcode::SharedAtomicIAdd64:
 		case ValueOpcode::SharedAtomicOr64:
+		case ValueOpcode::SharedAtomicUMax64:
+		case ValueOpcode::SharedAtomicCmpSwap64:
 		case ValueOpcode::LoadSharedU32x2:
 		case ValueOpcode::WriteSharedU32x2: return 2u;
 		case ValueOpcode::LoadSharedU32x3:
@@ -227,6 +248,7 @@ AddressOpcodeInfo AddressOpcodeInfoOf(ValueOpcode opcode) {
 		case ValueOpcode::LoadAddressU16: return {AddressAccess::Read, 16u};
 		case ValueOpcode::LoadAddressU32: return {AddressAccess::Read, 32u};
 		case ValueOpcode::BvhIntersectRay: return {AddressAccess::Read, 32u};
+		case ValueOpcode::Bvh8IntersectRay: return {AddressAccess::Read, 32u};
 		case ValueOpcode::StoreAddressU8: return {AddressAccess::Write, 8u};
 		case ValueOpcode::StoreAddressU16: return {AddressAccess::Write, 16u};
 		case ValueOpcode::StoreAddressU32: return {AddressAccess::Write, 32u};
@@ -242,6 +264,8 @@ ImageOpcodeInfo ImageOpcodeInfoOf(ValueOpcode opcode) {
 		case ValueOpcode::ImageSampleRaw:
 		case ValueOpcode::ImageGatherRaw:
 			return {ImageAccess::Read, ImageResourceClass::Sampled, true};
+		case ValueOpcode::ImageReadStorage:
+			return {ImageAccess::Read, ImageResourceClass::Storage, false};
 		case ValueOpcode::ImageWrite:
 			return {ImageAccess::Write, ImageResourceClass::Storage, false};
 		case ValueOpcode::ImageAtomicSwap32:

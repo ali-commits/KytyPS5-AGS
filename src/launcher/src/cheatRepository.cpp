@@ -1,5 +1,7 @@
 #include "cheatRepository.h"
 
+#include "cheatFile.h"
+
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
@@ -176,17 +178,23 @@ void CheatRepository::Load(const QString& title_id) {
 
 void CheatRepository::Fetch(const RemoteFile& file) {
 	CancelFetch();
-	if (!file.IsSupported()) {
-		emit FileLoaded({}, tr("Only JSON cheat files are supported."));
+	const auto url = file.Url();
+	if (url.isEmpty()) {
+		emit FileLoaded({}, tr("Invalid cheat file."));
 		return;
 	}
 	const auto generation = m_fetch_generation;
-	m_file_reply = Request(file.Url(), kFileLimit,
-	                       [this, generation](const QByteArray& data, const QString& error) {
-		                       if (generation == m_fetch_generation) {
-			                       emit FileLoaded(data, error);
-		                       }
-	                       });
+	m_file_reply =
+	    Request(url, kFileLimit,
+		        [this, generation, format = file.format](QByteArray data, QString error) {
+		            if (generation != m_fetch_generation) {
+			            return;
+		            }
+		            if (error.isEmpty() && format != QStringLiteral("json")) {
+			            error = ConvertTrainer(&data, format == QStringLiteral("mc4"));
+		            }
+		            emit FileLoaded(data, error);
+	            });
 }
 
 void CheatRepository::CancelFetch() {

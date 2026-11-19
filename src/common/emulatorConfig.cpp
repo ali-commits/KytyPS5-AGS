@@ -34,6 +34,8 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
 	*g_config = cfg;
+	Detail::g_graphics_debug_dump_enabled = cfg.graphics_debug_dump_enabled;
+	Detail::g_sync_raw_image_buffers = cfg.sync_raw_image_buffers;
 	Common::DebugCounters::SetOverlayVisible(cfg.perf_overlay_enabled);
 }
 
@@ -171,12 +173,21 @@ uint32_t LowLatencyFpsLimit() {
 	return limit == 0 ? 0 : std::clamp(limit, 10u, 360u);
 }
 
+bool StretchEnabled() {
+	return g_config->stretch_enabled;
+}
+
 bool VrEnabled() {
 	return g_config->vr_enabled;
 }
 
 bool Ps5ProEnabled() {
 	return g_config->pro_enabled;
+}
+
+bool PssrDlssEnabled() {
+	return g_config->pro_enabled && !g_config->dlss_folder.empty() &&
+	       (g_config->pssr_dlss_enabled || g_config->upscaler == Upscaler::DLSS);
 }
 
 const std::filesystem::path& GetDlssFolder() {
@@ -195,6 +206,10 @@ const std::string& GetAmdCpuDecision() {
 	return g_config->amd_cpu_decision;
 }
 
+bool GuestTscEnabled() {
+	return g_config->guest_tsc_enabled;
+}
+
 uint32_t GetVblankFrequency() {
 	return std::clamp(g_config->vblank_frequency, 30u, 360u);
 }
@@ -211,8 +226,16 @@ bool IsNetworkConnected() {
 	return g_config->network_connected;
 }
 
+bool PsnEmulationEnabled() {
+	return g_config->psn_emulation_enabled;
+}
+
 bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
+}
+
+bool ShaderCacheEnabled() {
+	return g_config->shader_cache_enabled;
 }
 
 ShaderOptimizationType GetShaderOptimizationType() {
@@ -233,10 +256,6 @@ bool CommandBufferDumpEnabled() {
 
 std::filesystem::path GetCommandBufferDumpFolder() {
 	return g_config->command_buffer_dump_folder;
-}
-
-bool GraphicsDebugDumpEnabled() {
-	return g_config->graphics_debug_dump_enabled;
 }
 
 LogDirection GetPrintfDirection() {
@@ -271,16 +290,32 @@ bool ReadbackTiledImagesEnabled() {
 	return g_config->readback_tiled_images;
 }
 
-bool SyncRawImageBuffersEnabled() {
-	return g_config->sync_raw_image_buffers;
-}
-
 bool SupportZmaskEnabled() {
 	return g_config->support_zmask;
 }
 
+bool ReadbackStorageImagesEnabled() {
+	return g_config->readback_storage_images;
+}
+
+uint32_t GetFlushDraws() {
+	return g_config->flush_draws;
+}
+
 bool TessellationEnabled() {
 	return g_config->tessellation_enabled;
+}
+
+bool OcclusionQueriesEnabled() {
+	return g_config->occlusion_queries_enabled;
+}
+
+bool RelaxedShaderFloatEnabled() {
+	return g_config->relaxed_shader_float;
+}
+
+bool LodStatsEnabled() {
+	return g_config->lod_stats_enabled;
 }
 
 bool TrophyEnabled() {
@@ -307,6 +342,10 @@ bool RedZoneProtectionEnabled() {
 
 const Keymap& GetKeymap() {
 	return g_config->keymap;
+}
+
+const std::vector<std::string>& GetGuestArguments() {
+	return g_config->guest_arguments;
 }
 
 } // namespace Config

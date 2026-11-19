@@ -12,8 +12,10 @@
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/u59Preset.h"
+#include "graphics/host_gpu/renderer/nativeRayTracing.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineList.h"
 #include "graphics/presentation/window.h"
+#include "graphics/shader/recompiler/CodegenOptions.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -23,10 +25,10 @@
 #include "libs/controller.h"
 #include "libs/libs.h"
 #include "libs/network.h"
+#include "libs/wheelHost.h"
 #include "loader/additionalContent.h"
 #include "loader/runtimeLinker.h"
 #include "loader/systemContent.h"
-#include "loader/timer.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -101,22 +103,25 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 
 	if (Common::File::IsFileExisting(param_json)) {
 		Loader::SystemContentLoadParamSfo(param_json);
-		if (const auto flexible_memory_size = Loader::SystemContentGetFlexibleMemorySize();
-		    flexible_memory_size != 0) {
-			Libs::LibKernel::Memory::SetFlexibleMemorySize(flexible_memory_size);
-		}
 	}
 
 	// Initialization order is explicit; destruction is automatic and reversed.
-	subsystems.Initialize<Loader::Timer::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
 	subsystems.Initialize<Profiler::Lifecycle>();
 	subsystems.Initialize<Libs::Network::Lifecycle>();
+	// KYTY_RT_HW: the Windows ray tracing driver runtime needs low virtual addresses that the guest
+	// reservation below would own (vkCreateDevice with ray tracing then fails with
+	// VK_ERROR_INITIALIZATION_FAILED): a temporary ray tracing device initializes it first.
+	if (Libs::Graphics::ShaderRecompiler::GetCodegenOptions().rt_hw) {
+		Libs::Graphics::PrepareNativeRayTracingRuntime(cfg.gpu_index);
+	}
 	subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::FileSystem::Lifecycle>();
 	subsystems.Initialize<Libs::Controller::Lifecycle>();
 	subsystems.Initialize<Libs::Audio::Lifecycle>();
 	subsystems.Initialize<Libs::Graphics::Lifecycle>();
+	// After the window: SDL is initialised there, on this thread.
+	subsystems.Initialize<Libs::Wheel::Lifecycle>();
 }
 
 static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = false,
@@ -137,13 +142,9 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 }
 
 static void Execute(const std::filesystem::path& game_patch) {
-	auto           patch_path = game_patch;
-	Common::Thread guest_thread(
-	    [](void* param) {
-		    auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
-		    rt->Execute(*static_cast<const std::filesystem::path*>(param));
-	    },
-	    &patch_path);
+	std::thread([game_patch] {
+		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
+	}).detach();
 	Libs::Graphics::WindowRun();
 	std::quick_exit(0);
 }
@@ -182,6 +183,11 @@ void Run(const RunOptions& options) {
 	     Common::U59Preset::StartupWarnings([](const char* name) { return std::getenv(name); })) {
 		Log::WriteToConsoleAndLog(line);
 	}
+	// The launcher applied u59-preset.<title>.json over the bundled preset for this game.
+	if (const char* title_preset = std::getenv("KYTY_TITLE_PRESET");
+	    title_preset != nullptr && title_preset[0] != '\0') {
+		Log::WriteToConsoleAndLog(fmt::format("Per-title preset applied: {}\n", title_preset));
+	}
 
 	int ok = atexit(KytyClose);
 	EXIT_NOT_IMPLEMENTED(ok != 0);
@@ -195,7 +201,7 @@ void Run(const RunOptions& options) {
 
 	MountSandboxDirs();
 
-	Loader::AddContentLoad(options.addcont_dir, title_id);
+	Loader::AddContentLoad(options.addcont_dir, options.addcont, title_id);
 	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
 	Libs::InitAll(rt->Symbols());
 

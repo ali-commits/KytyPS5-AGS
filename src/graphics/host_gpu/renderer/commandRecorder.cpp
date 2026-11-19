@@ -5,6 +5,7 @@
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/spinGate.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/drawPrep/cpGaps.h"
@@ -18,17 +19,17 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -100,6 +101,7 @@ std::array<std::atomic<CommandRecorder*>, MaxRecorders> g_recorders {};
 std::array<std::atomic<VkCommandBuffer>, MaxRecorders> g_recording {};
 thread_local bool                                      t_replaying = false;
 std::atomic<uint64_t>                                  g_ownership_faults {0};
+std::atomic<uint64_t>                                  g_recorders_busy_ns {0};
 
 size_t RegisterRecorder(CommandRecorder* recorder) {
 	for (size_t i = 0; i < MaxRecorders; i++) {
@@ -414,7 +416,13 @@ struct CommandRecorder::NativeExecutor {
 	}
 
 	// ---- vk::CommandBuffer forwarding ----
-	void beginRendering(const vk::RenderingInfo& info) { command.beginRendering(info); }
+	void beginRendering(const vk::RenderingInfo& info) {
+		if (DeadViewScrubEnabled()) {
+			// KYTY_DEAD_VIEW_SCRUB: the views may have been destroyed since the call was encoded.
+			ScrubDeadRenderingViews(info, "a recorded rendering");
+		}
+		command.beginRendering(info);
+	}
 	void endRendering() { command.endRendering(); }
 	void pipelineBarrier2(const vk::DependencyInfo& info) { command.pipelineBarrier2(info); }
 	void pipelineBarrier(vk::PipelineStageFlags src, vk::PipelineStageFlags dst,
@@ -445,6 +453,15 @@ struct CommandRecorder::NativeExecutor {
 	void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, uint32_t value) {
 		command.fillBuffer(buffer, offset, size, value);
 	}
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color,
+	                     uint32_t count, const vk::ImageSubresourceRange* ranges) {
+		command.clearColorImage(image, layout, color, count, ranges);
+	}
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout,
+	                            const vk::ClearDepthStencilValue* value, uint32_t count,
+	                            const vk::ImageSubresourceRange* ranges) {
+		command.clearDepthStencilImage(image, layout, value, count, ranges);
+	}
 	void bindPipeline(vk::PipelineBindPoint point, vk::Pipeline pipeline) {
 		command.bindPipeline(point, pipeline);
 	}
@@ -457,10 +474,16 @@ struct CommandRecorder::NativeExecutor {
 	// KYTY_RECORDER_DESCRIPTOR_SETS: the CP allocated the set and binds it in a later packet.
 	void updateDescriptorSets(vk::DescriptorSet /*set*/, uint32_t count,
 	                          const vk::WriteDescriptorSet* writes) {
+		if (DeadViewScrubEnabled()) {
+			ScrubDeadDescriptorViews(writes, count, "recorded descriptors");
+		}
 		owner.m_graphics.device.updateDescriptorSets(count, writes, 0, nullptr);
 	}
 	void pushDescriptorSetKHR(vk::PipelineBindPoint point, vk::PipelineLayout layout, uint32_t set,
 	                          uint32_t count, const vk::WriteDescriptorSet* writes) {
+		if (DeadViewScrubEnabled()) {
+			ScrubDeadDescriptorViews(writes, count, "recorded descriptors");
+		}
 		command.pushDescriptorSetKHR(point, layout, set, count, writes);
 	}
 	void pushConstants(vk::PipelineLayout layout, vk::ShaderStageFlags stages, uint32_t offset,
@@ -574,9 +597,16 @@ struct CommandRecorder::NativeExecutor {
 	void writeTimestamp2(vk::PipelineStageFlags2 stage, vk::QueryPool pool, uint32_t query) {
 		command.writeTimestamp2(stage, pool, query);
 	}
-	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
-	                          vk::DeviceSize offset, uint32_t marker) {
+	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer, vk::DeviceSize offset,
+	                          uint32_t marker) {
 		command.writeBufferMarkerAMD(stage, buffer, offset, marker);
+	}
+	void insertDebugLabel(const char* name) {
+		if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdInsertDebugUtilsLabelEXT != nullptr) {
+			vk::DebugUtilsLabelEXT label {};
+			label.pLabelName = name;
+			command.insertDebugUtilsLabelEXT(label);
+		}
 	}
 	// KYTY_STREAM_COPY_DEFER (BufferCache::ObtainBufferNow): the stream copy the CP reserved.
 	void hostCopy(void* destination, uint64_t source, uint64_t size) {
@@ -652,7 +682,9 @@ void CommandRecorder::Drain(const void* site_key, bool is_site) {
 	HangWatchdog::Scope wait("recorder-drain", reinterpret_cast<uint64_t>(this),
 	                         HangWatchdog::Enabled() ? m_ring.WritePosition() : 0,
 	                         HangWatchdog::Enabled() ? m_ring.Consumed() : 0);
-	const auto          start = NowNs();
+	const auto start = NowNs();
+	// KYTY_EMIT_SPLIT_COPIES: copies held back by the encoder are part of what the drain waits for.
+	m_encoder.FlushHostCopies();
 	// Idle: the recorder released everything encoded (published or not), so it executed every
 	// packet and records nothing until the next one. The window opens without a marker and
 	// without waking a parked recorder (the consumer's seq_cst release of the position orders its
@@ -663,7 +695,17 @@ void CommandRecorder::Drain(const void* site_key, bool is_site) {
 	} else {
 		const auto end = m_encoder.DrainMarker(++m_drain_serial);
 		if (m_mode == Mode::Thread) {
-			m_ring.WaitConsumed(end, m_drain_policy, m_drain_stats);
+			// KYTY_SPIN_BUDGET (common/spinGate.h): a short spin while the core budget is exceeded.
+			using Common::SpinGate::Site;
+			auto policy    = m_drain_policy;
+			policy.spin_ns = Common::SpinGate::SpinNs(Site::RecorderDrain, m_drain_policy.spin_ns);
+			const auto spin_tsc = m_drain_stats.spin_tsc;
+			const auto blocks   = m_drain_stats.blocks;
+			m_ring.WaitConsumed(end, policy, m_drain_stats);
+			Common::SpinGate::NoteSpin(Site::RecorderDrain, m_drain_stats.spin_tsc - spin_tsc);
+			if (m_drain_stats.blocks != blocks) {
+				Common::SpinGate::NotePark(Site::RecorderDrain);
+			}
 		}
 	}
 	const auto now = NowNs();
@@ -698,8 +740,24 @@ void CommandRecorder::WaitRecorded(uint64_t tick, bool from_producer) {
 		m_ring.Kick(m_encoder.Stats());
 	}
 	const auto start = NowNs();
+	// KYTY_SPIN_BUDGET (common/spinGate.h): a short spin while the core budget is exceeded.
+	using Common::SpinGate::Site;
+	const auto spin_ns  = Common::SpinGate::SpinNs(Site::RecorderDrain, m_drain_policy.spin_ns);
+	struct SpinNote {
+		uint64_t start = Common::SpinGate::Tsc();
+		bool     open  = true;
+		void     End() {
+			if (open) {
+				open = false;
+				Common::SpinGate::NoteSpin(Site::RecorderDrain, Common::SpinGate::Tsc() - start);
+			}
+		}
+		~SpinNote() { End(); }
+	} note;
 	while (m_recorded_tick.load(std::memory_order_acquire) < tick) {
-		if (NowNs() - start >= m_drain_policy.spin_ns) {
+		if (NowNs() - start >= spin_ns) {
+			note.End(); // the spin ends here
+			Common::SpinGate::NotePark(Site::RecorderDrain);
 			m_recorded_waiters.fetch_add(1, std::memory_order_seq_cst);
 			for (;;) {
 				const auto value = m_recorded_tick.load(std::memory_order_seq_cst);
@@ -777,9 +835,15 @@ void CommandRecorder::Run(std::stop_token stop) {
 		}
 		const auto start = NowNs();
 		ConsumeAvailable();
-		m_busy_ns.fetch_add(NowNs() - start, std::memory_order_release);
+		const auto busy = NowNs() - start;
+		m_busy_ns.fetch_add(busy, std::memory_order_release);
+		g_recorders_busy_ns.fetch_add(busy, std::memory_order_relaxed);
 	}
 	ConsumeAvailable();
+}
+
+uint64_t CommandRecorder::TotalBusyNs() noexcept {
+	return g_recorders_busy_ns.load(std::memory_order_relaxed);
 }
 
 uint64_t CommandRecorder::OwnershipFaults() noexcept {
@@ -916,7 +980,7 @@ void CommandRecorder::PrintDrainLog() {
 #if defined(_WIN32)
 	base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
 #endif
-	char       line[256];
+	char line[256];
 	const auto emit = [&] {
 		std::printf("%s", line);
 		LOGF("%s", line);
@@ -934,9 +998,9 @@ void CommandRecorder::PrintDrainLog() {
 		const double waited_us = per(stats.waited_ns, stats.count - stats.idle);
 		if (key.is_site) {
 			const auto* site = static_cast<const GpuOpProfiler::Site*>(key.key);
-			std::snprintf(line, sizeof(line),
-			              "  %10" PRIu64 " %10" PRIu64 " %8.2f %8.2f  site %s\n", stats.count,
-			              stats.idle, each_us, waited_us, site != nullptr ? site->name : "?");
+			std::snprintf(line, sizeof(line), "  %10" PRIu64 " %10" PRIu64 " %8.2f %8.2f  site %s\n",
+			              stats.count, stats.idle, each_us, waited_us,
+			              site != nullptr ? site->name : "?");
 		} else {
 			const auto address = reinterpret_cast<uintptr_t>(key.key);
 			std::snprintf(line, sizeof(line),
@@ -1070,10 +1134,10 @@ struct GuardPool {
 	std::atomic<uint32_t>      owner {0};
 };
 
-constexpr size_t   GuardSlots     = 16384;
-constexpr size_t   GuardPools     = 64;
-constexpr size_t   GuardTimelines = 64;
-constexpr uint64_t GuardMaxPrint  = 8;
+constexpr size_t GuardSlots      = 16384;
+constexpr size_t GuardPools      = 64;
+constexpr size_t GuardTimelines  = 64;
+constexpr uint64_t GuardMaxPrint = 8;
 
 std::array<GuardEntry, GuardSlots>                   g_guard_entries;
 std::array<GuardPool, GuardPools>                    g_guard_pools;
@@ -1098,13 +1162,11 @@ uint32_t GuardTid() noexcept {
 std::string GuardThreadName(uint32_t tid) {
 #if defined(_WIN32)
 	std::string name = std::to_string(tid);
-	if (HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
-	    thread != nullptr) {
+	if (HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid); thread != nullptr) {
 		PWSTR description = nullptr;
 		if (SUCCEEDED(GetThreadDescription(thread, &description)) && description != nullptr) {
 			char narrow[128] = {};
-			WideCharToMultiByte(CP_UTF8, 0, description, -1, narrow, sizeof(narrow) - 1, nullptr,
-			                    nullptr);
+			WideCharToMultiByte(CP_UTF8, 0, description, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
 			LocalFree(description);
 			if (narrow[0] != '\0') {
 				name += std::string(" '") + narrow + "'";
@@ -1119,8 +1181,7 @@ std::string GuardThreadName(uint32_t tid) {
 }
 
 size_t GuardHash(const void* key) noexcept {
-	return static_cast<size_t>((reinterpret_cast<uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >>
-	                           50u) %
+	return static_cast<size_t>((reinterpret_cast<uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >> 50u) %
 	       GuardSlots;
 }
 
@@ -1128,8 +1189,7 @@ GuardEntry* GuardFind(VkCommandBuffer command) noexcept {
 	if (command == nullptr) {
 		return nullptr;
 	}
-	for (size_t i = 0, slot = GuardHash(command); i < GuardSlots;
-	     i++, slot          = (slot + 1) % GuardSlots) {
+	for (size_t i = 0, slot = GuardHash(command); i < GuardSlots; i++, slot = (slot + 1) % GuardSlots) {
 		const auto key = g_guard_entries[slot].key.load(std::memory_order_acquire);
 		if (key == command) {
 			return &g_guard_entries[slot];
@@ -1158,14 +1218,12 @@ uint32_t GuardPoolIndex(VkCommandPool pool) {
 
 void GuardInsert(VkCommandBuffer command, uint32_t pool) {
 	std::lock_guard lock(g_guard_mutex);
-	for (size_t i = 0, slot = GuardHash(command); i < GuardSlots;
-	     i++, slot          = (slot + 1) % GuardSlots) {
+	for (size_t i = 0, slot = GuardHash(command); i < GuardSlots; i++, slot = (slot + 1) % GuardSlots) {
 		auto&      entry = g_guard_entries[slot];
 		const auto key   = entry.key.load(std::memory_order_acquire);
 		if (key == command || key == nullptr) {
 			entry.pool.store(pool, std::memory_order_relaxed);
-			entry.state.store(static_cast<uint32_t>(GuardState::Initial),
-			                  std::memory_order_relaxed);
+			entry.state.store(static_cast<uint32_t>(GuardState::Initial), std::memory_order_relaxed);
 			entry.semaphore.store(VK_NULL_HANDLE, std::memory_order_relaxed);
 			entry.value.store(0, std::memory_order_relaxed);
 			entry.key.store(command, std::memory_order_release);
@@ -1204,19 +1262,17 @@ void GuardViolation(const char* what, const char* function, VkCommandBuffer comm
 	// Per kind (the what string is a literal): the first few of each.
 	static std::array<std::atomic<const char*>, 16> kinds {};
 	static std::array<std::atomic<uint64_t>, 16>    printed {};
-	size_t                                          kind = kinds.size() - 1;
+	size_t kind = kinds.size() - 1;
 	for (size_t i = 0; i < kinds.size(); i++) {
 		const char* expected = nullptr;
-		if (kinds[i].load() == what || kinds[i].compare_exchange_strong(expected, what) ||
-		    expected == what) {
+		if (kinds[i].load() == what || kinds[i].compare_exchange_strong(expected, what) || expected == what) {
 			kind = i;
 			break;
 		}
 	}
 	const auto of_kind = printed[kind].fetch_add(1, std::memory_order_relaxed) + 1;
 	if (of_kind % 1000 == 0) {
-		std::printf("Kyty command guard: %" PRIu64 " x \"%s\" so far (%" PRIu64
-		            " violations in all)\n",
+		std::printf("Kyty command guard: %" PRIu64 " x \"%s\" so far (%" PRIu64 " violations in all)\n",
 		            of_kind, what, count);
 		std::fflush(stdout);
 	}
@@ -1260,8 +1316,7 @@ void GuardLeave(GuardEntry* entry, uint32_t tid) noexcept {
 
 // Begin / reset / free: the buffer's last submission must have completed.
 void GuardCheckIdle(GuardEntry* entry, const char* function, VkCommandBuffer command) {
-	if (entry->state.load(std::memory_order_acquire) !=
-	    static_cast<uint32_t>(GuardState::Pending)) {
+	if (entry->state.load(std::memory_order_acquire) != static_cast<uint32_t>(GuardState::Pending)) {
 		return;
 	}
 	const auto semaphore = entry->semaphore.load(std::memory_order_acquire);
@@ -1302,10 +1357,8 @@ struct GuardCmdHook<Index, void(VKAPI_PTR*)(VkCommandBuffer, Args...)> {
 			return;
 		}
 		const auto tid = GuardEnter(entry, name, command);
-		if (entry->state.load(std::memory_order_acquire) !=
-		    static_cast<uint32_t>(GuardState::Recording)) {
-			GuardViolation("command into a buffer that is not recording", name, command, entry, 0,
-			               0);
+		if (entry->state.load(std::memory_order_acquire) != static_cast<uint32_t>(GuardState::Recording)) {
+			GuardViolation("command into a buffer that is not recording", name, command, entry, 0, 0);
 		}
 		real(command, args...);
 		GuardLeave(entry, tid);
@@ -1322,17 +1375,17 @@ void InstallGuardHook(Fn& slot, const char* name) {
 	slot                          = &GuardCmdHook<Index, Fn>::Call;
 }
 
-PFN_vkBeginCommandBuffer     g_guard_real_begin        = nullptr;
-PFN_vkEndCommandBuffer       g_guard_real_end          = nullptr;
-PFN_vkResetCommandBuffer     g_guard_real_reset        = nullptr;
-PFN_vkAllocateCommandBuffers g_guard_real_allocate     = nullptr;
-PFN_vkFreeCommandBuffers     g_guard_real_free         = nullptr;
-PFN_vkQueueSubmit            g_guard_real_submit       = nullptr;
-PFN_vkQueueSubmit2           g_guard_real_submit2      = nullptr;
-PFN_vkCreateSemaphore        g_guard_real_semaphore    = nullptr;
-PFN_vkQueuePresentKHR        g_guard_real_present      = nullptr;
-PFN_vkQueueBindSparse        g_guard_real_sparse       = nullptr;
-PFN_vkQueueWaitIdle          g_guard_real_idle         = nullptr;
+PFN_vkBeginCommandBuffer     g_guard_real_begin    = nullptr;
+PFN_vkEndCommandBuffer       g_guard_real_end      = nullptr;
+PFN_vkResetCommandBuffer     g_guard_real_reset    = nullptr;
+PFN_vkAllocateCommandBuffers g_guard_real_allocate = nullptr;
+PFN_vkFreeCommandBuffers     g_guard_real_free     = nullptr;
+PFN_vkQueueSubmit            g_guard_real_submit   = nullptr;
+PFN_vkQueueSubmit2           g_guard_real_submit2  = nullptr;
+PFN_vkCreateSemaphore        g_guard_real_semaphore = nullptr;
+PFN_vkQueuePresentKHR        g_guard_real_present   = nullptr;
+PFN_vkQueueBindSparse        g_guard_real_sparse    = nullptr;
+PFN_vkQueueWaitIdle          g_guard_real_idle      = nullptr;
 PFN_vkDestroyCommandPool     g_guard_real_destroy_pool = nullptr;
 PFN_vkResetCommandPool       g_guard_real_reset_pool   = nullptr;
 
@@ -1363,8 +1416,7 @@ GuardQueue& GuardQueueOf(VkQueue queue) {
 struct GuardQueueScope {
 	GuardQueue& queue;
 	uint32_t    tid;
-	GuardQueueScope(VkQueue handle, const char* function)
-	    : queue(GuardQueueOf(handle)), tid(GuardTid()) {
+	GuardQueueScope(VkQueue handle, const char* function): queue(GuardQueueOf(handle)), tid(GuardTid()) {
 		const auto prev = queue.owner.exchange(tid, std::memory_order_acq_rel);
 		if (prev != 0 && prev != tid) {
 			GuardViolation("two threads in one queue", function, nullptr, nullptr, prev, 0);
@@ -1383,8 +1435,7 @@ VkResult VKAPI_PTR GuardPresent(VkQueue queue, const VkPresentInfoKHR* info) {
 	return g_guard_real_present(queue, info);
 }
 
-VkResult VKAPI_PTR GuardBindSparse(VkQueue queue, uint32_t count, const VkBindSparseInfo* info,
-                                   VkFence fence) {
+VkResult VKAPI_PTR GuardBindSparse(VkQueue queue, uint32_t count, const VkBindSparseInfo* info, VkFence fence) {
 	GuardQueueScope scope(queue, "vkQueueBindSparse");
 	return g_guard_real_sparse(queue, count, info, fence);
 }
@@ -1413,14 +1464,12 @@ void GuardCheckPoolIdle(VkCommandPool pool, const char* function) {
 	}
 }
 
-void VKAPI_PTR GuardDestroyPool(VkDevice device, VkCommandPool pool,
-                                const VkAllocationCallbacks* allocator) {
+void VKAPI_PTR GuardDestroyPool(VkDevice device, VkCommandPool pool, const VkAllocationCallbacks* allocator) {
 	GuardCheckPoolIdle(pool, "vkDestroyCommandPool");
 	g_guard_real_destroy_pool(device, pool, allocator);
 }
 
-VkResult VKAPI_PTR GuardResetPool(VkDevice device, VkCommandPool pool,
-                                  VkCommandPoolResetFlags flags) {
+VkResult VKAPI_PTR GuardResetPool(VkDevice device, VkCommandPool pool, VkCommandPoolResetFlags flags) {
 	GuardCheckPoolIdle(pool, "vkResetCommandPool");
 	return g_guard_real_reset_pool(device, pool, flags);
 }
@@ -1433,8 +1482,7 @@ VkResult VKAPI_PTR GuardBegin(VkCommandBuffer command, const VkCommandBufferBegi
 	const auto tid = GuardEnter(entry, "vkBeginCommandBuffer", command);
 	GuardCheckIdle(entry, "vkBeginCommandBuffer", command);
 	if (entry->state.load() == static_cast<uint32_t>(GuardState::Recording)) {
-		GuardViolation("begin of a buffer that is recording", "vkBeginCommandBuffer", command,
-		               entry, 0, 0);
+		GuardViolation("begin of a buffer that is recording", "vkBeginCommandBuffer", command, entry, 0, 0);
 	}
 	entry->generation.fetch_add(1, std::memory_order_acq_rel);
 	entry->state.store(static_cast<uint32_t>(GuardState::Recording), std::memory_order_release);
@@ -1450,8 +1498,7 @@ VkResult VKAPI_PTR GuardEnd(VkCommandBuffer command) {
 	}
 	const auto tid = GuardEnter(entry, "vkEndCommandBuffer", command);
 	if (entry->state.load() != static_cast<uint32_t>(GuardState::Recording)) {
-		GuardViolation("end of a buffer that is not recording", "vkEndCommandBuffer", command,
-		               entry, 0, 0);
+		GuardViolation("end of a buffer that is not recording", "vkEndCommandBuffer", command, entry, 0, 0);
 	}
 	const auto result = g_guard_real_end(command);
 	entry->state.store(static_cast<uint32_t>(GuardState::Executable), std::memory_order_release);
@@ -1474,12 +1521,11 @@ VkResult VKAPI_PTR GuardReset(VkCommandBuffer command, VkCommandBufferResetFlags
 
 VkResult VKAPI_PTR GuardAllocate(VkDevice device, const VkCommandBufferAllocateInfo* info,
                                  VkCommandBuffer* buffers) {
-	const auto pool = GuardPoolIndex(info->commandPool);
-	const auto tid  = GuardTid();
-	const auto prev = g_guard_pools[pool].owner.exchange(tid, std::memory_order_acq_rel);
+	const auto pool   = GuardPoolIndex(info->commandPool);
+	const auto tid    = GuardTid();
+	const auto prev   = g_guard_pools[pool].owner.exchange(tid, std::memory_order_acq_rel);
 	if (prev != 0 && prev != tid) {
-		GuardViolation("two threads in one command pool", "vkAllocateCommandBuffers", nullptr,
-		               nullptr, prev, 0);
+		GuardViolation("two threads in one command pool", "vkAllocateCommandBuffers", nullptr, nullptr, prev, 0);
 	}
 	const auto result = g_guard_real_allocate(device, info, buffers);
 	if (result == VK_SUCCESS) {
@@ -1492,8 +1538,7 @@ VkResult VKAPI_PTR GuardAllocate(VkDevice device, const VkCommandBufferAllocateI
 	return result;
 }
 
-void VKAPI_PTR GuardFree(VkDevice device, VkCommandPool pool, uint32_t count,
-                         const VkCommandBuffer* buffers) {
+void VKAPI_PTR GuardFree(VkDevice device, VkCommandPool pool, uint32_t count, const VkCommandBuffer* buffers) {
 	for (uint32_t i = 0; i < count; i++) {
 		if (auto* entry = GuardFind(buffers[i]); entry != nullptr) {
 			GuardCheckIdle(entry, "vkFreeCommandBuffers", buffers[i]);
@@ -1503,8 +1548,7 @@ void VKAPI_PTR GuardFree(VkDevice device, VkCommandPool pool, uint32_t count,
 	g_guard_real_free(device, pool, count, buffers);
 }
 
-void GuardSubmitted(VkCommandBuffer command, VkSemaphore semaphore, uint64_t value,
-                    const char* function) {
+void GuardSubmitted(VkCommandBuffer command, VkSemaphore semaphore, uint64_t value, const char* function) {
 	auto* entry = GuardFind(command);
 	if (entry == nullptr) {
 		return;
@@ -1518,20 +1562,18 @@ void GuardSubmitted(VkCommandBuffer command, VkSemaphore semaphore, uint64_t val
 	entry->state.store(static_cast<uint32_t>(GuardState::Pending), std::memory_order_release);
 }
 
-VkResult VKAPI_PTR GuardSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits,
-                               VkFence fence) {
+VkResult VKAPI_PTR GuardSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
 	for (uint32_t s = 0; s < count; s++) {
 		const auto& submit    = submits[s];
 		VkSemaphore semaphore = VK_NULL_HANDLE;
 		uint64_t    value     = 0;
-		for (const auto* next      = static_cast<const VkBaseInStructure*>(submit.pNext);
-		     next != nullptr; next = next->pNext) {
+		for (const auto* next = static_cast<const VkBaseInStructure*>(submit.pNext); next != nullptr;
+		     next             = next->pNext) {
 			if (next->sType != VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
 				continue;
 			}
 			const auto* timeline = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(next);
-			for (uint32_t i = 0;
-			     i < submit.signalSemaphoreCount && i < timeline->signalSemaphoreValueCount; i++) {
+			for (uint32_t i = 0; i < submit.signalSemaphoreCount && i < timeline->signalSemaphoreValueCount; i++) {
 				if (GuardIsTimeline(submit.pSignalSemaphores[i])) {
 					semaphore = submit.pSignalSemaphores[i];
 					value     = timeline->pSignalSemaphoreValues[i];
@@ -1546,8 +1588,7 @@ VkResult VKAPI_PTR GuardSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo
 	return g_guard_real_submit(queue, count, submits, fence);
 }
 
-VkResult VKAPI_PTR GuardSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
-                                VkFence fence) {
+VkResult VKAPI_PTR GuardSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits, VkFence fence) {
 	for (uint32_t s = 0; s < count; s++) {
 		const auto& submit    = submits[s];
 		VkSemaphore semaphore = VK_NULL_HANDLE;
@@ -1559,8 +1600,7 @@ VkResult VKAPI_PTR GuardSubmit2(VkQueue queue, uint32_t count, const VkSubmitInf
 			}
 		}
 		for (uint32_t i = 0; i < submit.commandBufferInfoCount; i++) {
-			GuardSubmitted(submit.pCommandBufferInfos[i].commandBuffer, semaphore, value,
-			               "vkQueueSubmit2");
+			GuardSubmitted(submit.pCommandBufferInfos[i].commandBuffer, semaphore, value, "vkQueueSubmit2");
 		}
 	}
 	GuardQueueScope scope(queue, "vkQueueSubmit2");
@@ -1568,15 +1608,12 @@ VkResult VKAPI_PTR GuardSubmit2(VkQueue queue, uint32_t count, const VkSubmitInf
 }
 
 VkResult VKAPI_PTR GuardCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo* info,
-                                        const VkAllocationCallbacks* allocator,
-                                        VkSemaphore*                 semaphore) {
-	const auto result   = g_guard_real_semaphore(device, info, allocator, semaphore);
+                                        const VkAllocationCallbacks* allocator, VkSemaphore* semaphore) {
+	const auto result = g_guard_real_semaphore(device, info, allocator, semaphore);
 	bool       timeline = false;
-	for (const auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr;
-	     next             = next->pNext) {
+	for (const auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
 		if (next->sType == VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO &&
-		    reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(next)->semaphoreType ==
-		        VK_SEMAPHORE_TYPE_TIMELINE) {
+		    reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(next)->semaphoreType == VK_SEMAPHORE_TYPE_TIMELINE) {
 			timeline = true;
 		}
 	}
@@ -1603,9 +1640,9 @@ struct GuardRef {
 	uint32_t    generation = 0;
 	const char* function   = nullptr;
 };
-std::mutex                             g_guard_ref_mutex;
-std::unordered_map<uint64_t, GuardRef> g_guard_refs;
-std::atomic<uint64_t>                  g_guard_ref_checks {0};
+std::mutex                                 g_guard_ref_mutex;
+std::unordered_map<uint64_t, GuardRef>     g_guard_refs;
+std::atomic<uint64_t>                      g_guard_ref_checks {0};
 
 template <typename Handle>
 uint64_t GuardKey(Handle handle) noexcept {
@@ -1620,7 +1657,7 @@ void GuardNoteRef(VkCommandBuffer command, uint64_t key, const char* function) {
 	if (entry == nullptr) {
 		return;
 	}
-	const GuardRef  ref {entry, entry->generation.load(std::memory_order_acquire), function};
+	const GuardRef ref {entry, entry->generation.load(std::memory_order_acquire), function};
 	std::lock_guard lock(g_guard_ref_mutex);
 	g_guard_refs[key] = ref;
 }
@@ -1632,7 +1669,7 @@ void GuardNoteDestroy(uint64_t key, const char* function) {
 	GuardRef ref;
 	{
 		std::lock_guard lock(g_guard_ref_mutex);
-		const auto      found = g_guard_refs.find(key);
+		const auto found = g_guard_refs.find(key);
 		if (found == g_guard_refs.end()) {
 			return;
 		}
@@ -1646,8 +1683,7 @@ void GuardNoteDestroy(uint64_t key, const char* function) {
 			std::lock_guard lock(g_guard_ref_mutex);
 			live = g_guard_refs.size();
 		}
-		std::printf("Kyty command guard: %" PRIu64
-		            " destroyed handles checked against their last use (%zu tracked)\n",
+		std::printf("Kyty command guard: %" PRIu64 " destroyed handles checked against their last use (%zu tracked)\n",
 		            checks, live);
 		std::fflush(stdout);
 	}
@@ -1658,8 +1694,7 @@ void GuardNoteDestroy(uint64_t key, const char* function) {
 	const auto state = static_cast<GuardState>(entry->state.load(std::memory_order_acquire));
 	char       what[160];
 	if (state == GuardState::Recording || state == GuardState::Executable) {
-		std::snprintf(what, sizeof(what),
-		              "destroy of a handle a not-yet-submitted buffer uses (%s, %s)", function,
+		std::snprintf(what, sizeof(what), "destroy of a handle a not-yet-submitted buffer uses (%s, %s)", function,
 		              ref.function);
 	} else if (state == GuardState::Pending) {
 		const auto semaphore = entry->semaphore.load(std::memory_order_acquire);
@@ -1669,22 +1704,22 @@ void GuardNoteDestroy(uint64_t key, const char* function) {
 		    reached >= entry->value.load(std::memory_order_acquire)) {
 			return;
 		}
-		std::snprintf(what, sizeof(what), "destroy of a handle a pending buffer uses (%s, %s)",
-		              function, ref.function);
+		std::snprintf(what, sizeof(what), "destroy of a handle a pending buffer uses (%s, %s)", function,
+		              ref.function);
 	} else {
 		return;
 	}
 	// The kind key must be a stable literal: one per destroy function.
-	const char* kind  = function;
+	const char* kind = function;
 	const auto  count = g_guard_violations.load(std::memory_order_relaxed);
 	if (count < 64) {
-		std::printf("Kyty command guard: %s: handle 0x%016" PRIx64 " buffer %p (thread %u)\n", what,
-		            key, static_cast<void*>(entry->key.load()), GuardTid());
+		std::printf("Kyty command guard: %s: handle 0x%016" PRIx64 " buffer %p (thread %u)\n", what, key,
+		            static_cast<void*>(entry->key.load()), GuardTid());
 		std::fflush(stdout);
 		LOGF("Kyty command guard: %s: handle 0x%016" PRIx64 "\n", what, key);
 	}
-	GuardViolation("destroy of a handle still used by a command buffer", kind, entry->key.load(),
-	               entry, 0, 0);
+	GuardViolation("destroy of a handle still used by a command buffer", kind,
+	               entry->key.load(), entry, 0, 0);
 }
 
 #define KYTY_GUARD_REAL(name) PFN_##name g_guard_next_##name = nullptr
@@ -1724,11 +1759,11 @@ KYTY_GUARD_REAL(vkAllocateDescriptorSets);
 
 // Descriptor sets: the handles each (binding, element) of a set was last written with; a bind
 // notes them all as used by the command buffer.
-std::mutex                                                               g_guard_set_mutex;
-std::unordered_map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>> g_guard_sets;
+std::mutex                                                                   g_guard_set_mutex;
+std::unordered_map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>>     g_guard_sets;
 
-void VKAPI_PTR GuardRefUpdateDescriptorSets(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w,
-                                            uint32_t nc, const VkCopyDescriptorSet* c) {
+void VKAPI_PTR GuardRefUpdateDescriptorSets(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w, uint32_t nc,
+                                            const VkCopyDescriptorSet* c) {
 	{
 		std::lock_guard lock(g_guard_set_mutex);
 		for (uint32_t i = 0; i < n; i++) {
@@ -1742,9 +1777,8 @@ void VKAPI_PTR GuardRefUpdateDescriptorSets(VkDevice d, uint32_t n, const VkWrit
 				} else if (w[i].pTexelBufferView != nullptr) {
 					handle = GuardKey(w[i].pTexelBufferView[k]);
 				}
-				const uint64_t slot =
-				    (uint64_t {w[i].dstBinding} << 32u) | (w[i].dstArrayElement + k);
-				bool found = false;
+				const uint64_t slot = (uint64_t {w[i].dstBinding} << 32u) | (w[i].dstArrayElement + k);
+				bool           found = false;
 				for (auto& entry: slots) {
 					if (entry.first == slot) {
 						entry.second = handle;
@@ -1762,9 +1796,8 @@ void VKAPI_PTR GuardRefUpdateDescriptorSets(VkDevice d, uint32_t n, const VkWrit
 }
 
 // A set (re)allocated from a reset pool starts with no written descriptors.
-VkResult VKAPI_PTR GuardRefAllocateDescriptorSets(VkDevice                           d,
-                                                  const VkDescriptorSetAllocateInfo* info,
-                                                  VkDescriptorSet*                   sets) {
+VkResult VKAPI_PTR GuardRefAllocateDescriptorSets(VkDevice d, const VkDescriptorSetAllocateInfo* info,
+                                                  VkDescriptorSet* sets) {
 	const auto result = g_guard_next_vkAllocateDescriptorSets(d, info, sets);
 	if (result == VK_SUCCESS) {
 		std::lock_guard lock(g_guard_set_mutex);
@@ -1775,10 +1808,9 @@ VkResult VKAPI_PTR GuardRefAllocateDescriptorSets(VkDevice                      
 	return result;
 }
 
-void VKAPI_PTR GuardRefBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint p,
-                                          VkPipelineLayout l, uint32_t first, uint32_t n,
-                                          const VkDescriptorSet* sets, uint32_t nd,
-                                          const uint32_t* dynamic) {
+void VKAPI_PTR GuardRefBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint p, VkPipelineLayout l,
+                                          uint32_t first, uint32_t n, const VkDescriptorSet* sets,
+                                          uint32_t nd, const uint32_t* dynamic) {
 	std::vector<uint64_t> handles;
 	{
 		std::lock_guard lock(g_guard_set_mutex);
@@ -1802,63 +1834,57 @@ void VKAPI_PTR GuardRefBindPipeline(VkCommandBuffer c, VkPipelineBindPoint p, Vk
 	GuardNoteRef(c, GuardKey(pipeline), "vkCmdBindPipeline");
 	g_guard_next_vkCmdBindPipeline(c, p, pipeline);
 }
-void VKAPI_PTR GuardRefBindVertexBuffers(VkCommandBuffer c, uint32_t first, uint32_t n,
-                                         const VkBuffer* b, const VkDeviceSize* o) {
-	for (uint32_t i = 0; i < n; i++)
-		GuardNoteRef(c, GuardKey(b[i]), "vkCmdBindVertexBuffers");
+void VKAPI_PTR GuardRefBindVertexBuffers(VkCommandBuffer c, uint32_t first, uint32_t n, const VkBuffer* b,
+                                         const VkDeviceSize* o) {
+	for (uint32_t i = 0; i < n; i++) GuardNoteRef(c, GuardKey(b[i]), "vkCmdBindVertexBuffers");
 	g_guard_next_vkCmdBindVertexBuffers(c, first, n, b, o);
 }
-void VKAPI_PTR GuardRefBindVertexBuffers2(VkCommandBuffer c, uint32_t first, uint32_t n,
-                                          const VkBuffer* b, const VkDeviceSize* o,
-                                          const VkDeviceSize* s, const VkDeviceSize* st) {
-	for (uint32_t i = 0; i < n; i++)
-		GuardNoteRef(c, GuardKey(b[i]), "vkCmdBindVertexBuffers2");
+void VKAPI_PTR GuardRefBindVertexBuffers2(VkCommandBuffer c, uint32_t first, uint32_t n, const VkBuffer* b,
+                                          const VkDeviceSize* o, const VkDeviceSize* s, const VkDeviceSize* st) {
+	for (uint32_t i = 0; i < n; i++) GuardNoteRef(c, GuardKey(b[i]), "vkCmdBindVertexBuffers2");
 	g_guard_next_vkCmdBindVertexBuffers2(c, first, n, b, o, s, st);
 }
-void VKAPI_PTR GuardRefBindIndexBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o,
-                                       VkIndexType t) {
+void VKAPI_PTR GuardRefBindIndexBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkIndexType t) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdBindIndexBuffer");
 	g_guard_next_vkCmdBindIndexBuffer(c, b, o, t);
 }
-void VKAPI_PTR GuardRefCopyBuffer(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n,
-                                  const VkBufferCopy* r) {
+void VKAPI_PTR GuardRefCopyBuffer(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy* r) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdCopyBuffer");
 	GuardNoteRef(c, GuardKey(d), "vkCmdCopyBuffer");
 	g_guard_next_vkCmdCopyBuffer(c, s, d, n, r);
 }
-void VKAPI_PTR GuardRefCopyBufferToImage(VkCommandBuffer c, VkBuffer s, VkImage d, VkImageLayout l,
-                                         uint32_t n, const VkBufferImageCopy* r) {
+void VKAPI_PTR GuardRefCopyBufferToImage(VkCommandBuffer c, VkBuffer s, VkImage d, VkImageLayout l, uint32_t n,
+                                         const VkBufferImageCopy* r) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdCopyBufferToImage");
 	GuardNoteRef(c, GuardKey(d), "vkCmdCopyBufferToImage");
 	g_guard_next_vkCmdCopyBufferToImage(c, s, d, l, n, r);
 }
-void VKAPI_PTR GuardRefCopyImageToBuffer(VkCommandBuffer c, VkImage s, VkImageLayout l, VkBuffer d,
-                                         uint32_t n, const VkBufferImageCopy* r) {
+void VKAPI_PTR GuardRefCopyImageToBuffer(VkCommandBuffer c, VkImage s, VkImageLayout l, VkBuffer d, uint32_t n,
+                                         const VkBufferImageCopy* r) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdCopyImageToBuffer");
 	GuardNoteRef(c, GuardKey(d), "vkCmdCopyImageToBuffer");
 	g_guard_next_vkCmdCopyImageToBuffer(c, s, l, d, n, r);
 }
-void VKAPI_PTR GuardRefCopyImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d,
-                                 VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
+void VKAPI_PTR GuardRefCopyImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl,
+                                 uint32_t n, const VkImageCopy* r) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdCopyImage");
 	GuardNoteRef(c, GuardKey(d), "vkCmdCopyImage");
 	g_guard_next_vkCmdCopyImage(c, s, sl, d, dl, n, r);
 }
-void VKAPI_PTR GuardRefBlitImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d,
-                                 VkImageLayout dl, uint32_t n, const VkImageBlit* r, VkFilter f) {
+void VKAPI_PTR GuardRefBlitImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl,
+                                 uint32_t n, const VkImageBlit* r, VkFilter f) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdBlitImage");
 	GuardNoteRef(c, GuardKey(d), "vkCmdBlitImage");
 	g_guard_next_vkCmdBlitImage(c, s, sl, d, dl, n, r, f);
 }
-void VKAPI_PTR GuardRefResolveImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d,
-                                    VkImageLayout dl, uint32_t n, const VkImageResolve* r) {
+void VKAPI_PTR GuardRefResolveImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl,
+                                    uint32_t n, const VkImageResolve* r) {
 	GuardNoteRef(c, GuardKey(s), "vkCmdResolveImage");
 	GuardNoteRef(c, GuardKey(d), "vkCmdResolveImage");
 	g_guard_next_vkCmdResolveImage(c, s, sl, d, dl, n, r);
 }
-void VKAPI_PTR GuardRefClearColorImage(VkCommandBuffer c, VkImage i, VkImageLayout l,
-                                       const VkClearColorValue* v, uint32_t n,
-                                       const VkImageSubresourceRange* r) {
+void VKAPI_PTR GuardRefClearColorImage(VkCommandBuffer c, VkImage i, VkImageLayout l, const VkClearColorValue* v,
+                                       uint32_t n, const VkImageSubresourceRange* r) {
 	GuardNoteRef(c, GuardKey(i), "vkCmdClearColorImage");
 	g_guard_next_vkCmdClearColorImage(c, i, l, v, n, r);
 }
@@ -1868,23 +1894,19 @@ void VKAPI_PTR GuardRefClearDepthStencilImage(VkCommandBuffer c, VkImage i, VkIm
 	GuardNoteRef(c, GuardKey(i), "vkCmdClearDepthStencilImage");
 	g_guard_next_vkCmdClearDepthStencilImage(c, i, l, v, n, r);
 }
-void VKAPI_PTR GuardRefFillBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s,
-                                  uint32_t d) {
+void VKAPI_PTR GuardRefFillBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, uint32_t d) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdFillBuffer");
 	g_guard_next_vkCmdFillBuffer(c, b, o, s, d);
 }
-void VKAPI_PTR GuardRefUpdateBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s,
-                                    const void* d) {
+void VKAPI_PTR GuardRefUpdateBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, const void* d) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdUpdateBuffer");
 	g_guard_next_vkCmdUpdateBuffer(c, b, o, s, d);
 }
-void VKAPI_PTR GuardRefDrawIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, uint32_t n,
-                                    uint32_t s) {
+void VKAPI_PTR GuardRefDrawIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdDrawIndirect");
 	g_guard_next_vkCmdDrawIndirect(c, b, o, n, s);
 }
-void VKAPI_PTR GuardRefDrawIndexedIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o,
-                                           uint32_t n, uint32_t s) {
+void VKAPI_PTR GuardRefDrawIndexedIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdDrawIndexedIndirect");
 	g_guard_next_vkCmdDrawIndexedIndirect(c, b, o, n, s);
 }
@@ -1894,20 +1916,18 @@ void VKAPI_PTR GuardRefDrawIndirectCount(VkCommandBuffer c, VkBuffer b, VkDevice
 	GuardNoteRef(c, GuardKey(cb), "vkCmdDrawIndirectCount");
 	g_guard_next_vkCmdDrawIndirectCount(c, b, o, cb, co, m, s);
 }
-void VKAPI_PTR GuardRefDrawIndexedIndirectCount(VkCommandBuffer c, VkBuffer b, VkDeviceSize o,
-                                                VkBuffer cb, VkDeviceSize co, uint32_t m,
-                                                uint32_t s) {
+void VKAPI_PTR GuardRefDrawIndexedIndirectCount(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkBuffer cb,
+                                                VkDeviceSize co, uint32_t m, uint32_t s) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdDrawIndexedIndirectCount");
 	GuardNoteRef(c, GuardKey(cb), "vkCmdDrawIndexedIndirectCount");
 	g_guard_next_vkCmdDrawIndexedIndirectCount(c, b, o, cb, co, m, s);
 }
-void VKAPI_PTR GuardRefDrawMeshIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, uint32_t n,
-                                        uint32_t s) {
+void VKAPI_PTR GuardRefDrawMeshIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdDrawMeshTasksIndirectEXT");
 	g_guard_next_vkCmdDrawMeshTasksIndirectEXT(c, b, o, n, s);
 }
-void VKAPI_PTR GuardRefDrawMeshIndirectCount(VkCommandBuffer c, VkBuffer b, VkDeviceSize o,
-                                             VkBuffer cb, VkDeviceSize co, uint32_t m, uint32_t s) {
+void VKAPI_PTR GuardRefDrawMeshIndirectCount(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkBuffer cb,
+                                             VkDeviceSize co, uint32_t m, uint32_t s) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdDrawMeshTasksIndirectCountEXT");
 	GuardNoteRef(c, GuardKey(cb), "vkCmdDrawMeshTasksIndirectCountEXT");
 	g_guard_next_vkCmdDrawMeshTasksIndirectCountEXT(c, b, o, cb, co, m, s);
@@ -1919,8 +1939,7 @@ void VKAPI_PTR GuardRefDispatchIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceS
 void VKAPI_PTR GuardRefBeginRendering(VkCommandBuffer c, const VkRenderingInfo* info) {
 	for (uint32_t i = 0; i < info->colorAttachmentCount; i++) {
 		GuardNoteRef(c, GuardKey(info->pColorAttachments[i].imageView), "vkCmdBeginRendering");
-		GuardNoteRef(c, GuardKey(info->pColorAttachments[i].resolveImageView),
-		             "vkCmdBeginRendering");
+		GuardNoteRef(c, GuardKey(info->pColorAttachments[i].resolveImageView), "vkCmdBeginRendering");
 	}
 	if (info->pDepthAttachment != nullptr) {
 		GuardNoteRef(c, GuardKey(info->pDepthAttachment->imageView), "vkCmdBeginRendering");
@@ -1930,17 +1949,15 @@ void VKAPI_PTR GuardRefBeginRendering(VkCommandBuffer c, const VkRenderingInfo* 
 	}
 	g_guard_next_vkCmdBeginRendering(c, info);
 }
-void VKAPI_PTR GuardRefPushDescriptorSet(VkCommandBuffer c, VkPipelineBindPoint p,
-                                         VkPipelineLayout l, uint32_t set, uint32_t n,
-                                         const VkWriteDescriptorSet* w) {
+void VKAPI_PTR GuardRefPushDescriptorSet(VkCommandBuffer c, VkPipelineBindPoint p, VkPipelineLayout l, uint32_t set,
+                                         uint32_t n, const VkWriteDescriptorSet* w) {
 	for (uint32_t i = 0; i < n; i++) {
 		for (uint32_t k = 0; k < w[i].descriptorCount; k++) {
 			if (w[i].pBufferInfo != nullptr) {
 				GuardNoteRef(c, GuardKey(w[i].pBufferInfo[k].buffer), "vkCmdPushDescriptorSetKHR");
 			}
 			if (w[i].pImageInfo != nullptr) {
-				GuardNoteRef(c, GuardKey(w[i].pImageInfo[k].imageView),
-				             "vkCmdPushDescriptorSetKHR");
+				GuardNoteRef(c, GuardKey(w[i].pImageInfo[k].imageView), "vkCmdPushDescriptorSetKHR");
 			}
 			if (w[i].pTexelBufferView != nullptr) {
 				GuardNoteRef(c, GuardKey(w[i].pTexelBufferView[k]), "vkCmdPushDescriptorSetKHR");
@@ -1949,9 +1966,8 @@ void VKAPI_PTR GuardRefPushDescriptorSet(VkCommandBuffer c, VkPipelineBindPoint 
 	}
 	g_guard_next_vkCmdPushDescriptorSetKHR(c, p, l, set, n, w);
 }
-void VKAPI_PTR GuardRefCopyQueryPoolResults(VkCommandBuffer c, VkQueryPool q, uint32_t f,
-                                            uint32_t n, VkBuffer b, VkDeviceSize o, VkDeviceSize s,
-                                            VkQueryResultFlags fl) {
+void VKAPI_PTR GuardRefCopyQueryPoolResults(VkCommandBuffer c, VkQueryPool q, uint32_t f, uint32_t n, VkBuffer b,
+                                            VkDeviceSize o, VkDeviceSize s, VkQueryResultFlags fl) {
 	GuardNoteRef(c, GuardKey(b), "vkCmdCopyQueryPoolResults");
 	g_guard_next_vkCmdCopyQueryPoolResults(c, q, f, n, b, o, s, fl);
 }
@@ -1967,8 +1983,7 @@ void VKAPI_PTR GuardRefDestroyImageView(VkDevice d, VkImageView v, const VkAlloc
 	GuardNoteDestroy(GuardKey(v), "vkDestroyImageView");
 	g_guard_next_vkDestroyImageView(d, v, a);
 }
-void VKAPI_PTR GuardRefDestroyBufferView(VkDevice d, VkBufferView v,
-                                         const VkAllocationCallbacks* a) {
+void VKAPI_PTR GuardRefDestroyBufferView(VkDevice d, VkBufferView v, const VkAllocationCallbacks* a) {
 	GuardNoteDestroy(GuardKey(v), "vkDestroyBufferView");
 	g_guard_next_vkDestroyBufferView(d, v, a);
 }
@@ -2034,14 +2049,12 @@ void CommandRecorder::InstallGuardHooks(vk::Device device) {
 	}
 	static std::once_flag once;
 	std::call_once(once, [device, value] {
-		g_guard_mode    = std::strcmp(value, "exit") == 0   ? 2
-		                  : std::strcmp(value, "wait") == 0 ? 3
-		                                                    : 1;
-		g_guard_device  = static_cast<VkDevice>(device);
-		auto& d         = VULKAN_HPP_DEFAULT_DISPATCHER;
+		g_guard_mode   = std::strcmp(value, "exit") == 0 ? 2 : std::strcmp(value, "wait") == 0 ? 3 : 1;
+		g_guard_device = static_cast<VkDevice>(device);
+		auto& d        = VULKAN_HPP_DEFAULT_DISPATCHER;
 		g_guard_counter = d.vkGetSemaphoreCounterValue != nullptr ? d.vkGetSemaphoreCounterValue
 		                                                          : d.vkGetSemaphoreCounterValueKHR;
-		g_guard_wait = d.vkWaitSemaphores != nullptr ? d.vkWaitSemaphores : d.vkWaitSemaphoresKHR;
+		g_guard_wait    = d.vkWaitSemaphores != nullptr ? d.vkWaitSemaphores : d.vkWaitSemaphoresKHR;
 		const auto swap = [](auto& slot, auto& real, auto hook) {
 			if (slot != nullptr) {
 				real = slot;
@@ -2124,9 +2137,7 @@ void CommandRecorder::InstallGuardHooks(vk::Device device) {
 		KYTY_GUARD_HOOK(vkCmdWriteBufferMarkerAMD);
 #undef KYTY_GUARD_HOOK
 		InstallGuardRefHooks();
-		std::printf(
-		    "Kyty command guard (KYTY_CMD_GUARD=%s): command-buffer state hooks installed\n",
-		    value);
+		std::printf("Kyty command guard (KYTY_CMD_GUARD=%s): command-buffer state hooks installed\n", value);
 		std::fflush(stdout);
 	});
 }

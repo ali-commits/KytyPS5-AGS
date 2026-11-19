@@ -1,6 +1,8 @@
+﻿#include "common/hleWaitStats.h"
 #include "kernel/semaphore.h"
 
 #include "common/assert.h"
+#include "common/gthreadStats.h"
 #include "common/hangWatchdog.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -47,6 +49,13 @@ public:
 
 	[[nodiscard]] const std::string& GetName() const { return m_name; }
 
+	// Waiters not yet made runnable (tests).
+	[[nodiscard]] int Waiting() {
+		Common::LockGuard lock(m_mutex);
+		return static_cast<int>(std::count_if(m_waiting_threads.begin(), m_waiting_threads.end(),
+		                                      [](const WaitingThread* waiter) { return !waiter->ready; }));
+	}
+
 private:
 	enum class Status { Set, Deleted };
 
@@ -63,6 +72,8 @@ private:
 	void AddWaiter(WaitingThread* waiter);
 	void RemoveWaiter(WaitingThread* waiter);
 	void WakeWaiters();
+	// WakeWaiters with the KYTY_GTHREAD_STATS signal counters.
+	void CountSignal();
 
 	Common::Mutex               m_mutex;
 	std::string                 m_name;
@@ -143,7 +154,12 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count) {
 
 	m_count += signal_count;
 
-	WakeWaiters();
+	if (GThreadStats::Enabled()) {
+		GThreadStats::FpProbe();
+		CountSignal();
+	} else {
+		WakeWaiters();
+	}
 
 	return Result::Ok;
 }
@@ -179,7 +195,25 @@ void KernelSemaPrivate::WakeWaiters() {
 	}
 }
 
+void KernelSemaPrivate::CountSignal() {
+	const auto not_ready = [this] {
+		return std::count_if(m_waiting_threads.begin(), m_waiting_threads.end(),
+		                     [](const WaitingThread* waiter) { return !waiter->ready; });
+	};
+	const auto before = not_ready();
+	WakeWaiters();
+	auto& counters = GThreadStats::Local();
+	GThreadStats::Add(counters.sema_signal);
+	if (before >= 2) {
+		GThreadStats::Add(counters.sema_signal_multi);
+		if (not_ready() > 0) {
+			GThreadStats::Add(counters.sema_signal_partial);
+		}
+	}
+}
+
 KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_micros) {
+	GThreadStats::FpProbe();
 	Common::LockGuard lock(m_mutex);
 
 	if (need_count < 1 || need_count > m_max_count) {
@@ -197,10 +231,6 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		infinitely = false;
 	}
 
-	uint32_t      elapsed = 0;
-	Common::Timer t;
-	t.Start();
-
 	if (m_count >= need_count) {
 		m_count -= need_count;
 		if (ptr_micros != nullptr) {
@@ -213,12 +243,19 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		return Result::TimedOut;
 	}
 
+	uint32_t      elapsed = 0;
+	Common::Timer t;
+
 	HangWatchdog::Scope wait("guest-semaphore", reinterpret_cast<uint64_t>(this), need_count,
 	                         m_count, 0, micros);
 	WaitingThread waiter {};
 	waiter.priority   = (m_fifo_order ? 0 : Libs::LibKernel::PthreadGetCurrentPriorityForKernel());
 	waiter.need_count = need_count;
 	AddWaiter(&waiter);
+	const bool stats = GThreadStats::Enabled();
+	if (stats) {
+		GThreadStats::Add(GThreadStats::Local().sema_block);
+	}
 
 	while (!waiter.ready) {
 		if ((elapsed >= micros && !infinitely)) {
@@ -227,7 +264,15 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 			return Result::TimedOut;
 		}
 
-		waiter.cond_var.WaitFor(&m_mutex, infinitely ? SIGNAL_APC_POLL_MICROS : micros - elapsed);
+		const bool woke =
+		    waiter.cond_var.WaitFor(&m_mutex, infinitely ? SIGNAL_APC_POLL_MICROS : micros - elapsed);
+		if (stats && woke) {
+			auto& counters = GThreadStats::Local();
+			GThreadStats::Add(counters.sema_wake);
+			if (!waiter.ready) {
+				GThreadStats::Add(counters.sema_spurious);
+			}
+		}
 
 		m_mutex.Unlock();
 		LibKernel::KernelDispatchPendingSignalForCurrentThread();
@@ -281,6 +326,7 @@ int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem) {
 }
 
 int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+	HleWait::Scope hle_wait_scope(HleWait::Sema); // wholecp measurement (KYTY_HLE_WAIT_STATS)
 	if (sem == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -364,6 +410,10 @@ int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads) {
 	return ret;
 }
 
+int Testing::Waiting(KernelSema sem) {
+	return sem != nullptr ? sem->Waiting() : 0;
+}
+
 } // namespace Libs::LibKernel::Semaphore
 
 namespace Libs::Posix {
@@ -394,12 +444,12 @@ public:
 	}
 
 	int Wait(uint32_t* micros) {
+		GThreadStats::FpProbe();
 		Common::LockGuard lock(m_mutex);
 
 		uint32_t      elapsed    = 0;
 		const bool    timed_wait = (micros != nullptr);
 		Common::Timer timer;
-		timer.Start();
 
 		while (m_count <= 0) {
 			HangWatchdog::Scope wait("guest-posix-semaphore", reinterpret_cast<uint64_t>(m_guest),
@@ -447,6 +497,7 @@ public:
 	}
 
 	int Post() {
+		GThreadStats::FpProbe();
 		Common::LockGuard lock(m_mutex);
 
 		if (m_count == POSIX_SEM_VALUE_MAX) {
@@ -620,6 +671,7 @@ int KYTY_SYSV_ABI sem_destroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_wait(void* sem) {
+	HleWait::Scope hle_wait_scope(HleWait::Sema); // wholecp measurement (KYTY_HLE_WAIT_STATS)
 	const int result = SemTimedwaitImpl(sem, nullptr);
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
@@ -693,6 +745,7 @@ int KYTY_SYSV_ABI PthreadSemDestroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemWait(void* sem) {
+	HleWait::Scope hle_wait_scope(HleWait::Sema); // wholecp measurement (KYTY_HLE_WAIT_STATS)
 	const int result = Posix::SemTimedwaitImpl(sem, nullptr);
 	return (result == OK ? OK : Posix::PosixToKernel(result));
 }

@@ -17,6 +17,8 @@ namespace Cheats {
 // that version or no "version", or when `version` is empty; otherwise <stem>-<version>.json
 // beside it (which may not exist yet). Empty for an empty `plan_path` or an unsafe `version`.
 [[nodiscard]] QString PlanPathForVersion(const QString& plan_path, const QString& version);
+// Replaces MC4 (encrypted) or SHN trainer XML with the equivalent cheat JSON.
+[[nodiscard]] QString ConvertTrainer(QByteArray* data, bool encrypted);
 
 // Local files retain their existing defaults; remote imports receive additional validation.
 [[nodiscard]] QString       ParseDocument(const QByteArray& data, QJsonDocument* document);

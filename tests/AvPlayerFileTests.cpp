@@ -4,16 +4,27 @@
 
 #include <array>
 #include <chrono>
+#include <new>
+#include <thread>
 
 namespace {
 std::filesystem::path content_root;
 }
 
 namespace Libs::LibKernel {
-int KYTY_SYSV_ABI PthreadCreate(Pthread*, const PthreadAttr*, pthread_entry_func_t, void*, const char*) {
-	std::abort();
+struct PthreadPrivate {
+	std::thread thread;
+};
+int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr*, pthread_entry_func_t entry,
+                              void* arg, const char*) {
+	*thread = new PthreadPrivate {std::thread([=] { entry(arg); })};
+	return 0;
 }
-int KYTY_SYSV_ABI PthreadJoin(Pthread, void**) { std::abort(); }
+int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void**) {
+	thread->thread.join();
+	delete thread;
+	return 0;
+}
 namespace FileSystem {
 std::filesystem::path GetRealFilename(const std::string& path) {
 	return path.starts_with("/app0/") ? content_root / path.substr(6) : std::filesystem::path {};
@@ -58,11 +69,25 @@ void CheckStream(FileStreamer& stream, const std::vector<uint8_t>& data) {
 	          std::equal(bytes.begin(), bytes.end(), data.begin() + 123), "FFmpeg seeks reset buffered reads");
 }
 
+struct GuestHeap {
+	std::vector<std::pair<uint8_t*, uint32_t>> live;
+	unsigned allocations = 0;
+	bool Owns(const uint8_t* buffer, uint32_t size) const {
+		return std::any_of(live.begin(), live.end(), [&](const auto& block) {
+			return buffer >= block.first && buffer + size <= block.first + block.second;
+		});
+	}
+};
+
 struct Callbacks {
 	const std::vector<uint8_t>& data;
 	unsigned opens = 0;
 	unsigned closes = 0;
 	bool premature_eof = false;
+	// When set, every read must land in a buffer from this allocator: the game's callback may
+	// read through AMPR, which accepts only guest memory (KYTY_AVPLAYER_GUEST_READ).
+	const GuestHeap* heap = nullptr;
+	bool foreign_buffer = false;
 };
 int KYTY_SYSV_ABI Open(void* object, const char*) {
 	++static_cast<Callbacks*>(object)->opens;
@@ -74,6 +99,9 @@ int KYTY_SYSV_ABI Close(void* object) {
 }
 int KYTY_SYSV_ABI Read(void* object, uint8_t* buffer, uint64_t offset, uint32_t size) {
 	auto& state = *static_cast<Callbacks*>(object);
+	if (state.heap != nullptr && !state.heap->Owns(buffer, size)) {
+		state.foreign_buffer = true;
+	}
 	if (state.premature_eof) {
 		return 0;
 	}
@@ -82,9 +110,167 @@ int KYTY_SYSV_ABI Read(void* object, uint8_t* buffer, uint64_t offset, uint32_t 
 	return static_cast<int>(bytes);
 }
 uint64_t KYTY_SYSV_ABI Size(void* object) { return static_cast<Callbacks*>(object)->data.size(); }
+void* KYTY_SYSV_ABI GuestAllocate(void* object, uint32_t, uint32_t size) {
+	auto& heap = *static_cast<GuestHeap*>(object);
+	auto* block = new uint8_t[size];
+	heap.live.emplace_back(block, size);
+	++heap.allocations;
+	return block;
+}
+void KYTY_SYSV_ABI GuestDeallocate(void* object, void* memory) {
+	auto& live = static_cast<GuestHeap*>(object)->live;
+	const auto it = std::find_if(live.begin(), live.end(),
+	                             [&](const auto& block) { return block.first == memory; });
+	Check(it != live.end(), "deallocate a block of this allocator");
+	delete[] it->first;
+	live.erase(it);
+}
+
+struct VideoMemory {
+	unsigned allocations        = 0;
+	unsigned deallocations      = 0;
+	void*    protected_buffer   = nullptr;
+	bool     released_protected = false;
+};
+void* KYTY_SYSV_ABI Allocate(void* object, uint32_t alignment, uint32_t size) {
+	Check(alignment == 0x100, "video allocation alignment");
+	++static_cast<VideoMemory*>(object)->allocations;
+	return ::operator new(size, std::align_val_t(alignment), std::nothrow);
+}
+void KYTY_SYSV_ABI Deallocate(void* object, void* data) {
+	auto& memory = *static_cast<VideoMemory*>(object);
+	++memory.deallocations;
+	memory.released_protected |= data == memory.protected_buffer;
+	::operator delete(data, std::align_val_t(0x100));
+}
+
+void CheckVideoReadAhead(const std::filesystem::path& root) {
+	// A 16x16 red MPEG-4 intra frame at 30 Hz; repeat it with increasing VOP times.
+	std::array<uint8_t, 50> frame {
+	    0x00, 0x00, 0x01, 0xb0, 0x01, 0x00, 0x00, 0x01, 0xb5, 0x89,
+	    0x13, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x20, 0x00,
+	    0xc4, 0x8d, 0x88, 0x00, 0xf5, 0x00, 0x84, 0x02, 0x14, 0x63,
+	    0x00, 0x00, 0x01, 0xb3, 0x00, 0x10, 0x07, 0x00, 0x00, 0x01,
+	    0xb6, 0x10, 0x60, 0x51, 0x85, 0x06, 0xd8, 0x2c, 0x81, 0xe0};
+	{
+		Common::File output;
+		Check(output.Create(root / "movie.m4v"), "create video fixture");
+		for (unsigned i = 0; i < 24; ++i) {
+			frame[41] = static_cast<uint8_t>(0x10 + i / 2);
+			frame[42] = i % 2 == 0 ? 0x60 : 0xe0;
+			output.Write(frame.data(), frame.size());
+		}
+	}
+	VideoMemory memory;
+	const AvPlayerMemAllocator allocator {&memory, Allocate, Deallocate, Allocate, Deallocate};
+	Source source(allocator, {}, {}, 6, false, 0);
+	Check(source.Init("/app0/movie.m4v", AvPlayerSourceFileMp4) == 0, "open video fixture");
+	source.SetSync(1);
+	Check(source.Start() == 0, "start video workers");
+	AvPlayerFrameInfoEx info {};
+	for (unsigned i = 0; i < 8; ++i) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+		while (!source.Video(&info)) {
+			Check(std::chrono::steady_clock::now() < deadline, "decode steady-state video");
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	// Let the producer refill, then model the game's immediate late-frame retries.
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	// One buffer is shown and one is held for the previously shown frame.
+	for (unsigned i = 0; i < 4; ++i) {
+		const auto previous = info.time_stamp;
+		Check(source.Video(&info), "six output buffers keep four video frames ready");
+		Check(info.time_stamp > previous, "video retries return successive frames");
+	}
+	Check(source.Pause() == 0, "pause video");
+	memory.protected_buffer = info.data;
+	std::array<uint8_t, 256> current {};
+	std::memcpy(current.data(), info.data, current.size());
+	Check(!source.Video(&info) && info.data == memory.protected_buffer,
+	      "failed video get preserves output");
+	Check(source.Start() == 0, "restart video with retained current output");
+	Check(!memory.released_protected &&
+	          std::memcmp(current.data(), memory.protected_buffer, current.size()) == 0,
+	      "restart preserves output until the next successful video get");
+	Check(source.Stop() == 0 && memory.allocations == memory.deallocations,
+	      "stop releases all video buffers");
+}
+
+void CheckDecoderThreads() {
+	Check(ParseVideoDecoderThreads(nullptr, 32) == 8 && ParseVideoDecoderThreads("auto", 32) == 8,
+	      "auto decoder threads are capped at 8");
+	Check(ParseVideoDecoderThreads(nullptr, 30) == 8 && ParseVideoDecoderThreads(nullptr, 12) == 6 &&
+	          ParseVideoDecoderThreads(nullptr, 6) == 3 && ParseVideoDecoderThreads(nullptr, 2) == 2 &&
+	          ParseVideoDecoderThreads(nullptr, 1) == 2,
+	      "auto decoder threads use half of the usable processors, at least 2");
+	Check(ParseVideoDecoderThreads("0", 32) == 1 && ParseVideoDecoderThreads("1", 32) == 1,
+	      "0 and 1 select the single-threaded decoder");
+	Check(ParseVideoDecoderThreads("4", 32) == 4 && ParseVideoDecoderThreads("64", 32) == 16,
+	      "explicit decoder threads, capped at 16");
+	Check(ParseVideoDecoderThreads("x", 32) == 8 && ParseVideoDecoderThreads("-2", 32) == 8 &&
+	          ParseVideoDecoderThreads("3x", 32) == 8,
+	      "malformed decoder threads fall back to auto");
+	Check(ParseLateDropMs(nullptr) == 20 && ParseLateDropMs("1") == 20 && ParseLateDropMs("x") == 20,
+	      "late frames are skipped 20 ms late by default");
+	Check(ParseLateDropMs("0") == UINT64_MAX && ParseLateDropMs("100") == 100,
+	      "late-frame skip off, or with its own tolerance");
+}
+
+void CheckLateFramesSkipped() {
+	// Playback clock sync (the default): while the following frame is already more than 20 ms
+	// late, Video() skips to it and gives the skipped frame's buffer back to the decoder.
+	VideoMemory memory;
+	const AvPlayerMemAllocator allocator {&memory, Allocate, Deallocate, Allocate, Deallocate};
+	Source source(allocator, {}, {}, 6, false, 0);
+	Check(source.Init("/app0/movie.m4v", AvPlayerSourceFileMp4) == 0, "open video fixture for sync");
+	Check(source.Start() == 0, "start video workers for sync");
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	AvPlayerFrameInfoEx info {};
+	Check(source.Video(&info), "a due frame is shown");
+	const auto shown = info.time_stamp;
+	Check(shown > 0, "frames that are already late are skipped");
+	Check(shown <= source.CurrentTime(), "the shown frame is due");
+	// The skipped frames' buffers went back: the decoder refills and playback goes on.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!source.Video(&info) || info.time_stamp <= shown) {
+		Check(std::chrono::steady_clock::now() < deadline, "playback continues after skipping");
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Check(source.Stop() == 0 && memory.allocations == memory.deallocations,
+	      "stop releases all video buffers after skipping");
+}
+
+void CheckTwoVideoBuffers() {
+	// With two output buffers, holding the previous frame must not leave the decoder without one.
+	VideoMemory memory;
+	const AvPlayerMemAllocator allocator {&memory, Allocate, Deallocate, Allocate, Deallocate};
+	Source source(allocator, {}, {}, 2, false, 0);
+	Check(source.Init("/app0/movie.m4v", AvPlayerSourceFileMp4) == 0,
+	      "open video fixture with two buffers");
+	source.SetSync(1);
+	Check(source.Start() == 0, "start video workers with two buffers");
+	AvPlayerFrameInfoEx info {};
+	for (unsigned i = 0; i < 8; ++i) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+		while (!source.Video(&info)) {
+			Check(std::chrono::steady_clock::now() < deadline,
+			      "two output buffers keep video playing");
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	Check(source.Stop() == 0 && memory.allocations == memory.deallocations,
+	      "stop releases both video buffers");
+}
 }
 
 int main() {
+	// The late-frame skip is a title-preset setting since int22 (unset: off); the test covers it on.
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	_putenv_s("KYTY_AVPLAYER_DROP_LATE", "1");
+#else
+	setenv("KYTY_AVPLAYER_DROP_LATE", "1", 1);
+#endif
 	const auto root = std::filesystem::temp_directory_path() /
 	    ("kyty_avio_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 	Check(std::filesystem::create_directories(root), "create fixture directory");
@@ -123,10 +309,33 @@ int main() {
 		Check(io->read_packet(io->opaque, &byte, 1) == AVERROR(EIO), "reject premature EOF");
 	}
 	Check(callbacks.opens == 1 && callbacks.closes == 1, "close callback exactly once");
+	for (const bool guest_read: {false, true}) {
+		GuestHeap heap;
+		Callbacks guest {payload};
+		guest.heap = &heap;
+		const AvPlayerFileReplacement guest_files {&guest, Open, Close, Read, Size};
+		const AvPlayerMemAllocator    guest_memory {&heap, GuestAllocate, GuestDeallocate, nullptr,
+		                                            nullptr};
+		{
+			FileStreamer callback(guest_files, guest_memory, guest_read);
+			Check(callback.Init("callback"), "open guest callback stream with a guest allocator");
+			CheckStream(callback, payload);
+		}
+		// Off (the default), the callback gets FFmpeg's host buffer as before.
+		Check(guest.foreign_buffer != guest_read,
+		      "the read callback's buffer is not where KYTY_AVPLAYER_GUEST_READ puts it");
+		Check((heap.allocations > 0) == guest_read && heap.live.empty(),
+		      "free every guest read buffer");
+	}
 	{
 		FileStreamer missing({});
 		Check(!missing.Init("/unmounted/movie.bin"), "reject unmapped media");
 	}
+	content_root = root;
+	CheckDecoderThreads();
+	CheckVideoReadAhead(root);
+	CheckLateFramesSkipped();
+	CheckTwoVideoBuffers();
 	std::error_code error;
 	std::filesystem::remove_all(root, error);
 	Check(!error, "release all archive handles");

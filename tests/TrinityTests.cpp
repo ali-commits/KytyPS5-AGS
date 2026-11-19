@@ -1,8 +1,8 @@
+#include <cstdlib>
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
-#include "common/virtualMemory.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
@@ -25,7 +25,6 @@ namespace Pm4 = Libs::Graphics::Pm4;
 
 TEST(Trinity, ModeQueriesPacketsAndMemoryAgree) {
 	static Common::Subsystems subsystems;
-	Common::VirtualMemory::Init();
 	Common::InitializeThreads();
 	subsystems.Initialize<Config::Lifecycle>();
 	Config::ConfigOptions options;
@@ -94,10 +93,11 @@ TEST(Trinity, ModeQueriesPacketsAndMemoryAgree) {
 	using namespace Libs::LibKernel::Memory;
 	subsystems.Initialize<Lifecycle>();
 	constexpr uint64_t mib = 1024 * 1024;
-	// This fork's memory model (kernel/memory.cpp): 13824 MiB in base mode, 1216 MiB more in
-	// Pro mode, and 1 GiB of flexible memory by default.
-	constexpr uint64_t backing = (13824 + 1216) * mib;
-	constexpr uint64_t flexible = 1024 * mib;
+	// Ours keeps 13824 MiB of guest memory unless KYTY_UPSTREAM_MEMORY_DEFAULTS=1 (upstream budget).
+	const char*        upstream_env = std::getenv("KYTY_UPSTREAM_MEMORY_DEFAULTS");
+	const bool         upstream     = upstream_env != nullptr && upstream_env[0] != '\0' && upstream_env[0] != '0';
+	const uint64_t     backing      = (upstream ? (12800 + 1216 - 64 - 96) : (13824 + 1216)) * mib;
+	constexpr uint64_t flexible = 3072 * mib;
 	EXPECT_EQ(TestGuestBackingSize(), backing);
 	EXPECT_EQ(KernelGetDirectMemorySize(), backing - flexible);
 	size_t configured = 0;

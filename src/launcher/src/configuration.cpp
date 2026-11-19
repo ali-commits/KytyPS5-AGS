@@ -1,5 +1,34 @@
 #include "configuration.h"
 
+#include <QByteArray>
+#include <QJsonDocument>
+#include <QRegularExpression>
+
+QString Configuration::NormalizeResolution(const QString& text) {
+	// Older settings stored the enum key, e.g. "R1920X1080".
+	static const QRegularExpression re(QStringLiteral("^\\s*R?(\\d+)\\s*[xX]\\s*(\\d+)\\s*$"));
+	const auto match = re.match(text);
+	if (!match.hasMatch()) {
+		return {};
+	}
+	const int width  = match.captured(1).toInt();
+	const int height = match.captured(2).toInt();
+	if (width < MIN_SCREEN_SIZE || height < MIN_SCREEN_SIZE || width > MAX_SCREEN_SIZE ||
+	    height > MAX_SCREEN_SIZE) {
+		return {};
+	}
+	return QStringLiteral("%1x%2").arg(width).arg(height);
+}
+
+Configuration::ShaderOptimizationType
+Configuration::ShaderOptimizationTypeFromText(const QString& text) {
+	// Unknown or empty text (a hand-edited or damaged config) means the default, Performance.
+	bool       ok    = false;
+	const auto value = QMetaEnum::fromType<ShaderOptimizationType>().keyToValue(
+	    text.trimmed().toUtf8().constData(), &ok);
+	return ok ? static_cast<ShaderOptimizationType>(value) : ShaderOptimizationType::Performance;
+}
+
 QVariantMap Configuration::GameSettings() const {
 	QVariantMap values;
 #define KYTY_CFG_SET(n) values.insert(QStringLiteral(#n), QVariant::fromValue(n).toString())
@@ -9,6 +38,7 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(audio_input_device);
 	KYTY_CFG_SET(stream_aspect_mode);
 	KYTY_CFG_SET(present_mode);
+	KYTY_CFG_SET(smooth_frametime_fix);
 	KYTY_CFG_SET(gpu_index);
 	KYTY_CFG_SET(fullscreen_enabled);
 	KYTY_CFG_SET(hdr_enabled);
@@ -21,16 +51,25 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(frame_generation);
 	KYTY_CFG_SET(frame_generation_flow_scale);
 	KYTY_CFG_SET(frame_generation_performance_mode);
+	KYTY_CFG_SET(stretch_enabled);
 	KYTY_CFG_SET(readback_linear_images);
 	KYTY_CFG_SET(readback_tiled_images);
+	KYTY_CFG_SET(readback_storage_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
 	KYTY_CFG_SET(support_zmask);
+	KYTY_CFG_SET(flush_draws);
 	KYTY_CFG_SET(tessellation_enabled);
+	KYTY_CFG_SET(occlusion_queries_enabled);
+	KYTY_CFG_SET(gpu_occlusion_accurate);
+	KYTY_CFG_SET(relaxed_shader_float);
+	KYTY_CFG_SET(fast_gpu_sync);
+	KYTY_CFG_SET(shader_cache_enabled);
 	KYTY_CFG_SET(trophy_enabled);
 	KYTY_CFG_SET(trophy_duration_seconds);
 	KYTY_CFG_SET(perf_overlay_enabled);
 	KYTY_CFG_SET(skip_notice_screen);
 	KYTY_CFG_SET(network_connected);
+	KYTY_CFG_SET(psn_emulation_enabled);
 	KYTY_CFG_SET(vblank_frequency);
 	KYTY_CFG_SET(console_language);
 	KYTY_CFG_SET(vulkan_validation_enabled);
@@ -45,7 +84,10 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(profiler_enabled);
 	KYTY_CFG_SET(renderdoc_enabled);
 	KYTY_CFG_SET(pro_enabled);
+	KYTY_CFG_SET(pssr_upscaler);
+	KYTY_CFG_SET(dlss_folder);
 	KYTY_CFG_SET(amd_cpu_mode);
+	KYTY_CFG_SET(guest_tsc_enabled);
 #if defined(_WIN32)
 	KYTY_CFG_SET(red_zone_protection_enabled);
 #endif
@@ -54,10 +96,32 @@ QVariantMap Configuration::GameSettings() const {
 	return values;
 }
 
+const QList<QPair<QString, QString>>& Configuration::FastGpuSyncVariables() {
+	static const QList<QPair<QString, QString>> variables {
+	    {QStringLiteral("KYTY_GPU_HAZARD"), QStringLiteral("3")},
+	    {QStringLiteral("KYTY_INDIRECT_ARGS_RANGES"), QStringLiteral("1")},
+	    {QStringLiteral("KYTY_GUEST_BARRIER_SCOPE"), QStringLiteral("rel=drop")},
+	    {QStringLiteral("KYTY_DMA_BARRIER_BATCH"), QStringLiteral("1")},
+	};
+	return variables;
+}
+
+void Configuration::ApplyFastGpuSync(QProcessEnvironment& environment) const {
+	if (!fast_gpu_sync) {
+		return;
+	}
+	for (const auto& [name, value]: FastGpuSyncVariables()) {
+		if (!environment.contains(name)) {
+			environment.insert(name, value);
+		}
+	}
+}
+
 template <class Settings>
 void Configuration::ReadGameSettingsValues(const Settings& s) {
 #define KYTY_CFG_GET(n) n = s.value(QStringLiteral(#n)).template value<decltype(n)>()
-	KYTY_CFG_GET(screen_resolution);
+	const auto resolution = NormalizeResolution(s.value("screen_resolution").toString());
+	screen_resolution     = resolution.isEmpty() ? DefaultScreenResolution() : resolution;
 	user_name          = s.value("user_name", user_name).toString();
 	bool user_id_ok    = false;
 	auto saved_user_id = s.value("user_id", user_id).toInt(&user_id_ok);
@@ -71,6 +135,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 		stream_aspect_mode = QStringLiteral("fit");
 	}
 	KYTY_CFG_GET(present_mode);
+	smooth_frametime_fix = s.value("smooth_frametime_fix", false).toBool();
 	gpu_index = s.value("gpu_index", -1).toInt();
 	if (EnumToText(present_mode).isEmpty()) {
 		present_mode = PresentMode::Mailbox;
@@ -104,13 +169,21 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 		frame_generation_flow_scale = scale_ok ? qBound(25, scale, 100) : 100;
 	}
 	KYTY_CFG_GET(frame_generation_performance_mode);
+	KYTY_CFG_GET(stretch_enabled);
 	KYTY_CFG_GET(readback_linear_images);
 	KYTY_CFG_GET(readback_tiled_images);
+	KYTY_CFG_GET(readback_storage_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
 	KYTY_CFG_GET(support_zmask);
+	KYTY_CFG_GET(flush_draws);
 	KYTY_CFG_GET(tessellation_enabled);
-
-	trophy_enabled         = s.value("trophy_enabled", trophy_enabled).toBool();
+	KYTY_CFG_GET(occlusion_queries_enabled);
+	// Missing in configs saved while the setting was global: keep the value set before reading.
+	gpu_occlusion_accurate = s.value("gpu_occlusion_accurate", gpu_occlusion_accurate).toBool();
+	KYTY_CFG_GET(relaxed_shader_float);
+	fast_gpu_sync        = s.value("fast_gpu_sync", false).toBool();
+	shader_cache_enabled = s.value("shader_cache_enabled", shader_cache_enabled).toBool();
+	trophy_enabled       = s.value("trophy_enabled", trophy_enabled).toBool();
 	bool       duration_ok = false;
 	const auto duration =
 	    s.value("trophy_duration_seconds", trophy_duration_seconds).toInt(&duration_ok);
@@ -118,6 +191,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(perf_overlay_enabled);
 	KYTY_CFG_GET(skip_notice_screen);
 	KYTY_CFG_GET(network_connected);
+	KYTY_CFG_GET(psn_emulation_enabled);
 	vblank_frequency = s.value("vblank_frequency", vblank_frequency).toInt();
 	console_language = s.value("console_language", console_language).toInt();
 	if (console_language < 0 || console_language > MAX_CONSOLE_LANGUAGE) {
@@ -125,7 +199,8 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	}
 	KYTY_CFG_GET(vulkan_validation_enabled);
 	KYTY_CFG_GET(shader_validation_enabled);
-	KYTY_CFG_GET(shader_optimization_type);
+	shader_optimization_type = ShaderOptimizationTypeFromText(
+	    s.value("shader_optimization_type").toString());
 	KYTY_CFG_GET(shader_log_direction);
 	KYTY_CFG_GET(shader_log_folder);
 	KYTY_CFG_GET(command_buffer_dump_enabled);
@@ -134,7 +209,10 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(printf_output_file);
 	KYTY_CFG_GET(profiler_enabled);
 	KYTY_CFG_GET(renderdoc_enabled);
-	KYTY_CFG_GET(pro_enabled);
+	KYTY_CFG_GET(guest_tsc_enabled);
+	KYTY_CFG_GET(pssr_upscaler);
+	KYTY_CFG_GET(dlss_folder);
+	pro_enabled = s.value("pro_enabled", false).toBool();
 	// "auto" (on unless the CPU is an AMD), "on" or "off". Before "auto", only amd_cpu_enabled was
 	// saved, and false for everyone who never touched it: true stays on, false becomes auto.
 	amd_cpu_mode = s.contains("amd_cpu_mode")                   ? s.value("amd_cpu_mode").toString()
@@ -196,7 +274,9 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 		if (!it.value().isString()) {
 			return fail(tr("Game setting %1 must be a string.").arg(it.key()));
 		}
-		values.insert(it.key(), it.value().toString());
+		const auto value = it.value().toString();
+		values.insert(it.key(), it.key() == "screen_resolution" ? NormalizeResolution(value)
+		                                                       : value);
 	}
 
 	ReadGameSettingsValues(values);
@@ -212,6 +292,12 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	if (gpu_index < -1) {
 		return fail(tr("GPU index must be -1 or greater."));
 	}
+	if (vblank_frequency < 30 || vblank_frequency > 360) {
+		return fail(tr("Vblank frequency must be between 30 and 360."));
+	}
+	if (flush_draws < 0) {
+		return fail(tr("Draws per GPU submit must be 0 or greater."));
+	}
 	if (trophy_duration_seconds < 5 || trophy_duration_seconds > 10) {
 		return fail(tr("Trophy notification duration must be between 5 and 10 seconds."));
 	}
@@ -221,14 +307,52 @@ bool Configuration::SetGameSettings(const QJsonObject& imported_settings, QStrin
 	if (frame_generation_flow_scale < 25 || frame_generation_flow_scale > 100) {
 		return fail(tr("Frame generation flow scale must be between 25 and 100%."));
 	}
-	if (vblank_frequency < 30 || vblank_frequency > 360) {
-		return fail(tr("Vblank frequency must be between 30 and 360."));
-	}
 	if ((shader_log_direction == LogDirection::File && shader_log_folder.isEmpty()) ||
 	    (printf_direction == LogDirection::File && printf_output_file.isEmpty()) ||
 	    (command_buffer_dump_enabled && command_buffer_dump_folder.isEmpty())) {
 		return fail(tr("Enabled logging and command buffer dumps require an output path."));
 	}
 
+	return true;
+}
+
+// The launcher settings each title was tested with, in the texts of a game config export. The
+// boot checks of these titles ran with linear readback and tessellation on; the other entries
+// are what one title needs on top. A title that runs with the default settings (Astro Bot,
+// Astro's Playroom) has no entry.
+static const char RECOMMENDED_GAME_SETTINGS[] = R"json({
+	"PPSA01317": {"readback_linear_images": "true", "tessellation_enabled": "true"},
+	"PPSA01340": {"readback_linear_images": "true", "tessellation_enabled": "true"},
+	"PPSA01341": {"readback_linear_images": "true", "tessellation_enabled": "true"},
+	"PPSA01342": {"readback_linear_images": "true", "tessellation_enabled": "true"},
+	"PPSA01417": {"readback_linear_images": "true", "tessellation_enabled": "true",
+	              "gpu_occlusion_accurate": "true"},
+	"PPSA01474": {"readback_linear_images": "true", "tessellation_enabled": "true",
+	              "readback_tiled_images": "true", "gpu_occlusion_accurate": "true"},
+	"PPSA03671": {"readback_linear_images": "true", "tessellation_enabled": "true",
+	              "gpu_occlusion_accurate": "true", "red_zone_protection_enabled": "true"},
+	"PPSA08705": {"readback_linear_images": "true", "tessellation_enabled": "true"},
+	"PPSA26344": {"readback_linear_images": "true", "tessellation_enabled": "true"}
+})json";
+
+QJsonObject Configuration::RecommendedGameSettings(const QString& title_id) {
+	static const QJsonObject table =
+	    QJsonDocument::fromJson(QByteArray(RECOMMENDED_GAME_SETTINGS)).object();
+	return table.value(title_id.trimmed().toUpper()).toObject();
+}
+
+bool Configuration::ApplyRecommendedGameSettings(const QString& title_id) {
+	const auto recommended = RecommendedGameSettings(title_id);
+	if (recommended.isEmpty()) {
+		return false;
+	}
+	auto values = GameSettings();
+	for (auto it = recommended.constBegin(); it != recommended.constEnd(); ++it) {
+		// A setting this platform does not have (red zone protection outside Windows) is skipped.
+		if (values.contains(it.key())) {
+			values.insert(it.key(), it.value().toString());
+		}
+	}
+	ReadGameSettingsValues(values);
 	return true;
 }

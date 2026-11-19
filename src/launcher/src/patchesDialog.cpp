@@ -72,8 +72,7 @@ PatchesDialog::PatchesDialog(const Configuration& game, QWidget* parent)
 	credits->setWordWrap(true);
 	remote_layout->addWidget(credits);
 	auto* support = StatusLabel(remote);
-	support->setText(tr("Only JSON cheats are supported. MC4 and SHN files are shown disabled. "
-	                    "Select a JSON file to preview its cheats."));
+	support->setText(tr("Select a file to preview its cheats."));
 	remote_layout->addWidget(support);
 	auto* split = new QSplitter(Qt::Vertical, remote);
 	m_files     = new QTreeWidget(split);
@@ -102,11 +101,13 @@ PatchesDialog::PatchesDialog(const Configuration& game, QWidget* parent)
 	m_status  = StatusLabel(local);
 	local_layout->addWidget(m_patches, 1);
 	local_layout->addWidget(m_status);
+	auto* selection   = new QDialogButtonBox(local);
+	auto* disable_all = selection->addButton(tr("Disable all"), QDialogButtonBox::ActionRole);
+	auto* enable_all  = selection->addButton(tr("Enable all"), QDialogButtonBox::ActionRole);
+	local_layout->addWidget(selection);
 	auto* local_buttons = new QDialogButtonBox(local);
 	auto* reload        = local_buttons->addButton(tr("Reload"), QDialogButtonBox::ActionRole);
 	m_apply = local_buttons->addButton(tr("Apply selection"), QDialogButtonBox::ActionRole);
-	auto* enable_all  = local_buttons->addButton(tr("Enable all"), QDialogButtonBox::ActionRole);
-	auto* disable_all = local_buttons->addButton(tr("Disable all"), QDialogButtonBox::ActionRole);
 	local_layout->addWidget(local_buttons);
 	auto set_all = [this](Qt::CheckState state) {
 		for (int i = 0; i < m_patches->count(); ++i) {
@@ -140,13 +141,7 @@ PatchesDialog::PatchesDialog(const Configuration& game, QWidget* parent)
 			                  file.format.toUpper(), file.name});
 			    item->setData(0, Qt::UserRole, index);
 			    for (int column = 0; column < 3; ++column) {
-				    item->setToolTip(column, file.IsSupported()
-				                                 ? file.title
-				                                 : tr("%1 — %2 is not supported.")
-				                                       .arg(file.title, file.format.toUpper()));
-			    }
-			    if (!file.IsSupported()) {
-				    item->setFlags(item->flags() & ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable));
+				    item->setToolTip(column, file.title);
 			    }
 		    }
 		    auto status =
@@ -204,7 +199,7 @@ void PatchesDialog::Load() {
 	m_local_document = {};
 	m_local_readable = false;
 	m_apply->setEnabled(false);
-	const auto path = Cheats::PlanPath(m_title_id);
+	const auto path = Cheats::PlanPathForVersion(Cheats::PlanPath(m_title_id), m_version);
 	if (path.isEmpty()) {
 		m_status->setText(tr("Unsupported title ID."));
 		return;
@@ -241,7 +236,8 @@ void PatchesDialog::Save() {
 		enabled.append(m_patches->item(index)->checkState() == Qt::Checked);
 	}
 	const auto document = Cheats::WithSelection(m_local_document, enabled);
-	const auto error = Cheats::SaveDocument(Cheats::PlanPath(m_title_id), document, m_local_data);
+	const auto path  = Cheats::PlanPathForVersion(Cheats::PlanPath(m_title_id), m_version);
+	const auto error = Cheats::SaveDocument(path, document, m_local_data);
 	if (!error.isEmpty()) {
 		m_status->setText(error);
 		return;
@@ -275,7 +271,7 @@ void PatchesDialog::PreviewRemote() {
 		return;
 	}
 	const auto index = item->data(0, Qt::UserRole).toInt();
-	if (index < 0 || index >= m_remote_files.size() || !m_remote_files[index].IsSupported()) {
+	if (index < 0 || index >= m_remote_files.size()) {
 		return;
 	}
 	m_preview_status->setText(tr("Loading cheat preview…"));
@@ -293,7 +289,7 @@ void PatchesDialog::ImportRemote() {
 		    tr("Could not read the local cheat file. Open Local and reload it before importing."));
 		return;
 	}
-	const auto path = Cheats::PlanPath(m_title_id);
+	const auto path = Cheats::PlanPathForVersion(Cheats::PlanPath(m_title_id), m_version);
 	if (QFile::exists(path) &&
 	    QMessageBox::question(this, tr("Replace local cheats?"),
 	                          tr("Replace the local cheat file and selections for %1? Imported "

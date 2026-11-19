@@ -16,13 +16,13 @@ namespace Config {
 void Initialize();
 void Shutdown();
 
+enum class ShaderOptimizationType { None, Size, Performance };
+
 struct Lifecycle {
 	static constexpr const char* name       = "Config";
 	static constexpr auto        initialize = Config::Initialize;
 	static constexpr auto        shutdown   = Config::Shutdown;
 };
-
-enum class ShaderOptimizationType { None, Size, Performance };
 
 enum class LogDirection { Silent, Console, File };
 
@@ -78,61 +78,75 @@ struct ConfigOptions {
 	uint32_t audio_music_volume            = 100;
 	uint32_t audio_pad_speaker_main_volume = DEFAULT_AUDIO_PAD_SPEAKER_MAIN_VOLUME;
 	// AudioOut2 3D object ports, mixed into the main bed (main and master apply on top).
-	uint32_t               audio_objects_volume  = 100;
-	bool                   audio_objects_enabled = true;
-	PresentMode            present_mode          = PresentMode::Mailbox;
-	int32_t                gpu_index             = -1;
-	bool                   fullscreen_enabled    = false;
-	bool                   hdr_enabled           = false;
-	bool                   hide_cursor_enabled   = false;
+	uint32_t               audio_objects_volume           = 100;
+	bool                   audio_objects_enabled          = true;
+	// 0 shares player 1 with the first gamepad; 1..MAX_PLAYERS dedicates that player to the keyboard.
+	uint32_t               keyboard_player                = 0;
+	PresentMode            present_mode                = PresentMode::Mailbox;
+	int32_t                gpu_index                   = -1;
+	bool                   fullscreen_enabled          = false;
+	bool                   hdr_enabled                 = false;
+	bool                   hide_cursor_enabled         = false;
 	bool                   native_resolution_enabled = false;
 	bool                   low_latency_enabled       = false;
 	uint32_t               low_latency_fps_limit     = 0;
 	Upscaler               upscaler                  = Upscaler::Off;
 	DlssMode               dlss_mode                 = DlssMode::Quality;
 	std::filesystem::path  upscaler_profile; // empty: none
-	// Folder with the user's DLSS model: with upscaler DLSS, DLSS upscales PSSR in Pro mode.
-	std::filesystem::path  dlss_folder;
-	uint32_t               dlss_preset = 0; // 0 is the model default
+	bool                   stretch_enabled             = false;
+	bool                   splash_enabled              = true;
 	FrameGeneration        frame_generation                  = FrameGeneration::Off;
 	uint32_t               frame_generation_flow_scale       = 100; // percent, 25-100
 	bool                   frame_generation_performance_mode = false;
-	bool                   vr_enabled            = false;
-	bool                   pro_enabled           = false;
-	bool                   amd_cpu_enabled       = false;
+	bool                   vr_enabled                  = false;
+	bool                   pro_enabled                 = false;
+	bool                   pssr_dlss_enabled           = false;
+	// Folder with the user's DLSS model.
+	std::filesystem::path  dlss_folder;
+	uint32_t               dlss_preset                 = 0; // 0 is the model default
+	bool                   amd_cpu_enabled             = false;
 	std::string            amd_cpu_decision; // why amd_cpu_enabled is set as it is, for the log
-	bool                   network_connected               = false;
-	uint32_t               vblank_frequency                = 60;
-	uint32_t               console_language                = DEFAULT_CONSOLE_LANGUAGE;
-	bool                   vulkan_validation_enabled       = false;
-	bool                   shader_validation_enabled       = false;
-	ShaderOptimizationType shader_optimization_type        = ShaderOptimizationType::None;
-	LogDirection           shader_log_direction            = LogDirection::Silent;
-	std::filesystem::path  shader_log_folder               = "_Shaders";
-	bool                   command_buffer_dump_enabled     = false;
-	std::filesystem::path  command_buffer_dump_folder      = "_Buffers";
-	bool                   graphics_debug_dump_enabled     = false;
-	LogDirection           printf_direction                = LogDirection::Silent;
-	std::filesystem::path  printf_output_file              = "_kyty.txt";
-	bool                   profiler_enabled                = false;
-	bool                   spirv_debug_printf_enabled      = false;
-	uint32_t               keyboard_player                 = 0;
+	bool                   guest_tsc_enabled           = false;
+	bool                   network_connected           = false;
+	bool                   psn_emulation_enabled       = false;
+	uint32_t               vblank_frequency            = 60;
+	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
+	bool                   vulkan_validation_enabled   = false;
+	bool                   shader_validation_enabled   = false;
+	bool                   shader_cache_enabled        = false;
+	// Kept for our launcher and scripts (upstream 57963dd12 dropped the unread option).
+	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
+	LogDirection           shader_log_direction        = LogDirection::Silent;
+	std::filesystem::path  shader_log_folder           = "_Shaders";
+	bool                   command_buffer_dump_enabled = false;
+	std::filesystem::path  command_buffer_dump_folder  = "_Buffers";
+	bool                   graphics_debug_dump_enabled = false;
+	LogDirection           printf_direction            = LogDirection::Silent;
+	std::filesystem::path  printf_output_file          = "_kyty.txt";
+	bool                   profiler_enabled            = false;
+	bool                   spirv_debug_printf_enabled  = false;
 	bool                   gpu_assisted_validation_enabled = false;
-	bool                   renderdoc_enabled               = false;
-	bool                   readback_linear_images          = false;
-	bool                   readback_tiled_images           = false;
-	bool                   sync_raw_image_buffers          = false;
-	bool                   support_zmask                   = false;
-	bool                   tessellation_enabled            = false;
-	bool                   trophy_enabled                  = true;
-	uint32_t               trophy_duration_seconds         = 6;
-	bool                   playgo_hack_enabled             = false;
-	bool                   skip_notice_screen              = false;
+	bool                   renderdoc_enabled           = false;
+	bool                   readback_linear_images      = false;
+	bool                   readback_tiled_images       = false;
+	bool                   readback_storage_images     = false;
+	bool                   sync_raw_image_buffers      = false;
+	uint32_t               flush_draws                 = 0; // 0 is off
+	bool                   tessellation_enabled        = false;
+	bool                   occlusion_queries_enabled   = false;
+	bool                   relaxed_shader_float        = false;
+	bool                   lod_stats_enabled           = false;
+	bool                   trophy_enabled              = true;
+	uint32_t               trophy_duration_seconds     = 6;
+	bool                   support_zmask = false;
+	bool                   playgo_hack_enabled = false;
+	bool                   skip_notice_screen = false;
 	bool                   perf_overlay_enabled            = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
 	Keymap keymap;
+	std::vector<std::string> guest_arguments {""};
 };
 
 void Load(const ConfigOptions& cfg);
@@ -164,6 +178,7 @@ uint32_t                              LowLatencyFpsLimit();
 Upscaler                              GetUpscaler();
 DlssMode                              GetDlssMode();
 const std::filesystem::path&          UpscalerProfilePath();
+bool                                  PssrDlssEnabled();
 const std::filesystem::path&          GetDlssFolder();
 uint32_t                              GetDlssPreset();
 // lsfg-vk frame generation, common/frameGeneration.h (applied in window.cpp).
@@ -183,8 +198,12 @@ uint32_t GetKeyboardPlayer();
 int32_t  GetPlayerUserId(int player);
 int      GetPlayerFromUserId(int32_t user_id);
 bool     IsGuestUserId(int32_t user_id);
+bool StretchEnabled();
+bool GuestTscEnabled();
+bool PsnEmulationEnabled();
 
 bool                   ShaderValidationEnabled();
+bool                   ShaderCacheEnabled();
 ShaderOptimizationType GetShaderOptimizationType();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();
@@ -192,7 +211,16 @@ std::filesystem::path  GetShaderLogFolder();
 bool                  CommandBufferDumpEnabled();
 std::filesystem::path GetCommandBufferDumpFolder();
 
-bool GraphicsDebugDumpEnabled();
+// Read per draw on the command processor (debug.cpp LogDrawPhase, descriptors.cpp): copies of the
+// loaded options, so the check inlines (the common library is not part of the emulator's LTO).
+namespace Detail {
+inline bool g_graphics_debug_dump_enabled = false;
+inline bool g_sync_raw_image_buffers      = false;
+} // namespace Detail
+
+inline bool GraphicsDebugDumpEnabled() {
+	return Detail::g_graphics_debug_dump_enabled;
+}
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
@@ -203,13 +231,20 @@ bool SpirvDebugPrintfEnabled();
 
 bool GpuAssistedValidationEnabled();
 
-bool     RenderDocEnabled();
-bool     ReadbackLinearImagesEnabled();
-bool     ReadbackTiledImagesEnabled();
-bool     SyncRawImageBuffersEnabled();
-bool     SupportZmaskEnabled();
-bool     TessellationEnabled();
-bool     TrophyEnabled();
+bool RenderDocEnabled();
+bool ReadbackLinearImagesEnabled();
+bool ReadbackTiledImagesEnabled();
+bool ReadbackStorageImagesEnabled();
+inline bool SyncRawImageBuffersEnabled() {
+	return Detail::g_sync_raw_image_buffers;
+}
+bool SupportZmaskEnabled();
+uint32_t GetFlushDraws();
+bool TessellationEnabled();
+bool OcclusionQueriesEnabled();
+bool RelaxedShaderFloatEnabled();
+bool LodStatsEnabled();
+bool TrophyEnabled();
 uint32_t GetTrophyDurationSeconds();
 bool     PlayGoHackEnabled();
 bool     SkipNoticeScreen();
@@ -218,6 +253,7 @@ bool RedZoneProtectionEnabled();
 #endif
 
 const Keymap& GetKeymap();
+const std::vector<std::string>& GetGuestArguments();
 
 } // namespace Config
 

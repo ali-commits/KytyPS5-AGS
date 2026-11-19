@@ -10,6 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -441,6 +442,32 @@ void TestFloatComparisonDescriptorInputs() {
   }
 }
 
+void TestSignedConversionDescriptorInputs() {
+  // 3.75 and -3.75 truncate, the largest float below 2^31 converts exactly, 2^31 and +inf
+  // saturate up, -2^31 and -1e10 saturate down, and -0.0, a denormal and both NaNs read zero.
+  constexpr std::array<std::pair<uint32_t, uint32_t>, 11> inputs = {{
+      {0x40700000u, 3u},          {0xc0700000u, 0xfffffffdu}, {0x4effffffu, 0x7fffff80u},
+      {0x4f000000u, 0x7fffffffu}, {0x7f800000u, 0x7fffffffu}, {0xcf000000u, 0x80000000u},
+      {0xd01502f9u, 0x80000000u}, {0x80000000u, 0u},          {0x00000001u, 0u},
+      {0x7fc00000u, 0u},          {0xffc00000u, 0u}}};
+  Fixture fixture;
+  const auto user = fixture.Emit(
+      ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+  const auto converted = fixture.Emit(
+      ValueOpcode::ConvertS32F32, {fixture.Emit(ValueOpcode::BitCastF32U32, {user})});
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {converted}, .dword_count = 1});
+  fixture.Plan();
+  for (const auto &[bits, expected] : inputs) {
+    const std::array user_data{bits};
+    DescriptorValue result;
+    Check(SrtWalker(fixture.program, {.user_data = user_data})
+                  .EvaluateDescriptor(0, result) &&
+              result.dwords[0] == expected,
+          "descriptor signed conversion disagrees with the native conversion");
+  }
+}
+
 void TestSharedIntegerRuntimeDependencies() {
   Fixture fixture;
   const auto lane = fixture.Emit(ValueOpcode::LaneId);
@@ -513,8 +540,11 @@ void TestConstantBufferBounds() {
   overflow.Emit(ValueOpcode::GetBufferResource,
                 {overflow_read, Value(0u), Value(16u), Value(0u)});
   overflow.Plan();
-  Check(!SrtWalker(overflow.program, runtime).RefreshFlatBuffer(flat),
-        "out-of-bounds constant-buffer walk was accepted");
+  memory_image.words.emplace(0x3010u, 0xdeadbeefu);
+  const auto reads_before = memory_image.reads;
+  Check(SrtWalker(overflow.program, runtime).RefreshFlatBuffer(flat) &&
+            flat == std::vector<uint32_t>{0} && memory_image.reads == reads_before,
+        "out-of-bounds constant-buffer read did not return zero without reading host memory");
 }
 
 void TestReadLaneElimination() {
@@ -703,17 +733,11 @@ void TestKnownZeroBitsFoldIndexedReads() {
 
 namespace Common {
 
-int DbgExitIfHandler(const char *, const char *, int) { return 1; }
+void DbgExitIfHandler(const char *, const char *, int) { std::abort(); }
 
-int DbgExitHandler(const char *, int, std::string_view text) {
+void DbgExitHandler(const char *, int, std::string_view text) {
   throw std::runtime_error(std::string(text));
 }
-
-int DbgExitHandler(const char *, int, fmt::text_style, std::string_view text) {
-  throw std::runtime_error(std::string(text));
-}
-
-void DbgExit(int) { std::abort(); }
 
 } // namespace Common
 
@@ -731,6 +755,7 @@ int main() {
     TestRuntime64BitDescriptorOps();
     TestUniformFirstLaneSamplerLod();
     TestFloatComparisonDescriptorInputs();
+    TestSignedConversionDescriptorInputs();
     TestSharedIntegerRuntimeDependencies();
     TestConstantBufferBounds();
     TestReadLaneElimination();
