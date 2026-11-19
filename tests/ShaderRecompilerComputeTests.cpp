@@ -5067,11 +5067,13 @@ public:
     const auto image_size = image_ring.Size() + 16;
     const auto [large_source, large_offset] =
         BufferCacheTestAccess::ImageStaging(cache, image_size);
-    if (small_upload) {
+    // Both rings hand an image larger than the ring a one-off source (upstream 9bcf80bf6; the
+    // default ring used to refuse it and the upload exited).
+    {
       Require("StreamBufferRing", "oversized image temporary",
               large_source != nullptr && large_source != &image_ring &&
                   large_source->Size() == image_size && large_offset == 0,
-              "small ring rejected an oversized image or replaced the persistent ring");
+              "image staging rejected an oversized image or replaced the persistent ring");
       constexpr uint64_t head = 0x52414d4845414401ull;
       constexpr uint64_t tail = 0x52414d5441494c02ull;
       std::memcpy(large_source->Mapped().data(), &head, sizeof(head));
@@ -5107,9 +5109,6 @@ public:
       Require("StreamBufferRing", "temporary submission lifetime",
               actual_head == head && actual_tail == tail && actual_swapped == swapped,
               "deferred image staging lost transfer or storage-shader reads before completion");
-    } else {
-      Require("StreamBufferRing", "default oversized image policy", large_source == nullptr,
-              "flag-off image staging changed its oversize policy");
     }
     Require("StreamBufferRing", "persistent image ring", image_ring.Handle() == ring_handle,
             "one-off image staging changed the shared utility ring");

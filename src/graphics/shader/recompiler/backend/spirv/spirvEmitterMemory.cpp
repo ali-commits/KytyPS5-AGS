@@ -3552,7 +3552,7 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	}
 	const auto access = PrepareMemoryResourceAccess(state, mem);
 	// Scalar buffer addressing aligns the base and each offset independently.
-	auto element = Binary(
+	const auto element = Binary(
 	    state, spv::OpIAdd, TypeU32(state), index,
 	    Binary(state, spv::OpShiftRightLogical, TypeU32(state), access.byte_offset, ConstantU32(state, 2)));
 	// KYTY_COHERENT_LOAD_MODE / _ACQUIRE: a coherent scalar load as the vector ones (not Plain).
@@ -3562,19 +3562,8 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return coherent ? EmitCoherentWordLoad(state, pointer)
 		                : EmitNative<spv::OpLoad, IR::Type::U32>(state, pointer);
 	};
-	if (DeviceChecksDwordLoad(access)) {
-		// Upstream ee034be4b: the device computes byte offsets in 32 bits, so elements from 2^30 on
-		// would wrap back into the range; the host prefix adds at most 63 bytes.
-		constexpr uint32_t last_element = UINT32_MAX >> 2u;
-		const auto         offset       = inst.Arg(1).Resolve();
-		if (!offset.IsImmediate() ||
-		    (offset.U32() >> 2u) + (mem.offset >> 2u) > last_element - 63u) {
-			element = EmitGlsl<GLSLstd450UMin, IR::Type::U32>(state, element,
-			                                                  ConstantU32(state, last_element));
-		}
-		ctx.Define(inst, load(EmitMemoryElementPointer(state, access, element)));
-		return;
-	}
+	// NVIDIA can return a partial DWORD from a 1-3 byte descriptor range even with
+	// robustBufferAccess2. OpArrayLength counts only whole DWORDs.
 	const auto condition = EmitMemoryElementInBounds(state, access, element);
 	ctx.Define(inst, EmitValueOrZeroIfCondition(state, condition, [&]() {
 		           return load(EmitMemoryElementPointer(state, access, element));
