@@ -746,6 +746,30 @@ if(KYTY_CPU_CHECK_LEVEL GREATER_EQUAL 3)
 	add_executable(build_flags_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BuildFlagsTests.cpp")
 endif()
 
+# KYTY_LANE_LOCAL: the wave64 lane-locality proof on hand-assembled programs (chenxiao07/KytyPS5 9907780e1).
+add_executable(lane_local_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LaneLocalTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ExportOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ImageOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/MemoryOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ScalarAluOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/VectorAluOps.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/translate/LaneLocal.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/CodegenOptions.cpp"
+)
+target_link_libraries(lane_local_tests common fmt::fmt)
+target_include_directories(lane_local_tests PRIVATE ${inc_headers})
+
+add_executable(vdecsw_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/VdecswTests.cpp"
+	"${KYTY_SOURCE_DIR}/libs/videoDec2Decoder.cpp"
+	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
+)
+target_link_libraries(vdecsw_tests common FFmpeg::ffmpeg)
+target_include_directories(vdecsw_tests PRIVATE ${inc_headers})
+
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageManagerTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
@@ -1671,7 +1695,7 @@ target_include_directories(gpu_blit_shader_tests PRIVATE ${inc_headers})
 
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
-	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
+	foreach(kyty_exception_test scalar_provenance_tests lane_local_tests resource_tracking_tests
 			pipeline_compile_queue_tests shader_precompile_tests virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
@@ -1725,6 +1749,11 @@ if(BUILD_TESTING)
 	add_test(NAME rt_hardware_gpu COMMAND $<TARGET_FILE:rt_hardware_tests>)
 	add_test(NAME rt_patch COMMAND $<TARGET_FILE:rt_patch_tests>)
 	set_tests_properties(registered_shader_code_cert PROPERTIES ENVIRONMENT "KYTY_REGISTERED_SHADER_CODE=1")
+	add_test(NAME lane_local COMMAND $<TARGET_FILE:lane_local_tests>)
+	add_test(NAME lane_local_codegen COMMAND $<TARGET_FILE:shader_cfg_tests> --lane-local-only)
+	set_tests_properties(lane_local_codegen PROPERTIES ENVIRONMENT
+		"KYTY_LANE_LOCAL=1;KYTY_LANE_LOCAL_LOG=1;KYTY_TRANSLATE_STATS=1;KYTY_WAVE64_WARPS=0")
+	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME texel_image_lookup COMMAND $<TARGET_FILE:texel_image_lookup_tests>)
@@ -3186,6 +3215,8 @@ if(BUILD_TESTING)
 		ime_dialog_tests
 		shader_cfg_tests
 		scalar_provenance_tests
+		lane_local_tests
+		vdecsw_tests
 		image_page_table_tests
 		image_clear_range_tests
 		image_gpu_keep_tests

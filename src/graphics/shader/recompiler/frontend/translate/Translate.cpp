@@ -1106,6 +1106,64 @@ bool StartsWithLiveExec(const Decoder::Program& decoded, const TranslateOptions&
 	return false;
 }
 
+// KYTY_TRANSLATE_STATS=1 (diagnostic, default off): one stdout line per translated program, for
+// sizing codegen work over a run's whole shader set (with KYTY_PROGRAM_CACHE=0 and
+// KYTY_SHADER_PRECOMPILE=1 every journaled program is translated at start-up):
+//   TranslateStats: stage=<ShaderType> wave=<32|64> hash=0x.. insts=N
+//   mode=structured|dispatcher(kind) setpc=N movrel=N pk_f16=N f16=N mix_f16=N
+// pk_f16: V_PK_{ADD,MUL,MIN,MAX,FMA,FMAC}_F16 (lowered to two f32 operations each); f16: other
+// half-precision arithmetic (unpacked VOP1/VOP2/VOP3 F16 forms); mix_f16: V_MAD_MIX*/V_FMA_MIX*.
+bool TranslateStatsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRANSLATE_STATS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void PrintTranslateStats(const Decoder::Program& decoded, const CFG::Graph& cfg,
+                         const TranslateOptions& options) {
+	using O = Decoder::Opcode;
+	uint32_t setpc = 0, movrel = 0, pk_f16 = 0, f16 = 0, mix = 0;
+	for (const auto& inst: decoded.instructions) {
+		switch (inst.opcode) {
+			case O::S_SETPC_B64: setpc++; break;
+			case O::V_MOVRELS_B32:
+			case O::V_MOVRELD_B32: movrel++; break;
+			case O::V_PK_ADD_F16:
+			case O::V_PK_MUL_F16:
+			case O::V_PK_MIN_F16:
+			case O::V_PK_MAX_F16:
+			case O::V_PK_FMA_F16:
+			case O::V_PK_FMAC_F16: pk_f16++; break;
+			case O::V_MAD_MIXLO_F16:
+			case O::V_MAD_MIXHI_F16: mix++; break;
+			case O::V_ADD_F16:
+			case O::V_SUB_F16:
+			case O::V_SUBREV_F16:
+			case O::V_MUL_F16:
+			case O::V_FMAC_F16:
+			case O::V_FMAMK_F16:
+			case O::V_FMAAK_F16:
+			case O::V_FMA_F16:
+			case O::V_MIN3_F16:
+			case O::V_MAX3_F16:
+			case O::V_MED3_F16:
+			case O::V_MAX_F16:
+			case O::V_MIN_F16: f16++; break;
+			default: break;
+		}
+	}
+	const bool dispatcher = cfg.irreducible || cfg.unsupported;
+	std::printf("TranslateStats: stage=%u wave=%u hash=0x%016llx insts=%zu mode=%s(%u) setpc=%u movrel=%u "
+	            "pk_f16=%u f16=%u mix_f16=%u%s%s\n",
+	            static_cast<uint32_t>(options.stage), static_cast<uint32_t>(options.wave_size),
+	            static_cast<unsigned long long>(options.shader_hash),
+	            decoded.instructions.size(), dispatcher ? "dispatcher" : "structured",
+	            static_cast<uint32_t>(cfg.failure_kind), setpc, movrel, pk_f16, f16, mix,
+	            cfg.unsupported_reason.empty() ? "" : " reason=", cfg.unsupported_reason.c_str());
+}
+
 } // namespace
 
 IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
@@ -1118,6 +1176,21 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	IR::Program result;
 	result.stage               = options.stage;
 	result.wave_size           = options.wave_size;
+	if (options.stage == ShaderType::Compute && options.wave_size == 64u &&
+	    GetCodegenOptions().lane_local && GetHostComputeSubgroups32() && options.input_info.compute != nullptr &&
+	    options.input_info.compute->host_subgroup_size == 32u) {
+		// KYTY_LANE_LOCAL (CodegenOptions.h): one guest lane per host invocation when proven.
+		static const bool log = std::getenv("KYTY_LANE_LOCAL_LOG") != nullptr;
+		std::string       reason;
+		bool              uniform_loads = false;
+		result.lane_local = IsWaveLaneLocal(decoded, log ? &reason : nullptr, &uniform_loads) &&
+		                    !uniform_loads;
+		if (log) {
+			std::printf("LaneLocal CS %016llx: %s\n",
+			            static_cast<unsigned long long>(options.shader_hash),
+			            result.lane_local ? "yes" : uniform_loads ? "uniform loads only" : reason.c_str());
+		}
+	}
 	result.shader_hash         = options.shader_hash;
 	result.user_data_base      = options.user_data_base;
 	result.user_data_count     = options.user_data_count;
@@ -1238,7 +1311,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			total_threads = std::max(workgroup->threads_num[0], 1u) *
 			                std::max(workgroup->threads_num[1], 1u) *
 			                std::max(workgroup->threads_num[2], 1u);
-			if (options.wave_size == 64u && workgroup->host_subgroup_size == 32u &&
+			if (options.wave_size == 64u && workgroup->host_subgroup_size == 32u && !result.lane_local &&
 			    total_threads % 64u != 0u) {
 				initial_exec = entry_ir.ULessThan(builtin(IR::StageInputKind::LocalInvocationIndex),
 				                                  IR::U32(IR::Value(total_threads)));
@@ -1648,6 +1721,9 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	}
 	if (IR::ValidationEnabled()) {
 		IR::ValidateProgram(result, false);
+	}
+	if (TranslateStatsEnabled()) [[unlikely]] {
+		PrintTranslateStats(decoded, cfg, options);
 	}
 	return result;
 }

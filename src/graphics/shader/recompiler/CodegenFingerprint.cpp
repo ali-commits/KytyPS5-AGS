@@ -421,6 +421,13 @@ std::vector<uint8_t> CodegenFingerprint() {
 	if (options.vs_lane_wrap32 && options.wave32_clusters == Wave32Clusters::Off) {
 		b.Text("vs_lane_wrap32");
 	}
+	if (options.lane_local) {
+		b.Text("lane_local");
+		b.U8(GetHostComputeSubgroups32() ? 1u : 0u);
+		if (const char* nops = std::getenv("KYTY_LANE_LOCAL_NOPS"); nops != nullptr && nops[0] == '1') {
+			b.Text("lane_local_nops");
+		}
+	}
 	// Bindless images (ir/BindlessBindings.h): resource tracking may turn an indirect image the
 	// enumeration cannot cover into a bindless one.
 	if (IR::BindlessImagesEnabled()) {

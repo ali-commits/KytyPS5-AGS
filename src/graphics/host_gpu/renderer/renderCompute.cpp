@@ -2475,7 +2475,6 @@ void RenderExecutor::DispatchDirectOne(uint64_t submit_id, CommandBuffer& buffer
 		buffer.NoteHazardDispatch(hazard_access);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
-	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	if (auto& cache = m_context.GetTextureCache(); cache.HasStencilStorageShadows()) {
 		cache.FlushStencilStorageShadows(); // KYTY_STENCIL_STORAGE_SHADOW
 	}

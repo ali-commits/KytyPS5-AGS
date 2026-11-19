@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/shader/recompiler/CodegenFingerprint.h"
 #include "graphics/shader/recompiler/CodegenOptions.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -16659,6 +16660,34 @@ int main(int argc, char **argv) {
   DefaultEnv("KYTY_MESH_CULL", "full");
 
   EnsureConfigInitialized();
+  if (argc == 2 && std::strcmp(argv[1], "--lane-local-only") == 0) {
+    using namespace ShaderRecompiler;
+    Check(GetCodegenOptions().lane_local, "KYTY_LANE_LOCAL did not enable the proof");
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    ShaderComputeInputInfo compute{};
+    compute.host_subgroup_size = 32;
+    compute.threads_num[0] = 64;
+    options.input_info.compute = &compute;
+    // S_ENDPGM is lane-local. Writing EXEC_HI observes the guest wave layout.
+    const uint32_t lane_local[] = {0xbf810000u};
+    const uint32_t wave_dependent[] = {0xbeff0380u, 0xbf810000u};
+    SetHostComputeSubgroups32(false);
+    const auto fallback_key = CodegenFingerprint();
+    Check(!RecompileForTest(lane_local, options).program.lane_local,
+          "lane-local codegen requires guaranteed 32-wide subgroups");
+    SetHostComputeSubgroups32(true);
+    Check(CodegenFingerprint() != fallback_key, "lane-local host support must change cache identity");
+    const auto compiled = RecompileForTest(lane_local, options);
+    Check(compiled.program.lane_local, "the lane-local verdict did not reach codegen");
+    CheckSpirvBinaryValidates(compiled.spirv);
+    Check(DisassembleSpirvBinary(compiled.spirv).find("LocalSize 64 1 1") != std::string::npos,
+          "lane-local codegen must emit one invocation per guest lane");
+    auto fallback = RecompileForTest(wave_dependent, options);
+    Check(!fallback.program.lane_local, "a wave-dependent program must keep the fallback");
+    Check(DisassembleSpirvBinary(fallback.spirv).find("LocalSize 32 1 1") != std::string::npos,
+          "two-lane codegen must keep 32 invocations for a wave64 workgroup");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--narrow-conversions-only") == 0) {
     TestNarrowConversionRoundTrips();
     std::puts("shader_cfg --narrow-conversions-only: ok");

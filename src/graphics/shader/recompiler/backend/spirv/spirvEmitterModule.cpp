@@ -835,8 +835,8 @@ void DefineInputs(EmitterState& state) {
 		    })) {
 			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		}
-	} else if (state.split_wave) {
-		// KYTY_WAVE64_WARPS uses the workgroup index as the guest lane and exchange slot.
+	} else if (state.program.lane_local || state.split_wave) {
+		// Lane-local ADD_TID and split-wave exchanges use the workgroup invocation index.
 		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 	}
 	for (auto& input: state.inputs) {

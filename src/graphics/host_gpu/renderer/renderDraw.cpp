@@ -474,6 +474,14 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
+static bool DynamicStateAllEnabled() {
+	static const bool enabled = [] {
+		const auto* value = std::getenv("KYTY_DYNAMIC_STATE_ALL");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
 static bool DynamicStateShadowEnabled() {
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
 	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [] {
@@ -787,17 +795,21 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, const CommandS
 	if (recorder.Update(shadow.depth_bias_enable, depth_bias_flag)) {
 		vk_buffer.setDepthBiasEnable(depth_bias_flag);
 	}
-	if (depth_bias_enable) {
+	// Declared dynamic state needs values even when the corresponding test is disabled.
+	const bool all_dynamic = DynamicStateAllEnabled();
+	if (depth_bias_enable || all_dynamic) {
 		// Vulkan has one bias for both faces. Prefer a visible front face when both are enabled.
-		const float guest_constant_factor =
-		    use_front ? poly_offset.front_offset : poly_offset.back_offset;
-		const float constant_factor = ConvertPolygonOffsetConstantFactor(
-		    guest_constant_factor, poly_offset, depth.desc.view_info.format);
-		const float slope_factor =
-		    (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f;
-		const std::array<float, 3> bias {constant_factor, poly_offset.clamp, slope_factor};
+		std::array<float, 3> bias {};
+		if (depth_bias_enable) {
+			const float guest_constant_factor =
+			    use_front ? poly_offset.front_offset : poly_offset.back_offset;
+			bias = {ConvertPolygonOffsetConstantFactor(guest_constant_factor, poly_offset,
+			                                           depth.desc.view_info.format),
+			        poly_offset.clamp,
+			        (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f};
+		}
 		if (recorder.Update(shadow.depth_bias, bias, shadow.depth_bias_valid)) {
-			vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+			vk_buffer.setDepthBias(bias[0], bias[1], bias[2]);
 			shadow.depth_bias_valid = true;
 		}
 	}
@@ -806,7 +818,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, const CommandS
 	if (recorder.Update(shadow.stencil_test_enable, stencil_test_enable)) {
 		vk_buffer.setStencilTestEnable(stencil_test_enable);
 	}
-	if (depth.stencil_test_enable) {
+	if (depth.stencil_test_enable || all_dynamic) {
 		const auto set_stencil = [&](vk::StencilFaceFlagBits face, const vk::StencilOpState& state) {
 			vk_buffer.setStencilOp(face, state.failOp, state.passOp, state.depthFailOp, state.compareOp);
 			vk_buffer.setStencilCompareMask(face, state.compareMask);

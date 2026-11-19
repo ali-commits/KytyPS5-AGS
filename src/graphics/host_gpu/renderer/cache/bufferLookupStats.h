@@ -55,11 +55,22 @@ enum class Part : uint8_t {
 // Why a read binding missed its memo (ObtainReadBinding).
 enum class Miss : uint8_t { NoRegion, Empty, OtherKey, Signature, Guard, Epoch, Count };
 
+// KYTY_CP_DIAGNOSTICS=OFF (CMake, default ON): the command processor's per-draw diagnostics
+// (KYTY_CP_COMMIT_STATS, KYTY_BUFFER_LOOKUP_STATS) are compiled out: their gates are constant
+// false, so every hook folds away (uProf 2026-10-15: these gates were ~2-3% of the Sky Garden
+// command processor's ops in a build with them present but off). The switches are then ignored.
+#ifndef KYTY_CP_DIAGNOSTICS
+#define KYTY_CP_DIAGNOSTICS 1
+#endif
+
 namespace Detail {
 [[nodiscard]] bool ReadEnabled();
 } // namespace Detail
 
 [[nodiscard]] inline bool Enabled() {
+#if !KYTY_CP_DIAGNOSTICS
+	return false;
+#endif
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
 	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return Detail::ReadEnabled();

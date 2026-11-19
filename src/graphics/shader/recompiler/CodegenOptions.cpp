@@ -62,7 +62,7 @@ CodegenOptions FromEnvironment() {
 	options.branchless_loads    = EnvFlag("KYTY_BRANCHLESS_LOADS", options.branchless_loads);
 	options.branchless_lds      = EnvFlag("KYTY_BRANCHLESS_LDS", options.branchless_lds);
 	options.flat_aperture_bvh   = EnvFlag("KYTY_FLAT_APERTURE_BVH", options.flat_aperture_bvh);
-
+	options.lane_local          = EnvFlag("KYTY_LANE_LOCAL", options.lane_local);
 	options.readonly_buffers    = EnvFlag("KYTY_READONLY_BUFFERS", options.readonly_buffers);
 	options.native_f16     = EnvFlag("KYTY_NATIVE_F16", options.native_f16);
 	options.f32_flush_host = EnvFlagVendor("KYTY_F32_FLUSH_HOST", options.f32_flush_host);
@@ -346,6 +346,18 @@ CodegenOptions& Storage() {
 }
 
 } // namespace
+
+namespace {
+std::atomic<bool> g_host_compute_subgroups_32 {false};
+} // namespace
+
+void SetHostComputeSubgroups32(bool fixed_32) {
+	g_host_compute_subgroups_32.store(fixed_32, std::memory_order_relaxed);
+}
+
+bool GetHostComputeSubgroups32() {
+	return g_host_compute_subgroups_32.load(std::memory_order_relaxed);
+}
 
 namespace {
 std::atomic<bool> g_host_uniform_buffer_robust {false};

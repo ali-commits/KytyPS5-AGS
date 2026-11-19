@@ -57192,12 +57192,19 @@ void CheckPs5GameExampleImageClearRuntimeShape() {
   Require("Ps5GameExampleImageClear", "memory-dependent fill guard",
           loaded.has_specialization_memory_reads,
           "a scalar-loaded fill lost its specialization-memory dependence");
-  runtime_resources = loaded;
-  Require("Ps5GameExampleImageClear", "scalar-loaded fill",
-          ResolveComputeBufferFill(compute, 1, 1, 1, 0x41u, descriptor,
-                                   packed_clear, size) &&
-              packed_clear == scalar_clear && descriptor.Base48() == 0x200000u,
+  const auto &loaded_fill = loaded.uniform_fill;
+  Require("Ps5GameExampleImageClear", "scalar-loaded fill materialization",
+          loaded_fill.kind == ShaderRecompiler::IR::UniformFillKind::Buffer &&
+              loaded_fill.value == scalar_clear &&
+              loaded_fill.resource < loaded.buffers.size() &&
+              DecodeNativeDescriptor<ShaderBufferResource>(
+                  loaded.buffers[loaded_fill.resource]).Base48() == 0x200000u,
           "GTA3's scalar input was confused with its destination");
+  runtime_resources = loaded;
+  Require("Ps5GameExampleImageClear", "scalar-loaded fill keeps the dispatch",
+          !ResolveComputeBufferFill(compute, 1, 1, 1, 0x41u, descriptor,
+                                    packed_clear, size),
+          "a fill depending on specialization memory replaced the dispatch");
   clean_scalar = false;
   runtime_resources = Compile(scalar_code);
   Require("Ps5GameExampleImageClear", "unavailable clean scalar",

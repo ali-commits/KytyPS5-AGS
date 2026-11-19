@@ -22,6 +22,65 @@ namespace {
 // constant. This is exact: nothing is assumed about unknown values. It exists for V_MOVRELS /
 // V_MOVRELD, whose select chains compare M0 against every VGPR offset above the base, while the
 // guest computes M0 from a 3-bit field (times a small stride), so most compares are always false.
+// Whether every lane where lanes holds also has predicate: lanes is the predicate, a
+// conjunction with a term that implies it, or a phi whose incoming values all do. A phi met again
+// through a loop is taken to imply it, which holds by induction once its other incoming values do:
+// a waterfall loop's EXEC starts as the EXEC before the loop and only loses lanes.
+// (serbru20066666/brunoKytyPs5 1d9b1ff09.)
+bool LanesImply(Value lanes, Value predicate, std::vector<const Inst*>& phis, uint32_t& budget) {
+	lanes = lanes.Resolve();
+	if (lanes == predicate) {
+		return true;
+	}
+	const auto* inst = lanes.TryInstruction();
+	if (inst == nullptr || budget == 0) {
+		return false;
+	}
+	budget--;
+	switch (inst->GetOpcode()) {
+		case ValueOpcode::LogicalAnd:
+			return LanesImply(inst->Arg(0), predicate, phis, budget) ||
+			       LanesImply(inst->Arg(1), predicate, phis, budget);
+		case ValueOpcode::Phi: {
+			if (std::ranges::find(phis, inst) != phis.end()) {
+				return true;
+			}
+			phis.push_back(inst);
+			bool all = inst->NumArgs() != 0;
+			for (size_t index = 0; index < inst->NumArgs() && all; index++) {
+				all = LanesImply(inst->Arg(index), predicate, phis, budget);
+			}
+			phis.pop_back();
+			return all;
+		}
+		default: return false;
+	}
+}
+
+// The value ReadFirstLane reads: the first active lane of its EXEC operand. In an active lane, a
+// register written under a mask that lane has holds the written value, whatever the inactive lanes
+// kept, so EXEC-masked merges Select(mask, written, old) whose mask EXEC implies are looked through.
+Value ActiveLaneValue(const Inst& read_first_lane) {
+	auto       value = read_first_lane.Arg(0).Resolve();
+	const auto exec  = read_first_lane.Arg(1);
+	if (exec.IsEmpty()) {
+		return value;
+	}
+	std::vector<const Inst*> phis;
+	for (uint32_t depth = 0; depth < 32; depth++) {
+		const auto* select = value.TryInstruction();
+		if (select == nullptr || select->GetOpcode() != ValueOpcode::SelectU32) {
+			break;
+		}
+		uint32_t budget = 256;
+		if (!LanesImply(exec, select->Arg(0).Resolve(), phis, budget)) {
+			break;
+		}
+		value = select->Arg(1).Resolve();
+	}
+	return value;
+}
+
 class ValueSetAnalysis {
 public:
 	using Set = std::optional<std::vector<uint32_t>>;
@@ -97,12 +156,44 @@ public:
 		if (const auto it = m_zeros.find(inst); it != m_zeros.end()) {
 			return it->second;
 		}
-		if (!m_zeros_active.insert(inst).second) {
-			return 0u; // A cycle through phis: nothing is known along it.
+		if (const auto assumed = m_zeros_assumed.find(inst); assumed != m_zeros_assumed.end()) {
+			return assumed->second;
 		}
-		const auto zeros = ComputeZeros(*inst, depth + 1);
+		if (m_zeros_active.contains(inst)) {
+			return 0u; // A cycle not through a phi being solved: nothing is known along it.
+		}
+		if (!m_zeros_assumed.empty()) {
+			if (m_zeros_budget == 0) {
+				return 0u;
+			}
+			m_zeros_budget--;
+		}
+		m_zeros_active.insert(inst);
+		uint32_t zeros = 0;
+		if (inst->GetOpcode() == ValueOpcode::Phi) {
+			if (m_zeros_assumed.empty()) {
+				m_zeros_budget = ZerosBudget;
+			}
+			// Each round only clears bits, so this ends.
+			for (uint32_t assumed = UINT32_MAX;;) {
+				m_zeros_assumed[inst] = assumed;
+				zeros                 = ComputeZeros(*inst, depth + 1) & assumed;
+				if (zeros == assumed || m_zeros_budget == 0) {
+					break;
+				}
+				assumed = zeros;
+			}
+			m_zeros_assumed.erase(inst);
+			if (m_zeros_budget == 0) {
+				zeros = 0u;
+			}
+		} else {
+			zeros = ComputeZeros(*inst, depth + 1);
+		}
 		m_zeros_active.erase(inst);
-		m_zeros.emplace(inst, zeros);
+		if (m_zeros_assumed.empty()) {
+			m_zeros.emplace(inst, zeros);
+		}
 		return zeros;
 	}
 
@@ -153,9 +244,9 @@ private:
 			// Zero extensions.
 			case ValueOpcode::ConvertU32U16: return 0xffff0000u;
 			case ValueOpcode::ConvertU32U8: return 0xffffff00u;
-			// One lane's value of the source (a waterfall loop's key): the source's bits hold for
-			// it.
-			case ValueOpcode::ReadFirstLane:
+			// One lane's value of the source (a waterfall loop's key): the source's bits hold for it,
+			// and for ReadFirstLane those of the value an EXEC-masked write left in the active lane.
+			case ValueOpcode::ReadFirstLane: return KnownZeros(ActiveLaneValue(inst), depth);
 			case ValueOpcode::ReadLane: return zeros(0);
 			// One of the operands.
 			case ValueOpcode::UMin32:
@@ -315,6 +406,10 @@ private:
 	std::unordered_set<const Inst*>           m_active;
 	std::unordered_map<const Inst*, uint32_t> m_zeros;
 	std::unordered_set<const Inst*>           m_zeros_active;
+	// Loop-carried phis being solved, and the bits each is currently assumed to have zero.
+	static constexpr uint32_t                 ZerosBudget = 4096;
+	std::unordered_map<const Inst*, uint32_t> m_zeros_assumed;
+	uint32_t                                  m_zeros_budget = 0;
 };
 
 Value Arg(const Inst& inst, size_t index) {
@@ -595,6 +690,24 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			return;
 		case ValueOpcode::SelectU32:
 		case ValueOpcode::SelectF32: FoldSelect(inst); return;
+		case ValueOpcode::FPCmpClass32: {
+			const auto mask = Arg(inst, 1);
+			if (!IsImmediate(mask, Type::U32)) {
+				return;
+			}
+			switch (mask.U32() & 0x3ffu) {
+				case 0u: Replace(inst, Value(false)); break;
+				case 0x3ffu: Replace(inst, Value(true)); break;
+				case 3u: {
+					const auto result = block.PrependNewInst(
+					    instruction, ValueOpcode::FPIsNan32, {Arg(inst, 0)});
+					Replace(inst, Value(&*result));
+					break;
+				}
+				default: break;
+			}
+			return;
+		}
 		case ValueOpcode::BitFieldInsert: {
 			const auto base   = Arg(inst, 0);
 			const auto insert = Arg(inst, 1);
@@ -1107,14 +1220,14 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 	}
 }
 
-// In wave32, extracting this invocation's bit from a ballot recovers its predicate.
-// Keep that identity through scalar EXEC operations and their loop-carried mask Phis.
+// Full and empty masks have a constant predicate in either wave size. In wave32,
+// ballot projection also survives scalar EXEC operations and loop-carried mask Phis.
 class LaneMaskProjection {
 public:
 	explicit LaneMaskProjection(std::unordered_set<Inst*>& lowered_ancillary)
 	    : m_lowered_ancillary(lowered_ancillary) {}
 
-	void Fold(Inst& inst) {
+	void Fold(Inst& inst, uint32_t wave_size) {
 		if (inst.GetOpcode() != ValueOpcode::INotEqual32 || !Immediate(Arg(inst, 1), 0u)) return;
 		const auto* bit = Arg(inst, 0).TryInstruction();
 		if (bit == nullptr || bit->GetOpcode() != ValueOpcode::BitwiseAnd32 ||
@@ -1128,9 +1241,15 @@ public:
 			return;
 		const auto* lane = Arg(*index, 0).TryInstruction();
 		if (lane == nullptr || lane->GetOpcode() != ValueOpcode::LaneId) return;
+		const auto mask = Arg(*shift, 0);
+		if (Immediate(mask, 0u) || Immediate(mask, UINT32_MAX)) {
+			Replace(inst, Value(mask.U32() != 0u));
+			return;
+		}
+		if (wave_size != 32u) return;
 		m_visited.clear();
 		m_grounded = false;
-		if (CanProject(Arg(*shift, 0)) && m_grounded) Replace(inst, Project(Arg(*shift, 0)));
+		if (CanProject(mask) && m_grounded) Replace(inst, Project(mask));
 	}
 
 private:
@@ -1512,12 +1631,12 @@ uint32_t FoldLaneMasks(Program& program) {
 void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 	std::unordered_set<Inst*> lowered_ancillary;
 	ValueSetAnalysis          value_sets;
-	value_sets.known_zeros  = GetCodegenOptions().movrel_known_zeros;
-	auto*              sets = GetCodegenOptions().movrel_range ? &value_sets : nullptr;
+	value_sets.known_zeros = GetCodegenOptions().movrel_known_zeros;
+	auto* sets = GetCodegenOptions().movrel_range ? &value_sets : nullptr;
 	LaneMaskProjection mask_projection(lowered_ancillary);
 	for (auto* block: blocks) {
 		for (auto inst = block->begin(); inst != block->end(); ++inst) {
-			if (wave_size == 32u) mask_projection.Fold(*inst);
+			mask_projection.Fold(*inst, wave_size);
 			FoldInstruction(*block, inst, lowered_ancillary, sets);
 		}
 	}

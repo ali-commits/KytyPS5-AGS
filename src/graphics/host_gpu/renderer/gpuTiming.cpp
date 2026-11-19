@@ -58,9 +58,14 @@ struct DeviceInfo {
 const char* g_calibration_extension = nullptr;
 
 // Guards g_device and g_pending. Producers hold it only to append one collected batch.
-std::mutex            g_mutex;
-DeviceInfo            g_device;
-std::vector<Sample>   g_pending;
+std::mutex          g_mutex;
+// Cumulative totals of every aggregated flip (Live::GpuTotals).
+std::atomic<uint64_t> g_total_busy_ns {0};
+std::atomic<uint64_t> g_total_idle_ns {0};
+std::atomic<uint64_t> g_total_starved_ns {0};
+std::atomic<uint64_t> g_total_cmdbufs {0};
+DeviceInfo          g_device;
+std::vector<Sample> g_pending;
 std::atomic<uint64_t> g_dropped {0};
 std::atomic<uint64_t> g_unavailable {0};
 
@@ -184,7 +189,18 @@ void OnGuestFlip() {
 		return;
 	}
 	std::lock_guard flip_lock(g_flip_mutex);
-	DeviceInfo      info;
+	static const bool provider = [] {
+		// Live A/B lines (KYTY_LIVE_FILE) carry the totals (liveSwitch.h).
+		Live::SetGpuTotalsProvider([]() -> Live::GpuTotals {
+			return {g_total_busy_ns.load(std::memory_order_relaxed),
+			        g_total_idle_ns.load(std::memory_order_relaxed),
+			        g_total_starved_ns.load(std::memory_order_relaxed),
+			        g_total_cmdbufs.load(std::memory_order_relaxed)};
+		});
+		return true;
+	}();
+	(void)provider;
+	DeviceInfo info;
 	{
 		std::lock_guard lock(g_mutex);
 		info = g_device;
@@ -311,18 +327,22 @@ void OnGuestFlip() {
 	}
 
 	HangTrace::GpuFrame frame;
-	frame.busy_ns             = ToUnsignedNs(static_cast<double>(busy) * info.period_ns);
-	frame.idle_ns             = ToUnsignedNs(static_cast<double>(idle) * info.period_ns);
-	frame.max_gap_ns          = ToUnsignedNs(static_cast<double>(max_gap) * info.period_ns);
-	frame.starved_ns          = ToUnsignedNs(starved_ns);
-	frame.command_buffers     = spans.size();
-	frame.latency_samples     = latency_samples;
-	frame.record_latency_ns   = ToUnsignedNs(record_latency_ns);
-	frame.dispatch_latency_ns = ToUnsignedNs(dispatch_latency_ns);
-	frame.dropped             = dropped + unavailable + rejected;
+	frame.busy_ns              = ToUnsignedNs(static_cast<double>(busy) * info.period_ns);
+	frame.idle_ns              = ToUnsignedNs(static_cast<double>(idle) * info.period_ns);
+	frame.max_gap_ns           = ToUnsignedNs(static_cast<double>(max_gap) * info.period_ns);
+	frame.starved_ns           = ToUnsignedNs(starved_ns);
+	frame.command_buffers      = spans.size();
+	frame.latency_samples      = latency_samples;
+	frame.record_latency_ns    = ToUnsignedNs(record_latency_ns);
+	frame.dispatch_latency_ns  = ToUnsignedNs(dispatch_latency_ns);
+	frame.dropped              = dropped + unavailable + rejected;
 	HangTrace::RecordGpuFrame(frame);
 	PaceLog::NoteGpuFrame(frame.busy_ns, frame.idle_ns, frame.starved_ns, frame.command_buffers,
 	                      calibration.valid && have_cursor ? ToUnsignedNs(to_steady(cursor)) : 0);
+	g_total_busy_ns.fetch_add(frame.busy_ns, std::memory_order_relaxed);
+	g_total_idle_ns.fetch_add(frame.idle_ns, std::memory_order_relaxed);
+	g_total_starved_ns.fetch_add(frame.starved_ns, std::memory_order_relaxed);
+	g_total_cmdbufs.fetch_add(frame.command_buffers, std::memory_order_relaxed);
 
 	Profiler::AddFrameWait(Profiler::FrameWait::GpuBusy, frame.command_buffers, frame.busy_ns);
 	Profiler::AddFrameWait(Profiler::FrameWait::GpuIdle, gaps, frame.idle_ns);

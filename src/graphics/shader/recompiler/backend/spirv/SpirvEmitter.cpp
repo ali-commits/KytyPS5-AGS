@@ -881,7 +881,8 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	}
 	EmitterState state(program, input_info);
 	state.mip_stats_records = mip_stats_records;
-	state.lane_count = ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
+	state.lane_count =
+	    program.lane_local ? 1u : ShaderLanesPerInvocation(program.stage, program.wave_size, input_info);
 	if (state.lane_count == 2 && GetCodegenOptions().wave64_warps &&
 	    program.stage == ShaderType::Compute && !program.dispatcher_fallback &&
 	    // BVH node counts (KYTY_RT_NODE_BUDGET/STATS) report per two-lane invocation.

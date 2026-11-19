@@ -176,6 +176,14 @@ enum class Step : uint8_t {
 	Count
 };
 
+// KYTY_CP_DIAGNOSTICS=OFF (CMake, default ON): the command processor's per-draw diagnostics
+// (KYTY_CP_COMMIT_STATS, KYTY_BUFFER_LOOKUP_STATS) are compiled out: their gates are constant
+// false, so every hook folds away (uProf 2026-10-15: these gates were ~2-3% of the Sky Garden
+// command processor's ops in a build with them present but off). The switches are then ignored.
+#ifndef KYTY_CP_DIAGNOSTICS
+#define KYTY_CP_DIAGNOSTICS 1
+#endif
+
 namespace Detail {
 [[nodiscard]] bool ReadEnabled();
 [[nodiscard]] bool ReadIndirectOnly();
@@ -188,6 +196,9 @@ void               StepAt(Step step);
 // KYTY_CP_COMMIT_STATS=steps, switched in a running boot (same-boot comparison of the class costs
 // with and without the step boundaries' own cost).
 [[nodiscard]] inline bool StepsEnabled() {
+#if !KYTY_CP_DIAGNOSTICS
+	return false;
+#endif
 	static std::atomic<int64_t> steps_once {Common::OnceUnset};
 	const auto steps = static_cast<bool>(Common::Once(steps_once, [&] {
 		return Detail::ReadSteps();
@@ -203,6 +214,9 @@ inline void StepMark(Step step) {
 }
 
 [[nodiscard]] inline bool Enabled() {
+#if !KYTY_CP_DIAGNOSTICS
+	return false;
+#endif
 	static std::atomic<int64_t> enabled_once {Common::OnceUnset};
 	const auto enabled = static_cast<bool>(Common::Once(enabled_once, [&] {
 		return Detail::ReadEnabled();
@@ -213,6 +227,9 @@ inline void StepMark(Step step) {
 // KYTY_CP_COMMIT_STATS=indirect: only native indirect draws committed from a prepared slot
 // (DrawPrep::Engine::ExecuteIndirect) are measured.
 [[nodiscard]] inline bool IndirectOnly() {
+#if !KYTY_CP_DIAGNOSTICS
+	return false;
+#endif
 	static std::atomic<int64_t> indirect_once {Common::OnceUnset};
 	const auto indirect = static_cast<bool>(Common::Once(indirect_once, [&] {
 		return Detail::ReadIndirectOnly();

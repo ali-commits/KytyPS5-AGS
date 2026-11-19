@@ -291,6 +291,7 @@ bool CloneProgram(const Program& source, Program& target) {
 	target.wave_size           = source.wave_size;
 	target.scratch_dwords      = source.scratch_dwords;
 	target.dispatcher_fallback = source.dispatcher_fallback;
+	target.lane_local          = source.lane_local;
 	target.cfg_failure_kind    = source.cfg_failure_kind;
 	target.fallback_reason     = source.fallback_reason;
 	target.block_info.reserve(source.block_info.size());

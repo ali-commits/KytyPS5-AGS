@@ -1144,6 +1144,10 @@ struct Program: ResourcePlan {
 	BlockList                           blocks;
 	uint32_t                            wave_size           = 64;
 	uint32_t                            scratch_dwords      = 0;
+
+	// KYTY_LANE_LOCAL: a wave64 workgroup program proven lane-local (Frontend::IsWaveLaneLocal) and
+	// translated for a host with 32-wide subgroups: it runs one guest lane per host invocation.
+	bool                                lane_local          = false;
 	bool                                dispatcher_fallback = false;
 	CFG::FailureKind                    cfg_failure_kind    = CFG::FailureKind::None;
 	std::string                         fallback_reason;

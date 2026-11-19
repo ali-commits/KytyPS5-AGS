@@ -24,11 +24,13 @@
 #include "graphics/guest_gpu/command_processor/cpSequencer.h"
 #include "graphics/guest_gpu/command_processor/cpVerify.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/gpuTimestampScale.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/coherenceLog.h"
 #include "graphics/host_gpu/gpuTouchedPages.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/readFaultDiag.h"
 #include "graphics/host_gpu/watchRange.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cpCommit.h"
@@ -557,7 +559,10 @@ static void CpTestDrawSpin() {
 
 // cp.csv label rows (KYTY_HANG_TRACE_CP).
 static void TraceCpLabel(const char* kind, const void* dst, uint64_t value, uint64_t size) {
-
+	// Record labels visible to the guest for read-fault correlation.
+	if (ReadFaultDiag::Enabled() && std::strncmp(kind, "label-defer", 11) != 0) {
+		ReadFaultDiag::NoteLabel(kind, reinterpret_cast<uint64_t>(dst), value);
+	}
 	if (HangTrace::CpTraceEnabled()) {
 		HangTrace::CpEvent event;
 		event.event   = kind;
@@ -1309,6 +1314,28 @@ static Live::Switch g_eop_flush_packets("KYTY_EOP_FLUSH_PACKETS", [](const char*
 	return static_cast<int64_t>(std::clamp(parsed, 1ul, 1ul << 20u));
 });
 
+// KYTY_GPU_TIMESTAMP_SCALE (gpuTimestampScale.h): guest GPU clock values stretched since the last
+// guest flip. The anchor is the reference clock when the CP executed the last flip op.
+static Live::Switch          g_gpu_timestamp_scale("KYTY_GPU_TIMESTAMP_SCALE",
+                                                   GpuTimestampScale::ParsePercent);
+static std::atomic<uint64_t> g_gpu_timestamp_anchor {0};
+
+static uint64_t GuestGpuTimestamp() {
+	const auto now     = Sync::ReadReferenceClock();
+	const auto percent = g_gpu_timestamp_scale.Get();
+	if (percent == GpuTimestampScale::Off) {
+		return now;
+	}
+	static std::atomic_bool reported {false};
+	if (!reported.exchange(true, std::memory_order_relaxed)) {
+		std::printf("Kyty GPU timestamps: stretched to %lld%% since each flip "
+		            "(KYTY_GPU_TIMESTAMP_SCALE)\n",
+		            static_cast<long long>(percent));
+	}
+	return GpuTimestampScale::Stretch(now, g_gpu_timestamp_anchor.load(std::memory_order_relaxed),
+	                                  percent);
+}
+
 static Live::Switch g_eop_flush_batch("KYTY_EOP_FLUSH_BATCH", [](const char* value) -> int64_t {
 	const auto parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 8ul;
 	return static_cast<int64_t>(std::clamp(parsed, 1ul, 1024ul));
@@ -2002,13 +2029,14 @@ void CommandProcessor::ExecReferenceClock(const CpSeq::ReferenceClockOp& op) {
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
 		     num_bytes);
 	}
-	const auto value = Sync::ReadReferenceClock();
+	const auto value = GuestGpuTimestamp();
 	StreamCopyDefer::NoteGpuOnlyWrite(dst_address, num_bytes);
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	NoteCpWrite(dst_address, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
-		LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64 " size=%u\n",
+		LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64
+		     " size=%u\n",
 		     dst_address, value, num_bytes);
 	}
 }
@@ -4492,6 +4520,7 @@ bool CommandProcessor::TryDeferLabel(void* dst, uint64_t value, uint32_t size, b
 				    if (superseded != (1u << size) - 1u) {
 					    LibKernel::SyncOnAddress::WakeAfterEmulatorWrite(
 					        reinterpret_cast<volatile void*>(address), size);
+					    ReadFaultDiag::NoteLabel("label-deferred-write", address, written);
 				    }
 			    }
 			    if (HangTrace::CpTraceEnabled()) {
@@ -4594,7 +4623,7 @@ bool CommandProcessor::WriteReleaseMemDroppedData(void* dst, uint64_t value, uin
 		case 2: size = 8; break;
 		case 3:
 			size  = 8;
-			value = Sync::ReadReferenceClock();
+			value = GuestGpuTimestamp();
 			break;
 		default: return false; // 5 (GDS) and others keep the old behaviour
 	}
@@ -4778,7 +4807,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 						case 0x02: label_size = 8; break;
 						case 0x04:
 							label_size  = 8;
-							label_value = Sync::ReadReferenceClock();
+							label_value = GuestGpuTimestamp();
 							label_clock = true;
 							break;
 						default: break;
@@ -4917,7 +4946,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			} else {
 				const bool clock_write = event_write_source == 0x04;
 				if (clock_write) {
-					value = Sync::ReadReferenceClock();
+					value = GuestGpuTimestamp();
 				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
@@ -5468,6 +5497,7 @@ bool CommandProcessor::DeferFlipLabel(void* dst, uint32_t value, bool interrupt)
 
 void CommandProcessor::ExecFlip(const CpSeq::FlipOp& op) {
 	StreamCopyDefer::NoteFrameBoundary(); // KYTY_UPLOAD_DMA_WRITE_DRAIN=frame
+	g_gpu_timestamp_anchor.store(Sync::ReadReferenceClock(), std::memory_order_relaxed);
 	const FlipInfo flip {.handle    = op.handle,
 	                     .index     = op.index,
 	                     .flip_mode = op.flip_mode,
