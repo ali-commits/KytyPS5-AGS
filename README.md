@@ -11,8 +11,9 @@ The emulator also runs on its own: the Qt launcher (`kyty_launcher`) is kept as 
 
 - **Renderer and compatibility:** the U59 renderer, the Demon's Souls shader and compatibility
   fixes, software ray tracing for compute kernels that use `IMAGE_BVH_INTERSECT_RAY` (Astro Bot
-  lighting), and selected upstream int20 and int21 ports.
-  See [U59 changes](docs/CHANGES-U59.md), [ported fixes](docs/PORTED-OCT25.md) and the
+  lighting), selected upstream int20 and int21 ports, and Jetsku int22 merged in full.
+  See [U59 changes](docs/CHANGES-U59.md), [ported fixes](docs/PORTED-OCT25.md),
+  [the int22 merge](docs/PORTED-NOV19.md) and the
   [change catalog](docs/CHANGE-CATALOG.md).
 - **Performance and stability:** profile-guided builds, pipeline look-ahead with fast-first
   compilation, frame pacing and efficiency work, and crash and hang investigations.

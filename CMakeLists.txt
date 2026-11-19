@@ -133,7 +133,7 @@ if (KYTY_LINKER STREQUAL LD AND NOT LINUX)
 	set(KYTY_LD_OPTIONS "-Wl,--image-base=0x100000000000")
 endif()
 
-project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.8.0)
+project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.9.0)
 
 # AGS extension version: the project version plus an optional suffix. Stable releases leave it empty;
 # testing pre-releases (tag v<X.Y.Z>-testing.<N>, built from the testing branch) pass -testing.<N>.
