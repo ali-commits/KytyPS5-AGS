@@ -1,5 +1,6 @@
 #include "page.h"
 
+#include "actions.h"
 #include "settings.h"
 
 namespace AdapterPage {
@@ -106,10 +107,16 @@ QJsonArray SettingsSections(PageKind kind) {
 	return sections;
 }
 
-QJsonObject Describe(const GameEntry* game, const QString& /*runtime_root*/,
-                     const QString& /*data_dir*/) {
+QJsonObject Describe(const GameEntry* game, const QString& runtime_root, const QString& data_dir) {
 	if (game == nullptr) return {{"sections", SettingsSections(PageKind::Extension)}};
-	return {{"sections", QJsonArray {}}}; // shortcut: no game page items yet, Task 4 fills them
+	auto sections = SettingsSections(PageKind::Game);
+	for (const auto& section:
+	     {AdapterActions::InfoSection(*game), AdapterActions::ContentSection(*game),
+	      AdapterActions::TrophiesSection(*game, runtime_root, data_dir),
+	      AdapterActions::VariantsSection(*game, runtime_root)}) {
+		if (!section.isEmpty()) sections.append(section);
+	}
+	return {{"sections", sections}};
 }
 
 } // namespace AdapterPage

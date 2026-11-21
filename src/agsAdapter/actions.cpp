@@ -6,6 +6,7 @@
 #include "gameContent.h"
 #include "gameLibrary.h"
 #include "gameServices.h"
+#include "library.h"
 #include "trophyItems.h"
 
 #include <QDir>
@@ -14,6 +15,7 @@
 #include <QJsonArray>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QTimer>
 
 #include <algorithm>
@@ -72,44 +74,9 @@ Reply CheatList(const GameEntry& game, const QJsonObject& params, const QString&
 	return Reply::Success(result);
 }
 
-Reply Trophies(const GameEntry& game, const QString& runtime_root, const QString& data_dir) {
-	const auto&                     info = *game.info;
-	static const QRegularExpression safe(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
-	const auto folder = safe.match(info.title_id).hasMatch() ? info.title_id : game.id;
-	return AdapterTrophies::Run(info, runtime_root,
-	                            QDir(data_dir).filePath(QStringLiteral("trophies/%1").arg(folder)));
-}
-
-Reply Content(const GameEntry& game) {
-	const auto&  info = *game.info;
-	QJsonArray   items;
-	const auto   title_id = info.title_id.trimmed().toUpper();
-	const auto   folder   = info.addons_dir;
-	for (const auto& entry: Common::FindAddContent(GameContent::ToPath(folder), title_id.toStdString())) {
-		QJsonObject item {{"id", QString::fromStdString(entry.content_id)},
-		                  {"title", QString::fromStdString(entry.title.empty() ? entry.entitlement_label
-		                                                                       : entry.title)}};
-		if (!entry.entitlement_label.empty())
-			item[QStringLiteral("label")] = QString::fromStdString(entry.entitlement_label);
-		items.append(item);
-	}
-	QJsonObject result {{"items", items}};
-	if (!folder.isEmpty() && QDir(folder).exists()) result[QStringLiteral("folder")] = folder;
-	return Reply::Success(result);
-}
-
-Reply Info(const GameEntry& game) {
-	const auto& info = *game.info;
-	QJsonArray  items;
-	const auto  add = [&](const char* label, const QString& value) {
-		if (!value.trimmed().isEmpty())
-			items.append(QJsonObject {{"label", label}, {"value", value}});
-	};
-	add("Title ID", info.title_id);
-	add("Version", info.gameVersion);
-	add("Required firmware", info.firmwareVer);
-	add("Location", info.basedir);
-	return Reply::Success({{"items", items}});
+// A row label or value, one line within `max_chars`.
+QString RowText(const QString& text, int max_chars) {
+	return AdapterLibrary::CutChars(AdapterLibrary::DropControls(text), max_chars);
 }
 
 } // namespace
@@ -225,50 +192,108 @@ bool HasCheatPlan(const GameEntry& game, const QString& runtime_root) {
 	return !plan.isEmpty() && QFileInfo::exists(plan);
 }
 
-Reply List(const GameEntry* game, const QString& runtime_root) {
-	if (game == nullptr) return Reply::Success({{"actions", QJsonArray {}}});
-	QJsonArray actions {
-	    QJsonObject {{"id", "cheats"},
-	                 {"kind", "toggle_list"},
-	                 {"label", "Cheats"},
-	                 {"icon", "assets/ags/actions/cheats.svg"}},
-	    QJsonObject {{"id", "cheats.fetch"},
-	                 {"kind", "command"},
-	                 {"label", "Fetch cheats"},
-	                 {"confirm", true},
-	                 {"menu", true},
-	                 {"icon", "assets/ags/actions/fetch.svg"}},
-	    QJsonObject {{"id", "trophies"},
-	                 {"kind", "progress_list"},
-	                 {"label", "Trophies"},
-	                 {"icon", "assets/ags/actions/trophies.svg"}},
-	    QJsonObject {{"id", "info"},
-	                 {"kind", "info"},
-	                 {"label", "Game info"},
-	                 {"icon", "assets/ags/actions/info.svg"}},
-	    QJsonObject {{"id", "content"},
-	                 {"kind", "list"},
-	                 {"label", "Additional content"},
-	                 {"icon", "assets/ags/actions/content.svg"}},
+QJsonObject InfoSection(const GameEntry& game) {
+	const auto& info = *game.info;
+	QJsonArray  rows;
+	const auto  add = [&](const char* label, const QString& value) {
+		if (const auto text = RowText(value, 200); !text.trimmed().isEmpty())
+			rows.append(QJsonObject {{"label", label}, {"value", text}});
 	};
-	// Only when a cheat plan exists: without one this would be the plain launch.
-	if (HasCheatPlan(*game, runtime_root)) {
-		actions.append(QJsonObject {{"id", LAUNCH_WITHOUT_CHEATS},
-		                            {"kind", "launch"},
-		                            {"label", "Launch without cheats"},
-		                            {"icon", "assets/ags/actions/launch-nocheats.svg"}});
+	add("Title ID", info.title_id);
+	add("Version", info.gameVersion);
+	add("Required firmware", info.firmwareVer);
+	// No "Location" row: a host path must not reach a paired device (sheet 3.6).
+	if (rows.isEmpty()) return {};
+	return {
+	    {"id", "kyty.info"},
+	    {"surface", "panel"},
+	    {"tab", "advanced"},
+	    {"title", "Game info"},
+	    {"icon", "assets/ags/actions/info.svg"},
+	    {"items", QJsonArray {QJsonObject {
+	                  {"id", "info"}, {"kind", "rows"}, {"label", "Game info"}, {"rows", rows}}}}};
+}
+
+QJsonObject ContentSection(const GameEntry& game) {
+	static const QRegularExpression entry_id(QStringLiteral("^[A-Za-z0-9._-]{1,128}$"));
+	const auto&                     info     = *game.info;
+	const auto                      title_id = info.title_id.trimmed().toUpper();
+	const auto                      folder   = info.addons_dir;
+	QJsonArray                      rows;
+	QSet<QString>                   ids;
+	for (const auto& entry:
+	     Common::FindAddContent(GameContent::ToPath(folder), title_id.toStdString())) {
+		if (rows.size() >= 256) break;
+		const auto id    = QString::fromStdString(entry.content_id);
+		auto       label = RowText(
+		    QString::fromStdString(entry.title.empty() ? entry.entitlement_label : entry.title),
+		    80);
+		if (label.trimmed().isEmpty()) label = RowText(id, 80);
+		if (label.trimmed().isEmpty()) continue; // nothing to show; a blank label drops the item
+		QJsonObject row {{"label", label},
+		                 {"value", RowText(QString::fromStdString(entry.entitlement_label), 200)}};
+		if (entry_id.match(id).hasMatch() && !ids.contains(id)) {
+			row[QStringLiteral("id")] = id;
+			ids.insert(id);
+		}
+		rows.append(row);
 	}
-	return Reply::Success({{"actions", actions}});
+	QJsonObject item {{"id", "content"},
+	                  {"kind", "rows"},
+	                  {"label", "Additional content"},
+	                  {"alias", "content"},
+	                  {"rows", rows}};
+	if (!folder.isEmpty() && QDir(folder).exists()) item[QStringLiteral("folder")] = folder;
+	if (rows.isEmpty() && !item.contains(QStringLiteral("folder"))) return {};
+	return {{"id", "kyty.content"},
+	        {"surface", "panel"},
+	        {"tab", "about"},
+	        {"title", "Additional content"},
+	        {"icon", "assets/ags/actions/content.svg"},
+	        {"items", QJsonArray {item}}};
+}
+
+QJsonObject TrophiesSection(const GameEntry& game, const QString& runtime_root,
+                            const QString& data_dir) {
+	const auto&                     info = *game.info;
+	static const QRegularExpression safe(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
+	const auto folder = safe.match(info.title_id).hasMatch() ? info.title_id : game.id;
+	return AdapterTrophies::Section(
+	    info, runtime_root, QDir(data_dir).filePath(QStringLiteral("trophies/%1").arg(folder)));
+}
+
+QJsonObject VariantsSection(const GameEntry& game, const QString& runtime_root) {
+	if (!HasCheatPlan(game, runtime_root)) return {};
+	return {{"id", "kyty.variants"},
+	        {"surface", "menu"},
+	        {"items", QJsonArray {QJsonObject {{"id", LAUNCH_WITHOUT_CHEATS},
+	                                           {"kind", "button"},
+	                                           {"label", "Launch without cheats"},
+	                                           {"icon", "assets/ags/actions/launch-nocheats.svg"},
+	                                           {"launch", true}}}}};
+}
+
+Reply List(const GameEntry* game, const QString& /*runtime_root*/) {
+	if (game == nullptr) return Reply::Success({{"actions", QJsonArray {}}});
+	return Reply::Success({{"actions", QJsonArray {
+	                                       QJsonObject {{"id", "cheats"},
+										                {"kind", "toggle_list"},
+										                {"label", "Cheats"},
+										                {"icon", "assets/ags/actions/cheats.svg"}},
+	                                       QJsonObject {{"id", "cheats.fetch"},
+										                {"kind", "command"},
+										                {"label", "Fetch cheats"},
+										                {"confirm", true},
+										                {"menu", true},
+										                {"icon", "assets/ags/actions/fetch.svg"}},
+	                                   }}});
 }
 
 Reply Run(const GameEntry& game, const QJsonObject& params, const QString& runtime_root,
-          const QString& data_dir, CheatFetcher& fetcher) {
+          const QString& /*data_dir*/, CheatFetcher& fetcher) {
 	const auto action = params[QStringLiteral("action_id")].toString();
 	if (action == QLatin1String("cheats")) return CheatList(game, params, runtime_root);
 	if (action == QLatin1String("cheats.fetch")) return fetcher.Run(game, runtime_root, 3500);
-	if (action == QLatin1String("trophies")) return Trophies(game, runtime_root, data_dir);
-	if (action == QLatin1String("info")) return Info(game);
-	if (action == QLatin1String("content")) return Content(game);
 	return Reply::NotFound(QStringLiteral("Unknown action %1.").arg(action));
 }
 

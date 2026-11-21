@@ -1,8 +1,8 @@
 #ifndef AGS_ADAPTER_ACTIONS_H
 #define AGS_ADAPTER_ACTIONS_H
 
-// actions.list and actions.run (STANDARD.md section 5.4): cheats (toggle_list), cheats.fetch
-// (command), trophies (progress_list) and info.
+// actions.list and actions.run (STANDARD.md section 5.4): cheats (toggle_list) and cheats.fetch
+// (command); the game page's info, content, trophies and launch variant sections.
 #include "cheatRepository.h"
 #include "fetchResult.h"
 #include "reply.h"
@@ -56,6 +56,15 @@ PickCheatFile(const QList<Cheats::RemoteFile>& supported, const QString& version
 
 // `launch` action id: launch.plan leaves out --game-patch (the cheat plan).
 inline constexpr const char* LAUNCH_WITHOUT_CHEATS = "launch.nocheats";
+
+// Game page sections (sheet 1.2). Each returns an empty object when the section is absent.
+[[nodiscard]] QJsonObject InfoSection(const GameEntry& game);
+[[nodiscard]] QJsonObject ContentSection(const GameEntry& game);
+// Icons are written to <data_dir>/trophies/<title id or game id>.
+[[nodiscard]] QJsonObject TrophiesSection(const GameEntry& game, const QString& runtime_root,
+                                          const QString& data_dir);
+// Only with a cheat plan: without one "Launch without cheats" would be the plain launch.
+[[nodiscard]] QJsonObject VariantsSection(const GameEntry& game, const QString& runtime_root);
 
 [[nodiscard]] Reply List(const GameEntry* game, const QString& runtime_root);
 [[nodiscard]] Reply Run(const GameEntry& game, const QJsonObject& params,

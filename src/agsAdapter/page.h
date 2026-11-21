@@ -2,7 +2,7 @@
 #define AGS_ADAPTER_PAGE_H
 
 // page.describe (protocol 2): the protocol 1 schema of AdapterSettings::Schema() as ags_page
-// sections, for the extension's own page and (from Task 4) a game's page.
+// sections, for the extension's own page and a game's page.
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>

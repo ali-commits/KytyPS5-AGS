@@ -33,6 +33,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <tuple>
+#include <utility>
 
 #define CHECK(expression)                                                                          \
 	do {                                                                                           \
@@ -810,17 +812,10 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", "bogus"}}) == "invalid-params");
 	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", 5}}) == "invalid-params");
 	WriteFile(plan_path, "{}");
-	const auto with_plan = s.Result("actions.list", {{"game", id}})["actions"].toArray();
-	EXPECT(with_plan.size() == 6);
-	const auto variant = with_plan.at(5).toObject();
-	EXPECT(variant["id"] == "launch.nocheats" && variant["kind"] == "launch" &&
-	       !variant["label"].toString().isEmpty());
-	ExpectIcon(variant["icon"].toString());
 	EXPECT(Strings(s.Result("launch.plan", {{"game", id}})["argv"]).contains("--game-patch"));
 	const auto plain = Strings(s.Result("launch.plan", {{"game", id}, {"action", "launch.nocheats"}})["argv"]);
 	EXPECT(!plain.contains("--game-patch") && plain.contains("--game"));
 	CHECK(QFile::remove(plan_path));
-	EXPECT(s.Result("actions.list", {{"game", id}})["actions"].toArray().size() == 5);
 }
 
 void TestActions(Session& s, const QString& id) {
@@ -828,59 +823,121 @@ void TestActions(Session& s, const QString& id) {
 	QStringList ids;
 	for (const auto& a: actions)
 		ids.append(a.toObject()["id"].toString());
-	EXPECT(ids == QStringList({"cheats", "cheats.fetch", "trophies", "info", "content"}));
+	EXPECT(ids == QStringList({"cheats", "cheats.fetch"}));
 	EXPECT(actions.at(1).toObject()["kind"].toString() == "command");
 	EXPECT(actions.at(1).toObject()["confirm"].toBool());
 	for (const auto& a: actions) ExpectIcon(a.toObject()["icon"].toString());
 	EXPECT(actions.at(1).toObject()["menu"].toBool() && !actions.at(0).toObject()["menu"].toBool());
 	EXPECT(s.Result("actions.list")["actions"].toArray().isEmpty());
-	const auto info =
-	    s.Result("actions.run", {{"game", id}, {"action_id", "info"}})["items"].toArray();
-	EXPECT(info.at(0).toObject() == QJsonObject({{"label", "Title ID"}, {"value", "PPSA01234"}}));
 	const auto cheats = s.Result("actions.run", {{"game", id}, {"action_id", "cheats"}});
 	EXPECT(cheats["items"].toArray().isEmpty() && !cheats["message"].toString().isEmpty());
-	EXPECT(s.Result("actions.run", {{"game", id}, {"action_id", "trophies"}})["items"]
-	           .toArray()
-	           .isEmpty());
-	EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", "nope"}}) == "not-found");
-	EXPECT(actions.at(4).toObject() ==
-	       QJsonObject({{"id", "content"},
-	                                                {"kind", "list"},
-	                                                {"label", "Additional content"},
-	                                                {"icon", "assets/ags/actions/content.svg"}}));
+	for (const auto* gone: {"nope", "info", "trophies", "content"})
+		EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", gone}}) == "not-found");
 }
 
-void TestContent(Session& s, const Fixture& f, const QString& id) {
-	const auto run = [&] { return s.Result("actions.run", {{"game", id}, {"action_id", "content"}}); };
-	auto       none = run();
-	EXPECT(none["items"].toArray().isEmpty() && !none.contains("folder"));
+// page.describe with a game: the Kyty.ini settings, then info, content, trophies, the variant.
+void TestGamePage(Session& s, const Fixture& f, const QString& id) {
+	const auto describe = [&] {
+		const auto page = s.Result("page.describe", {{"game", id}});
+		ExpectPageRules(page, true);
+		QHash<QString, QJsonObject> by_id;
+		QStringList                 order;
+		for (const auto& v: page["sections"].toArray()) {
+			by_id.insert(v.toObject()["id"].toString(), v.toObject());
+			order.append(v.toObject()["id"].toString());
+		}
+		return std::make_pair(order, by_id);
+	};
+	auto [order, by_id] = describe();
+	QStringList expected;
+	for (const auto& v: AdapterPage::SettingsSections(AdapterPage::PageKind::Game))
+		expected.append(v.toObject()["id"].toString());
+	EXPECT(!expected.isEmpty() && !expected.contains("kyty.machine"));
+	expected.append("kyty.info");
+	EXPECT(order == expected);
+	for (const auto& section: by_id) {
+		for (const auto& i: section["items"].toArray()) {
+			const auto item = i.toObject();
+			if (item.contains("scope")) EXPECT(item["scope"] == "game_on_device");
+			for (const auto* device_wide: {"controller_color", "controller_speaker_volume",
+			                               "audio_master_volume", "controller_keyboard_player",
+			                               "runtime_root", "game_dirs", "addons_dir", "gpu_index"})
+				EXPECT(item["id"] != device_wide);
+		}
+	}
+	EXPECT(by_id["kyty.display"]["tab"] == "display" &&
+	       by_id["kyty.display"]["title"] == "KytyPS5");
+	EXPECT(by_id["kyty.debug"]["tab"] == "advanced" && by_id["kyty.graphics"]["tab"] == "source");
+	const auto info = by_id["kyty.info"];
+	EXPECT(info["surface"] == "panel" && info["tab"] == "advanced" &&
+	       info["title"] == "Game info" && info["icon"] == "assets/ags/actions/info.svg");
+	const auto info_item = info["items"].toArray().at(0).toObject();
+	EXPECT(info["items"].toArray().size() == 1 && info_item["id"] == "info" &&
+	       info_item["kind"] == "rows" && info_item["label"] == "Game info");
+	const auto rows = info_item["rows"].toArray();
+	EXPECT(rows.size() >= 2 &&
+	       rows.at(0).toObject() == QJsonObject({{"label", "Title ID"}, {"value", "PPSA01234"}}) &&
+	       rows.at(1).toObject() == QJsonObject({{"label", "Version"}, {"value", "01.000"}}));
+	for (const auto& r: rows) {
+		EXPECT(r.toObject()["label"] != "Location" && !r.toObject().contains("id"));
+		EXPECT(!r.toObject()["value"].toString().contains(f.game));
+	}
+	EXPECT(s.ErrorCode("page.describe", {{"game", "missing"}}) == "not-found");
+
+	// Additional content, from today's add-on fixture.
 	const auto addons = QDir(f.dir.path()).filePath("addons");
 	WriteFile(QDir(addons).filePath("dlc1/sce_sys/param.json"),
 	          R"({"contentId":"EP0000-PPSA01234_00-ABCDEFGH12345678","titleName":"Extra Pack"})");
 	// Another title, and an application, are not additional content for this game.
 	WriteFile(QDir(addons).filePath("other/sce_sys/param.json"),
 	          R"({"contentId":"EP0000-PPSA09999_00-ABCDEFGH12345678","titleName":"Other"})");
-	CHECK(s.Result("values.set", {{"scope", "machine"},
-	                                {"values", QJsonObject {{"addons_dir", addons}}}})
-	          .contains("values"));
-	const auto got   = run();
-	const auto items = got["items"].toArray();
-	EXPECT(items.size() == 1);
-	EXPECT(items.at(0).toObject() ==
-	       QJsonObject({{"id", "EP0000-PPSA01234_00-ABCDEFGH12345678"},
-	                    {"title", "Extra Pack"},
-	                    {"label", "ABCDEFGH12345678"}}));
-	EXPECT(got["folder"].toString() == addons);
 	// A param.json symlinked from outside the addons folder is ignored.
 	WriteFile(QDir(f.dir.path()).filePath("outside/param.json"),
 	          R"({"contentId":"EP0000-PPSA01234_00-ZZZZZZZZ12345678","titleName":"Escaped"})");
 	QDir().mkpath(QDir(addons).filePath("dlc2/sce_sys"));
 	CHECK(QFile::link(QDir(f.dir.path()).filePath("outside/param.json"),
 	                  QDir(addons).filePath("dlc2/sce_sys/param.json")));
-	EXPECT(run()["items"].toArray().size() == 1);
+	CHECK(s.Result("values.set",
+	               {{"scope", "machine"}, {"values", QJsonObject {{"addons_dir", addons}}}})
+	          .contains("values"));
+	std::tie(order, by_id) = describe();
+	EXPECT(order.endsWith("kyty.content") &&
+	       order.indexOf("kyty.content") == order.indexOf("kyty.info") + 1);
+	EXPECT(by_id["kyty.content"] ==
+	       QJsonObject({{"id", "kyty.content"},
+	                    {"surface", "panel"},
+	                    {"tab", "about"},
+	                    {"title", "Additional content"},
+	                    {"icon", "assets/ags/actions/content.svg"},
+	                    {"items", QJsonArray {QJsonObject {
+	                                  {"id", "content"},
+	                                  {"kind", "rows"},
+	                                  {"label", "Additional content"},
+	                                  {"alias", "content"},
+	                                  {"rows", QJsonArray {QJsonObject {
+	                                               {"id", "EP0000-PPSA01234_00-ABCDEFGH12345678"},
+	                                               {"label", "Extra Pack"},
+	                                               {"value", "ABCDEFGH12345678"}}}},
+	                                  {"folder", addons}}}}}));
 	CHECK(s.Result("values.set", {{"scope", "machine"},
 	                                {"values", QJsonObject {{"addons_dir", ""}}}})
 	          .contains("values"));
+
+	// The launch variant, only with a cheat plan.
+	const auto plan_path = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
+	WriteFile(plan_path, "{}");
+	std::tie(order, by_id) = describe();
+	EXPECT(order.endsWith("kyty.variants") && !order.contains("kyty.content"));
+	const auto variants = by_id["kyty.variants"];
+	EXPECT(variants["surface"] == "menu" && !variants.contains("tab") &&
+	       variants["items"].toArray().size() == 1);
+	const auto variant = variants["items"].toArray().at(0).toObject();
+	EXPECT(variant["id"] == "launch.nocheats" && variant["kind"] == "button" &&
+	       variant["label"] == "Launch without cheats" && variant["launch"] == true);
+	ExpectIcon(variant["icon"].toString());
+	EXPECT(variant["icon"] == "assets/ags/actions/launch-nocheats.svg");
+	CHECK(QFile::remove(plan_path));
+	EXPECT(!describe().second.contains("kyty.variants"));
 }
 
 void TestInputMapping(Session& s) {
@@ -1267,8 +1324,8 @@ void TestUnits(const Fixture& f) {
 		unlocks.timestamps[2] = Common::Trophies::UnixEpochTick - 1ULL;
 		unlocks.unlocked.insert(2);
 		const auto icons  = QDir(f.dir.path()).filePath("trophy-icons");
-		const auto items0 = AdapterTrophies::Items(package, unlocks, 0, icons);
-		const auto items1 = AdapterTrophies::Items(package, unlocks, 1, icons);
+		const auto items0 = AdapterTrophies::Cards(package, unlocks, 0, icons);
+		const auto items1 = AdapterTrophies::Cards(package, unlocks, 1, icons);
 		EXPECT(items0.size() == 4 && items1.size() == 4);
 		QStringList ids;
 		for (const auto& v: items0)
@@ -1281,21 +1338,32 @@ void TestUnits(const Fixture& f) {
 		EXPECT(first["label"] == "First" && first["unlocked"].toBool());
 		EXPECT(first["tier"] == "gold" && !first["hidden"].toBool() && !first.contains("description"));
 		EXPECT(first["unlocked_at"] == "2024-03-05T01:02:03Z");
-		EXPECT(first["icon"].toString() == QDir(icons).filePath("0-1.png"));
-		EXPECT(ReadAll(first["icon"].toString()) == png);
+		EXPECT(first["image"].toString() == QDir(icons).filePath("0-1.png"));
+		EXPECT(ReadAll(first["image"].toString()) == png);
 		const auto plain = items0.at(1).toObject();
-		EXPECT(plain["id"] == "0-2" && !plain.contains("icon"));
+		EXPECT(plain["id"] == "0-2" && !plain.contains("image"));
 		EXPECT(plain["description"] == "No picture" && plain["tier"] == "bronze");
 		EXPECT(!plain.contains("unlocked_at")); // tick below the epoch: omitted
 		const auto secret = items0.at(2).toObject(); // hidden and locked: nothing revealed
-		EXPECT(secret["label"] == "Hidden trophy" && !secret.contains("icon"));
+		EXPECT(secret["label"] == "Hidden trophy" && !secret.contains("image"));
 		EXPECT(secret["hidden"].toBool() && !secret.contains("description"));
 		EXPECT(!secret.contains("unlocked_at"));
 		EXPECT(!QFileInfo::exists(QDir(icons).filePath("0-3.png")));
 		const auto opened = items0.at(3).toObject(); // hidden but unlocked: shown
-		EXPECT(opened["label"] == "Secret opened" && opened.contains("icon") &&
+		EXPECT(opened["label"] == "Secret opened" && opened.contains("image") &&
 		       opened["hidden"].toBool());
 		EXPECT(opened["unlocked_at"] == "2024-03-05T01:02:03Z"); // sub-second part truncates
+		// Text from the game's files is cut and stripped to the card limits (sheet 1.3).
+		Common::Trophies::Package long_text;
+		long_text.trophies[5].id          = 5;
+		long_text.trophies[5].name        = std::string(60, 'n') + "\n" + std::string(59, 'm');
+		long_text.trophies[5].description = std::string(400, 'd');
+		const auto card = AdapterTrophies::Cards(long_text, {}, 0, icons).at(0).toObject();
+		EXPECT(OneLine(card["label"], 80, 80) && OneLine(card["description"], 300, 300));
+		// A name of control characters only leaves a blank label: the "Trophy <id>" fallback.
+		long_text.trophies[5].name = "\n\t";
+		EXPECT(AdapterTrophies::Cards(long_text, {}, 0, icons).at(0).toObject()["label"] ==
+		       "Trophy 0-5");
 	}
 
 	// Raw enum spellings are aliases of the schema options.
@@ -1368,7 +1436,7 @@ int main(int argc, char* argv[]) {
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
 		TestActions(s, id);
-		TestContent(s, f, id);
+		TestGamePage(s, f, id);
 		TestInputMapping(s);
 		TestStaleCache(s, f, id);
 		TestSettingsAtomic(s, f);

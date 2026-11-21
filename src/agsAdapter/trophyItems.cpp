@@ -2,6 +2,7 @@
 
 #include "configuration.h"
 #include "gameContent.h"
+#include "library.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -53,7 +54,7 @@ QString ItemId(unsigned label, int trophy_id) {
 	return QStringLiteral("%1-%2").arg(label).arg(trophy_id);
 }
 
-QJsonArray Items(const Common::Trophies::Package&    package,
+QJsonArray Cards(const Common::Trophies::Package&    package,
                  const Common::Trophies::UnlockData& unlocks, unsigned label,
                  const QString& icons_dir) {
 	QJsonArray items;
@@ -61,15 +62,20 @@ QJsonArray Items(const Common::Trophies::Package&    package,
 		const bool unlocked = unlocks.unlocked.contains(id);
 		const bool hidden   = trophy.hidden && !unlocked;
 		const auto item_id  = ItemId(label, id);
-		auto name = hidden ? QStringLiteral("Hidden trophy") : QString::fromStdString(trophy.name);
-		if (name.isEmpty()) name = QStringLiteral("Trophy %1").arg(item_id);
+		auto       name =
+		    hidden ? QStringLiteral("Hidden trophy")
+			       : AdapterLibrary::CutChars(
+		                 AdapterLibrary::DropControls(QString::fromStdString(trophy.name)), 80);
+		if (name.trimmed().isEmpty()) name = QStringLiteral("Trophy %1").arg(item_id);
 		QJsonObject item {{"id", item_id},
 		                  {"label", name},
 		                  {"unlocked", unlocked},
 		                  {"tier", TierName(trophy.grade)},
 		                  {"hidden", trophy.hidden}};
-		if (!hidden && !trophy.description.empty()) {
-			item[QStringLiteral("description")] = QString::fromStdString(trophy.description);
+		if (const auto description = AdapterLibrary::CutChars(
+		        AdapterLibrary::DropControls(QString::fromStdString(trophy.description)), 300);
+		    !hidden && !description.isEmpty()) {
+			item[QStringLiteral("description")] = description;
 		}
 		if (const auto at = unlocks.timestamps.find(id); unlocked && at != unlocks.timestamps.end()) {
 			if (const auto text = UnlockedAt(at->second); !text.isEmpty())
@@ -78,14 +84,15 @@ QJsonArray Items(const Common::Trophies::Package&    package,
 		if (!hidden && !trophy.icon_png.empty()) {
 			const auto path = QDir(icons_dir).filePath(item_id + QStringLiteral(".png"));
 			WriteIcon(path, trophy.icon_png);
-			if (QFileInfo(path).isFile()) item[QStringLiteral("icon")] = path;
+			if (QFileInfo(path).isFile()) item[QStringLiteral("image")] = path;
 		}
 		items.append(item);
 	}
 	return items;
 }
 
-Reply Run(const Configuration& info, const QString& runtime_root, const QString& icons_dir) {
+QJsonObject Section(const Configuration& info, const QString& runtime_root,
+                    const QString& icons_dir) {
 	static const QRegularExpression           file_pattern(QStringLiteral("^trophy(\\d+)\\.ucp$"));
 	std::vector<std::pair<unsigned, QString>> packages;
 	for (const auto& file: GameContent::ListFiles(
@@ -95,16 +102,26 @@ Reply Run(const Configuration& info, const QString& runtime_root, const QString&
 		}
 	}
 	std::sort(packages.begin(), packages.end());
-	QJsonArray items;
+	QJsonArray cards;
 	for (const auto& [label, file]: packages) {
 		const auto package =
 		    Common::Trophies::LoadPackage(GameContent::ToPath(file), info.console_language);
 		const auto unlocks = Common::Trophies::LoadUnlockDataMigrating(
 		    GameContent::ToPath(runtime_root), info.title_id.toStdString(), info.user_id, label);
-		for (const auto& item: Items(package, unlocks, label, icons_dir))
-			items.append(item);
+		for (const auto& card: Cards(package, unlocks, label, icons_dir)) {
+			if (cards.size() < 1024) cards.append(card);
+		}
 	}
-	return Reply::Success({{"items", items}});
+	if (cards.isEmpty()) return {};
+	return {{"id", "kyty.trophies"},
+	        {"surface", "banner"},
+	        {"title", "Trophies"},
+	        {"icon", "assets/ags/actions/trophies.svg"},
+	        {"items", QJsonArray {QJsonObject {{"id", "trophies"},
+	                                           {"kind", "cards"},
+	                                           {"label", "Trophies"},
+	                                           {"alias", "trophies"},
+	                                           {"cards", cards}}}}};
 }
 
 } // namespace AdapterTrophies
