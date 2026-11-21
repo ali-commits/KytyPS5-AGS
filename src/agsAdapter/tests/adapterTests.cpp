@@ -960,6 +960,15 @@ void TestCheats(Session& s, const Fixture& f, const QString& id) {
 	                    {"confirm", "Download the cheat file for this game?"},
 	                    {"icon", "assets/ags/actions/fetch.svg"}}));
 	EXPECT(on() == QJsonArray {});
+	// The declared default with another game key, never fetched: both written, no plan file made.
+	const auto defaults =
+	    s.Result("values.set",
+		         {{"scope", "game"},
+		          {"game", id},
+		          {"values", QJsonObject {{"cheats", QJsonArray {}}, {"user_id", 11}}}})["values"]
+	        .toObject();
+	EXPECT(defaults["user_id"].toInt() == 11 && defaults["cheats"].toArray().isEmpty());
+	EXPECT(!QFile::exists(QDir(f.runtime).filePath("_Patches/PPSA01234.json")));
 
 	// A cheat file that does not parse: no entries, disabled, nothing written.
 	const auto plan = QDir(f.runtime).filePath("_Patches/PPSA01234.json");

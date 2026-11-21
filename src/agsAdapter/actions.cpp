@@ -25,7 +25,8 @@ namespace {
 // Entries past this many are left out of the toggle list (sheet 1.3) and keep their stored state.
 constexpr qsizetype MAX_CHEAT_ENTRIES = 512;
 
-// The PutCheats body that turns exactly `ids` on, or the refusal; nothing is written.
+// The PutCheats body that turns exactly `ids` on, or the refusal; nothing is written. `body` is
+// left empty when the selection is already stored (also: no mods, where PutCheats would fail).
 Reply CheatSelection(const Configuration& info, const QString& root, const QJsonValue& ids,
                      QJsonObject* body) {
 	if (!ids.isNull() && !ids.isArray()) {
@@ -47,6 +48,7 @@ Reply CheatSelection(const Configuration& info, const QString& root, const QJson
 	}
 	const auto mods = cheats[QStringLiteral("mods")].toArray();
 	QJsonArray enabled;
+	bool       changed = false;
 	for (qsizetype i = 0; i < mods.size(); ++i) {
 		enabled.append(i < MAX_CHEAT_ENTRIES
 		                   ? on.remove(QString::number(i))
@@ -54,7 +56,9 @@ Reply CheatSelection(const Configuration& info, const QString& root, const QJson
 	}
 	// The cheat file changed since the page was described (a fetch renumbers entries).
 	if (!on.isEmpty()) return Reply::Invalid(QStringLiteral("No such cheat; reload the page."));
-	*body = {{"revision", cheats[QStringLiteral("revision")]}, {"enabled", enabled}};
+	for (qsizetype i = 0; i < mods.size(); ++i)
+		changed |= enabled[i].toBool() != mods[i].toObject()[QStringLiteral("enabled")].toBool();
+	if (changed) *body = {{"revision", cheats[QStringLiteral("revision")]}, {"enabled", enabled}};
 	return Reply::Success();
 }
 
@@ -315,6 +319,7 @@ Reply SetCheats(const GameEntry& game, const QString& runtime_root, const QJsonV
 	if (auto refused = CheatSelection(*game.info, runtime_root, ids, &body); !refused.Ok()) {
 		return refused;
 	}
+	if (body.isEmpty()) return Reply::Success();
 	if (const auto error = GameServices::PutCheats(*game.info, runtime_root, body, nullptr);
 	    !error.isEmpty()) {
 		return Reply::Failed(QStringLiteral("Cannot save the cheat selection (%1).").arg(error));
