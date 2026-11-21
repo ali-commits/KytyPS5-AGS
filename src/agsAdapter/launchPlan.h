@@ -12,8 +12,9 @@ struct GameEntry;
 
 namespace AdapterLaunch {
 
-// BCP-47 tag to console language index (preferenceSchema.h order); -1 when unknown.
-[[nodiscard]] int     LanguageIndex(const QString& tag);
+// BCP-47 tag or registry language name to console language index (preferenceSchema.h order); -1
+// when unknown.
+[[nodiscard]] int     LanguageIndex(const QString& tag_or_name);
 [[nodiscard]] QString LanguageTag(int index);
 // Nearest frame rate the emulator can export (Streaming::IsCaptureFrameRateSupported).
 [[nodiscard]] int NearestCaptureFps(int fps);

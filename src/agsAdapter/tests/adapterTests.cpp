@@ -599,7 +599,7 @@ void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
 
 	auto plan = s.Result("launch.plan",
 	                     {{"game", id},
-	                      {"player", QJsonObject {{"controller_color", "#A0B0C0"},
+	                      {"values", QJsonObject {{"controller_color", "#A0B0C0"},
 	                                              {"controller_keyboard_player", "3"}}}});
 	auto argv = Strings(plan["argv"]);
 	EXPECT(ArgAfter(argv, "--controller-color") == "#a0b0c0");
@@ -608,11 +608,11 @@ void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(plan["applied"].toObject()["controller_keyboard_player"] == "3");
 	for (const auto* bad: {"#fff", "blue", "#80ff0000"}) {
 		EXPECT(s.ErrorCode("launch.plan", {{"game", id},
-		                                   {"player", QJsonObject {{"controller_color", bad}}}}) ==
+		                                   {"values", QJsonObject {{"controller_color", bad}}}}) ==
 		       "invalid-params");
 	}
 	// Empty lets the game set the colour: no --controller-color at all.
-	plan = s.Result("launch.plan", {{"game", id}, {"player", QJsonObject {{"controller_color", ""}}}});
+	plan = s.Result("launch.plan", {{"game", id}, {"values", QJsonObject {{"controller_color", ""}}}});
 	EXPECT(!Strings(plan["argv"]).contains("--controller-color"));
 	values = set({{"controller_color", ""}, {"controller_keyboard_player", "0"}});
 	EXPECT(values["controller_color"] == "" && values["controller_keyboard_player"] == "0");
@@ -698,15 +698,15 @@ void TestValues(Session& s, const Fixture& f, const QString& id) {
 void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	auto       plan = s.Result("launch.plan",
 	                           {{"game", id},
-	                            {"standard", QJsonObject {{"resolution", "1919x1081"},
-	                                                      {"fps_limit", 144},
-	                                                      {"aspect", "fill"},
+	                            {"standard", QJsonObject {{"display.resolution", "1919x1081"},
+	                                                      {"display.fps", 144},
+	                                                      {"display.aspect", "fill"},
 	                                                      {"language", "de-DE"},
 	                                                      {"player_name", "Ünïcödé player name"},
 	                                                      {"fullscreen", true},
-	                                                      {"hide_cursor", true},
-	                                                      {"hdr", true}}},
-	                            {"player", QJsonObject {{"hdr_enabled", false}, {"gpu_index", "3"}}},
+	                                                      {"display.hide_cursor", true},
+	                                                      {"display.hdr", true}}},
+	                            {"values", QJsonObject {{"hdr_enabled", false}, {"gpu_index", "3"}}},
 	                            {"capture", "native"},
 	                            {"controllers", QJsonArray {"dualsense"}}});
 	const auto argv = Strings(plan["argv"]);
@@ -746,19 +746,19 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	for (const auto& key: env.keys())
 		EXPECT(!key.startsWith("AGS_"));
 	const auto applied = plan["applied"].toObject();
-	EXPECT(applied["resolution"].toString() == "1918x1080");
-	EXPECT(applied["fps_limit"].toInt() == 120);
-	EXPECT(applied["aspect"].toString() == "fill");
+	EXPECT(applied["display.resolution"].toString() == "1918x1080");
+	EXPECT(applied["display.fps"].toInt() == 120);
+	EXPECT(applied["display.aspect"].toString() == "fill");
 	EXPECT(applied["language"].toString() == "de-DE");
 	EXPECT(applied["player_name"].toString() == name);
-	EXPECT(applied["controller"].toString() == "dualsense");
-	EXPECT(applied["hdr"].toBool() && applied["fullscreen"].toBool() && applied["hide_cursor"].toBool());
+	EXPECT(applied["input.controller"].toString() == "dualsense");
+	EXPECT(applied["display.hdr"].toBool() && applied["fullscreen"].toBool() && applied["display.hide_cursor"].toBool());
 	EXPECT(!applied.contains("hdr_enabled"));
 	EXPECT(!applied.contains("gpu_index"));
 
 	plan = s.Result("launch.plan",
 	                {{"game", id},
-	                 {"standard", QJsonObject {{"resolution", "9001x10"}, {"fps_limit", 144}}},
+	                 {"standard", QJsonObject {{"display.resolution", "9001x10"}, {"display.fps", 144}}},
 	                 {"capture", "gamescope"}});
 	const auto argv2 = Strings(plan["argv"]);
 	EXPECT(ArgAfter(argv2, "--screen-width") == "8192");
@@ -773,22 +773,22 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(ArgAfter(argv2, "--perf-overlay") == "false");
 	// absent keys keep the game's own setting (default off)
 	EXPECT(!argv2.contains("--fullscreen") && !argv2.contains("--hide-cursor") && !argv2.contains("--hdr"));
-	EXPECT(!plan["applied"].toObject()["hdr"].toBool());
+	EXPECT(!plan["applied"].toObject()["display.hdr"].toBool());
 	EXPECT(!env.contains("KYTY_STREAM_FRAMES")); // native plans leave the emulator its frame pool
 
 	plan = s.Result("launch.plan", {{"game", id},
-	                                {"player", QJsonObject {{"present_mode", "Fifo"},
+	                                {"values", QJsonObject {{"present_mode", "Fifo"},
 	                                                        {"shader_optimization_type", "Size"}}}});
 	const auto argv3 = Strings(plan["argv"]);
 	EXPECT(ArgAfter(argv3, "--present-mode") == "Fifo");
 	EXPECT(ArgAfter(argv3, "--shader-optimization-type") == "Size");
 	EXPECT(plan["applied"].toObject()["present_mode"] == "Fifo");
-	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"player", QJsonObject {{"present_mode", "x"}}}}) ==
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"values", QJsonObject {{"present_mode", "x"}}}}) ==
 	       "invalid-params");
 
 	plan = s.Result("launch.plan",
 	                {{"game", id},
-	                 {"player", QJsonObject {{"frame_generation", "Double"},
+	                 {"values", QJsonObject {{"frame_generation", "Double"},
 	                                         {"frame_generation_flow_scale", 80},
 	                                         {"frame_generation_performance_mode", true}}}});
 	const auto argv4 = Strings(plan["argv"]);
@@ -798,24 +798,66 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(ArgAfter(argv3, "--frame-generation") == "Off"); // the default
 	EXPECT(s.ErrorCode(
 	           "launch.plan",
-	           {{"game", id}, {"player", QJsonObject {{"frame_generation_flow_scale", 10}}}}) ==
+	           {{"game", id}, {"values", QJsonObject {{"frame_generation_flow_scale", 10}}}}) ==
 	       "invalid-params");
 
 	EXPECT(s.ErrorCode("launch.plan", {{"game", "nope"}}) == "not-found");
 	EXPECT(s.ErrorCode("launch.plan",
-	                   {{"game", id}, {"player", QJsonObject {{"trophy_duration_seconds", 99}}}}) ==
+	                   {{"game", id}, {"values", QJsonObject {{"trophy_duration_seconds", 99}}}}) ==
 	       "invalid-params");
 	EXPECT(s.Result("launch.ended", {{"game", id}, {"exit_code", 0}}).isEmpty());
 
 	// "Launch without cheats": offered only with a cheat plan, drops --game-patch, refused otherwise.
 	const auto plan_path = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
-	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", "bogus"}}) == "invalid-params");
-	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"action", 5}}) == "invalid-params");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"variant", "bogus"}}) == "invalid-params");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"variant", 5}}) == "invalid-params");
 	WriteFile(plan_path, "{}");
 	EXPECT(Strings(s.Result("launch.plan", {{"game", id}})["argv"]).contains("--game-patch"));
-	const auto plain = Strings(s.Result("launch.plan", {{"game", id}, {"action", "launch.nocheats"}})["argv"]);
+	const auto plain = Strings(s.Result("launch.plan", {{"game", id}, {"variant", "launch.nocheats"}})["argv"]);
 	EXPECT(!plain.contains("--game-patch") && plain.contains("--game"));
 	CHECK(QFile::remove(plan_path));
+
+	for (const auto* name: {"german", "koreana"}) {
+		const auto want = QString(name) == "german" ? "4" : "9";
+		EXPECT(ArgAfter(Strings(s.Result("launch.plan", {{"game", id},
+		           {"standard", QJsonObject {{"language", name}}}})["argv"]), "--console-language") == want);
+	}
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"variant", "launch.cheats"}}) == "invalid-params");
+}
+
+// Every default the pages declare must launch (Review Focus 1), and so must the values the host
+// resolves with nothing stored on a device (sheets 2.8 and 3.4).
+void TestLaunchWithPageDefaults(Session& s, const QString& id) {
+	const auto game_page = s.Result("page.describe", {{"game", id}});
+	const auto ext_page  = s.Result("page.describe");
+	static const QStringList value_kinds {"switch", "choice", "slider", "number", "text",
+	                                      "path",   "list",   "colour", "toggle_list"};
+	const auto stored_game    = s.Result("values.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	const auto stored_machine = s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
+	QJsonObject defaults, resolved;
+	for (const auto* page: {&game_page, &ext_page}) {
+		const bool is_game = page == &game_page;
+		for (const auto& sv: (*page)["sections"].toArray()) {
+			for (const auto& iv: sv.toObject()["items"].toArray()) {
+				const auto item  = iv.toObject();
+				const auto key   = item["id"].toString();
+				if (!value_kinds.contains(item["kind"].toString())) continue;
+				if (!is_game && item["scope"] != "device") continue;
+				const auto def = item["default"];
+				if (!def.isNull() && !def.isUndefined() && !defaults.contains(key)) defaults.insert(key, def);
+				auto value = def;
+				if (stored_game.contains(key) && is_game) value = stored_game[key];
+				else if (stored_machine.contains(key)) value = stored_machine[key];
+				if (!value.isNull() && !value.isUndefined() && !resolved.contains(key)) resolved.insert(key, value);
+			}
+		}
+	}
+	for (const auto& values: {defaults, resolved}) {
+		const auto plan = s.Result("launch.plan", {{"game", id}, {"values", values}});
+		EXPECT(ArgAfter(Strings(plan["argv"]), "--frame-generation") == "Off");
+	}
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"variant", 5}}) == "invalid-params");
+	EXPECT(s.ErrorCode("launch.plan", {{"game", id}, {"values", 5}}) == "invalid-params");
 }
 
 // page.describe with a game: cheats, the Kyty.ini settings, info, content, trophies, the variant.
@@ -1546,6 +1588,7 @@ int main(int argc, char* argv[]) {
 		TestValues(s, f, id);
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
+		TestLaunchWithPageDefaults(s, id);
 		TestGamePage(s, f, id);
 		TestCheats(s, f, id);
 		TestInputMapping(s);
