@@ -112,6 +112,10 @@ QJsonObject Section(const Configuration& info, const QString& runtime_root,
 			if (cards.size() < 1024) cards.append(card);
 		}
 	}
+	return Banner(cards);
+}
+
+QJsonObject Banner(const QJsonArray& cards) {
 	if (cards.isEmpty()) return {};
 	return {{"id", "kyty.trophies"},
 	        {"surface", "banner"},

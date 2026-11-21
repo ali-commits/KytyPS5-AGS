@@ -1,13 +1,14 @@
 #ifndef AGS_ADAPTER_ACTIONS_H
 #define AGS_ADAPTER_ACTIONS_H
 
-// actions.list and actions.run (STANDARD.md section 5.4): cheats (toggle_list) and cheats.fetch
-// (command); the game page's info, content, trophies and launch variant sections.
+// The game page's cheats, info, content, trophies and launch variant sections; the cheats values
+// and the Fetch cheats button (action.run).
 #include "cheatRepository.h"
 #include "fetchResult.h"
 #include "reply.h"
 
 #include <QElapsedTimer>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
@@ -29,6 +30,10 @@ public:
 	// call for the game within 60 s of its completion returns that result, a later call fetches
 	// again.
 	[[nodiscard]] Reply Run(const GameEntry& game, const QString& cheats_root, int wait_ms);
+
+signals:
+	// After a successful import, also one that finished after its call gave up.
+	void Imported(const QString& game);
 
 private:
 	enum class Phase { Idle, Catalog, File };
@@ -66,10 +71,17 @@ inline constexpr const char* LAUNCH_WITHOUT_CHEATS = "launch.nocheats";
 // Only with a cheat plan: without one "Launch without cheats" would be the plain launch.
 [[nodiscard]] QJsonObject VariantsSection(const GameEntry& game, const QString& runtime_root);
 
-[[nodiscard]] Reply List(const GameEntry* game, const QString& runtime_root);
-[[nodiscard]] Reply Run(const GameEntry& game, const QJsonObject& params,
-                        const QString& runtime_root, const QString& data_dir,
-                        CheatFetcher& fetcher);
+// kyty.cheats; empty when GameServices::GetCheats says unsupported.
+[[nodiscard]] QJsonObject CheatsSection(const GameEntry& game, const QString& runtime_root);
+// The ids of the entries that are on (the item's game-scope value).
+[[nodiscard]] QJsonArray CheatsOn(const GameEntry& game, const QString& runtime_root);
+// SetCheats' checks alone: the reply it would refuse with, success when it would write.
+[[nodiscard]] Reply CheckCheats(const GameEntry& game, const QString& runtime_root,
+                                const QJsonValue& ids);
+// Turns exactly `ids` on (null: none). invalid-params, writing nothing, for a non-array, a
+// non-string, a repeated id or an id that is not an entry now; failed when PutCheats fails.
+[[nodiscard]] Reply SetCheats(const GameEntry& game, const QString& runtime_root,
+                              const QJsonValue& ids);
 
 } // namespace AdapterActions
 

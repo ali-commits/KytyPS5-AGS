@@ -109,7 +109,11 @@ QJsonArray SettingsSections(PageKind kind) {
 
 QJsonObject Describe(const GameEntry* game, const QString& runtime_root, const QString& data_dir) {
 	if (game == nullptr) return {{"sections", SettingsSections(PageKind::Extension)}};
-	auto sections = SettingsSections(PageKind::Game);
+	QJsonArray sections;
+	if (auto cheats = AdapterActions::CheatsSection(*game, runtime_root); !cheats.isEmpty())
+		sections.append(cheats);
+	for (const auto& section: SettingsSections(PageKind::Game))
+		sections.append(section);
 	for (const auto& section:
 	     {AdapterActions::InfoSection(*game), AdapterActions::ContentSection(*game),
 	      AdapterActions::TrophiesSection(*game, runtime_root, data_dir),

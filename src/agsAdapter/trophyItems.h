@@ -23,6 +23,9 @@ namespace AdapterTrophies {
                                const Common::Trophies::UnlockData& unlocks, unsigned label,
                                const QString& icons_dir);
 
+// The `kyty.trophies` banner around `cards`; empty without cards.
+[[nodiscard]] QJsonObject Banner(const QJsonArray& cards);
+
 // The `kyty.trophies` banner with the cards of all packages of the game (at most 1024), read
 // from `info.basedir` (folder or archive); unlock state is read from `runtime_root`. Empty
 // without cards.

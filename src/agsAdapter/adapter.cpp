@@ -1,6 +1,7 @@
 #include "adapter.h"
 
 #include "gameLibrary.h"
+#include "gameServices.h"
 #include "launchPlan.h"
 #include "library.h"
 #include "page.h"
@@ -34,6 +35,11 @@ QJsonObject Metric(const char* key, const char* label, const char* unit, const c
 Adapter::Adapter(const QString& data_dir, const QString& adapter_dir,
                  std::function<void(const QJsonObject&)> notify, QObject* parent)
     : QObject(parent), m_state(data_dir), m_adapter_dir(adapter_dir), m_notify(std::move(notify)) {
+	// A download that finished after its action.run gave up still reaches AGS.
+	connect(&m_fetcher, &CheatFetcher::Imported, this, [this](const QString& game) {
+		m_notify(
+		    QJsonObject {{"method", "page.changed"}, {"params", QJsonObject {{"game", game}}}});
+	});
 	m_debounce.setSingleShot(true);
 	m_debounce.setInterval(500);
 	connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_debounce, qOverload<>(&QTimer::start));
@@ -147,9 +153,8 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("launch.ended")) return Reply::Success();
 	const bool known =
 	    method == QLatin1String("library.list") || method == QLatin1String("page.describe") ||
-	    method == QLatin1String("values.get") ||
-	    method == QLatin1String("values.set") || method == QLatin1String("actions.list") ||
-	    method == QLatin1String("actions.run") || method == QLatin1String("launch.plan");
+	    method == QLatin1String("values.get") || method == QLatin1String("values.set") ||
+	    method == QLatin1String("action.run") || method == QLatin1String("launch.plan");
 	if (!known) {
 		return Reply::Error(QStringLiteral("unknown-method"),
 		                    QStringLiteral("Unknown method %1.").arg(method));
@@ -199,14 +204,38 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 			return Reply::Invalid(QStringLiteral("scope must be game or machine."));
 		}
 		if (scope == QLatin1String("game") && !FindGame(params, true, &game, &reply)) return reply;
+		// The cheats item exists when GetCheats says supported (a cheat plan path for the title).
+		const auto entry = game != nullptr ? std::optional<GameEntry>(*game) : std::nullopt;
+		const bool has_cheats =
+		    entry && !GameServices::CheatPlanPath(*entry->info, m_runtime_root).isEmpty();
+		const auto with_cheats = [&](Reply out) {
+			if (!out.Ok() || !has_cheats) return out;
+			auto values                          = out.result[QStringLiteral("values")].toObject();
+			values[QStringLiteral("cheats")]     = AdapterActions::CheatsOn(*entry, m_runtime_root);
+			out.result[QStringLiteral("values")] = values;
+			return out;
+		};
 		if (method == QLatin1String("values.get")) {
-			return AdapterSettings::Get(m_state, ini, game);
+			return with_cheats(AdapterSettings::Get(m_state, ini, game));
 		}
 		if (!params[QStringLiteral("values")].isObject()) {
 			return Reply::Invalid(QStringLiteral("values must be an object."));
 		}
-		auto result = AdapterSettings::Set(m_state, ini, *m_library, game,
-		                                   params[QStringLiteral("values")].toObject());
+		auto       values     = params[QStringLiteral("values")].toObject();
+		const bool set_cheats = entry && values.contains(QStringLiteral("cheats"));
+		const auto cheats     = set_cheats ? values.take(QStringLiteral("cheats")) : QJsonValue {};
+		if (set_cheats) { // checked before anything is written
+			if (auto refused = AdapterActions::CheckCheats(*entry, m_runtime_root, cheats);
+			    !refused.Ok())
+				return refused;
+		}
+		auto result = AdapterSettings::Set(m_state, ini, *m_library, game, values);
+		if (result.Ok() && set_cheats) {
+			if (auto failed = AdapterActions::SetCheats(*entry, m_runtime_root, cheats);
+			    !failed.Ok())
+				return failed;
+		}
+		result = with_cheats(result);
 		// A machine change (or a new runtime root) changes every game's merged values.
 		if (game == nullptr) m_library_dirty = true;
 		if (result.Ok() &&
@@ -217,16 +246,15 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		}
 		return result;
 	}
-	if (method == QLatin1String("actions.list")) {
-		if (!FindGame(params, false, &game, &reply)) return reply;
-		return AdapterActions::List(game, m_runtime_root);
-	}
-	if (method == QLatin1String("actions.run")) {
-		if (!params[QStringLiteral("action_id")].isString()) {
-			return Reply::Invalid(QStringLiteral("action_id is required."));
+	if (method == QLatin1String("action.run")) {
+		if (!params[QStringLiteral("item")].isString()) {
+			return Reply::Invalid(QStringLiteral("item is required."));
 		}
-		if (!FindGame(params, true, &game, &reply)) return reply;
-		return AdapterActions::Run(*game, params, m_runtime_root, m_state.DataDir(), m_fetcher);
+		if (!FindGame(params, false, &game, &reply)) return reply;
+		if (game == nullptr || params[QStringLiteral("item")] != QLatin1String("cheats.fetch")) {
+			return Reply::NotFound(QStringLiteral("No such action."));
+		}
+		return m_fetcher.Run(*game, m_runtime_root, 3500);
 	}
 	// launch.plan
 	if (!FindGame(params, true, &game, &reply)) return reply;

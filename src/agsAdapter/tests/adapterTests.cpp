@@ -818,24 +818,7 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	CHECK(QFile::remove(plan_path));
 }
 
-void TestActions(Session& s, const QString& id) {
-	const auto  actions = s.Result("actions.list", {{"game", id}})["actions"].toArray();
-	QStringList ids;
-	for (const auto& a: actions)
-		ids.append(a.toObject()["id"].toString());
-	EXPECT(ids == QStringList({"cheats", "cheats.fetch"}));
-	EXPECT(actions.at(1).toObject()["kind"].toString() == "command");
-	EXPECT(actions.at(1).toObject()["confirm"].toBool());
-	for (const auto& a: actions) ExpectIcon(a.toObject()["icon"].toString());
-	EXPECT(actions.at(1).toObject()["menu"].toBool() && !actions.at(0).toObject()["menu"].toBool());
-	EXPECT(s.Result("actions.list")["actions"].toArray().isEmpty());
-	const auto cheats = s.Result("actions.run", {{"game", id}, {"action_id", "cheats"}});
-	EXPECT(cheats["items"].toArray().isEmpty() && !cheats["message"].toString().isEmpty());
-	for (const auto* gone: {"nope", "info", "trophies", "content"})
-		EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", gone}}) == "not-found");
-}
-
-// page.describe with a game: the Kyty.ini settings, then info, content, trophies, the variant.
+// page.describe with a game: cheats, the Kyty.ini settings, info, content, trophies, the variant.
 void TestGamePage(Session& s, const Fixture& f, const QString& id) {
 	const auto describe = [&] {
 		const auto page = s.Result("page.describe", {{"game", id}});
@@ -853,9 +836,11 @@ void TestGamePage(Session& s, const Fixture& f, const QString& id) {
 	for (const auto& v: AdapterPage::SettingsSections(AdapterPage::PageKind::Game))
 		expected.append(v.toObject()["id"].toString());
 	EXPECT(!expected.isEmpty() && !expected.contains("kyty.machine"));
+	expected.prepend("kyty.cheats");
 	expected.append("kyty.info");
 	EXPECT(order == expected);
 	for (const auto& section: by_id) {
+		if (section["id"] == "kyty.cheats") continue; // game scope, checked in TestCheats
 		for (const auto& i: section["items"].toArray()) {
 			const auto item = i.toObject();
 			if (item.contains("scope")) EXPECT(item["scope"] == "game_on_device");
@@ -938,6 +923,112 @@ void TestGamePage(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(variant["icon"] == "assets/ags/actions/launch-nocheats.svg");
 	CHECK(QFile::remove(plan_path));
 	EXPECT(!describe().second.contains("kyty.variants"));
+}
+
+// kyty.cheats: the toggle list, its game-scope values and the Fetch cheats button.
+void TestCheats(Session& s, const Fixture& f, const QString& id) {
+	const auto cheats_section = [&] {
+		const auto page = s.Result("page.describe", {{"game", id}});
+		ExpectPageRules(page, true);
+		const auto sections = page["sections"].toArray();
+		EXPECT(sections.at(0).toObject()["id"] == "kyty.cheats");
+		return sections.at(0).toObject();
+	};
+	const auto on = [&] {
+		const auto values =
+		    s.Result("values.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+		EXPECT(values["cheats"].isArray());
+		return values["cheats"].toArray();
+	};
+	// No plan file yet: no entries, a hint to fetch, and the button.
+	auto section = cheats_section();
+	EXPECT(section["surface"] == "panel" && section["tab"] == "source" &&
+	       section["title"] == "Cheats" && section["icon"] == "assets/ags/actions/cheats.svg");
+	auto items = section["items"].toArray();
+	EXPECT(items.size() == 2);
+	auto list = items.at(0).toObject();
+	EXPECT(list["id"] == "cheats" && list["kind"] == "toggle_list" && list["label"] == "Cheats" &&
+	       list["alias"] == "cheats" && list["scope"] == "game" && list["default"].isArray() &&
+	       list["default"].toArray().isEmpty());
+	EXPECT(list["entries"].toArray().isEmpty() && !list["help"].toString().isEmpty() &&
+	       !list.contains("disabled_reason"));
+	EXPECT(items.at(1).toObject() ==
+	       QJsonObject({{"id", "cheats.fetch"},
+	                    {"kind", "button"},
+	                    {"label", "Fetch cheats"},
+	                    {"alias", "cheats_fetch"},
+	                    {"confirm", "Download the cheat file for this game?"},
+	                    {"icon", "assets/ags/actions/fetch.svg"}}));
+	EXPECT(on() == QJsonArray {});
+
+	// A cheat file that does not parse: no entries, disabled, nothing written.
+	const auto plan = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
+	WriteFile(plan, "{}");
+	list = cheats_section()["items"].toArray().at(0).toObject();
+	EXPECT(list["entries"].toArray().isEmpty() &&
+	       list["disabled_reason"] == "Cannot read the cheat file.");
+	EXPECT(on() == QJsonArray {});
+	EXPECT(s.ErrorCode("values.set", {{"scope", "game"},
+	                                  {"game", id},
+	                                  {"values", QJsonObject {{"cheats", QJsonArray {}}}}}) ==
+	       "failed");
+	EXPECT(ReadAll(plan) == "{}");
+
+	// The plan document of src/launcher/tests/gameServicesTests.cpp for this game.
+	const auto mod = [](const QString& name, bool on, const char* offset) {
+		return QJsonObject {
+		    {"name", name},
+		    {"enabled", on},
+		    {"memory", QJsonArray {QJsonObject {{"offset", offset}, {"off", "00"}, {"on", "01"}}}}};
+	};
+	WriteFile(plan,
+	          QJsonDocument(QJsonObject {{"id", "PPSA01234"},
+	                                     {"version", "01.000"},
+	                                     {"process", "eboot.bin"},
+	                                     {"mods", QJsonArray {mod("A", false, "10"),
+	                                                          mod(QString(100, 'B'), true, "20"),
+	                                                          mod("\n", false, "30")}}})
+	              .toJson());
+	list = cheats_section()["items"].toArray().at(0).toObject();
+	EXPECT(list["entries"].toArray() ==
+	       QJsonArray({QJsonObject {{"id", "0"}, {"label", "A"}},
+	                   QJsonObject {{"id", "1"}, {"label", QString(80, 'B')}},
+	                   QJsonObject {{"id", "2"}, {"label", "Cheat 3"}}}));
+	EXPECT(!list.contains("help") && !list.contains("disabled_reason"));
+	EXPECT(on() == QJsonArray({"1"}));
+	// An id that is not an entry now, a repeated id, a non-string, a non-array, or a valid
+	// selection next to a bad setting: refused whole.
+	const auto before  = ReadAll(plan);
+	const auto refused = [&](const QJsonObject& values) {
+		return s.ErrorCode("values.set", {{"scope", "game"}, {"game", id}, {"values", values}});
+	};
+	EXPECT(refused({{"cheats", QJsonArray {"0", "7"}}}) == "invalid-params");
+	EXPECT(refused({{"cheats", QJsonArray {"0", "0"}}}) == "invalid-params");
+	EXPECT(refused({{"cheats", QJsonArray {0}}}) == "invalid-params");
+	EXPECT(refused({{"cheats", "0"}}) == "invalid-params");
+	EXPECT(refused({{"cheats", QJsonArray {"0"}}, {"nope", true}}) == "invalid-params");
+	EXPECT(ReadAll(plan) == before);
+	const auto set = s.Result(
+	    "values.set",
+	    {{"scope", "game"}, {"game", id}, {"values", QJsonObject {{"cheats", QJsonArray {"0"}}}}});
+	EXPECT(set["values"].toObject()["cheats"].toArray() == QJsonArray({"0"}));
+	EXPECT(
+	    s.Result("values.set", {{"scope", "game"},
+		                        {"game", id},
+		                        {"values", QJsonObject {{"cheats", QJsonValue::Null}}}})["values"]
+	        .toObject()["cheats"]
+	        .toArray()
+	        .isEmpty());
+	EXPECT(on() == QJsonArray {});
+
+	// action.run: only cheats.fetch (not pressed here: it needs the network).
+	EXPECT(s.ErrorCode("action.run", {{"game", id}, {"item", "nope"}}) == "not-found");
+	EXPECT(s.ErrorCode("action.run", {{"item", "cheats.fetch"}}) == "not-found");
+	EXPECT(s.ErrorCode("action.run", {{"game", id}}) == "invalid-params");
+	EXPECT(s.ErrorCode("action.run", {{"game", id}, {"item", 1}}) == "invalid-params");
+	EXPECT(s.ErrorCode("actions.list", {{"game", id}}) == "unknown-method");
+	EXPECT(s.ErrorCode("actions.run", {{"game", id}, {"action_id", "cheats"}}) == "unknown-method");
+	CHECK(QFile::remove(plan));
 }
 
 void TestInputMapping(Session& s) {
@@ -1326,6 +1417,17 @@ void TestUnits(const Fixture& f) {
 		const auto icons  = QDir(f.dir.path()).filePath("trophy-icons");
 		const auto items0 = AdapterTrophies::Cards(package, unlocks, 0, icons);
 		const auto items1 = AdapterTrophies::Cards(package, unlocks, 1, icons);
+		// The banner around them; its icon is installed (the fixture game has no trophies).
+		EXPECT(AdapterTrophies::Banner({}).isEmpty());
+		const auto banner = AdapterTrophies::Banner(items0);
+		EXPECT(banner["id"] == "kyty.trophies" && banner["surface"] == "banner" &&
+		       banner["title"] == "Trophies" && !banner.contains("tab"));
+		const auto trophies = banner["items"].toArray();
+		EXPECT(trophies.size() == 1 && trophies.at(0).toObject()["id"] == "trophies" &&
+		       trophies.at(0).toObject()["kind"] == "cards" &&
+		       trophies.at(0).toObject()["alias"] == "trophies" &&
+		       trophies.at(0).toObject()["cards"].toArray() == items0);
+		ExpectIcon(banner["icon"].toString());
 		EXPECT(items0.size() == 4 && items1.size() == 4);
 		QStringList ids;
 		for (const auto& v: items0)
@@ -1435,8 +1537,8 @@ int main(int argc, char* argv[]) {
 		TestValues(s, f, id);
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
-		TestActions(s, id);
 		TestGamePage(s, f, id);
+		TestCheats(s, f, id);
 		TestInputMapping(s);
 		TestStaleCache(s, f, id);
 		TestSettingsAtomic(s, f);

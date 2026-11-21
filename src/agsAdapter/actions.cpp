@@ -22,56 +22,40 @@
 
 namespace {
 
-QJsonArray CheatItems(const QJsonObject& cheats) {
-	QJsonArray items;
-	for (const auto& v: cheats[QStringLiteral("mods")].toArray()) {
-		const auto mod = v.toObject();
-		items.append(QJsonObject {{"id", QString::number(mod[QStringLiteral("index")].toInt())},
-		                          {"label", mod[QStringLiteral("name")].toString()},
-		                          {"on", mod[QStringLiteral("enabled")].toBool()}});
-	}
-	return items;
-}
+// Entries past this many are left out of the toggle list (sheet 1.3) and keep their stored state.
+constexpr qsizetype MAX_CHEAT_ENTRIES = 512;
 
-Reply CheatList(const GameEntry& game, const QJsonObject& params, const QString& root) {
-	const auto& info   = *game.info;
-	auto        cheats = GameServices::GetCheats(info, root);
+// The PutCheats body that turns exactly `ids` on, or the refusal; nothing is written.
+Reply CheatSelection(const Configuration& info, const QString& root, const QJsonValue& ids,
+                     QJsonObject* body) {
+	if (!ids.isNull() && !ids.isArray()) {
+		return Reply::Invalid(QStringLiteral("cheats must be a list of cheat ids."));
+	}
+	QSet<QString> on;
+	for (const auto& v: ids.toArray()) {
+		if (!v.isString() || on.contains(v.toString())) {
+			return Reply::Invalid(QStringLiteral("Invalid value for cheats."));
+		}
+		on.insert(v.toString());
+	}
+	const auto cheats = GameServices::GetCheats(info, root);
 	if (!cheats[QStringLiteral("supported")].toBool()) {
-		return Reply::Success(
-		    {{"items", QJsonArray {}}, {"message", "Cheats are not available for this game."}});
+		return Reply::Invalid(QStringLiteral("Cheats are not available for this game."));
 	}
 	if (cheats.contains(QStringLiteral("error"))) {
 		return Reply::Failed(cheats[QStringLiteral("error")].toString());
 	}
-	if (params.contains(QStringLiteral("item_id"))) {
-		bool       ok    = false;
-		const auto index = params[QStringLiteral("item_id")].toString().toInt(&ok);
-		const auto mods  = cheats[QStringLiteral("mods")].toArray();
-		if (!params[QStringLiteral("on")].isBool()) {
-			return Reply::Invalid(QStringLiteral("on must be a boolean."));
-		}
-		if (!ok || index < 0 || index >= mods.size()) {
-			return Reply::NotFound(QStringLiteral("No such cheat."));
-		}
-		QJsonArray enabled;
-		for (qsizetype i = 0; i < mods.size(); ++i) {
-			enabled.append(i == index ? params[QStringLiteral("on")].toBool()
-			                          : mods[i].toObject()[QStringLiteral("enabled")].toBool());
-		}
-		const QJsonObject body {{"revision", cheats[QStringLiteral("revision")]},
-		                        {"enabled", enabled}};
-		if (const auto error = GameServices::PutCheats(info, root, body, nullptr);
-		    !error.isEmpty()) {
-			return Reply::Failed(
-			    QStringLiteral("Cannot save the cheat selection (%1).").arg(error));
-		}
-		cheats = GameServices::GetCheats(info, root);
+	const auto mods = cheats[QStringLiteral("mods")].toArray();
+	QJsonArray enabled;
+	for (qsizetype i = 0; i < mods.size(); ++i) {
+		enabled.append(i < MAX_CHEAT_ENTRIES
+		                   ? on.remove(QString::number(i))
+						   : mods[i].toObject()[QStringLiteral("enabled")].toBool());
 	}
-	QJsonObject result {{"items", CheatItems(cheats)}};
-	if (cheats[QStringLiteral("mods")].toArray().isEmpty()) {
-		result[QStringLiteral("message")] = "No cheats are installed. Use Fetch cheats first.";
-	}
-	return Reply::Success(result);
+	// The cheat file changed since the page was described (a fetch renumbers entries).
+	if (!on.isEmpty()) return Reply::Invalid(QStringLiteral("No such cheat; reload the page."));
+	*body = {{"revision", cheats[QStringLiteral("revision")]}, {"enabled", enabled}};
+	return Reply::Success();
 }
 
 // A row label or value, one line within `max_chars`.
@@ -119,6 +103,7 @@ CheatFetcher::CheatFetcher(QObject* parent): QObject(parent) {
 		        const auto import_error =
 		            GameServices::ImportRemoteCheat(*m_info, m_cheats_root, data, nullptr);
 		        Finish(import_error, m_message);
+		        if (import_error.isEmpty()) emit Imported(m_game);
 	        });
 }
 
@@ -273,28 +258,68 @@ QJsonObject VariantsSection(const GameEntry& game, const QString& runtime_root) 
 	                                           {"launch", true}}}}};
 }
 
-Reply List(const GameEntry* game, const QString& /*runtime_root*/) {
-	if (game == nullptr) return Reply::Success({{"actions", QJsonArray {}}});
-	return Reply::Success({{"actions", QJsonArray {
-	                                       QJsonObject {{"id", "cheats"},
-										                {"kind", "toggle_list"},
-										                {"label", "Cheats"},
-										                {"icon", "assets/ags/actions/cheats.svg"}},
-	                                       QJsonObject {{"id", "cheats.fetch"},
-										                {"kind", "command"},
-										                {"label", "Fetch cheats"},
-										                {"confirm", true},
-										                {"menu", true},
-										                {"icon", "assets/ags/actions/fetch.svg"}},
-	                                   }}});
+QJsonObject CheatsSection(const GameEntry& game, const QString& runtime_root) {
+	const auto cheats = GameServices::GetCheats(*game.info, runtime_root);
+	if (!cheats[QStringLiteral("supported")].toBool()) return {};
+	QJsonObject list {{"id", "cheats"},          {"kind", "toggle_list"},
+	                  {"label", "Cheats"},       {"alias", "cheats"},
+	                  {"scope", "game"},         {"default", QJsonArray {}},
+	                  {"entries", QJsonArray {}}};
+	if (cheats.contains(QStringLiteral("error"))) {
+		list[QStringLiteral("disabled_reason")] = "Cannot read the cheat file.";
+	} else {
+		QJsonArray entries;
+		for (const auto& v: cheats[QStringLiteral("mods")].toArray()) {
+			if (entries.size() >= MAX_CHEAT_ENTRIES) break;
+			const auto index = v.toObject()[QStringLiteral("index")].toInt();
+			auto       label = RowText(v.toObject()[QStringLiteral("name")].toString(), 80);
+			if (label.trimmed().isEmpty()) label = QStringLiteral("Cheat %1").arg(index + 1);
+			entries.append(QJsonObject {{"id", QString::number(index)}, {"label", label}});
+		}
+		if (entries.isEmpty())
+			list[QStringLiteral("help")] = "No cheats are installed. Use Fetch cheats first.";
+		list[QStringLiteral("entries")] = entries;
+	}
+	return {{"id", "kyty.cheats"},
+	        {"surface", "panel"},
+	        {"tab", "source"},
+	        {"title", "Cheats"},
+	        {"icon", "assets/ags/actions/cheats.svg"},
+	        {"items",
+	         QJsonArray {list, QJsonObject {{"id", "cheats.fetch"},
+	                                        {"kind", "button"},
+	                                        {"label", "Fetch cheats"},
+	                                        {"alias", "cheats_fetch"},
+	                                        {"confirm", "Download the cheat file for this game?"},
+	                                        {"icon", "assets/ags/actions/fetch.svg"}}}}};
 }
 
-Reply Run(const GameEntry& game, const QJsonObject& params, const QString& runtime_root,
-          const QString& /*data_dir*/, CheatFetcher& fetcher) {
-	const auto action = params[QStringLiteral("action_id")].toString();
-	if (action == QLatin1String("cheats")) return CheatList(game, params, runtime_root);
-	if (action == QLatin1String("cheats.fetch")) return fetcher.Run(game, runtime_root, 3500);
-	return Reply::NotFound(QStringLiteral("Unknown action %1.").arg(action));
+QJsonArray CheatsOn(const GameEntry& game, const QString& runtime_root) {
+	const auto cheats = GameServices::GetCheats(*game.info, runtime_root);
+	QJsonArray on;
+	if (cheats.contains(QStringLiteral("error"))) return on;
+	const auto mods = cheats[QStringLiteral("mods")].toArray();
+	for (qsizetype i = 0; i < std::min(mods.size(), MAX_CHEAT_ENTRIES); ++i) {
+		if (mods[i].toObject()[QStringLiteral("enabled")].toBool()) on.append(QString::number(i));
+	}
+	return on;
+}
+
+Reply CheckCheats(const GameEntry& game, const QString& runtime_root, const QJsonValue& ids) {
+	QJsonObject body;
+	return CheatSelection(*game.info, runtime_root, ids, &body);
+}
+
+Reply SetCheats(const GameEntry& game, const QString& runtime_root, const QJsonValue& ids) {
+	QJsonObject body;
+	if (auto refused = CheatSelection(*game.info, runtime_root, ids, &body); !refused.Ok()) {
+		return refused;
+	}
+	if (const auto error = GameServices::PutCheats(*game.info, runtime_root, body, nullptr);
+	    !error.isEmpty()) {
+		return Reply::Failed(QStringLiteral("Cannot save the cheat selection (%1).").arg(error));
+	}
+	return Reply::Success();
 }
 
 } // namespace AdapterActions
