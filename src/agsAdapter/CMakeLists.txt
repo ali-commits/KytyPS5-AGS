@@ -7,6 +7,7 @@ set(ags_adapter_lib_sources
 	reply.h
 	adapterState.cpp adapterState.h
 	settings.cpp settings.h
+	page.cpp page.h
 	library.cpp library.h
 	actions.cpp actions.h
 	fetchResult.h

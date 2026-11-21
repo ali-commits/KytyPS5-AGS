@@ -417,36 +417,6 @@ const QJsonArray& Schema() {
 	return schema;
 }
 
-QStringList HostFieldTypes(const QJsonObject& hello_params) {
-	// A host that predates field_types knows the protocol 1 originals only.
-	static const QStringList ORIGINAL {"bool", "enum", "int", "string", "path", "path_list",
-	                                   "string_list", "group"};
-	const auto listed = hello_params[QStringLiteral("field_types")];
-	if (!listed.isArray()) return ORIGINAL;
-	QStringList types;
-	for (const auto& t: listed.toArray()) {
-		if (t.isString()) types.append(t.toString());
-	}
-	return types;
-}
-
-QJsonArray SchemaFor(const QStringList& host_types) {
-	QJsonArray fields;
-	QJsonValue heading(QJsonValue::Undefined); // a group heading waits for its first field
-	for (const auto& v: Schema()) {
-		const auto type = v.toObject()[QStringLiteral("type")].toString();
-		if (type == QLatin1String("group")) {
-			heading = v;
-			continue;
-		}
-		if (!host_types.contains(type)) continue; // an older host would refuse the whole schema
-		if (!heading.isUndefined()) fields.append(heading);
-		heading = QJsonValue(QJsonValue::Undefined);
-		fields.append(v);
-	}
-	return fields;
-}
-
 const QJsonObject* FindField(const QString& key) {
 	static const QHash<QString, QJsonObject> index = [] {
 		QHash<QString, QJsonObject> h;

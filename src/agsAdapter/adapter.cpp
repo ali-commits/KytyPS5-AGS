@@ -3,6 +3,7 @@
 #include "gameLibrary.h"
 #include "launchPlan.h"
 #include "library.h"
+#include "page.h"
 #include "settings.h"
 
 #include <QDateTime>
@@ -139,12 +140,14 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("hello")) {
 		return Hello();
 	}
-	if (method == QLatin1String("settings.schema")) {
-		return Reply::Success({{"fields", AdapterSettings::Schema()}});
+	// The extension's own page is answered before Ready(), so a broken runtime folder can be fixed.
+	if (method == QLatin1String("page.describe") && !params.contains(QStringLiteral("game"))) {
+		return Reply::Success(AdapterPage::Describe(nullptr, {}, m_state.DataDir()));
 	}
 	if (method == QLatin1String("launch.ended")) return Reply::Success();
 	const bool known =
-	    method == QLatin1String("library.list") || method == QLatin1String("settings.get") ||
+	    method == QLatin1String("library.list") || method == QLatin1String("page.describe") ||
+	    method == QLatin1String("settings.get") ||
 	    method == QLatin1String("settings.set") || method == QLatin1String("actions.list") ||
 	    method == QLatin1String("actions.run") || method == QLatin1String("launch.plan");
 	if (!known) {
@@ -172,6 +175,10 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("library.list")) {
 		return Reply::Success({{"games", AdapterLibrary::Games(*m_library, m_state.DataDir(),
 		                                                       m_runtime_root, m_art_cache)}});
+	}
+	if (method == QLatin1String("page.describe")) {
+		if (!FindGame(params, true, &game, &reply)) return reply;
+		return Reply::Success(AdapterPage::Describe(game, m_runtime_root, m_state.DataDir()));
 	}
 	if (method == QLatin1String("settings.get") || method == QLatin1String("settings.set")) {
 		const auto scope = params[QStringLiteral("scope")].toString(QStringLiteral("global"));

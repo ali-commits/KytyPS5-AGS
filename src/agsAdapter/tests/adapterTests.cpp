@@ -6,6 +6,7 @@
 #include "gameLibrary.h"
 #include "launchPlan.h"
 #include "library.h"
+#include "page.h"
 #include "settings.h"
 #include "trophyItems.h"
 
@@ -326,142 +327,242 @@ void ExpectIcon(const QString& icon) {
 	EXPECT(file.isFile() && !file.isSymLink() && file.size() > 0 && file.size() <= 256 * 1024);
 }
 
-void TestRicherKeys(const QJsonArray& fields);
-
-void TestSchema(Session& s) {
-	const auto fields = s.Result("settings.schema")["fields"].toArray();
-	EXPECT(!fields.isEmpty() && fields.size() <= 512);
-	static const QRegularExpression key_pattern(QStringLiteral("^[a-z][a-z0-9_.]{0,63}$"));
-	QStringList                     keys;
-	QStringList                     machine;
-	for (const auto& v: fields) {
-		const auto f     = v.toObject();
-		const auto key   = f["key"].toString();
-		const auto type  = f["type"].toString();
-		const auto label = f["label"].toString();
-		EXPECT(key_pattern.match(key).hasMatch());
-		EXPECT(!keys.contains(key));
-		keys.append(key);
-		EXPECT(!label.isEmpty() && label.size() <= 80);
-		EXPECT(f["hint"].toString().size() <= 200 && !f["hint"].toString().contains('\n'));
-		EXPECT(QStringList({"bool", "enum", "int", "string", "path", "path_list", "string_list",
-	                         "group"})
-		           .contains(type));
-		EXPECT(QStringList({"", "global", "per_game", "both"}).contains(f["scope"].toString()));
-		EXPECT(QStringList({"", "player", "machine"}).contains(f["location"].toString()));
-		EXPECT(!f.contains("visible_if"));
-		if (f["location"].toString() == "machine") machine.append(key);
-		const auto d = f["default"];
-		if (type == "group") {
-			EXPECT(!f.contains("default") && !f.contains("fields") && !f.contains("title"));
-			ExpectIcon(f["icon"].toString());
-		} else if (type == "bool") {
-			EXPECT(d.isBool());
-		} else if (type == "int") {
-			EXPECT(d.isDouble() && f["min"].toInteger() <= d.toInteger() &&
-			       d.toInteger() <= f["max"].toInteger());
-		} else if (type == "enum") {
-			const auto options = f["options"].toArray();
-			EXPECT(!options.isEmpty());
-			bool found = false;
-			for (const auto& o: options) {
-				const auto value = o.toObject()["value"].toString();
-				const auto label = o.toObject()["label"].toString();
-				EXPECT(o.toObject()["value"].isString() && !label.isEmpty());
-				// gpu_index "-1" and audio_input_device "" mean "let the system choose": every
-				// option must carry a human label, and that one must read "Default".
-				if ((key == "gpu_index" && value == "-1") ||
-				    (key == "audio_input_device" && value.isEmpty())) {
-					EXPECT(label == "Default");
-				}
-				found = found || o.toObject()["value"] == d;
-			}
-			EXPECT(found);
-		} else if (type == "path_list") {
-			EXPECT(d.isArray());
-		} else if (type == "string_list") {
-			EXPECT(d.isArray() && f["max_items"].toInt() == 256 && f["max_len"].toInt() == 1024);
-			EXPECT(key == "host_input_mapping" && f["location"].toString() == "machine");
-		} else {
-			EXPECT(d.isString());
-		}
+// "One line" (sheet 1.3): no control character, `min` to `max` characters.
+bool OneLine(const QJsonValue& v, int min, int max) {
+	if (!v.isString()) return false;
+	const auto chars = v.toString().toUcs4();
+	if (chars.size() < min || chars.size() > max) return false;
+	for (const auto c: chars) {
+		if (QChar::category(c) == QChar::Other_Control) return false;
 	}
-	for (const auto* omitted: {"screen_resolution", "vblank_frequency", "stream_aspect_mode",
-	                           "console_language", "user_name", "fullscreen_enabled",
-	                           "hide_cursor_enabled", "hdr_enabled"}) {
-		EXPECT(!keys.contains(omitted));
-	}
-	machine.sort();
-	EXPECT(machine == QStringList({"addons_dir", "game_dirs", "gpu_index", "host_input_mapping",
-	                               "runtime_root"}));
-	EXPECT(keys.contains("present_mode") && keys.contains("controller_color"));
-	for (const auto* hidden: {"shader_log_folder", "command_buffer_dump_folder", "printf_output_file",
-	                          "perf_overlay_enabled"}) {
-		EXPECT(!keys.contains(hidden));
-	}
-	TestRicherKeys(fields);
+	return true;
 }
 
-// Presentation keys (STANDARD.md section 6.2) that the app reads instead of guessing by key name.
-void TestRicherKeys(const QJsonArray& fields) {
-	QHash<QString, QJsonObject> by_key;
-	for (const auto& v: fields) {
-		by_key.insert(v.toObject()["key"].toString(), v.toObject());
-		// The host refuses a schema with a null where it expects a list or a string.
-		const auto field = v.toObject();
-		for (auto it = field.begin(); it != field.end(); ++it)
-			EXPECT(!it.value().isNull());
+void ExpectNoNull(const QJsonValue& v) {
+	EXPECT(!v.isNull());
+	if (v.isArray()) {
+		for (const auto& e: v.toArray())
+			ExpectNoNull(e);
+	} else if (v.isObject()) {
+		const auto o = v.toObject();
+		for (auto it = o.begin(); it != o.end(); ++it)
+			ExpectNoNull(it.value());
 	}
+}
+
+// Entry, row and card lists: optional ids 1 to 128 of [A-Za-z0-9._-], unique within the item.
+void ExpectEntryIds(const QJsonArray& list, bool id_required) {
+	static const QRegularExpression entry_id(QStringLiteral("^[A-Za-z0-9._-]{1,128}$"));
+	QSet<QString> ids;
+	for (const auto& v: list) {
+		const auto e = v.toObject();
+		if (!e.contains("id") && !id_required) continue;
+		const auto id = e["id"].toString();
+		EXPECT(e["id"].isString() && entry_id.match(id).hasMatch() && !ids.contains(id));
+		ids.insert(id);
+	}
+}
+
+// The rules of sheet 1.2.2 and 1.3 on a page.describe result; a host `sanitize` drop fails here.
+void ExpectPageRules(const QJsonObject& page, bool game_page) {
+	ExpectNoNull(page);
+	static const QRegularExpression id_pattern(QStringLiteral("^[a-z0-9][a-z0-9._-]{0,63}$"));
 	static const QRegularExpression colour(QStringLiteral("^#[0-9a-f]{6}$"));
-	const auto light = by_key.value("controller_color");
-	EXPECT(light["type"] == "string" && light["default"] == "");
-	EXPECT(light["format"] == "colour" && light["nullable"] == true &&
-	       light["null_label"] == "Game default");
-	const auto palette = light["palette"].toArray();
-	EXPECT(palette.size() >= 5 && palette.size() <= 32);
-	EXPECT(palette.at(0).toObject() == QJsonObject({{"value", "#0030ff"}, {"label", "Blue"}}));
-	QSet<QString> swatches;
-	for (const auto& p: palette) {
-		const auto value = p.toObject()["value"].toString();
-		EXPECT(colour.match(value).hasMatch() && !swatches.contains(value));
-		swatches.insert(value);
-		EXPECT(!p.toObject()["label"].toString().isEmpty());
-	}
-	for (const auto* volume: {"controller_speaker_volume", "controller_vibration_intensity",
-	                          "audio_master_volume", "audio_main_volume", "audio_music_volume",
-	                          "audio_pad_speaker_main_volume", "audio_objects_volume"}) {
-		const auto f = by_key.value(volume);
-		EXPECT(f["type"] == "int" && f["unit"] == "%" && f["control"] == "slider");
-		EXPECT(f.contains("min") && f.contains("max"));
-	}
-	EXPECT(by_key.value("trophy_duration_seconds")["unit"] == "s");
-	const auto keyboard = by_key.value("controller_keyboard_player");
-	EXPECT(keyboard["type"] == "enum" && keyboard["default"] == "0");
-	const auto players = keyboard["options"].toArray();
-	EXPECT(players.size() == Config::MAX_PLAYERS + 1);
-	EXPECT(players.at(0).toObject() == QJsonObject({{"value", "0"}, {"label", "Shared with player 1"}}));
-	EXPECT(players.at(2).toObject() == QJsonObject({{"value", "2"}, {"label", "Player 2"}}));
-	int segmented = 0;
-	for (const auto& f: by_key) {
-		if (f.contains("control") && f["type"] != "int") {
-			EXPECT(f["type"] == "enum" && f["control"] == "segmented");
-			EXPECT(f["options"].toArray().size() >= 2 && f["options"].toArray().size() <= 4);
-			++segmented;
+	static const QStringList        surfaces {"hero", "panel", "menu", "banner", "overlay"};
+	static const QStringList        tabs {"display", "maintenance", "advanced", "about", "source"};
+	static const QStringList        value_kinds {"switch", "choice", "slider", "number", "text",
+                                          "path",   "list",   "colour", "toggle_list"};
+	const auto                      sections = page["sections"].toArray();
+	EXPECT(page["sections"].isArray() && sections.size() <= 32);
+	QSet<QString> ids;
+	const auto    expect_id = [&ids](const QJsonValue& v) {
+        const auto id = v.toString();
+        EXPECT(v.isString() && id_pattern.match(id).hasMatch() && !id.startsWith("ags.") &&
+		          !ids.contains(id));
+        ids.insert(id);
+	};
+	int total = 0;
+	for (const auto& sv: sections) {
+		const auto section = sv.toObject();
+		const auto surface = section["surface"].toString();
+		expect_id(section["id"]);
+		EXPECT(surfaces.contains(surface));
+		if (!game_page) EXPECT(surface == "panel" && !section.contains("tab"));
+		if (surface == "panel") {
+			if (game_page) EXPECT(tabs.contains(section["tab"].toString()));
+		} else {
+			EXPECT(!section.contains("tab"));
 		}
-		if (f.contains("unit")) EXPECT(f["type"] == "int");
+		if (surface == "panel" || surface == "banner") EXPECT(OneLine(section["title"], 1, 40));
+		if (section.contains("icon")) ExpectIcon(section["icon"].toString());
+		const auto items = section["items"].toArray();
+		EXPECT(items.size() <= 128);
+		total += static_cast<int>(items.size());
+		for (const auto& iv: items) {
+			const auto item = iv.toObject();
+			const auto kind = item["kind"].toString();
+			expect_id(item["id"]);
+			EXPECT(OneLine(item["label"], 1, 80));
+			if (item.contains("help")) EXPECT(OneLine(item["help"], 0, 200));
+			if (item.contains("disabled_reason")) EXPECT(OneLine(item["disabled_reason"], 1, 80));
+			if (item.contains("confirm")) EXPECT(OneLine(item["confirm"], 1, 120));
+			if (item.contains("unit")) EXPECT(OneLine(item["unit"], 1, 8));
+			if (item.contains("null_label")) {
+				EXPECT(OneLine(item["null_label"], 1, 40) && item["nullable"] == true);
+			}
+			if (surface == "menu") EXPECT(kind == "button");
+			if (surface == "banner") EXPECT(kind == "cards" || kind == "rows");
+			if (item["launch"] == true) EXPECT(surface == "menu" && kind == "button");
+			if (kind == "button" && item.contains("icon")) ExpectIcon(item["icon"].toString());
+			const auto options = item["options"].toArray();
+			QSet<QString> values;
+			for (const auto& o: options) {
+				const auto value = o.toObject().value("value");
+				EXPECT(OneLine(value, 0, 255) && !values.contains(value.toString()));
+				values.insert(value.toString());
+				EXPECT(OneLine(o.toObject()["label"], 1, 80));
+			}
+			if (item["presentation"] == "segmented") EXPECT(options.size() >= 2 && options.size() <= 4);
+			const auto palette = item["palette"].toArray();
+			EXPECT(palette.size() <= 32);
+			for (const auto& p: palette)
+				EXPECT(colour.match(p.toObject()["value"].toString()).hasMatch());
+			if (!value_kinds.contains(kind)) {
+				EXPECT(!item.contains("scope") && !item.contains("default"));
+			} else {
+				const auto scope = item["scope"].toString();
+				EXPECT(game_page ? QStringList({"game_on_device", "device", "game", "machine"}).contains(scope)
+				                 : (scope == "device" || scope == "machine"));
+				const auto d = item["default"];
+				if (kind == "switch") {
+					EXPECT(d.isBool());
+				} else if (kind == "choice") {
+					EXPECT(d.isString() && values.contains(d.toString()));
+				} else if (kind == "slider" || kind == "number") {
+					EXPECT(d.isDouble() && d.toDouble() == static_cast<double>(d.toInteger()));
+					if (item.contains("min")) EXPECT(item["min"].toInteger() <= d.toInteger());
+					if (item.contains("max")) EXPECT(d.toInteger() <= item["max"].toInteger());
+					if (kind == "slider") EXPECT(item.contains("min") && item.contains("max"));
+				} else if (kind == "colour") {
+					EXPECT(d.isString() && (d == "" || colour.match(d.toString()).hasMatch()));
+				} else if (kind == "list" || kind == "toggle_list") {
+					EXPECT(d.isArray());
+					for (const auto& e: d.toArray())
+						EXPECT(e.isString());
+				} else {
+					EXPECT(d.isString());
+				}
+			}
+			if (kind == "toggle_list") {
+				const auto entries = item["entries"].toArray();
+				EXPECT(item["entries"].isArray() && entries.size() <= 512);
+				ExpectEntryIds(entries, true);
+				for (const auto& e: entries) {
+					EXPECT(OneLine(e.toObject()["label"], 1, 80));
+					if (e.toObject().contains("description"))
+						EXPECT(OneLine(e.toObject()["description"], 0, 300));
+				}
+			}
+			if (kind == "rows") {
+				const auto rows = item["rows"].toArray();
+				EXPECT(item["rows"].isArray() && rows.size() <= 256);
+				ExpectEntryIds(rows, false);
+				for (const auto& r: rows) {
+					EXPECT(OneLine(r.toObject()["label"], 1, 80));
+					EXPECT(OneLine(r.toObject()["value"], 0, 200));
+				}
+			}
+			if (kind == "cards") {
+				const auto cards = item["cards"].toArray();
+				EXPECT(cards.size() <= 1024);
+				ExpectEntryIds(cards, true);
+				for (const auto& c: cards) {
+					EXPECT(OneLine(c.toObject()["label"], 1, 80));
+					if (c.toObject().contains("description"))
+						EXPECT(OneLine(c.toObject()["description"], 0, 300));
+				}
+			}
+		}
 	}
-	EXPECT(by_key.value("present_mode")["control"] == "segmented");
-	EXPECT(segmented >= 1);
-	const auto frame_generation = by_key.value("frame_generation");
-	EXPECT(frame_generation["type"] == "enum" && frame_generation["default"] == "Off");
-	QStringList multipliers;
-	for (const auto& o: frame_generation["options"].toArray())
-		multipliers << o.toObject()["value"].toString();
-	EXPECT(multipliers == QStringList({"Off", "Double", "Triple", "Quadruple"}));
-	const auto flow_scale = by_key.value("frame_generation_flow_scale");
-	EXPECT(flow_scale["type"] == "int" && flow_scale["min"] == 25 && flow_scale["max"] == 100 &&
-	       flow_scale["default"] == 100 && flow_scale["control"] == "slider");
-	EXPECT(by_key.value("frame_generation_performance_mode")["type"] == "bool");
+	EXPECT(total <= 512);
+}
+
+// The game page's settings sections (page.describe with a game uses them from Task 4): the
+// Kyty.ini fields only, at game_on_device, in tabs.
+void TestGameSettingsSections() {
+	const auto sections = AdapterPage::SettingsSections(AdapterPage::PageKind::Game);
+	ExpectPageRules({{"sections", sections}}, true);
+	QHash<QString, QJsonObject> by_id;
+	QSet<QString>               items;
+	for (const auto& v: sections) {
+		const auto section = v.toObject();
+		by_id.insert(section["id"].toString(), section);
+		for (const auto& i: section["items"].toArray()) {
+			EXPECT(i.toObject()["scope"] == "game_on_device");
+			items.insert(i.toObject()["id"].toString());
+		}
+	}
+	EXPECT(!by_id.contains("kyty.machine") && by_id.contains("kyty.graphics"));
+	EXPECT(by_id["kyty.display"]["tab"] == "display" && by_id["kyty.display"]["title"] == "KytyPS5");
+	EXPECT(by_id["kyty.debug"]["tab"] == "advanced" && by_id["kyty.graphics"]["tab"] == "source");
+	for (const auto* left_out: {"gpu_index", "runtime_root", "game_dirs", "controller_color",
+	                            "audio_master_volume", "gpu_occlusion_accurate"})
+		EXPECT(!items.contains(left_out));
+	EXPECT(items.contains("present_mode") && items.contains("frame_generation"));
+}
+
+// The extension's own page (no game): the protocol 1 schema as panel sections.
+void TestExtensionPage(Session& s) {
+	const auto page = s.Result("page.describe");
+	ExpectPageRules(page, false);
+	QStringList                 ids;   // section ids
+	QHash<QString, QJsonObject> items; // by item id
+	QStringList                 machine;
+	for (const auto& sv: page["sections"].toArray()) {
+		ids.append(sv.toObject()["id"].toString());
+		for (const auto& iv: sv.toObject()["items"].toArray()) {
+			const auto item = iv.toObject();
+			items.insert(item["id"].toString(), item);
+			if (item["scope"] == "machine") {
+				machine.append(item["id"].toString());
+			} else {
+				EXPECT(item["scope"] == "device");
+			}
+		}
+	}
+	EXPECT(ids.mid(0, 8) == QStringList({"kyty.display", "kyty.user", "kyty.audio", "kyty.controller",
+	                                     "kyty.graphics", "kyty.system", "kyty.debug", "kyty.machine"}));
+	EXPECT(ids.size() <= 9 && (ids.size() == 8 || ids[8] == "kyty.other"));
+	machine.sort();
+	EXPECT(machine == QStringList({"addons_dir", "game_dirs", "gpu_index", "host_input_mapping", "runtime_root"}));
+	for (const auto* gone: {"screen_resolution", "vblank_frequency", "stream_aspect_mode", "console_language",
+	                        "user_name", "fullscreen_enabled", "hide_cursor_enabled", "hdr_enabled",
+	                        "shader_log_folder", "command_buffer_dump_folder", "printf_output_file",
+	                        "perf_overlay_enabled"})
+		EXPECT(!items.contains(gone));
+	const auto light = items["controller_color"];
+	EXPECT(light["kind"] == "colour" && light["default"] == "" && light["nullable"] == true &&
+	       light["null_label"] == "Game default");
+	EXPECT(light["palette"].toArray().at(0).toObject() == QJsonObject({{"value", "#0030ff"}, {"label", "Blue"}}));
+	EXPECT(items["audio_master_volume"]["kind"] == "slider" && items["audio_master_volume"]["unit"] == "%");
+	EXPECT(items["trophy_duration_seconds"]["kind"] == "number" && items["trophy_duration_seconds"]["unit"] == "s");
+	EXPECT(items["controller_keyboard_player"]["kind"] == "choice" &&
+	       items["controller_keyboard_player"]["default"] == "0" &&
+	       items["controller_keyboard_player"]["options"].toArray().size() == Config::MAX_PLAYERS + 1);
+	EXPECT(items["present_mode"]["presentation"] == "segmented");
+	EXPECT(items["frame_generation"]["kind"] == "choice" && items["frame_generation"]["default"] == "Off");
+	EXPECT(items["frame_generation_flow_scale"]["kind"] == "slider" && items["frame_generation_flow_scale"]["min"] == 25 &&
+	       items["frame_generation_flow_scale"]["max"] == 100 && items["frame_generation_flow_scale"]["default"] == 100);
+	EXPECT(items["frame_generation_performance_mode"]["kind"] == "switch");
+	EXPECT(items["runtime_root"]["kind"] == "path" && items["runtime_root"]["nullable"] == true &&
+	       items["runtime_root"]["null_label"] == "Default");
+	EXPECT(items["addons_dir"]["null_label"] == "None");
+	EXPECT(items["game_dirs"]["kind"] == "list" && items["game_dirs"]["entry"] == "path" && items["game_dirs"]["pick"] == "folder");
+	EXPECT(items["host_input_mapping"]["kind"] == "list" && items["host_input_mapping"]["entry"] == "text" &&
+	       items["host_input_mapping"]["max_items"] == 256 && items["host_input_mapping"]["max_len"] == 1024);
+	EXPECT(s.ErrorCode("settings.schema") == "unknown-method");
+	EXPECT(s.ErrorCode("page.describe", {{"game", "no-such-game"}}) == "not-found");
+	EXPECT(s.ErrorCode("page.describe", {{"game", 1}}) == "invalid-params");
 }
 
 // The light bar colour is #rrggbb in lower case on every path, or empty; the keyboard player is
@@ -929,6 +1030,17 @@ void TestMalformedIni(const Fixture& f) {
 	EXPECT(names == QStringList({"Kyty.ini"})); // no temporary or backup file either
 }
 
+// A broken runtime folder must not hide the page that fixes it.
+void TestExtensionPageWithoutRuntime(const Fixture& f) {
+	const auto data = QDir(f.dir.path()).filePath("data-no-runtime");
+	CHECK(QDir().mkpath(data));
+	WriteFile(QDir(data).filePath("adapter.json"),
+	          QJsonDocument(QJsonObject {{"runtime_root", QDir(f.dir.path()).filePath("missing-runtime")}})
+	              .toJson());
+	Session s(f.adapter, data, f.home);
+	EXPECT(!s.Result("page.describe")["sections"].toArray().isEmpty());
+}
+
 // M3: a request is validated whole before anything is written; a runtime_root change is answered
 // from the new root.
 void TestSettingsAtomic(Session& s, const Fixture& f) {
@@ -1230,7 +1342,8 @@ int main(int argc, char* argv[]) {
 		Session s(f.adapter, f.data, f.home);
 		TestHello(s);
 		const auto id = TestLibrary(s, f);
-		TestSchema(s);
+		TestExtensionPage(s);
+		TestGameSettingsSections();
 		TestSettings(s, f, id);
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
@@ -1243,6 +1356,7 @@ int main(int argc, char* argv[]) {
 	}
 	TestOversized(f);
 	TestMalformedIni(f);
+	TestExtensionPageWithoutRuntime(f);
 	TestFraming(f);
 	TestUnits(f);
 	// With KYTY_TEST_INSTALL_ROOT (a `cmake --install` tree) every icon published above must be in it.
