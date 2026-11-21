@@ -1,7 +1,7 @@
 #ifndef AGS_ADAPTER_FRAMING_H
 #define AGS_ADAPTER_FRAMING_H
 
-// AGS adapter protocol 1 framing (STANDARD.md section 5.1): a 4-byte big-endian length, then
+// AGS adapter protocol 2 framing (unchanged from protocol 1): a 4-byte big-endian length, then
 // that many bytes of UTF-8 JSON, at most 1 MiB.
 #include <QByteArray>
 #include <QJsonObject>

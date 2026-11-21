@@ -1,4 +1,4 @@
-// Drives the built kyty-ags-adapter over protocol 1 framing against a fixture runtime root and
+// Drives the built kyty-ags-adapter over protocol 2 against a fixture runtime root and
 // game folder. Plain checks, no framework.
 #include "actions.h"
 #include "configuration.h"
@@ -149,6 +149,7 @@ public:
 			CHECK(!message.isEmpty());
 			if (!message.contains(QStringLiteral("id"))) {
 				m_notices.append(message[QStringLiteral("method")].toString());
+				m_events.append(message);
 				continue;
 			}
 			CHECK(message[QStringLiteral("id")].toInt() == id);
@@ -191,6 +192,7 @@ public:
 	}
 
 	QStringList m_notices;
+	QList<QJsonObject> m_events;
 
 private:
 	QProcess   m_process;
@@ -805,7 +807,6 @@ void TestLaunch(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(s.ErrorCode("launch.plan",
 	                   {{"game", id}, {"values", QJsonObject {{"trophy_duration_seconds", 99}}}}) ==
 	       "invalid-params");
-	EXPECT(s.Result("launch.ended", {{"game", id}, {"exit_code", 0}}).isEmpty());
 
 	// "Launch without cheats": offered only with a cheat plan, drops --game-patch, refused otherwise.
 	const auto plan_path = QDir(f.runtime).filePath("_Patches/PPSA01234.json");
@@ -1122,6 +1123,15 @@ void TestInputMapping(Session& s) {
 	           .contains("values"));
 }
 
+void TestSessionEvents(Session& s, const QString& id) {
+	EXPECT(s.Result("session.started", {{"game", id}, {"session", "launch-1"}}).isEmpty());
+	s.m_events.clear();
+	EXPECT(s.Result("session.ended", {{"game", id}, {"session", "launch-1"}, {"exit_code", 0}}).isEmpty());
+	EXPECT(s.m_events.contains(QJsonObject({{"method", "page.changed"}, {"params", QJsonObject {{"game", id}}}})));
+	for (const auto* gone: {"launch.ended", "settings.schema", "settings.get", "settings.set", "actions.list", "actions.run"})
+		EXPECT(s.ErrorCode(gone, {{"game", id}}) == "unknown-method");
+}
+
 void TestChangedAndEof(Session& s, const Fixture& f) {
 	// Drop notifications caused by the settings.set calls above, then change Kyty.ini from outside.
 	while (!s.Read(1000).isEmpty()) {
@@ -1312,7 +1322,7 @@ void TestFraming(const Fixture& f) {
 		auto reply = s.CallInPieces("hello", {{"protocol", 2}}, {2, 7, 20});
 		EXPECT(reply["result"].toObject()["protocol"].toInt() == 2);
 		// Two requests in one write are both answered, in order.
-		const auto two = AgsFrame::Encode({{"id", 101}, {"method", "launch.ended"}}) +
+		const auto two = AgsFrame::Encode({{"id", 101}, {"method", "session.started"}}) +
 		                 AgsFrame::Encode({{"id", 102}, {"method", "no.such"}});
 		s.WriteRaw(two);
 		const auto first  = s.Read(10000);
@@ -1594,6 +1604,7 @@ int main(int argc, char* argv[]) {
 		TestInputMapping(s);
 		TestStaleCache(s, f, id);
 		TestSettingsAtomic(s, f);
+		TestSessionEvents(s, id);
 		TestChangedAndEof(s, f);
 	}
 	TestOversized(f);

@@ -150,7 +150,16 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("page.describe") && !params.contains(QStringLiteral("game"))) {
 		return Reply::Success(AdapterPage::Describe(nullptr, {}, m_state.DataDir()));
 	}
-	if (method == QLatin1String("launch.ended")) return Reply::Success();
+	// Session notices (sheet 2.9): no params checked, the host only logs a failure here. Trophies and
+	// cheats may have changed during play, so the page is read again.
+	if (method == QLatin1String("session.started")) return Reply::Success();
+	if (method == QLatin1String("session.ended")) {
+		if (const auto game = params[QStringLiteral("game")]; game.isString()) {
+			m_notify(QJsonObject {{"method", "page.changed"},
+			                      {"params", QJsonObject {{"game", game.toString()}}}});
+		}
+		return Reply::Success();
+	}
 	const bool known =
 	    method == QLatin1String("library.list") || method == QLatin1String("page.describe") ||
 	    method == QLatin1String("values.get") || method == QLatin1String("values.set") ||

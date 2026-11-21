@@ -13,7 +13,7 @@ public:
 	// The runtime root, validated (absolute, an existing directory, no symlink components). The
 	// default <data>/runtime is created (0700) on first use. Empty with `error` set otherwise.
 	[[nodiscard]] QString RuntimeRoot(QString* error) const;
-	// The value as stored (or the default), without validation, for settings.get.
+	// The value as stored (or the default), without validation, for values.get.
 	[[nodiscard]] QString StoredRuntimeRoot() const;
 	// A runtime root is valid when empty (the default) or absolute, an existing folder and free
 	// of symbolic links (GameServices::SafeRuntime). `error` is set otherwise.

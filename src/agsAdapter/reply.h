@@ -4,7 +4,7 @@
 #include <QJsonObject>
 #include <QString>
 
-// The result of one method: a result object, or an error code from protocol 1
+// The result of one method: a result object, or an error code from protocol 2
 // (unknown-method, invalid-params, not-found, failed) with a sentence for the user.
 struct Reply {
 	QJsonObject result;

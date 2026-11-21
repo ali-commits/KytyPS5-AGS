@@ -1,8 +1,8 @@
 #ifndef AGS_ADAPTER_ADAPTER_H
 #define AGS_ADAPTER_ADAPTER_H
 
-// Method dispatch for the KytyPS5 AGS adapter (protocol 1) and the Kyty.ini watcher that sends
-// library.changed.
+// Method dispatch for the KytyPS5 AGS adapter (protocol 2), session.started and session.ended, and the
+// Kyty.ini watcher that sends library.changed.
 #include "actions.h"
 #include "adapterState.h"
 #include "library.h"

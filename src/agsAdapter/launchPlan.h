@@ -1,8 +1,8 @@
 #ifndef AGS_ADAPTER_LAUNCH_PLAN_H
 #define AGS_ADAPTER_LAUNCH_PLAN_H
 
-// launch.plan (STANDARD.md section 5.4): kyty_emulator next to the adapter, BuildEmulatorArgs with
-// the standard and player settings applied, cwd and writable = runtime_root, u59 preset env.
+// launch.plan (protocol 2): kyty_emulator next to the adapter, BuildEmulatorArgs with
+// the `standard` map and the `values` applied, cwd and writable = runtime_root, u59 preset env.
 #include "reply.h"
 
 #include <QJsonObject>
