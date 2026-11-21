@@ -1,3 +1,14 @@
+# KytyPS5 0.10.0 (testing): AGS protocol 2
+
+This version needs an AGS that speaks extension protocol 2; an older AGS offers it and fails to install it.
+
+- **Protocol 2:** the manifest says `protocol = 2` and `roles = ["emulator"]`. The adapter serves the extension's settings page and each game's page. Protocol 1 methods are gone.
+- **Game page:** settings per `Kyty.ini` group, Game info, Additional content, Trophies, and a Cheats list with a Fetch cheats button. A "Launch without cheats" variant starts the game with cheats off.
+- **Values and actions:** settings read and write at game and machine scope; Fetch cheats is an action.
+- **Launch:** `launch.plan` takes registry key names such as `display.resolution`, and registry language names (Steam names such as `english`, `koreana`) besides BCP-47 tags.
+- **Events:** `session.started`, `session.ended` and `page.changed`.
+- The session socket stays `AGS_SESSION_PROTOCOL=1`.
+
 # KytyPS5 U59 int22
 
 int22 is int21 plus a faster Astro Bot and Astro's Playroom, shader lists in the package, one preset file per game, the latest upstream KytyPS5 changes and work on other games; the older notes are in docs/release-notes-history.md. The first launch rebuilds the shader and program caches once, so the first minutes can stutter. **This build needs a CPU with AVX2, BMI2 and FMA** (Intel Core 4th generation, AMD Ryzen, or newer); on an older CPU it says so and exits.
