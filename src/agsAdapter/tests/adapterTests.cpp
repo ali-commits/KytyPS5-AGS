@@ -1128,6 +1128,13 @@ void TestSessionEvents(Session& s, const QString& id) {
 	s.m_events.clear();
 	EXPECT(s.Result("session.ended", {{"game", id}, {"session", "launch-1"}, {"exit_code", 0}}).isEmpty());
 	EXPECT(s.m_events.contains(QJsonObject({{"method", "page.changed"}, {"params", QJsonObject {{"game", id}}}})));
+	// No params are checked: nothing or a non-string game answers {} and sends no page.changed.
+	for (const QJsonObject& odd: {QJsonObject {}, QJsonObject {{"game", 5}}}) {
+		s.m_events.clear();
+		EXPECT(s.Result("session.ended", odd).isEmpty());
+		EXPECT(s.Result("session.started", odd).isEmpty());
+		EXPECT(s.m_events.isEmpty());
+	}
 	for (const auto* gone: {"launch.ended", "settings.schema", "settings.get", "settings.set", "actions.list", "actions.run"})
 		EXPECT(s.ErrorCode(gone, {{"game", id}}) == "unknown-method");
 }
@@ -1259,6 +1266,9 @@ void TestExtensionPageWithoutRuntime(const Fixture& f) {
 	Session s(f.adapter, data, f.home);
 	EXPECT(!s.Result("page.describe")["sections"].toArray().isEmpty());
 	EXPECT(s.ErrorCode("values.get", {{"scope", "machine"}}) == "failed");
+	// Session notices answer before Ready(), so a broken runtime folder does not matter.
+	EXPECT(s.Result("session.started", {{"game", "x"}, {"session", "s"}}).isEmpty());
+	EXPECT(s.Result("session.ended", {{"game", "x"}, {"session", "s"}}).isEmpty());
 	const auto fixed = QDir(f.dir.path()).filePath("runtime-fixed");
 	CHECK(QDir().mkpath(fixed));
 	EXPECT(s.ErrorCode("values.set", {{"scope", "machine"}, {"values", QJsonObject {{"runtime_root", 5}}}}) ==
