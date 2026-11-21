@@ -147,22 +147,31 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("launch.ended")) return Reply::Success();
 	const bool known =
 	    method == QLatin1String("library.list") || method == QLatin1String("page.describe") ||
-	    method == QLatin1String("settings.get") ||
-	    method == QLatin1String("settings.set") || method == QLatin1String("actions.list") ||
+	    method == QLatin1String("values.get") ||
+	    method == QLatin1String("values.set") || method == QLatin1String("actions.list") ||
 	    method == QLatin1String("actions.run") || method == QLatin1String("launch.plan");
 	if (!known) {
 		return Reply::Error(QStringLiteral("unknown-method"),
 		                    QStringLiteral("Unknown method %1.").arg(method));
 	}
-	// library.list always scans afresh. settings.set starts from a fresh read of Kyty.ini too, so a
+	// library.list always scans afresh. values.set starts from a fresh read of Kyty.ini too, so a
 	// stale cache can never overwrite what the launcher saved meanwhile.
-	if (method == QLatin1String("library.list") || method == QLatin1String("settings.set")) {
+	if (method == QLatin1String("library.list") || method == QLatin1String("values.set")) {
 		m_library_dirty = true;
 	}
 	Reply reply;
-	if (method == QLatin1String("settings.set")) {
-		// Writing would replace a Kyty.ini we cannot parse: refuse before anything is loaded.
+	if (method == QLatin1String("values.set")) {
+		// A broken runtime folder is fixed here, before Ready() would refuse it.
+		const auto values = params[QStringLiteral("values")].toObject();
 		QString    root_error;
+		if (m_state.RuntimeRoot(&root_error).isEmpty() &&
+		    params[QStringLiteral("scope")] == QLatin1String("machine") && values.size() == 1 &&
+		    values.contains(QStringLiteral("runtime_root"))) {
+			const auto path = values[QStringLiteral("runtime_root")].toString();
+			if (!AdapterState::CheckRuntimeRoot(path, &root_error)) return Reply::Invalid(root_error);
+			if (!m_state.SetRuntimeRoot(path, &root_error)) return Reply::Failed(root_error);
+		}
+		// Writing would replace a Kyty.ini we cannot parse: refuse before anything is loaded.
 		const auto root = m_state.RuntimeRoot(&root_error);
 		if (!root.isEmpty() && !AdapterSettings::IniReadable(AdapterState::IniPath(root))) {
 			return Reply::Failed(QString::fromLatin1(AdapterSettings::INI_UNREADABLE));
@@ -180,13 +189,13 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		if (!FindGame(params, true, &game, &reply)) return reply;
 		return Reply::Success(AdapterPage::Describe(game, m_runtime_root, m_state.DataDir()));
 	}
-	if (method == QLatin1String("settings.get") || method == QLatin1String("settings.set")) {
-		const auto scope = params[QStringLiteral("scope")].toString(QStringLiteral("global"));
-		if (scope != QLatin1String("global") && scope != QLatin1String("game")) {
-			return Reply::Invalid(QStringLiteral("scope must be global or game."));
+	if (method == QLatin1String("values.get") || method == QLatin1String("values.set")) {
+		const auto scope = params[QStringLiteral("scope")].toString();
+		if (scope != QLatin1String("machine") && scope != QLatin1String("game")) {
+			return Reply::Invalid(QStringLiteral("scope must be game or machine."));
 		}
 		if (scope == QLatin1String("game") && !FindGame(params, true, &game, &reply)) return reply;
-		if (method == QLatin1String("settings.get")) {
+		if (method == QLatin1String("values.get")) {
 			return AdapterSettings::Get(m_state, ini, game);
 		}
 		if (!params[QStringLiteral("values")].isObject()) {
@@ -194,7 +203,7 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		}
 		auto result = AdapterSettings::Set(m_state, ini, *m_library, game,
 		                                   params[QStringLiteral("values")].toObject());
-		// A global change (or a new runtime root) changes every game's merged values.
+		// A machine change (or a new runtime root) changes every game's merged values.
 		if (game == nullptr) m_library_dirty = true;
 		if (result.Ok() &&
 		    params[QStringLiteral("values")].toObject().contains(QStringLiteral("runtime_root"))) {

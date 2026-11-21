@@ -1,7 +1,7 @@
 #ifndef AGS_ADAPTER_SETTINGS_H
 #define AGS_ADAPTER_SETTINGS_H
 
-// The settings schema (page.describe builds pages from it), settings.get and settings.set, converted
+// The settings schema (page.describe builds pages from it), values.get and values.set, converted
 // from PreferenceSchema / OwnerPreferences and stored in Kyty.ini, plus runtime_root in
 // adapter.json.
 #include "reply.h"

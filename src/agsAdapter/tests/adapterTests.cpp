@@ -569,7 +569,7 @@ void TestExtensionPage(Session& s) {
 // an enum on the wire and a number in Kyty.ini.
 void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
 	const auto set = [&s](const QJsonObject& values) {
-		return s.Result("settings.set", {{"scope", "global"}, {"values", values}})["values"]
+		return s.Result("values.set", {{"scope", "machine"}, {"values", values}})["values"]
 		    .toObject();
 	};
 	auto values = set({{"controller_color", "#0030FF"}, {"controller_keyboard_player", "2"}});
@@ -582,17 +582,17 @@ void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
 	}
 	for (const auto& bad: {QJsonValue("#fff"), QJsonValue("red"), QJsonValue("#80ff0000"),
 	                       QJsonValue("0030ff"), QJsonValue(5)}) {
-		EXPECT(s.ErrorCode("settings.set", {{"scope", "global"},
+		EXPECT(s.ErrorCode("values.set", {{"scope", "machine"},
 		                                    {"values", QJsonObject {{"controller_color", bad}}}}) ==
 		       "invalid-params");
 	}
 	for (const auto& bad: {QJsonValue("5"), QJsonValue(2), QJsonValue("Player 2")}) {
-		EXPECT(s.ErrorCode("settings.set",
-		                   {{"scope", "global"},
+		EXPECT(s.ErrorCode("values.set",
+		                   {{"scope", "machine"},
 		                    {"values", QJsonObject {{"controller_keyboard_player", bad}}}}) ==
 		       "invalid-params");
 	}
-	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"].toObject()["controller_color"] ==
+	EXPECT(s.Result("values.get", {{"scope", "machine"}})["values"].toObject()["controller_color"] ==
 	       "#0030ff");
 
 	auto plan = s.Result("launch.plan",
@@ -616,71 +616,81 @@ void TestColourAndKeyboard(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(values["controller_color"] == "" && values["controller_keyboard_player"] == "0");
 }
 
-void TestSettings(Session& s, const Fixture& f, const QString& id) {
-	auto values = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+void TestValues(Session& s, const Fixture& f, const QString& id) {
+	auto values = s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
 	EXPECT(values["trophy_enabled"].toBool());
 	EXPECT(values["runtime_root"].toString() == f.runtime);
 	EXPECT(Strings(values["game_dirs"]) == QStringList({f.games}));
 	values =
-	    s.Result("settings.set", {{"scope", "global"},
+	    s.Result("values.set", {{"scope", "machine"},
 		                          {"values", QJsonObject {{"trophy_enabled", false},
 		                                                  {"audio_master_volume", 150},
 		                                                  {"present_mode", "Fifo"}}}})["values"]
 	        .toObject();
 	EXPECT(!values["trophy_enabled"].toBool());
-	values = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+	values = s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
 	EXPECT(!values["trophy_enabled"].toBool());
 	EXPECT(values["audio_master_volume"].toInt() == 150);
 	EXPECT(values["present_mode"].toString() == "Fifo");
 
-	values = s.Result("settings.set", {{"scope", "game"},
+	values = s.Result("values.set", {{"scope", "game"},
 	                                   {"game", id},
 	                                   {"values", QJsonObject {{"support_zmask", true}}}})["values"]
 	             .toObject();
 	EXPECT(values["support_zmask"].toBool());
-	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	values = s.Result("values.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
 	EXPECT(values["support_zmask"].toBool());
 	EXPECT(!values.contains("audio_master_volume")); // global only
 	// Digit-leading non-enum values are stored as they are, not as RawText ("R10").
-	values = s.Result("settings.set", {{"scope", "game"},
+	values = s.Result("values.set", {{"scope", "game"},
 	                                   {"game", id},
 	                                   {"values", QJsonObject {{"user_id", 10}}}})["values"]
 	             .toObject();
 	EXPECT(values["user_id"].toInt() == 10);
-	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	values = s.Result("values.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
 	EXPECT(values["user_id"].toInt() == 10);
-	values = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+	values = s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
 	EXPECT(!values["support_zmask"].toBool());
 
-	EXPECT(s.ErrorCode("settings.set",
-	                   {{"scope", "global"}, {"values", QJsonObject {{"no_such_key", 1}}}}) ==
+	EXPECT(s.ErrorCode("values.set",
+	                   {{"scope", "machine"}, {"values", QJsonObject {{"no_such_key", 1}}}}) ==
 	       "invalid-params");
-	EXPECT(s.ErrorCode("settings.set", {{"scope", "global"},
+	EXPECT(s.ErrorCode("values.set", {{"scope", "machine"},
 	                                    {"values", QJsonObject {{"trophy_enabled", "yes"}}}}) ==
 	       "invalid-params");
-	EXPECT(s.ErrorCode("settings.set", {{"scope", "global"},
+	EXPECT(s.ErrorCode("values.set", {{"scope", "machine"},
 	                                    {"values", QJsonObject {{"present_mode", "Bogus"}}}}) ==
 	       "invalid-params");
-	EXPECT(s.ErrorCode("settings.set", {{"scope", "game"},
+	EXPECT(s.ErrorCode("values.set", {{"scope", "game"},
 	                                    {"game", id},
 	                                    {"values", QJsonObject {{"audio_master_volume", 10}}}}) ==
 	       "invalid-params");
 	// Raw launcher spellings are accepted, stored and read back as the schema option.
-	values = s.Result("settings.set", {{"scope", "game"},
+	values = s.Result("values.set", {{"scope", "game"},
 	                                   {"game", id},
 	                                   {"values", QJsonObject {{"present_mode", "Immediate"},
 	                                                           {"shader_optimization_type", "Size"}}}})
 	             ["values"]
 	             .toObject();
 	EXPECT(values["present_mode"] == "Immediate" && values["shader_optimization_type"] == "Size");
-	EXPECT(s.ErrorCode("settings.set", {{"scope", "game"},
+	EXPECT(s.ErrorCode("values.set", {{"scope", "game"},
 	                                    {"game", id},
 	                                    {"values", QJsonObject {{"shader_optimization_type", "Huge"},
 	                                                            {"present_mode", "Fifo"}}}}) ==
 	       "invalid-params");
-	values = s.Result("settings.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
+	values = s.Result("values.get", {{"scope", "game"}, {"game", id}})["values"].toObject();
 	EXPECT(values["present_mode"] == "Immediate"); // the rejected request wrote nothing
-	EXPECT(s.ErrorCode("settings.get", {{"scope", "game"}, {"game", "missing"}}) == "not-found");
+	EXPECT(s.ErrorCode("values.get", {{"scope", "game"}, {"game", "missing"}}) == "not-found");
+	EXPECT(s.ErrorCode("values.get", {{"scope", "device"}}) == "invalid-params");
+	EXPECT(s.ErrorCode("values.get", {{"scope", "game"}}) == "invalid-params");
+	auto v = s.Result("values.set", {{"scope", "machine"},
+	                                {"values", QJsonObject {{"trophy_enabled", QJsonValue::Null},
+	                                                        {"addons_dir", QJsonValue::Null}}}})["values"].toObject();
+	EXPECT(v["trophy_enabled"].toBool() && v["addons_dir"].toString().isEmpty()); // the defaults
+	EXPECT(s.ErrorCode("settings.get", {{"scope", "global"}}) == "unknown-method");
+	EXPECT(s.ErrorCode("values.set", {{"scope", "game"}, {"game", id},
+	                                  {"values", QJsonObject {{"support_zmask", QJsonValue::Null}}}}) == "invalid-params");
+	EXPECT(s.ErrorCode("values.set", {{"scope", "machine"}, {"values", 5}}) == "invalid-params");
 }
 
 void TestLaunch(Session& s, const Fixture& f, const QString& id) {
@@ -850,7 +860,7 @@ void TestContent(Session& s, const Fixture& f, const QString& id) {
 	// Another title, and an application, are not additional content for this game.
 	WriteFile(QDir(addons).filePath("other/sce_sys/param.json"),
 	          R"({"contentId":"EP0000-PPSA09999_00-ABCDEFGH12345678","titleName":"Other"})");
-	CHECK(s.Result("settings.set", {{"scope", "global"},
+	CHECK(s.Result("values.set", {{"scope", "machine"},
 	                                {"values", QJsonObject {{"addons_dir", addons}}}})
 	          .contains("values"));
 	const auto got   = run();
@@ -868,22 +878,22 @@ void TestContent(Session& s, const Fixture& f, const QString& id) {
 	CHECK(QFile::link(QDir(f.dir.path()).filePath("outside/param.json"),
 	                  QDir(addons).filePath("dlc2/sce_sys/param.json")));
 	EXPECT(run()["items"].toArray().size() == 1);
-	CHECK(s.Result("settings.set", {{"scope", "global"},
+	CHECK(s.Result("values.set", {{"scope", "machine"},
 	                                {"values", QJsonObject {{"addons_dir", ""}}}})
 	          .contains("values"));
 }
 
 void TestInputMapping(Session& s) {
 	const auto get = [&] {
-		return s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+		return s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
 	};
 	const auto set = [&](const QJsonValue& v) {
-		return s.ErrorCode("settings.set", {{"scope", "global"},
+		return s.ErrorCode("values.set", {{"scope", "machine"},
 		                                    {"values", QJsonObject {{"host_input_mapping", v}}}});
 	};
 	EXPECT(get()["host_input_mapping"].isArray() && get()["host_input_mapping"].toArray().isEmpty());
 	const QJsonArray mapping {"Cross=Key:Z", "Circle=Key:X, Shift", ""};
-	const auto       saved = s.Result("settings.set", {{"scope", "global"},
+	const auto       saved = s.Result("values.set", {{"scope", "machine"},
 	                                                   {"values", QJsonObject {{"host_input_mapping", mapping}}}})["values"]
 	                       .toObject();
 	EXPECT(saved["host_input_mapping"].toArray() == mapping);
@@ -899,16 +909,16 @@ void TestInputMapping(Session& s) {
 	EXPECT(set(QJsonArray {emoji(1025)}) == "invalid-params");
 	EXPECT(set("Cross=Key:Z") == "invalid-params");
 	EXPECT(get()["host_input_mapping"].toArray() == mapping); // rejected requests changed nothing
-	CHECK(s.Result("settings.set", {{"scope", "global"},
+	CHECK(s.Result("values.set", {{"scope", "machine"},
 	                                {"values", QJsonObject {{"host_input_mapping", QJsonArray {emoji(600)}}}}})
 	          .contains("values"));
 	QJsonArray max_ok;
 	for (int i = 0; i < 256; ++i)
 		max_ok.append(QString(1024, 'b'));
-	EXPECT(s.Result("settings.set", {{"scope", "global"},
+	EXPECT(s.Result("values.set", {{"scope", "machine"},
 	                                 {"values", QJsonObject {{"host_input_mapping", max_ok}}}})["values"]
 	           .toObject()["host_input_mapping"].toArray() == max_ok);
-	EXPECT(s.Result("settings.set", {{"scope", "global"},
+	EXPECT(s.Result("values.set", {{"scope", "machine"},
 	                                 {"values", QJsonObject {{"host_input_mapping", QJsonArray {}}}}})
 	           .contains("values"));
 }
@@ -984,13 +994,13 @@ void TestStaleCache(Session& s, const Fixture& f, const QString& id) {
 	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
 	// Straight away, before the file watcher's debounce could reload the cache.
 	(void)s.Result(
-	    "settings.set",
+	    "values.set",
 	    {{"scope", "game"}, {"game", id}, {"values", QJsonObject {{"support_zmask", false}}}});
 	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
 	EXPECT(GamePaths(ini_path).contains(f.game));
 	// A global set rewrites no per-game data, and keeps both.
-	(void)s.Result("settings.set",
-	               {{"scope", "global"}, {"values", QJsonObject {{"trophy_enabled", true}}}});
+	(void)s.Result("values.set",
+	               {{"scope", "machine"}, {"values", QJsonObject {{"trophy_enabled", true}}}});
 	EXPECT(GamePaths(ini_path).contains("/launcher/saved/Other Game"));
 }
 
@@ -1012,16 +1022,16 @@ void TestMalformedIni(const Fixture& f) {
 	}
 	Session    s(f.adapter, data, f.home);
 	const auto global = s.Call(
-	    "settings.set", {{"scope", "global"}, {"values", QJsonObject {{"trophy_enabled", false}}}});
+	    "values.set", {{"scope", "machine"}, {"values", QJsonObject {{"trophy_enabled", false}}}});
 	EXPECT(global["error"]["code"].toString() == "failed");
 	EXPECT(global["error"]["message"].toString() == "Kyty.ini could not be read; not saving");
 	const auto game = s.Call(
-	    "settings.set",
+	    "values.set",
 	    {{"scope", "game"}, {"game", "0123"}, {"values", QJsonObject {{"support_zmask", true}}}});
 	EXPECT(game["error"]["code"].toString() == "failed");
 	EXPECT(game["error"]["message"].toString() == "Kyty.ini could not be read; not saving");
 	const auto runtime_only = s.Call(
-	    "settings.set", {{"scope", "global"}, {"values", QJsonObject {{"runtime_root", runtime}}}});
+	    "values.set", {{"scope", "machine"}, {"values", QJsonObject {{"runtime_root", runtime}}}});
 	EXPECT(runtime_only["error"]["code"].toString() == "failed");
 	EXPECT(ReadAll(ini_path) == bad); // byte for byte
 	QStringList names;
@@ -1039,12 +1049,19 @@ void TestExtensionPageWithoutRuntime(const Fixture& f) {
 	              .toJson());
 	Session s(f.adapter, data, f.home);
 	EXPECT(!s.Result("page.describe")["sections"].toArray().isEmpty());
+	EXPECT(s.ErrorCode("values.get", {{"scope", "machine"}}) == "failed");
+	const auto fixed = QDir(f.dir.path()).filePath("runtime-fixed");
+	CHECK(QDir().mkpath(fixed));
+	EXPECT(s.Result("values.set", {{"scope", "machine"},
+	                              {"values", QJsonObject {{"runtime_root", fixed}}}})["values"]
+	           .toObject()["runtime_root"] == fixed);
+	EXPECT(!s.Result("values.get", {{"scope", "machine"}})["values"].toObject().isEmpty());
 }
 
 // M3: a request is validated whole before anything is written; a runtime_root change is answered
 // from the new root.
 void TestSettingsAtomic(Session& s, const Fixture& f) {
-	const auto before     = s.Result("settings.get", {{"scope", "global"}})["values"].toObject();
+	const auto before     = s.Result("values.get", {{"scope", "machine"}})["values"].toObject();
 	const auto ini_before = ReadAll(QDir(f.runtime).filePath("Kyty.ini"));
 	const QDir root(f.dir.path());
 	const auto file = root.filePath("not-a-folder");
@@ -1055,11 +1072,11 @@ void TestSettingsAtomic(Session& s, const Fixture& f) {
 	for (const auto& bad: {QString("relative/path"), root.filePath("missing"), file, link}) {
 		auto values            = good;
 		values["runtime_root"] = bad;
-		EXPECT(s.ErrorCode("settings.set", {{"scope", "global"}, {"values", values}}) ==
+		EXPECT(s.ErrorCode("values.set", {{"scope", "machine"}, {"values", values}}) ==
 		       "invalid-params");
 		EXPECT(ReadAll(QDir(f.runtime).filePath("Kyty.ini")) == ini_before);
 	}
-	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"].toObject() == before);
+	EXPECT(s.Result("values.get", {{"scope", "machine"}})["values"].toObject() == before);
 
 	const auto other = root.filePath("runtime-other");
 	CHECK(QDir().mkpath(other));
@@ -1069,16 +1086,16 @@ void TestSettingsAtomic(Session& s, const Fixture& f) {
 		ini.sync();
 	}
 	auto values =
-	    s.Result("settings.set",
-		         {{"scope", "global"}, {"values", QJsonObject {{"runtime_root", other}}}})["values"]
+	    s.Result("values.set",
+		         {{"scope", "machine"}, {"values", QJsonObject {{"runtime_root", other}}}})["values"]
 	        .toObject();
 	EXPECT(values["runtime_root"].toString() == other);
 	EXPECT(values["audio_master_volume"].toInt() == 33); // read from the new root's Kyty.ini
-	EXPECT(s.Result("settings.get", {{"scope", "global"}})["values"]
+	EXPECT(s.Result("values.get", {{"scope", "machine"}})["values"]
 	           .toObject()["audio_master_volume"]
 	           .toInt() == 33);
 	values =
-	    s.Result("settings.set", {{"scope", "global"},
+	    s.Result("values.set", {{"scope", "machine"},
 		                          {"values", QJsonObject {{"runtime_root", f.runtime}}}})["values"]
 	        .toObject();
 	EXPECT(values["runtime_root"].toString() == f.runtime);
@@ -1344,7 +1361,7 @@ int main(int argc, char* argv[]) {
 		const auto id = TestLibrary(s, f);
 		TestExtensionPage(s);
 		TestGameSettingsSections();
-		TestSettings(s, f, id);
+		TestValues(s, f, id);
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);
 		TestActions(s, id);

@@ -591,23 +591,30 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 		if (game != nullptr && scope == QLatin1String("global")) {
 			return Reply::Invalid(QStringLiteral("%1 cannot be set per game.").arg(it.key()));
 		}
+		QJsonValue value = it.value();
+		if (value.isNull()) { // machine: back to the item's default
+			if (game != nullptr) {
+				return Reply::Invalid(QStringLiteral("%1 cannot be reset per game.").arg(it.key()));
+			}
+			value = (*field)[QStringLiteral("default")];
+		}
 		const auto type = (*field)[QStringLiteral("type")].toString();
 		if (type == QLatin1String("path_list")) {
-			if (!it.value().isArray()) {
+			if (!value.isArray()) {
 				return Reply::Invalid(QStringLiteral("%1 must be a list of paths.").arg(it.key()));
 			}
-			patch.insert(it.key(), it.value());
+			patch.insert(it.key(), value);
 			continue;
 		}
 		if (type == QLatin1String("string_list")) {
-			if (!MappingList(it.value())) {
+			if (!MappingList(value)) {
 				return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
 			}
-			patch.insert(it.key(), it.value());
+			patch.insert(it.key(), value);
 			continue;
 		}
 		QString text;
-		if (!Stored(*field, it.value(), &text)) {
+		if (!Stored(*field, value, &text)) {
 			return Reply::Invalid(QStringLiteral("Invalid value for %1.").arg(it.key()));
 		}
 		if (IsClosedEnum(*field, it.key()) && !OptionValue(*field, text, &text)) {
@@ -631,7 +638,7 @@ Reply Set(AdapterState& state, const QString& ini, GameLibrary& library, const G
 		} else if (it.key() == QLatin1String(KEYBOARD_PLAYER)) {
 			globals.insert(it.key(), text.toInt()); // Kyty.ini keeps the player number
 		} else if (IsGlobalKey(it.key())) {
-			globals.insert(it.key(), it.value());
+			globals.insert(it.key(), value);
 		} else if (IsGameKey(it.key())) {
 			settings.insert(it.key(), IsClosedEnum(*field, it.key()) ? PreferenceSchema::RawText(text) : text);
 		}
