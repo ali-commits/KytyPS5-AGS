@@ -1,10 +1,11 @@
-# AGS extension manifest (protocol 1). Rendered by CMake from ags-extension.toml.in; edit the .in file.
+# AGS extension manifest (protocol 2). Rendered by CMake from ags-extension.toml.in; edit the .in file.
 # The copy at the repository root is what AGS reads at the tagged commit (ctest -R ags_manifest checks it).
 id = "kytyps5"
 name = "KytyPS5"
 version = "${PROJECT_VERSION}${AGS_VERSION_SUFFIX}"
 license = "GPL-2.0"
-protocol = 1
+protocol = 2
+roles = ["emulator"]
 adapter = "kyty-ags-adapter"
 
 [assets]

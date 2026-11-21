@@ -240,20 +240,29 @@ struct Fixture {
 	}
 };
 
-void TestHello(Session& s) {
-	const auto hello = s.Result("hello", {{"protocol", 1}});
-	EXPECT(hello["protocol"].toInt() == 1);
-	EXPECT(hello["version"].toString() == QStringLiteral(KYTY_AGS_ADAPTER_VERSION));
-	EXPECT(Strings(hello["capabilities"]) ==
-	       QStringList({"library", "settings", "actions", "native_frames", "metrics"}));
-	const auto standard = hello["standard"].toObject();
-	EXPECT(standard.size() == 9);
-	for (const auto* key: {"resolution", "fps_limit", "aspect", "language", "player_name",
-	                           "fullscreen", "hide_cursor", "hdr"}) {
-		EXPECT(standard[key].toObject()["level"].toString() == "honoured");
+void TestManifest() {
+	QFile file(QDir(KYTY_TEST_SOURCE_ROOT).filePath("ags-extension.toml"));
+	EXPECT(file.open(QIODevice::ReadOnly | QIODevice::Text));
+	const auto lines = QString::fromUtf8(file.readAll()).split('\n');
+	EXPECT(lines.contains("protocol = 2"));
+	EXPECT(lines.contains("roles = [\"emulator\"]"));
+	bool version_ok = false;
+	for (const auto& line: lines) {
+		if (line.startsWith("version = \"") && line.endsWith('"')) {
+			version_ok = QStringLiteral(KYTY_AGS_ADAPTER_VERSION).startsWith(line.mid(11, line.size() - 12));
+		}
 	}
-	EXPECT(standard["controller"].toObject() ==
-	       QJsonObject({{"level", "fixed"}, {"value", "dualsense"}}));
+	EXPECT(version_ok);
+}
+
+void TestHello(Session& s) {
+	const auto hello = s.Result("hello", {{"protocol", 2}});
+	EXPECT(hello["protocol"].toInt() == 2);
+	EXPECT(hello["version"].toString() == QStringLiteral(KYTY_AGS_ADAPTER_VERSION));
+	EXPECT(Strings(hello["roles"]) == QStringList({"emulator"}));
+	EXPECT(Strings(hello["features"]) ==
+	       QStringList({"library", "page", "values", "actions", "native_frames", "metrics"}));
+	EXPECT(!hello.contains("capabilities") && !hello.contains("standard"));
 	const auto controller = hello["controllers"].toArray().at(0).toObject();
 	EXPECT(controller["kind"].toString() == "dualsense");
 	EXPECT(Strings(controller["features"]) ==
@@ -453,30 +462,6 @@ void TestRicherKeys(const QJsonArray& fields) {
 	EXPECT(flow_scale["type"] == "int" && flow_scale["min"] == 25 && flow_scale["max"] == 100 &&
 	       flow_scale["default"] == 100 && flow_scale["control"] == "slider");
 	EXPECT(by_key.value("frame_generation_performance_mode")["type"] == "bool");
-}
-
-// The schema keeps to the field types the host's hello listed; a host without the list gets the
-// protocol 1 originals.
-void TestHostVocabulary(Session& s) {
-	const auto full = s.Result("settings.schema")["fields"].toArray();
-	(void)s.Result("hello", {{"protocol", 1}, {"field_types", QJsonArray {"bool", "group"}}});
-	const auto narrow = s.Result("settings.schema")["fields"].toArray();
-	EXPECT(!narrow.isEmpty() && narrow.size() < full.size());
-	for (const auto& v: narrow) {
-		const auto type = v.toObject()["type"].toString();
-		EXPECT(type == "bool" || type == "group");
-	}
-	EXPECT(narrow.last().toObject()["type"] == "bool"); // no heading left without fields
-	for (int i = 1; i < narrow.size(); ++i) {
-		EXPECT(!(narrow.at(i)["type"] == "group" && narrow.at(i - 1)["type"] == "group"));
-	}
-	(void)s.Result("hello", {{"protocol", 1}});
-	EXPECT(s.Result("settings.schema")["fields"].toArray() == full);
-	(void)s.Result("hello", {{"protocol", 1},
-	                         {"field_types", QJsonArray {"bool", "enum", "int", "string", "path",
-	                                                     "path_list", "string_list", "group",
-	                                                     "multi", "int_range"}}});
-	EXPECT(s.Result("settings.schema")["fields"].toArray() == full);
 }
 
 // The light bar colour is #rrggbb in lower case on every path, or empty; the keyboard player is
@@ -993,8 +978,8 @@ void TestFraming(const Fixture& f) {
 	{
 		Session s(f.adapter, f.data, f.home);
 		// A frame written in several pieces: inside the length, then inside the JSON.
-		auto reply = s.CallInPieces("hello", {{"protocol", 1}}, {2, 7, 20});
-		EXPECT(reply["result"].toObject()["protocol"].toInt() == 1);
+		auto reply = s.CallInPieces("hello", {{"protocol", 2}}, {2, 7, 20});
+		EXPECT(reply["result"].toObject()["protocol"].toInt() == 2);
 		// Two requests in one write are both answered, in order.
 		const auto two = AgsFrame::Encode({{"id", 101}, {"method", "launch.ended"}}) +
 		                 AgsFrame::Encode({{"id", 102}, {"method", "no.such"}});
@@ -1014,7 +999,7 @@ void TestFraming(const Fixture& f) {
 		}
 		// A message without id is a notification: no reply, and the adapter carries on.
 		s.WriteRaw(AgsFrame::Encode({{"method", "hello"}}));
-		EXPECT(s.Result("hello", {{"protocol", 1}})["protocol"].toInt() == 1);
+		EXPECT(s.Result("hello", {{"protocol", 2}})["protocol"].toInt() == 2);
 		// params that is not an object.
 		s.WriteRaw(AgsFrame::Encode({{"id", 7}, {"method", "hello"}, {"params", 5}}));
 		const auto params = s.Read(10000);
@@ -1241,11 +1226,11 @@ int main(int argc, char* argv[]) {
 	QCoreApplication app(argc, argv);
 	Fixture          f;
 	{
+		TestManifest();
 		Session s(f.adapter, f.data, f.home);
 		TestHello(s);
 		const auto id = TestLibrary(s, f);
 		TestSchema(s);
-		TestHostVocabulary(s);
 		TestSettings(s, f, id);
 		TestColourAndKeyboard(s, f, id);
 		TestLaunch(s, f, id);

@@ -71,22 +71,12 @@ void Adapter::Watch() {
 	}
 }
 
-Reply Adapter::Hello(const QJsonObject& /*params*/) const {
-	const QJsonObject honoured {{"level", "honoured"}};
+Reply Adapter::Hello() const {
 	return Reply::Success({
-	    {"protocol", 1},
+	    {"protocol", 2},
 	    {"version", QStringLiteral(KYTY_AGS_ADAPTER_VERSION)},
-	    {"capabilities", QJsonArray {"library", "settings", "actions", "native_frames", "metrics"}},
-	    {"standard",
-		 QJsonObject {{"resolution", honoured},
-		              {"fps_limit", honoured},
-		              {"aspect", honoured},
-		              {"language", honoured},
-		              {"player_name", honoured},
-		              {"fullscreen", honoured},
-		              {"hide_cursor", honoured},
-		              {"hdr", honoured},
-		              {"controller", QJsonObject {{"level", "fixed"}, {"value", "dualsense"}}}}},
+	    {"roles", QJsonArray {"emulator"}},
+	    {"features", QJsonArray {"library", "page", "values", "actions", "native_frames", "metrics"}},
 	    {"controllers",
 		 QJsonArray {QJsonObject {
 	         {"kind", "dualsense"},
@@ -147,11 +137,10 @@ bool Adapter::FindGame(const QJsonObject& params, bool required, const GameEntry
 
 Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("hello")) {
-		m_host_field_types = AdapterSettings::HostFieldTypes(params);
-		return Hello(params);
+		return Hello();
 	}
 	if (method == QLatin1String("settings.schema")) {
-		return Reply::Success({{"fields", AdapterSettings::SchemaFor(m_host_field_types)}});
+		return Reply::Success({{"fields", AdapterSettings::Schema()}});
 	}
 	if (method == QLatin1String("launch.ended")) return Reply::Success();
 	const bool known =

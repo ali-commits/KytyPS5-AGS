@@ -32,7 +32,7 @@ public:
 	[[nodiscard]] Reply Call(const QString& method, const QJsonObject& params);
 
 private:
-	[[nodiscard]] Reply Hello(const QJsonObject& params) const;
+	[[nodiscard]] Reply Hello() const;
 	// Validated runtime root and an up-to-date library; false with `reply` set on failure.
 	[[nodiscard]] bool Ready(Reply* reply);
 	[[nodiscard]] bool FindGame(const QJsonObject& params, bool required, const GameEntry** game,
@@ -49,8 +49,6 @@ private:
 	QTimer                                  m_debounce;
 	CheatFetcher                            m_fetcher;
 	AdapterLibrary::ArtCache                m_art_cache;
-	// The field types the host's hello listed; settings.schema leaves out the rest.
-	QStringList m_host_field_types = AdapterSettings::HostFieldTypes(QJsonObject {});
 };
 
 #endif
