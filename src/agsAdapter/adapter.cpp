@@ -1,8 +1,10 @@
 #include "adapter.h"
 
 #include "gameLibrary.h"
+#include "gameServices.h"
 #include "launchPlan.h"
 #include "library.h"
+#include "page.h"
 #include "settings.h"
 
 #include <QDateTime>
@@ -33,6 +35,11 @@ QJsonObject Metric(const char* key, const char* label, const char* unit, const c
 Adapter::Adapter(const QString& data_dir, const QString& adapter_dir,
                  std::function<void(const QJsonObject&)> notify, QObject* parent)
     : QObject(parent), m_state(data_dir), m_adapter_dir(adapter_dir), m_notify(std::move(notify)) {
+	// A download that finished after its action.run gave up still reaches AGS.
+	connect(&m_fetcher, &CheatFetcher::Imported, this, [this](const QString& game) {
+		m_notify(
+		    QJsonObject {{"method", "page.changed"}, {"params", QJsonObject {{"game", game}}}});
+	});
 	m_debounce.setSingleShot(true);
 	m_debounce.setInterval(500);
 	connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_debounce, qOverload<>(&QTimer::start));
@@ -71,22 +78,12 @@ void Adapter::Watch() {
 	}
 }
 
-Reply Adapter::Hello(const QJsonObject& /*params*/) const {
-	const QJsonObject honoured {{"level", "honoured"}};
+Reply Adapter::Hello() const {
 	return Reply::Success({
-	    {"protocol", 1},
+	    {"protocol", 2},
 	    {"version", QStringLiteral(KYTY_AGS_ADAPTER_VERSION)},
-	    {"capabilities", QJsonArray {"library", "settings", "actions", "native_frames", "metrics"}},
-	    {"standard",
-		 QJsonObject {{"resolution", honoured},
-		              {"fps_limit", honoured},
-		              {"aspect", honoured},
-		              {"language", honoured},
-		              {"player_name", honoured},
-		              {"fullscreen", honoured},
-		              {"hide_cursor", honoured},
-		              {"hdr", honoured},
-		              {"controller", QJsonObject {{"level", "fixed"}, {"value", "dualsense"}}}}},
+	    {"roles", QJsonArray {"emulator"}},
+	    {"features", QJsonArray {"library", "page", "values", "actions", "native_frames", "metrics"}},
 	    {"controllers",
 		 QJsonArray {QJsonObject {
 	         {"kind", "dualsense"},
@@ -147,30 +144,52 @@ bool Adapter::FindGame(const QJsonObject& params, bool required, const GameEntry
 
 Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 	if (method == QLatin1String("hello")) {
-		m_host_field_types = AdapterSettings::HostFieldTypes(params);
-		return Hello(params);
+		return Hello();
 	}
-	if (method == QLatin1String("settings.schema")) {
-		return Reply::Success({{"fields", AdapterSettings::SchemaFor(m_host_field_types)}});
+	// The extension's own page is answered before Ready(), so a broken runtime folder can be fixed.
+	if (method == QLatin1String("page.describe") && !params.contains(QStringLiteral("game"))) {
+		return Reply::Success(AdapterPage::Describe(nullptr, {}, m_state.DataDir()));
 	}
-	if (method == QLatin1String("launch.ended")) return Reply::Success();
+	// Session notices (sheet 2.9): no params checked, the host only logs a failure here. Trophies and
+	// cheats may have changed during play, so the page is read again.
+	if (method == QLatin1String("session.started")) return Reply::Success();
+	if (method == QLatin1String("session.ended")) {
+		if (const auto game = params[QStringLiteral("game")]; game.isString()) {
+			m_notify(QJsonObject {{"method", "page.changed"},
+			                      {"params", QJsonObject {{"game", game.toString()}}}});
+		}
+		return Reply::Success();
+	}
 	const bool known =
-	    method == QLatin1String("library.list") || method == QLatin1String("settings.get") ||
-	    method == QLatin1String("settings.set") || method == QLatin1String("actions.list") ||
-	    method == QLatin1String("actions.run") || method == QLatin1String("launch.plan");
+	    method == QLatin1String("library.list") || method == QLatin1String("page.describe") ||
+	    method == QLatin1String("values.get") || method == QLatin1String("values.set") ||
+	    method == QLatin1String("action.run") || method == QLatin1String("launch.plan");
 	if (!known) {
 		return Reply::Error(QStringLiteral("unknown-method"),
 		                    QStringLiteral("Unknown method %1.").arg(method));
 	}
-	// library.list always scans afresh. settings.set starts from a fresh read of Kyty.ini too, so a
+	// library.list always scans afresh. values.set starts from a fresh read of Kyty.ini too, so a
 	// stale cache can never overwrite what the launcher saved meanwhile.
-	if (method == QLatin1String("library.list") || method == QLatin1String("settings.set")) {
+	if (method == QLatin1String("library.list") || method == QLatin1String("values.set")) {
 		m_library_dirty = true;
 	}
 	Reply reply;
-	if (method == QLatin1String("settings.set")) {
-		// Writing would replace a Kyty.ini we cannot parse: refuse before anything is loaded.
+	if (method == QLatin1String("values.set")) {
+		// A broken runtime folder is fixed here, before Ready() would refuse it.
+		const auto values = params[QStringLiteral("values")].toObject();
 		QString    root_error;
+		if (m_state.RuntimeRoot(&root_error).isEmpty() &&
+		    params[QStringLiteral("scope")] == QLatin1String("machine") && values.size() == 1 &&
+		    values.contains(QStringLiteral("runtime_root"))) {
+			const auto given = values[QStringLiteral("runtime_root")];
+			if (!given.isString() && !given.isNull()) {
+				return Reply::Invalid(QStringLiteral("Invalid value for runtime_root."));
+			}
+			const auto path = given.toString();
+			if (!AdapterState::CheckRuntimeRoot(path, &root_error)) return Reply::Invalid(root_error);
+			if (!m_state.SetRuntimeRoot(path, &root_error)) return Reply::Failed(root_error);
+		}
+		// Writing would replace a Kyty.ini we cannot parse: refuse before anything is loaded.
 		const auto root = m_state.RuntimeRoot(&root_error);
 		if (!root.isEmpty() && !AdapterSettings::IniReadable(AdapterState::IniPath(root))) {
 			return Reply::Failed(QString::fromLatin1(AdapterSettings::INI_UNREADABLE));
@@ -184,21 +203,49 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		return Reply::Success({{"games", AdapterLibrary::Games(*m_library, m_state.DataDir(),
 		                                                       m_runtime_root, m_art_cache)}});
 	}
-	if (method == QLatin1String("settings.get") || method == QLatin1String("settings.set")) {
-		const auto scope = params[QStringLiteral("scope")].toString(QStringLiteral("global"));
-		if (scope != QLatin1String("global") && scope != QLatin1String("game")) {
-			return Reply::Invalid(QStringLiteral("scope must be global or game."));
+	if (method == QLatin1String("page.describe")) {
+		if (!FindGame(params, true, &game, &reply)) return reply;
+		return Reply::Success(AdapterPage::Describe(game, m_runtime_root, m_state.DataDir()));
+	}
+	if (method == QLatin1String("values.get") || method == QLatin1String("values.set")) {
+		const auto scope = params[QStringLiteral("scope")].toString();
+		if (scope != QLatin1String("machine") && scope != QLatin1String("game")) {
+			return Reply::Invalid(QStringLiteral("scope must be game or machine."));
 		}
 		if (scope == QLatin1String("game") && !FindGame(params, true, &game, &reply)) return reply;
-		if (method == QLatin1String("settings.get")) {
-			return AdapterSettings::Get(m_state, ini, game);
+		// The cheats item exists when GetCheats says supported (a cheat plan path for the title).
+		const auto entry = game != nullptr ? std::optional<GameEntry>(*game) : std::nullopt;
+		const bool has_cheats =
+		    entry && !GameServices::CheatPlanPath(*entry->info, m_runtime_root).isEmpty();
+		const auto with_cheats = [&](Reply out) {
+			if (!out.Ok() || !has_cheats) return out;
+			auto values                          = out.result[QStringLiteral("values")].toObject();
+			values[QStringLiteral("cheats")]     = AdapterActions::CheatsOn(*entry, m_runtime_root);
+			out.result[QStringLiteral("values")] = values;
+			return out;
+		};
+		if (method == QLatin1String("values.get")) {
+			return with_cheats(AdapterSettings::Get(m_state, ini, game));
 		}
 		if (!params[QStringLiteral("values")].isObject()) {
 			return Reply::Invalid(QStringLiteral("values must be an object."));
 		}
-		auto result = AdapterSettings::Set(m_state, ini, *m_library, game,
-		                                   params[QStringLiteral("values")].toObject());
-		// A global change (or a new runtime root) changes every game's merged values.
+		auto       values     = params[QStringLiteral("values")].toObject();
+		const bool set_cheats = entry && values.contains(QStringLiteral("cheats"));
+		const auto cheats     = set_cheats ? values.take(QStringLiteral("cheats")) : QJsonValue {};
+		if (set_cheats) { // checked before anything is written
+			if (auto refused = AdapterActions::CheckCheats(*entry, m_runtime_root, cheats);
+			    !refused.Ok())
+				return refused;
+		}
+		auto result = AdapterSettings::Set(m_state, ini, *m_library, game, values);
+		if (result.Ok() && set_cheats) {
+			if (auto failed = AdapterActions::SetCheats(*entry, m_runtime_root, cheats);
+			    !failed.Ok())
+				return failed;
+		}
+		result = with_cheats(result);
+		// A machine change (or a new runtime root) changes every game's merged values.
 		if (game == nullptr) m_library_dirty = true;
 		if (result.Ok() &&
 		    params[QStringLiteral("values")].toObject().contains(QStringLiteral("runtime_root"))) {
@@ -208,16 +255,15 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		}
 		return result;
 	}
-	if (method == QLatin1String("actions.list")) {
-		if (!FindGame(params, false, &game, &reply)) return reply;
-		return AdapterActions::List(game, m_runtime_root);
-	}
-	if (method == QLatin1String("actions.run")) {
-		if (!params[QStringLiteral("action_id")].isString()) {
-			return Reply::Invalid(QStringLiteral("action_id is required."));
+	if (method == QLatin1String("action.run")) {
+		if (!params[QStringLiteral("item")].isString()) {
+			return Reply::Invalid(QStringLiteral("item is required."));
 		}
-		if (!FindGame(params, true, &game, &reply)) return reply;
-		return AdapterActions::Run(*game, params, m_runtime_root, m_state.DataDir(), m_fetcher);
+		if (!FindGame(params, false, &game, &reply)) return reply;
+		if (game == nullptr || params[QStringLiteral("item")] != QLatin1String("cheats.fetch")) {
+			return Reply::NotFound(QStringLiteral("No such action."));
+		}
+		return m_fetcher.Run(*game, m_runtime_root, 3500);
 	}
 	// launch.plan
 	if (!FindGame(params, true, &game, &reply)) return reply;

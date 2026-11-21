@@ -79,8 +79,19 @@ QJsonObject PresetEnv(const QString& adapter_dir) {
 
 } // namespace
 
-int LanguageIndex(const QString& tag) {
-	const auto t = tag.trimmed().replace(QLatin1Char('_'), QLatin1Char('-')).toLower();
+int LanguageIndex(const QString& tag_or_name) {
+	// Registry names (Steam's), in LANGUAGE_TAGS order; "-" has no name (en-GB, fr-CA).
+	static const std::array<const char*, 30> NAMES = {
+	    "japanese", "english", "french",   "spanish", "german",     "italian", "dutch",
+	    "portuguese", "russian", "koreana", "tchinese", "schinese", "finnish", "swedish",
+	    "danish",   "norwegian", "polish", "brazilian", "-",         "turkish", "latam",
+	    "arabic",   "-",       "czech",    "hungarian", "greek",    "romanian", "thai",
+	    "vietnamese", "indonesian"};
+	const auto name = tag_or_name.trimmed().toLower();
+	for (int i = 0; i < static_cast<int>(NAMES.size()); ++i) {
+		if (name == QLatin1String(NAMES[i]) && name != QLatin1String("-")) return i;
+	}
+	const auto t = tag_or_name.trimmed().replace(QLatin1Char('_'), QLatin1Char('-')).toLower();
 	if (t.isEmpty()) return -1;
 	for (int i = 0; i < static_cast<int>(LANGUAGE_TAGS.size()); ++i) {
 		if (t == QString::fromLatin1(LANGUAGE_TAGS[i]).toLower()) return i;
@@ -148,18 +159,18 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	if (!QFileInfo(exe).isFile()) {
 		return Reply::Failed(QStringLiteral("kyty_emulator is missing next to the adapter."));
 	}
-	for (const auto* key: {"standard", "player"}) {
+	for (const auto* key: {"standard", "values"}) {
 		if (params.contains(QLatin1String(key)) && !params[QLatin1String(key)].isObject()) {
 			return Reply::Invalid(QStringLiteral("%1 must be an object.").arg(QLatin1String(key)));
 		}
 	}
-	// launch variant (STANDARD.md launch actions): only the ones actions.list offers.
+	// launch variant: only the one the game page offers.
 	bool no_cheats = false;
-	if (params.contains(QStringLiteral("action"))) {
-		const auto action = params[QStringLiteral("action")];
-		if (!action.isString() ||
-		    action.toString() != QLatin1String(AdapterActions::LAUNCH_WITHOUT_CHEATS)) {
-			return Reply::Invalid(QStringLiteral("Unknown launch action."));
+	if (params.contains(QStringLiteral("variant"))) {
+		const auto variant = params[QStringLiteral("variant")];
+		if (!variant.isString() ||
+		    variant.toString() != QLatin1String(AdapterActions::LAUNCH_WITHOUT_CHEATS)) {
+			return Reply::Invalid(QStringLiteral("Unknown launch variant."));
 		}
 		no_cheats = true;
 	}
@@ -175,7 +186,7 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 
 	QJsonObject applied;
 	QString     error;
-	if (!AdapterSettings::ApplyPlayer(info, params[QStringLiteral("player")].toObject(), &applied,
+	if (!AdapterSettings::ApplyPlayer(info, params[QStringLiteral("values")].toObject(), &applied,
 	                                  &error)) {
 		return Reply::Invalid(error);
 	}
@@ -185,7 +196,7 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	int        width      = configured.value(0).toInt();
 	int        height     = configured.value(1).toInt();
 	static const QRegularExpression resolution(QStringLiteral("^([0-9]{1,5})x([0-9]{1,5})$"));
-	if (const auto m = resolution.match(standard[QStringLiteral("resolution")].toString());
+	if (const auto m = resolution.match(standard[QStringLiteral("display.resolution")].toString());
 	    m.hasMatch()) {
 		width  = m.captured(1).toInt();
 		height = m.captured(2).toInt();
@@ -193,15 +204,15 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	width  = EvenClamp(width, MAX_DIMENSION);
 	height = EvenClamp(height, MAX_DIMENSION);
 
-	// fps_limit: the nearest rate the emulator can export for native capture, else 30..360.
+	// display.fps: the nearest rate the emulator can export for native capture, else 30..360.
 	int fps = info.vblank_frequency;
-	if (const auto v = standard[QStringLiteral("fps_limit")]; v.isDouble()) {
+	if (const auto v = standard[QStringLiteral("display.fps")]; v.isDouble()) {
 		fps = static_cast<int>(std::lround(v.toDouble()));
 	}
 	fps                   = native ? NearestCaptureFps(fps) : std::clamp(fps, 30, 360);
 	info.vblank_frequency = fps;
 
-	if (const auto aspect = standard[QStringLiteral("aspect")].toString();
+	if (const auto aspect = standard[QStringLiteral("display.aspect")].toString();
 	    aspect == QLatin1String("fit") || aspect == QLatin1String("fill") ||
 	    aspect == QLatin1String("stretch")) {
 		info.stream_aspect_mode = aspect;
@@ -215,10 +226,10 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	    !name.isEmpty()) {
 		info.user_name = name;
 	}
-	// fullscreen, hide_cursor, hdr: bool; the game's own setting when absent or not a bool.
+	// fullscreen, display.hide_cursor, display.hdr: bool; the game's own setting when absent or not a bool.
 	if (const auto v = standard[QStringLiteral("fullscreen")]; v.isBool()) info.fullscreen_enabled = v.toBool();
-	if (const auto v = standard[QStringLiteral("hide_cursor")]; v.isBool()) info.hide_cursor_enabled = v.toBool();
-	if (const auto v = standard[QStringLiteral("hdr")]; v.isBool()) info.hdr_enabled = v.toBool();
+	if (const auto v = standard[QStringLiteral("display.hide_cursor")]; v.isBool()) info.hide_cursor_enabled = v.toBool();
+	if (const auto v = standard[QStringLiteral("display.hdr")]; v.isBool()) info.hdr_enabled = v.toBool();
 	info.perf_overlay_enabled = false; // AGS draws the overlay (STANDARD.md section 8.2)
 
 	// The plan for this game's contentVersion: <TITLE>-<version>.json when <TITLE>.json holds
@@ -280,15 +291,15 @@ Reply Plan(const GameEntry& game, const QJsonObject& params, const QString& runt
 	for (int i = 0; i < players; ++i)
 		controllers.append(QStringLiteral("dualsense"));
 
-	applied.insert(QStringLiteral("resolution"), QStringLiteral("%1x%2").arg(width).arg(height));
-	applied.insert(QStringLiteral("fps_limit"), fps);
-	applied.insert(QStringLiteral("aspect"), info.stream_aspect_mode);
+	applied.insert(QStringLiteral("display.resolution"), QStringLiteral("%1x%2").arg(width).arg(height));
+	applied.insert(QStringLiteral("display.fps"), fps);
+	applied.insert(QStringLiteral("display.aspect"), info.stream_aspect_mode);
 	applied.insert(QStringLiteral("language"), LanguageTag(info.console_language));
 	applied.insert(QStringLiteral("player_name"), info.user_name);
-	applied.insert(QStringLiteral("controller"), QStringLiteral("dualsense"));
+	applied.insert(QStringLiteral("input.controller"), QStringLiteral("dualsense"));
 	applied.insert(QStringLiteral("fullscreen"), info.fullscreen_enabled);
-	applied.insert(QStringLiteral("hide_cursor"), info.hide_cursor_enabled);
-	applied.insert(QStringLiteral("hdr"), info.hdr_enabled);
+	applied.insert(QStringLiteral("display.hide_cursor"), info.hide_cursor_enabled);
+	applied.insert(QStringLiteral("display.hdr"), info.hdr_enabled);
 
 	return Reply::Success({{"argv", argv},
 	                       {"env", env},

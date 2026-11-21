@@ -1,8 +1,8 @@
 #ifndef AGS_ADAPTER_LAUNCH_PLAN_H
 #define AGS_ADAPTER_LAUNCH_PLAN_H
 
-// launch.plan (STANDARD.md section 5.4): kyty_emulator next to the adapter, BuildEmulatorArgs with
-// the standard and player settings applied, cwd and writable = runtime_root, u59 preset env.
+// launch.plan (protocol 2): kyty_emulator next to the adapter, BuildEmulatorArgs with
+// the `standard` map and the `values` applied, cwd and writable = runtime_root, u59 preset env.
 #include "reply.h"
 
 #include <QJsonObject>
@@ -12,8 +12,9 @@ struct GameEntry;
 
 namespace AdapterLaunch {
 
-// BCP-47 tag to console language index (preferenceSchema.h order); -1 when unknown.
-[[nodiscard]] int     LanguageIndex(const QString& tag);
+// BCP-47 tag or registry language name to console language index (preferenceSchema.h order); -1
+// when unknown.
+[[nodiscard]] int     LanguageIndex(const QString& tag_or_name);
 [[nodiscard]] QString LanguageTag(int index);
 // Nearest frame rate the emulator can export (Streaming::IsCaptureFrameRateSupported).
 [[nodiscard]] int NearestCaptureFps(int fps);

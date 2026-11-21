@@ -2,6 +2,8 @@
 
 How KytyPS5 talks to AGS (STANDARD sections 7 and 8).
 
+The adapter (`kyty-ags-adapter`) speaks AGS extension protocol 2. This session socket is a separate channel and stays `AGS_SESSION_PROTOCOL=1` until AGS changes it.
+
 ## Environment
 
 - `AGS_SESSION_SOCKET` is the socket path. It is used only when `AGS_SESSION_PROTOCOL` is `1`; with any other value the socket is ignored and a line is logged.

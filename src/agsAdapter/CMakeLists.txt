@@ -1,4 +1,4 @@
-# kyty-ags-adapter: the AGS extension adapter (protocol 1). QtCore event loop, no widgets.
+# kyty-ags-adapter: the AGS extension adapter (protocol 2). QtCore event loop, no widgets.
 # Built next to kyty_emulator and installed at the package root, so $ORIGIN/lib finds Qt.
 find_package(Qt6 6.8 COMPONENTS Core Gui Network REQUIRED)
 
@@ -7,6 +7,7 @@ set(ags_adapter_lib_sources
 	reply.h
 	adapterState.cpp adapterState.h
 	settings.cpp settings.h
+	page.cpp page.h
 	library.cpp library.h
 	actions.cpp actions.h
 	fetchResult.h

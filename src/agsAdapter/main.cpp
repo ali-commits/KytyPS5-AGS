@@ -1,5 +1,5 @@
 // kyty-ags-adapter: describes KytyPS5 to AGS over framed JSON on stdin and stdout
-// (docs/extensions/STANDARD.md in the AGS repository, protocol 1). It never starts the emulator.
+// (extension protocol 2). It never starts the emulator.
 //
 // Framing rules: a frame larger than 1 MiB, or a frame that is not a JSON object, cannot be
 // answered (there is no id to echo) and means the stream is no longer trustworthy: the adapter
@@ -66,7 +66,7 @@ bool Handle(Adapter& adapter, const QByteArray& payload) {
 	}
 	const auto request = document.object();
 	if (!request.contains(QStringLiteral("id"))) {
-		return true; // a notification from AGS; protocol 1 defines none
+		return true; // a notification from AGS; protocol 2 sends the adapter none
 	}
 	const auto id = request.value(QStringLiteral("id"));
 	if (!IsInteger(id)) {

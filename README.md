@@ -22,8 +22,8 @@ The emulator also runs on its own: the Qt launcher (`kyty_launcher`) is kept as 
   [int21 stability](docs/INT21-STABILITY-OCT25.md) and the [hang watchdog](docs/HANG-WATCHDOG.md).
 - **Controllers:** DualSense audio, haptics and gyro through the virtual controller AGS provides
   ([controller audio](docs/dualsense-controller-audio.md)).
-- **AGS integration:** the `kyty-ags-adapter` (library, settings, cheats, trophies, additional
-  content, metrics), frames shared with the AGS capture path, and the session socket
+- **AGS integration:** the `kyty-ags-adapter` (AGS extension protocol 2: library, settings and game
+  pages, cheats, trophies, additional content, metrics), frames shared with the AGS capture path, and the session socket
   ([AGS session](docs/AGS_SESSION.md)). Resolution, frame rate, full screen, hide cursor and HDR
   come from AGS settings. HDR stays off for now: the AGS stream is 8-bit SDR, and HDR output from
   this emulator currently looks clipped.
@@ -506,6 +506,9 @@ package for the latest release and falls back to a source build when the release
 
 The release package is Linux x86_64 only. On aarch64 there is no matching package, so AGS falls back to a
 source build, which is untested.
+
+The adapter speaks AGS extension protocol 2 (0.10.0 and newer). A protocol 2 release installs only on an AGS
+that speaks protocol 2; an older AGS offers it and fails to install it.
 
 Building from source (the AGS fallback) needs:
 
