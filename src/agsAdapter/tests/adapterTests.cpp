@@ -1052,6 +1052,9 @@ void TestExtensionPageWithoutRuntime(const Fixture& f) {
 	EXPECT(s.ErrorCode("values.get", {{"scope", "machine"}}) == "failed");
 	const auto fixed = QDir(f.dir.path()).filePath("runtime-fixed");
 	CHECK(QDir().mkpath(fixed));
+	EXPECT(s.ErrorCode("values.set", {{"scope", "machine"}, {"values", QJsonObject {{"runtime_root", 5}}}}) ==
+	       "invalid-params");
+	EXPECT(s.ErrorCode("values.get", {{"scope", "machine"}}) == "failed"); // adapter.json untouched
 	EXPECT(s.Result("values.set", {{"scope", "machine"},
 	                              {"values", QJsonObject {{"runtime_root", fixed}}}})["values"]
 	           .toObject()["runtime_root"] == fixed);

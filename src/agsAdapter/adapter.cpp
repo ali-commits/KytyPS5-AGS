@@ -167,7 +167,11 @@ Reply Adapter::Call(const QString& method, const QJsonObject& params) {
 		if (m_state.RuntimeRoot(&root_error).isEmpty() &&
 		    params[QStringLiteral("scope")] == QLatin1String("machine") && values.size() == 1 &&
 		    values.contains(QStringLiteral("runtime_root"))) {
-			const auto path = values[QStringLiteral("runtime_root")].toString();
+			const auto given = values[QStringLiteral("runtime_root")];
+			if (!given.isString() && !given.isNull()) {
+				return Reply::Invalid(QStringLiteral("Invalid value for runtime_root."));
+			}
+			const auto path = given.toString();
 			if (!AdapterState::CheckRuntimeRoot(path, &root_error)) return Reply::Invalid(root_error);
 			if (!m_state.SetRuntimeRoot(path, &root_error)) return Reply::Failed(root_error);
 		}
